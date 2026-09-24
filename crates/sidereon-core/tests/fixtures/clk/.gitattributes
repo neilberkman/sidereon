@@ -1,0 +1,4 @@
+# The AIUB short-name CODE clock excerpts keep every record byte for byte;
+# RINEX clock pads its records with trailing blanks, which Git's whitespace check
+# would report.
+COM*.CLK -whitespace

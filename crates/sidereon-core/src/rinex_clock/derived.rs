@@ -39,6 +39,8 @@ pub(super) struct Derived {
     surplus_lines: Vec<usize>,
     other_layout_lines: Vec<usize>,
     whitespace_lines: Vec<usize>,
+    /// Source lines of records read with text after the layout's last column.
+    trailing_text_lines: Vec<usize>,
 }
 
 /// Builds [`Derived`] from records given one at a time in body order, keeping
@@ -73,6 +75,7 @@ impl DerivedBuilder {
         derived.surplus_lines.sort_unstable();
         derived.other_layout_lines.sort_unstable();
         derived.whitespace_lines.sort_unstable();
+        derived.trailing_text_lines.sort_unstable();
         for (key, mut entries) in self.points {
             entries.sort_by(|(a, ao), (b, bo)| sample_cmp(&a.epoch, *ao, &b.epoch, *bo));
             let samples = entries
@@ -119,14 +122,26 @@ fn same_epoch(a: &Instant, b: &Instant) -> bool {
 }
 
 /// Which line-keyed findings a source record contributes to.
-fn record_findings(record: &ClockRecord, declared: Option<ClockLayout>) -> [bool; 3] {
+fn record_findings(record: &ClockRecord, declared: Option<ClockLayout>) -> [bool; 4] {
     let readings = [Some(record.reading), record.continuation_reading];
     let whitespace = readings.contains(&Some(ClockRecordReading::Whitespace));
     let other_layout = !whitespace
         && declared.is_some_and(|declared| {
             readings.contains(&Some(ClockRecordReading::Columns(declared.other())))
+                || readings.contains(&Some(ClockRecordReading::ColumnsTrailingText(
+                    declared.other(),
+                )))
         });
-    [!record.surplus.is_empty(), other_layout, whitespace]
+    let trailing_text = readings
+        .iter()
+        .any(|reading| matches!(reading, Some(ClockRecordReading::ColumnsTrailingText(_))))
+        || record.trailing_text.is_some();
+    [
+        !record.surplus.is_empty(),
+        other_layout,
+        whitespace,
+        trailing_text,
+    ]
 }
 
 fn insert_line(lines: &mut Vec<usize>, line: usize) {
@@ -253,7 +268,7 @@ impl Derived {
                 self.skipped.remove(at);
             }
         }
-        let [surplus, other_layout, whitespace] = record_findings(record, declared);
+        let [surplus, other_layout, whitespace, trailing_text] = record_findings(record, declared);
         if surplus {
             remove_line(&mut self.surplus_lines, line);
         }
@@ -262,6 +277,9 @@ impl Derived {
         }
         if whitespace {
             remove_line(&mut self.whitespace_lines, line);
+        }
+        if trailing_text {
+            remove_line(&mut self.trailing_text_lines, line);
         }
     }
 
@@ -278,7 +296,7 @@ impl Derived {
         let Some(line) = record.line else {
             return;
         };
-        let [surplus, other_layout, whitespace] = record_findings(record, declared);
+        let [surplus, other_layout, whitespace, trailing_text] = record_findings(record, declared);
         let add = |lines: &mut Vec<usize>| {
             if bulk {
                 lines.push(line);
@@ -294,6 +312,9 @@ impl Derived {
         }
         if whitespace {
             add(&mut self.whitespace_lines);
+        }
+        if trailing_text {
+            add(&mut self.trailing_text_lines);
         }
         if record.record_type != ClockRecordType::As {
             let skip = RinexClockSkip::new(line, record.record_type.code());
@@ -338,6 +359,12 @@ impl Derived {
             }),
             notice(&self.whitespace_lines, |records, first_line| {
                 RinexClockNotice::WhitespaceRecords {
+                    records,
+                    first_line,
+                }
+            }),
+            notice(&self.trailing_text_lines, |records, first_line| {
+                RinexClockNotice::TrailingTextRecords {
                     records,
                     first_line,
                 }

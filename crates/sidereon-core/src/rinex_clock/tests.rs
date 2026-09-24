@@ -30,6 +30,7 @@ fn typed_as(epoch: Instant, values: Vec<f64>) -> TypedRecord {
             source: super::epoch::EpochSource::Instant,
         },
         values,
+        trailing_text: None,
     }
 }
 
@@ -770,6 +771,7 @@ fn render_record_refuses_an_instant_the_epoch_field_cannot_restate() {
             second_text: None,
         },
         values: vec![1.0e-4],
+        trailing_text: None,
     };
     assert_eq!(
         render_record(

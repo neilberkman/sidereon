@@ -1,0 +1,4 @@
+# The AIUB short-name CODE IONEX excerpts keep every record byte for byte; IONEX
+# pads its records to the label columns with trailing blanks, which Git's
+# whitespace check would report.
+CODG* -whitespace

@@ -827,8 +827,105 @@ const IGS_COMBINED_FINAL_START_GPS_WEEK: u32 = 730;
 const IGS_LONG_FILENAME_START_GPS_WEEK: u32 = 2238;
 
 /// First GPS week in which AIUB's supported CODE product families use the
-/// cataloged long filenames.
+/// cataloged long filenames. Earlier dates take AIUB's short names
+/// ([`legacy_code_filename`]).
 const CODE_LONG_FILENAME_START_GPS_WEEK: u32 = 2238;
+
+/// Start of the cataloged AIUB short-name CODE MGEX orbit and clock window,
+/// `CODE_MGEX/CODE/<year>/COM<week><day>.EPH.Z` and `.CLK.Z` (GPS week 1773
+/// day 3). The retained listing audit samples this start and the 2022-11-26
+/// end; it does not establish daily continuity across the window.
+const CODE_LEGACY_MGEX_START_DATE: ProductDate = ProductDate {
+    year: 2014,
+    month: 1,
+    day: 1,
+};
+
+/// Start of the cataloged AIUB short-name CODE final IONEX window,
+/// `CODE/<year>/CODG<day-of-year>0.<yy>I.Z`. The retained listing audit samples
+/// this start and the 2022-11-26 end; it does not establish daily continuity
+/// across the window.
+const CODE_LEGACY_IONEX_START_DATE: ProductDate = ProductDate {
+    year: 1995,
+    month: 1,
+    day: 1,
+};
+
+/// Sampling of AIUB's short-name CODE MGEX final orbits (`COM<week><day>.EPH`)
+/// by first date: the SP3 header interval at each evidenced transition. 900 s
+/// (97 epochs, midnight to midnight) from 2014-01-01, 300 s (289 epochs) from
+/// 2017-08-06 (GPS week 1961 day 0) through 2022-11-26.
+const CODE_LEGACY_SP3_SAMPLES: [(ProductDate, &str); 2] = [
+    (CODE_LEGACY_MGEX_START_DATE, "15M"),
+    (
+        ProductDate {
+            year: 2017,
+            month: 8,
+            day: 6,
+        },
+        "05M",
+    ),
+];
+
+/// Sampling of the satellite clocks in AIUB's short-name CODE MGEX final
+/// clock files (`COM<week><day>.CLK`) by first date, confirmed at transitions:
+/// every satellite at
+/// 300 s from 2014-01-01, every satellite at 30 s from 2017-08-13 (GPS week
+/// 1962 day 0) through 2022-11-26.
+const CODE_LEGACY_CLK_SAMPLES: [(ProductDate, &str); 2] = [
+    (CODE_LEGACY_MGEX_START_DATE, "05M"),
+    (
+        ProductDate {
+            year: 2017,
+            month: 8,
+            day: 13,
+        },
+        "30S",
+    ),
+];
+
+/// Map interval of AIUB's short-name CODE final IONEX files
+/// (`CODG<day-of-year>0.<yy>I`) by first date: `INTERVAL` values confirmed in
+/// representative real products. One daily map at 12:00 (86400 s) from
+/// 1995-01-01; twelve two-hourly maps from 01:00 from 1997-02-02; one daily
+/// map again from 1997-02-24; twelve two-hourly maps from 1998-03-28 (thirteen,
+/// 00:00 to 24:00, from 2002-11-03); 25 hourly maps from 2014-10-19 through
+/// 2022-11-26.
+const CODE_LEGACY_IONEX_SAMPLES: [(ProductDate, &str); 5] = [
+    (CODE_LEGACY_IONEX_START_DATE, "01D"),
+    (
+        ProductDate {
+            year: 1997,
+            month: 2,
+            day: 2,
+        },
+        "02H",
+    ),
+    (
+        ProductDate {
+            year: 1997,
+            month: 2,
+            day: 24,
+        },
+        "01D",
+    ),
+    (
+        ProductDate {
+            year: 1998,
+            month: 3,
+            day: 28,
+        },
+        "02H",
+    ),
+    (
+        ProductDate {
+            year: 2014,
+            month: 10,
+            day: 19,
+        },
+        "01H",
+    ),
+];
 
 /// First GFZ rapid-orbit date published with the five-minute sampling token.
 ///
@@ -1885,7 +1982,9 @@ impl ProductIdentity {
         let descriptor = product_type_convention(self.family);
         let legacy_igs_final =
             uses_legacy_igs_final_name(self.analysis_center, self.family, self.date)?;
-        if !legacy_igs_final && descriptor.kind == ProductFilenameKind::Sampled {
+        let legacy_code = uses_legacy_code_name(self.analysis_center, self.family, self.date)?;
+        let legacy = legacy_igs_final || legacy_code;
+        if !legacy && descriptor.kind == ProductFilenameKind::Sampled {
             let entry = required_center_catalog(self.analysis_center);
             let issue_valid = if entry.issues.is_empty() {
                 self.issue.as_deref() == Some("0000")
@@ -1916,6 +2015,22 @@ impl ProductIdentity {
                 self.date.gps_week()?,
                 self.date.gps_day_of_week()?
             )
+        } else if legacy_code {
+            // The short name states no campaign, version, issue, span or
+            // sampling; they are those of the product line, and the sampling
+            // is the one AIUB published that day (checked above).
+            let fields_valid = self.publisher == ProductPublisher::Code
+                && self.solution == SolutionClass::Final
+                && Some(self.campaign) == convention_campaign(convention)
+                && self.version == 0
+                && self.issue.as_deref() == Some("0000")
+                && self.span == convention.span;
+            if !fields_valid {
+                return Err(DataCatalogError::InconsistentProductIdentity {
+                    field: "legacy_code_final",
+                });
+            }
+            legacy_code_filename(self.family, self.date)?
         } else {
             match descriptor.kind {
                 ProductFilenameKind::Sampled => {
@@ -1971,7 +2086,7 @@ impl ProductIdentity {
             });
         }
 
-        if !legacy_igs_final && descriptor.kind == ProductFilenameKind::Sampled {
+        if !legacy && descriptor.kind == ProductFilenameKind::Sampled {
             let expected_catalog_filename = format!(
                 "{}_{}_{}_{}_{}.{}",
                 convention.token,
@@ -2372,7 +2487,9 @@ impl ProductSpec {
     ///
     /// IGS combined final SP3 products use the historical
     /// `igs<week><day>.sp3` convention before GPS week 2238 and the IGS long
-    /// filename convention from week 2238 onward.
+    /// filename convention from week 2238 onward. CODE's final orbit, clock and
+    /// IONEX lines take AIUB's short names before week 2238:
+    /// `COM<week><day>.EPH`, `COM<week><day>.CLK` and `CODG<day-of-year>0.<yy>I`.
     pub fn canonical_filename(&self) -> Result<String, DataCatalogError> {
         ProductDate::new(self.date.year, self.date.month, self.date.day)?;
         let convention = validate_product(
@@ -2382,12 +2499,8 @@ impl ProductSpec {
             &self.sample,
             self.issue.as_deref(),
         )?;
-        if uses_legacy_igs_final_name(self.center, self.product_type, self.date)? {
-            return Ok(format!(
-                "igs{:04}{}.sp3",
-                self.date.gps_week()?,
-                self.date.gps_day_of_week()?
-            ));
+        if let Some(filename) = legacy_filename(self.center, self.product_type, self.date)? {
+            return Ok(filename);
         }
         let descriptor = product_type_convention(self.product_type);
         Ok(match descriptor.kind {
@@ -2458,16 +2571,8 @@ impl ProductSpec {
         let descriptor = product_type_convention(self.product_type);
         let campaign = match descriptor.kind {
             ProductFilenameKind::Nav => ProductCampaign::Broadcast,
-            ProductFilenameKind::Sampled => match convention.token.get(4..7) {
-                Some("OPS") => ProductCampaign::Operational,
-                Some("MGN") => ProductCampaign::MultiGnss,
-                Some("MGX") => ProductCampaign::MultiGnssExperiment,
-                _ => {
-                    return Err(DataCatalogError::InconsistentProductIdentity {
-                        field: "campaign",
-                    });
-                }
-            },
+            ProductFilenameKind::Sampled => convention_campaign(convention)
+                .ok_or(DataCatalogError::InconsistentProductIdentity { field: "campaign" })?,
         };
         let identity = ProductIdentity {
             family: self.product_type,
@@ -4055,9 +4160,31 @@ pub fn resolve_first_published(
             convention.compression,
         )?;
         let archive_name = format!("{filename}{}", compression.suffix());
+        // AIUB's short names repeat across its tree: the Bernese-format clock
+        // files under `CODE_MGEX/BSWUSER52/<year>` carry the clock product's
+        // `COM<week><day>.CLK.Z`. A listed path of a short-name CODE product
+        // must therefore be the product's own; a bare filename is a listing
+        // of that directory.
+        let legacy_dir =
+            if uses_legacy_code_name(candidate.center, candidate.product_type, candidate.date)? {
+                Some(product_dir_path(
+                    candidate.center,
+                    convention.layout,
+                    candidate.date,
+                )?)
+            } else {
+                None
+            };
         let found = objects.iter().any(|object| {
             if !object_matches_center(candidate.center, &object.path) {
                 return false;
+            }
+            if let Some(dir) = legacy_dir.as_deref() {
+                let listed = object.path.trim_start_matches('/');
+                if listed.contains('/') {
+                    return listed == format!("{dir}/{archive_name}")
+                        || listed == format!("{dir}/{filename}");
+                }
             }
             let listed_name = object.path.rsplit('/').next().unwrap_or(&object.path);
             listed_name == archive_name || listed_name == filename
@@ -4295,6 +4422,17 @@ fn supported_samples_inner(
     date: ProductDate,
     issue: Option<&str>,
 ) -> Result<&'static [&'static str], DataCatalogError> {
+    if uses_legacy_code_name(center, product_type, date)? {
+        return Ok(match legacy_code_sample(product_type, date) {
+            Some("15M") => &["15M"],
+            Some("05M") => &["05M"],
+            Some("30S") => &["30S"],
+            Some("01D") => &["01D"],
+            Some("02H") => &["02H"],
+            Some("01H") => &["01H"],
+            _ => &[],
+        });
+    }
     if product_type != ProductType::Sp3 {
         let convention = product_convention(center, product_type)?;
         return Ok(match convention.default_sample {
@@ -4366,22 +4504,21 @@ fn validate_product_date(
         });
     }
 
-    // AIUB documents different short-name CODE products through week 2237.
-    // This catalog intentionally refuses those dates until their distinct
-    // identities and distributor rules are modeled; it must not emit a
-    // post-transition long filename that never existed.
-    if center == AnalysisCenter::Cod
-        && matches!(
-            product_type,
-            ProductType::Sp3 | ProductType::Clk | ProductType::Ionex
-        )
-        && date.gps_week()? < CODE_LONG_FILENAME_START_GPS_WEEK
-    {
-        return Err(DataCatalogError::UnsupportedProductEra {
-            center,
-            product_type,
-            date,
-        });
+    // Before week 2238 AIUB publishes CODE's final lines under short names
+    // (`legacy_code_filename`): the MGEX orbits and clocks from 2014-01-01, the
+    // final IONEX from 1995-01-01. Earlier dates have no product.
+    if uses_legacy_code_name(center, product_type, date)? {
+        let first = match product_type {
+            ProductType::Ionex => CODE_LEGACY_IONEX_START_DATE,
+            _ => CODE_LEGACY_MGEX_START_DATE,
+        };
+        if date < first {
+            return Err(DataCatalogError::UnsupportedProductEra {
+                center,
+                product_type,
+                date,
+            });
+        }
     }
 
     let start_date = match (center, product_type) {
@@ -4419,6 +4556,15 @@ fn default_sample_for_product_issue(
     let current = default_sample(center, product_type)?;
     validate_product_date(center, product_type, date)?;
 
+    if uses_legacy_code_name(center, product_type, date)? {
+        return legacy_code_sample(product_type, date).ok_or(
+            DataCatalogError::UnsupportedProductEra {
+                center,
+                product_type,
+                date,
+            },
+        );
+    }
     if product_type != ProductType::Sp3 {
         return Ok(current);
     }
@@ -4653,13 +4799,108 @@ fn uses_legacy_igs_final_name(
         && date.gps_week()? < IGS_LONG_FILENAME_START_GPS_WEEK)
 }
 
+/// Campaign a sampled product line's long-name token states (`OPS`, `MGN`,
+/// `MGX` in characters 5 to 7).
+fn convention_campaign(convention: &CenterProductConvention) -> Option<ProductCampaign> {
+    match convention.token.get(4..7) {
+        Some("OPS") => Some(ProductCampaign::Operational),
+        Some("MGN") => Some(ProductCampaign::MultiGnss),
+        Some("MGX") => Some(ProductCampaign::MultiGnssExperiment),
+        _ => None,
+    }
+}
+
+/// Whether a CODE product takes AIUB's short name: the final orbit, clock and
+/// IONEX lines before GPS week 2238.
+fn uses_legacy_code_name(
+    center: AnalysisCenter,
+    product_type: ProductType,
+    date: ProductDate,
+) -> Result<bool, DataCatalogError> {
+    Ok(center == AnalysisCenter::Cod
+        && matches!(
+            product_type,
+            ProductType::Sp3 | ProductType::Clk | ProductType::Ionex
+        )
+        && date.gps_week()? < CODE_LONG_FILENAME_START_GPS_WEEK)
+}
+
+/// AIUB's short name, without the `.Z` it is archived under, for a CODE final
+/// product before GPS week 2238 (AIUB_AFTP.TXT, "CODE product files" and "Files
+/// from the CODE MGEX processing"): the MGEX orbit `COM<week><day>.EPH` and
+/// clock `COM<week><day>.CLK` under `CODE_MGEX/CODE/<year>`, and the final
+/// IONEX `CODG<day-of-year>0.<yy>I` under `CODE/<year>`.
+fn legacy_code_filename(
+    product_type: ProductType,
+    date: ProductDate,
+) -> Result<String, DataCatalogError> {
+    match product_type {
+        ProductType::Sp3 => Ok(format!(
+            "COM{:04}{}.EPH",
+            date.gps_week()?,
+            date.gps_day_of_week()?
+        )),
+        ProductType::Clk => Ok(format!(
+            "COM{:04}{}.CLK",
+            date.gps_week()?,
+            date.gps_day_of_week()?
+        )),
+        ProductType::Ionex => Ok(format!(
+            "CODG{:03}0.{:02}I",
+            date.day_of_year(),
+            date.year.rem_euclid(100)
+        )),
+        product_type => Err(DataCatalogError::UnsupportedProduct {
+            center: AnalysisCenter::Cod,
+            product_type,
+        }),
+    }
+}
+
+/// The sampling AIUB published for a short-name CODE product on `date`, from a
+/// table of `(first date, sample)` runs in date order.
+fn legacy_code_sample(product_type: ProductType, date: ProductDate) -> Option<&'static str> {
+    let runs: &[(ProductDate, &'static str)] = match product_type {
+        ProductType::Sp3 => &CODE_LEGACY_SP3_SAMPLES,
+        ProductType::Clk => &CODE_LEGACY_CLK_SAMPLES,
+        ProductType::Ionex => &CODE_LEGACY_IONEX_SAMPLES,
+        _ => return None,
+    };
+    runs.iter()
+        .rev()
+        .find(|(first, _)| date >= *first)
+        .map(|(_, sample)| *sample)
+}
+
+/// The short name of a legacy IGS final or CODE product, or `None` for a
+/// product with an IGS long name.
+fn legacy_filename(
+    center: AnalysisCenter,
+    product_type: ProductType,
+    date: ProductDate,
+) -> Result<Option<String>, DataCatalogError> {
+    if uses_legacy_igs_final_name(center, product_type, date)? {
+        Ok(Some(format!(
+            "igs{:04}{}.sp3",
+            date.gps_week()?,
+            date.gps_day_of_week()?
+        )))
+    } else if uses_legacy_code_name(center, product_type, date)? {
+        legacy_code_filename(product_type, date).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 fn product_archive_compression(
     center: AnalysisCenter,
     product_type: ProductType,
     date: ProductDate,
     default: ArchiveCompression,
 ) -> Result<ArchiveCompression, DataCatalogError> {
-    if uses_legacy_igs_final_name(center, product_type, date)? {
+    if uses_legacy_igs_final_name(center, product_type, date)?
+        || uses_legacy_code_name(center, product_type, date)?
+    {
         Ok(ArchiveCompression::UnixCompress)
     } else {
         Ok(default)
@@ -4756,6 +4997,24 @@ mod content_start_tests {
         ];
         for (center, sample, issue) in cases {
             assert_eq!(offset(center, current, sample, issue), 0, "{center:?}");
+        }
+    }
+
+    /// AIUB's short-name CODE MGEX orbits start at midnight of their filename
+    /// day: every `COM<week><day>.EPH` header states that day at 00:00 and
+    /// its GPS week and seconds of week.
+    #[test]
+    fn code_short_name_sp3_starts_at_its_filename_epoch() {
+        for (product_date, sample) in [
+            (date(2014, 1, 1), "15M"),
+            (date(2017, 8, 6), "05M"),
+            (date(2022, 11, 26), "05M"),
+        ] {
+            assert_eq!(
+                offset(AnalysisCenter::Cod, product_date, sample, None),
+                0,
+                "{product_date:?}"
+            );
         }
     }
 

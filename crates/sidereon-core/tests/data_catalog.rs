@@ -586,32 +586,259 @@ COD0OPSRAP_20261200000_01D_01H_GIM.INX.gz"
     }
 }
 
+/// Before GPS week 2238 AIUB publishes CODE's final lines under short names
+/// (AIUB_AFTP.TXT): the MGEX orbits and clocks as `COM<week><day>.EPH.Z` and
+/// `.CLK.Z` under `CODE_MGEX/CODE/<year>`, the final IONEX as
+/// `CODG<day-of-year>0.<yy>I.Z` under `CODE/<year>`. The last short-name day
+/// is 2022-11-26 (week 2237 day 6); the long names start the next day. The
+/// objects are in the recorded AIUB listing.
 #[test]
-fn code_pretransition_dates_are_not_misnamed_with_current_long_names() {
-    let legacy_date = date(2022, 11, 26);
-    for (product_type, result) in [
+fn code_pretransition_dates_take_aiub_short_names() {
+    let last = date(2022, 11, 26);
+    let cases = [
         (
-            ProductType::Sp3,
-            mgex_sp3(AnalysisCenter::Cod, legacy_date, None),
+            mgex_sp3(AnalysisCenter::Cod, last, None).expect("CODE MGEX SP3"),
+            "COM22376.EPH",
+            "https://www.aiub.unibe.ch/download/CODE_MGEX/CODE/2022/COM22376.EPH.Z",
+            "05M",
+            ProductCampaign::MultiGnssExperiment,
         ),
         (
-            ProductType::Clk,
-            mgex_clk(AnalysisCenter::Cod, legacy_date, None),
+            mgex_clk(AnalysisCenter::Cod, last, None).expect("CODE MGEX clock"),
+            "COM22376.CLK",
+            "https://www.aiub.unibe.ch/download/CODE_MGEX/CODE/2022/COM22376.CLK.Z",
+            "30S",
+            ProductCampaign::MultiGnssExperiment,
         ),
         (
-            ProductType::Ionex,
-            mgex_ionex(AnalysisCenter::Cod, legacy_date, None),
+            mgex_ionex(AnalysisCenter::Cod, last, None).expect("CODE final IONEX"),
+            "CODG3300.22I",
+            "https://www.aiub.unibe.ch/download/CODE/2022/CODG3300.22I.Z",
+            "01H",
+            ProductCampaign::Operational,
         ),
+    ];
+    let listed: Vec<String> =
+        parse_archive_listing(&listing_fixture("aiub-code-legacy-20260923.csv"))
+            .expect("recognized listing")
+            .into_iter()
+            .map(|object| object.path)
+            .collect();
+    for (product, filename, url, sample, campaign) in cases {
+        assert_eq!(product.canonical_filename().expect("filename"), filename);
+        assert_eq!(product.archive_url().expect("URL"), url);
+        let identity = product.identity().expect("identity");
+        identity.validate().expect("valid identity");
+        assert_eq!(identity.official_filename, filename);
+        assert_eq!(identity.sample, sample);
+        assert_eq!(identity.span, "01D");
+        assert_eq!(identity.issue.as_deref(), Some("0000"));
+        assert_eq!(identity.version, 0);
+        assert_eq!(identity.publisher, ProductPublisher::Code);
+        assert_eq!(identity.solution, SolutionClass::Final);
+        assert_eq!(identity.campaign, campaign);
+        let direct = distribution_location_for_identity(&identity, DistributionSource::Direct)
+            .expect("direct AIUB location");
+        assert_eq!(direct.original_url.as_deref(), Some(url));
+        assert_eq!(direct.archive_filename, format!("{filename}.Z"));
+        assert_eq!(direct.compression, ArchiveCompression::UnixCompress);
+        let path = url
+            .strip_prefix("https://www.aiub.unibe.ch/download/")
+            .expect("AIUB path");
+        assert!(
+            listed.iter().any(|listed| listed == path),
+            "{path} is listed"
+        );
+        // No CDDIS mapping is cataloged for AIUB's short names.
+        assert!(
+            distribution_location_for_identity(&identity, DistributionSource::NasaCddis).is_err()
+        );
+    }
+
+    // The next day takes the long names.
+    let first_long = date(2022, 11, 27);
+    assert_eq!(
+        mgex_sp3(AnalysisCenter::Cod, first_long, None)
+            .expect("CODE MGEX SP3")
+            .canonical_filename()
+            .expect("filename"),
+        "COD0MGXFIN_20223310000_01D_05M_ORB.SP3"
+    );
+    assert_eq!(
+        mgex_ionex(AnalysisCenter::Cod, first_long, None)
+            .expect("CODE final IONEX")
+            .canonical_filename()
+            .expect("filename"),
+        "COD0OPSFIN_20223310000_01D_01H_GIM.INX"
+    );
+}
+
+/// A short-name identity is the product line's: a long name, another campaign
+/// or a sampling AIUB did not publish that day is refused.
+#[test]
+fn code_short_name_identity_rejects_inconsistent_fields() {
+    let identity = mgex_sp3(AnalysisCenter::Cod, date(2020, 6, 1), None)
+        .expect("CODE MGEX SP3")
+        .identity()
+        .expect("identity");
+    assert_eq!(identity.official_filename, "COM21081.EPH");
+
+    let mut long_name = identity.clone();
+    long_name.official_filename = "COD0MGXFIN_20201530000_01D_05M_ORB.SP3".to_string();
+    assert_eq!(
+        long_name.validate(),
+        Err(DataCatalogError::InconsistentProductIdentity {
+            field: "official_filename",
+        })
+    );
+    let mut campaign = identity.clone();
+    campaign.campaign = ProductCampaign::Operational;
+    assert_eq!(
+        campaign.validate(),
+        Err(DataCatalogError::InconsistentProductIdentity {
+            field: "legacy_code_final",
+        })
+    );
+    let mut sample = identity;
+    sample.sample = "15M".to_string();
+    assert_eq!(
+        sample.validate(),
+        Err(DataCatalogError::UnsupportedSample {
+            center: AnalysisCenter::Cod,
+            product_type: ProductType::Sp3,
+            sample: "15M".to_string(),
+        })
+    );
+}
+
+/// The short-name series start where AIUB's listing starts them: the MGEX
+/// orbits and clocks on 2014-01-01 (GPS week 1773 day 3), the final IONEX on
+/// 1995-01-01. Earlier dates have no product.
+#[test]
+fn code_short_name_series_start_at_their_first_listed_day() {
+    for (product_type, before, first) in [
+        (ProductType::Sp3, date(2013, 12, 31), date(2014, 1, 1)),
+        (ProductType::Clk, date(2013, 12, 31), date(2014, 1, 1)),
+        (ProductType::Ionex, date(1994, 12, 31), date(1995, 1, 1)),
     ] {
         assert_eq!(
-            result,
+            product(AnalysisCenter::Cod, product_type, before, None, None),
             Err(DataCatalogError::UnsupportedProductEra {
                 center: AnalysisCenter::Cod,
                 product_type,
-                date: legacy_date,
+                date: before,
             })
         );
+        assert!(product(AnalysisCenter::Cod, product_type, first, None, None).is_ok());
     }
+    assert_eq!(
+        canonical_filename(
+            AnalysisCenter::Cod,
+            ProductType::Sp3,
+            date(2014, 1, 1),
+            None,
+            None
+        ),
+        Ok("COM17733.EPH".to_string())
+    );
+    assert_eq!(
+        canonical_filename(
+            AnalysisCenter::Cod,
+            ProductType::Ionex,
+            date(1995, 1, 1),
+            None,
+            None
+        ),
+        Ok("CODG0010.95I".to_string())
+    );
+    assert_eq!(
+        canonical_filename(
+            AnalysisCenter::Cod,
+            ProductType::Ionex,
+            date(2000, 12, 31),
+            None,
+            None
+        ),
+        Ok("CODG3660.00I".to_string())
+    );
+}
+
+/// Sampling of the short-name series, from the header of every file AIUB
+/// lists: SP3 interval 900 s through 2017-08-05 and 300 s from 2017-08-06;
+/// satellite clocks every 300 s through 2017-08-12 and every 30 s from
+/// 2017-08-13; IONEX map interval one day, two hours, one day again, two
+/// hours, then one hour from 2014-10-19.
+#[test]
+fn code_short_name_sampling_follows_the_published_series() {
+    let cases = [
+        (ProductType::Sp3, date(2014, 1, 1), "15M"),
+        (ProductType::Sp3, date(2017, 8, 5), "15M"),
+        (ProductType::Sp3, date(2017, 8, 6), "05M"),
+        (ProductType::Sp3, date(2022, 11, 26), "05M"),
+        (ProductType::Clk, date(2014, 1, 1), "05M"),
+        (ProductType::Clk, date(2017, 8, 12), "05M"),
+        (ProductType::Clk, date(2017, 8, 13), "30S"),
+        (ProductType::Ionex, date(1995, 1, 1), "01D"),
+        (ProductType::Ionex, date(1997, 2, 1), "01D"),
+        (ProductType::Ionex, date(1997, 2, 2), "02H"),
+        (ProductType::Ionex, date(1997, 2, 23), "02H"),
+        (ProductType::Ionex, date(1997, 2, 24), "01D"),
+        (ProductType::Ionex, date(1998, 3, 27), "01D"),
+        (ProductType::Ionex, date(1998, 3, 28), "02H"),
+        (ProductType::Ionex, date(2014, 10, 18), "02H"),
+        (ProductType::Ionex, date(2014, 10, 19), "01H"),
+        (ProductType::Ionex, date(2022, 11, 26), "01H"),
+    ];
+    for (product_type, product_date, sample) in cases {
+        assert_eq!(
+            default_sample_for_date(AnalysisCenter::Cod, product_type, product_date),
+            Ok(sample),
+            "{product_type} {product_date:?}"
+        );
+        assert_eq!(
+            supported_samples(AnalysisCenter::Cod, product_type, product_date, None),
+            Ok(&[sample][..]),
+            "{product_type} {product_date:?}"
+        );
+        let spec = product(AnalysisCenter::Cod, product_type, product_date, None, None)
+            .expect("short-name product");
+        assert_eq!(spec.identity().expect("identity").sample, sample);
+    }
+    assert_eq!(
+        mgex_clk(AnalysisCenter::Cod, date(2016, 1, 1), Some("30S")),
+        Err(DataCatalogError::UnsupportedSample {
+            center: AnalysisCenter::Cod,
+            product_type: ProductType::Clk,
+            sample: "30S".to_string(),
+        })
+    );
+}
+
+/// AIUB's short names repeat across its tree: the Bernese-format clock file
+/// `CODE_MGEX/BSWUSER52/2022/COM22376.CLK.Z` has the clock product's name. A
+/// whole-tree listing resolves the clock product only at its own path.
+#[test]
+fn code_short_name_resolution_requires_the_product_directory() {
+    let objects = parse_archive_listing(&listing_fixture("aiub-code-legacy-20260923.csv"))
+        .expect("recognized listing");
+    let candidates =
+        vec![mgex_clk(AnalysisCenter::Cod, date(2022, 11, 26), None).expect("CODE MGEX clock")];
+    assert_eq!(
+        resolve_first_published(&candidates, &objects).expect("resolvable"),
+        Some(0)
+    );
+    let without_product: Vec<_> = objects
+        .into_iter()
+        .filter(|object| object.path != "CODE_MGEX/CODE/2022/COM22376.CLK.Z")
+        .collect();
+    assert!(without_product
+        .iter()
+        .any(|object| object.path == "CODE_MGEX/BSWUSER52/2022/COM22376.CLK.Z"));
+    assert_eq!(
+        resolve_first_published(&candidates, &without_product).expect("resolvable"),
+        None,
+        "the Bernese-format clock file is not the clock product"
+    );
 }
 
 #[test]

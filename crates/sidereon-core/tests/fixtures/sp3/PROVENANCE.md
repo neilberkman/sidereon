@@ -165,3 +165,37 @@ are of the committed files.
 
 Hand-written, not a redistributed product: five GPS satellites placed at one
 ECEF point, for the rank-deficient geometry path.
+
+## `COM17733.EPH`
+
+- **Product:** AIUB's short-name CODE MGEX final orbit and clock product for
+  2014-01-01 (GPS week 1773 day 3), the first file of that series,
+  `https://www.aiub.unibe.ch/download/CODE_MGEX/CODE/2014/COM17733.EPH.Z`
+  (180457 bytes, MD5 `da78d9c99ea809e758681970af0a5a01` as AIUB's
+  `full_listing.csv` states it, SHA-256
+  `df81f0a137ff32664f07cfc6fb92f0895a35b7ce4a07d3b2b67a06b77f03467f`),
+  fetched 2026-09-24 and committed decompressed and otherwise verbatim.
+- **Content:** SP3-c, agency `AIUB`, 97 epochs at 15-minute spacing,
+  2014-01-01 00:00 through 2014-01-02 00:00 GPST; 70 satellites; position
+  and clock records only.
+- **Committed file:** 418640 bytes, SHA-256
+  `0f89bb5f77fc0b89edcd0cf6bd678aa2398b3ed5094d6be4d960795747c31f11`.
+- **Used by:** `tests/code_legacy_products.rs`, exact validation against the
+  catalog identity of the first 15-minute short-name day.
+
+## `COM19610.EPH`
+
+- **Product:** AIUB's short-name CODE MGEX final orbit and clock product for
+  2017-08-06 (GPS week 1961 day 0), the first 5-minute file of that series,
+  `https://www.aiub.unibe.ch/download/CODE_MGEX/CODE/2017/COM19610.EPH.Z`
+  (620423 bytes, MD5 `6695cd7626ac771f8a3e4e084c0c8181` as AIUB's
+  `full_listing.csv` states it, SHA-256
+  `6d54f725c402ff1fa77142021b53b10d535c5f54af902e2cc643a455f68c5644`),
+  fetched 2026-09-24 and committed decompressed and otherwise verbatim.
+- **Content:** SP3-c, agency `AIUB`, 289 epochs at 5-minute spacing,
+  2017-08-06 00:00 through 2017-08-07 00:00 GPST; 82 satellites; position
+  and clock records only.
+- **Committed file:** 1456172 bytes, SHA-256
+  `3a176513a13d695f16e213bb34ff78979bd295784311f464859e74ae039f0ba2`.
+- **Used by:** `tests/code_legacy_products.rs`, exact validation against the
+  catalog identity of the first 5-minute short-name day.

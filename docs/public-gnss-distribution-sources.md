@@ -123,12 +123,40 @@ CODE rapid IONEX:          https://www.aiub.unibe.ch/download/CODE/...
 CODE ultra-rapid SP3:      https://www.aiub.unibe.ch/download/CODE/...
 ```
 
-The `cod` SP3 and clock catalog entries describe the current MGEX final line;
-its IONEX entry describes the operational final line. Historical CODE
-short-name products use different identities and layouts. Until those are
-modeled explicitly, `AnalysisCenter::Cod` rejects SP3, clock, and IONEX dates
-before GPS week 2238 with `UnsupportedProductEra`; it never fabricates a
-current long filename for a historical request.
+The `cod` SP3 and clock catalog entries describe the MGEX final line; its
+IONEX entry describes the operational final line. AIUB documents these lines
+under historical short-name conventions; within the catalog windows below,
+`AnalysisCenter::Cod` derives those names, never a long filename that did not
+exist:
+
+```text
+MGEX final SP3 catalog window,   2014-01-01 to 2022-11-26: CODE_MGEX/CODE/<year>/COM<week><day>.EPH.Z
+MGEX final clock catalog window, 2014-01-01 to 2022-11-26: CODE_MGEX/CODE/<year>/COM<week><day>.CLK.Z
+final IONEX catalog window,      1995-01-01 to 2022-11-26: CODE/<year>/CODG<day-of-year>0.<yy>I.Z
+```
+
+The official filename in the identity is the short name without `.Z`; the
+publisher is CODE, the solution final, the campaign that of the long-name line
+(MGEX for orbits and clocks, operational for IONEX), the span `01D` and the
+issue `0000`. The short name states no sampling, so the identity uses the
+sampling observed in the representative source products at the transition
+dates below; this is not an exhaustive per-file header audit:
+
+```text
+SP3 interval:          15M through 2017-08-05, 05M from 2017-08-06
+satellite clocks:      05M through 2017-08-12, 30S from 2017-08-13
+IONEX map interval:    01D from 1995-01-01, 02H from 1997-02-02,
+                       01D from 1997-02-24, 02H from 1998-03-28,
+                       01H from 2014-10-19
+```
+
+A short-name SP3 starts at 00:00 of its filename day and runs to 24:00
+inclusive (97 epochs at 15 minutes, 289 at 5). Dates before the first listed
+day of each series return `UnsupportedProductEra`. No CDDIS mapping is
+cataloged for the short names. AIUB reuses the clock name
+`COM<week><day>.CLK.Z` for its Bernese-format clock files under
+`CODE_MGEX/BSWUSER52/<year>`, so availability from a whole-tree listing counts
+a short-name product only at its own path.
 
 CODE's predicted maps are archived in one AIUB directory with one filename
 token per prediction lead: `COD0OPSP0D` for the one-day line (`cod_prd1`, the
@@ -228,6 +256,8 @@ ESA final SP3/clock: 2014-01-05
 GFZ rapid SP3/clock: 2020-05-13
 IGS ultra SP3:       GPS week 2238 (2022-11-27)
 CODE ultra SP3:      GPS week 2238 (2022-11-27)
+CODE MGEX SP3/clock: 2014-01-01 (short names through 2022-11-26)
+CODE final IONEX:    1995-01-01 (short names through 2022-11-26)
 ESA ultra SP3:       2022-10-04
 GFZ ultra SP3:       2020-10-06
 ```
@@ -554,6 +584,8 @@ mirrored by every distributor.
 | AIUB identifies its current product service and CODE product series. | [AIUB services](https://www.aiub.unibe.ch/services/index_eng.html), [CODE Analysis Center](https://www.aiub.unibe.ch/research/code___analysis_center/index_eng.html) | 2026-07-20 |
 | AIUB documents operational, rapid, ultra-rapid, predicted, final, MGEX, clock, SP3, and IONEX names and directories. | [AIUB_AFTP.TXT](https://www.aiub.unibe.ch/download/AIUB_AFTP.TXT) | 2026-07-20 |
 | Current AIUB listings confirm MGEX final SP3/clock under `CODE_MGEX/CODE/<year>`, final products under `CODE/<year>`, and rapid/ultra-rapid products at `CODE`. | [MGEX 2026 listing](https://code.aiub.unibe.ch/s3_script/aiub_s3_bucket_listing.php?path=CODE_MGEX%2FCODE%2F2026), [CODE 2026 listing](https://code.aiub.unibe.ch/s3_script/aiub_s3_bucket_listing.php?path=CODE%2F2026), [CODE current listing](https://code.aiub.unibe.ch/s3_script/aiub_s3_bucket_listing.php?path=CODE) | 2026-07-20 |
+| AIUB's short-name CODE MGEX final names are `COM<week><day>.EPH.Z` and `.CLK.Z` under `CODE_MGEX/CODE/<year>`; final IONEX names are `CODG<day-of-year>0.<yy>I.Z` under `CODE/<year>`. The catalog support windows are 2014-01-01–2022-11-26 for MGEX and 1995-01-01–2022-11-26 for IONEX. A retained boundary extract samples series endpoints, cadence transitions and the same-name Bernese clock collision; it does not establish daily continuity or prove there are no files outside those windows. It is derived from the 2026-09-24 AIUB whole-tree listing, 41,575,382 bytes, SHA-256 `7ed6281e10693634669c31d1440459ed968c1d104bb0b8108c37190884d48278`. | [AIUB_AFTP.TXT](https://www.aiub.unibe.ch/download/AIUB_AFTP.TXT), [whole-tree listing](https://www.aiub.unibe.ch/download/full_listing.csv), [retained boundary rows](../crates/sidereon-core/tests/fixtures/listings/aiub-code-legacy-boundaries-20260924.csv), [audit generator](../crates/sidereon-core/tests/fixtures/listings/audit_aiub_code_legacy_boundaries.py) | 2026-09-24 |
+| Real product headers at the sampled cadence boundaries confirm the SP3 and clock transitions and all five cataloged IONEX intervals: `01D`, `02H`, `01D`, `02H`, then `01H`. The IONEX two-hourly series has 12 maps from 01:00 through 23:00 through 2002-11-02 and 13 maps from 00:00 through 24:00 from 2002-11-03; real-product fixtures cover 1995, both 1997 transitions, 1998, the 2002 13-map boundary, and the 2014 two-hourly/hourly boundary. These representative headers do not claim an exhaustive sweep. | [CODE fixture tests](../crates/sidereon-core/tests/code_legacy_products.rs), [IONEX fixture provenance](../crates/sidereon-core/tests/fixtures/ionex/PROVENANCE.md), [SP3 provenance](../crates/sidereon-core/tests/fixtures/sp3/PROVENANCE.md), [clock provenance](../crates/sidereon-core/tests/fixtures/clk/PROVENANCE.md) | 2026-09-24 |
 | AIUB archives CODE's predicted IONEX lines under `CODE/IONO/PRD/` as `COD0OPSP0D`, `COD0OPSP1D` and `COD0OPSP4D`; the `CODE/IONO/P1` and `CODE/IONO/P2` trees are empty. | [PRD listing](https://code.aiub.unibe.ch/s3_script/aiub_s3_bucket_listing.php?path=CODE%2FIONO%2FPRD), [whole-tree listing](https://www.aiub.unibe.ch/download/full_listing.csv) | 2026-09-23 |
 | GFZ rapid SP3 used `15M` through 2021 day 137 and `05M` from day 138 within GPS week 2158; its current rapid series remains `05M`. The current day-200 `05M` object returned HTTP 200 while the corresponding `15M` URL returned 404. | [GFZ week-2158 listing](https://isdc-data.gfz.de/gnss/products/rapid/w2158/), [GFZ current week-2428 listing](https://isdc-data.gfz.de/gnss/products/rapid/w2428/), [current 05M object](https://isdc-data.gfz.de/gnss/products/rapid/w2428/GFZ0OPSRAP_20262000000_01D_05M_ORB.SP3.gz), [absent 15M path](https://isdc-data.gfz.de/gnss/products/rapid/w2428/GFZ0OPSRAP_20262000000_01D_15M_ORB.SP3.gz) | 2026-07-20 |
 | ESA's MGEX final SP3 and clock archive begins on 2014-01-05; the preceding week has no corresponding final-orbit or clock object. | [preceding week 1773](https://navigation-office.esa.int/products/gnss-products/1773/), [first week 1774 listing](https://navigation-office.esa.int/products/gnss-products/1774/), [first SP3 object](https://navigation-office.esa.int/products/gnss-products/1774/ESA0MGNFIN_20140050000_01D_05M_ORB.SP3.gz), [first clock object](https://navigation-office.esa.int/products/gnss-products/1774/ESA0MGNFIN_20140050000_01D_30S_CLK.CLK.gz) | 2026-07-20 |
@@ -588,10 +620,9 @@ transition guideline, GPS-week arithmetic, and archive objects agree that week
 an isolated off-by-one statement; the same page identifies that date as the
 end of week 2237.
 
-AIUB's legacy CODE names and directories are documented, so they are not an
-evidence gap. Supporting them is deferred because they are distinct public
-identities requiring product-specific short-name validation and distribution
-handling; current long names are never substituted for them.
+AIUB's short CODE names and directories before GPS week 2238 are documented
+and cataloged (see "CODE product routes"); current long names are never
+substituted for them.
 
 ## Other public evidence
 
