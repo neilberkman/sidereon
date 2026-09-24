@@ -72,6 +72,10 @@ pub use crate::sp3::{
     MergeContinuityViolation, MergeProvenance, PrecedenceTransition, ProvenanceMode,
     TransitionReason,
 };
+pub use crate::sp3::{
+    Sp3ChannelCoverage, Sp3Coverage, Sp3CoverageGap, Sp3CoverageSpan, Sp3EpochGrid,
+    Sp3SatelliteCoverage,
+};
 pub use crate::sp3::{Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR};
 pub use crate::spp::{EphemerisSource, PositionClock, PositionClockGroupDelay};
 use crate::{validate, GnssSatelliteId, GnssSystem};

@@ -1840,6 +1840,47 @@ fn tick_calendar(
     Ok(text)
 }
 
+/// Whole 10-nanosecond ticks from the J2000 origin (2000-01-01 12:00:00, in
+/// the product's own scale) at which an epoch record states `epoch`, or `None`
+/// when no record states it exactly.
+///
+/// This is the SP3 module's exact epoch axis: two epochs are one instant
+/// exactly when their ticks are equal. An integer-nanosecond count is one when
+/// it is a whole number of ticks. A split Julian date is one when a record this
+/// writer offers for it reads back, through the parser's own conversion, as
+/// exactly the instant it holds - which every epoch [`Sp3::parse`] builds does;
+/// its tick is then that record's, counted in whole 86,400-second days. In a
+/// UTC-like system a `23:59:60` label and the ordinary statement one second
+/// later count to the same tick, as the split representation itself folds
+/// them.
+pub(super) fn epoch_tick(epoch: &Instant, time_system: Sp3TimeSystem) -> Option<i128> {
+    match epoch.repr {
+        InstantRepr::Nanos(nanos) => {
+            (nanos.rem_euclid(NANOS_PER_TICK) == 0).then_some(nanos.div_euclid(NANOS_PER_TICK))
+        }
+        InstantRepr::JulianDate(split) => {
+            if !split.jd_whole.is_finite() || !split.fraction.is_finite() {
+                return None;
+            }
+            let (primary, alternative) = epoch_candidates(split, time_system);
+            let stated = core::iter::once(primary).chain(alternative).any(|fields| {
+                (0..10i64.pow(CALENDAR_YEAR_COLUMNS as u32)).contains(&fields.year)
+                    && restated_split(&fields.record_text(), time_system)
+                        .is_some_and(|restated| exact_instant(restated) == exact_instant(split))
+            });
+            if !stated {
+                return None;
+            }
+            let (day, ticks, _) = midnight_decomposition(split);
+            Some(
+                (day as i128 - J2000_JULIAN_DAY_NUMBER as i128) * SP3_TIME_TICKS_PER_DAY as i128
+                    + ticks as i128
+                    - J2000_NOON_TICKS,
+            )
+        }
+    }
+}
+
 /// The civil day a split Julian date falls in, the whole tick count within that
 /// day, and the day the split's own `jd_whole` boundary opens - as
 /// `(day, ticks, boundary_day)`, with both days Julian Day Numbers and `ticks`
