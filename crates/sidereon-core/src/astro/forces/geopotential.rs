@@ -51,7 +51,9 @@ pub enum TideSystem {
     /// Table 6.2 values are zero-tide.
     ZeroTide,
     /// "Mean tide": `C20` holds the permanent deformation and the permanent
-    /// tide-generating potential `A0 H0` as well.
+    /// tide-generating potential `A0 H0` as well. That second part varies as
+    /// `r^2` about the geocentre, not as the `r^-3` of a `C20` term, so it is
+    /// right in `C20` only at the reference radius.
     MeanTide,
 }
 

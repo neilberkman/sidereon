@@ -20,7 +20,7 @@ use crate::astro::forces::{
     CompositeForceModel, DragParameters, EarthRadiationPressure, ForceModel, J2Gravity,
     SchwarzschildRelativity, SolarRadiationPressure, SolidEarthPoleTideGravity,
     SolidEarthTideGravity, SourcedDragForce, SpaceWeatherSource, SphericalHarmonicGravityConfig,
-    ThirdBodyGravity, TwoBodyGravity, ZonalGravity,
+    ThirdBodyGravity, TideSystem, TwoBodyGravity, ZonalGravity,
 };
 use crate::astro::integrators::{Integrator, DP54, RK4};
 use crate::astro::propagator::api::{IntegratorOptions, PropagationContext};
@@ -300,9 +300,17 @@ impl ForceModelKind {
                 // The tide force's Step 3 removes the permanent tide the field's
                 // C20 holds; told another tide system, it would count that part
                 // twice or not at all.
+                // A zonal field without J2 has no C20, so it holds no permanent
+                // tide whatever its coefficients' tide system says.
                 let field_tide_system = components
                     .zonal
-                    .map(|zonal| zonal.coefficients.tide_system)
+                    .map(|zonal| {
+                        if zonal.degrees.j2 {
+                            zonal.coefficients.tide_system
+                        } else {
+                            TideSystem::TideFree
+                        }
+                    })
                     .or(components
                         .spherical_harmonic
                         .map(|gravity| gravity.tide_system()));
@@ -954,8 +962,6 @@ mod tests {
 
     #[test]
     fn solid_earth_tide_must_share_the_field_tide_system() {
-        use crate::astro::forces::TideSystem;
-
         let tide_free = SolidEarthTideGravity::default();
         let zero_tide = SolidEarthTideGravity {
             tide_system: TideSystem::ZeroTide,
@@ -992,6 +998,20 @@ mod tests {
             .build()
             .err()
             .expect("a tide-free tide force on a zero-tide field is refused");
+
+        // Without J2 the zonal field holds no C20, so it counts as tide-free
+        // whatever its coefficients say: a zero-tide tide force would remove a
+        // permanent tide the field does not hold.
+        let mut without_j2 = zero_tide_zonal;
+        without_j2.degrees.j2 = false;
+        let components = ForceModelComponents::earth_two_body().with_zonal(without_j2);
+        ForceModelKind::composite(components.with_solid_earth_tide(tide_free))
+            .build()
+            .expect("a zonal field without J2 pairs with a tide-free tide force");
+        ForceModelKind::composite(components.with_solid_earth_tide(zero_tide))
+            .build()
+            .err()
+            .expect("a zero-tide tide force on a zonal field without J2 is refused");
 
         // Without a zonal or spherical-harmonic field the tide force's own
         // setting stands.

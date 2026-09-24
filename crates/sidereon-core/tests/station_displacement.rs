@@ -4,12 +4,12 @@ use sidereon_core::astro::frames::transforms::PolarMotion;
 use sidereon_core::astro::time::TimeScales;
 use sidereon_core::tides::{
     ocean_tide_loading, parse_ocean_loading_blq_block, parse_ocean_loading_blq_blocks,
-    solid_earth_pole_tide, solid_earth_tide, station_displacement_ecef_m,
-    station_displacement_ecef_m_batch, write_ocean_loading_blq_blocks, BlqParseErrorKind,
-    BlqWriteErrorKind, OceanLoadingBlq, OceanLoadingBlqBlock, OceanLoadingBlqComment,
-    OceanLoadingBlqCommentPlacement, OceanTideConstituent, StationDisplacementEpoch,
-    StationDisplacementOptions, StationDisplacementPosition, TideError, TideInputErrorKind,
-    NUM_OCEAN_CONSTITUENTS,
+    solid_earth_pole_tide, solid_earth_tide, solid_earth_tide_with_constants,
+    station_displacement_ecef_m, station_displacement_ecef_m_batch, write_ocean_loading_blq_blocks,
+    BlqParseErrorKind, BlqWriteErrorKind, OceanLoadingBlq, OceanLoadingBlqBlock,
+    OceanLoadingBlqComment, OceanLoadingBlqCommentPlacement, OceanTideConstituent,
+    StationDisplacementEpoch, StationDisplacementOptions, StationDisplacementPosition,
+    StationTideConstants, TideError, TideInputErrorKind, NUM_OCEAN_CONSTITUENTS,
 };
 use sidereon_core::{geodetic_to_itrf, Wgs84Geodetic};
 
@@ -334,7 +334,18 @@ fn solid_earth_tide_matches_iers_dehant_reference_rows() {
         let fhr = inputs["fhr_hours"]["value"].as_f64().expect("fhr");
         let expected = vec3(&case["expected"]["dxtide_m"]);
 
-        let got = solid_earth_tide(&xsta, year, month, day, fhr, &xsun, &xmon).expect("solid tide");
+        // The header values come from the routine, so its own constants.
+        let got = solid_earth_tide_with_constants(
+            &xsta,
+            year,
+            month,
+            day,
+            fhr,
+            &xsun,
+            &xmon,
+            StationTideConstants::IersRoutine,
+        )
+        .expect("solid tide");
         for i in 0..3 {
             assert!(
                 (got[i] - expected[i]).abs() < 1.0e-9,
