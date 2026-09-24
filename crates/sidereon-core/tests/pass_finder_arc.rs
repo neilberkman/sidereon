@@ -8,9 +8,8 @@
 //! pass-prediction path ([`predict_passes`]) run at a fine step -- the two must
 //! agree on every pass to a tight tolerance -- and a deliberately coarse
 //! [`predict_passes`] run is shown to MISS passes the dense finder keeps. The
-//! TLE and topocentric path are already pinned elsewhere (Vallado SGP4 oracle,
-//! frozen ISS-London look-angle golden), so freezing this arc is a regression
-//! lock, not an oracle.
+//! same window, station and step are checked against Skyfield 1.54 in
+//! `skyfield_passes.rs`.
 
 use std::path::PathBuf;
 
@@ -123,15 +122,9 @@ fn find_passes_agrees_with_reference_and_keeps_what_coarse_drops() {
         );
     }
 
-    // Frozen-bits regression lock on the first pass (full set cross-checked
-    // Python-side against the dumped fixture). SGP4 is propagated at
-    // Skyfield's split Julian date for each instant, which moved the maximum
-    // elevation by 8 units in the last place from its civil-midnight split.
-    let first = mine[0];
-    assert_eq!(first.aos.unix_microseconds(), 1_530_672_731_076_964);
-    assert_eq!(first.los.unix_microseconds(), 1_530_673_217_359_923);
-    assert_eq!(first.culmination.unix_microseconds(), 1_530_672_973_724_542);
-    assert_eq!(first.max_elevation_deg.to_bits(), 0x4021_3c92_daf7_0622);
+    // The found passes are checked against Skyfield 1.54 in
+    // `skyfield_passes.rs`, which runs this window, station and step (the
+    // fixture's ISS case from London at 80 m).
 
     if std::env::var("SIDEREON_DUMP_FIXTURES").is_ok() {
         dump_fixture(&mine);
