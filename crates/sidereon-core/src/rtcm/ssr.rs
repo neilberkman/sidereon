@@ -9,7 +9,8 @@ use crate::id::GnssSystem;
 
 use super::bits::{BitReader, FieldWriter};
 use super::{
-    is_departing_tail, DecodeContext, DecodeError, DecodeResult, RtcmDeparture, RtcmPolicy,
+    is_departing_tail, DecodeContext, DecodeError, DecodeResult, RtcmDeparture, RtcmEncodeError,
+    RtcmPolicy, RtcmRecordKind,
 };
 
 /// The SSR message group derived from the message number.
@@ -343,7 +344,7 @@ impl SsrMessage {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming what cannot be written as the SSR wire
+    /// [`Error::RtcmEncode`] naming what cannot be written as the SSR wire
     /// form states it:
     ///
     /// * a message number this codec does not decode, or one whose
@@ -383,10 +384,14 @@ impl SsrMessage {
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         let number = self.message_number;
         if ssr_kind(number) != Some((self.system, self.kind)) {
-            return Err(Error::InvalidInput(format!(
-                "RTCM message number {number} is not the {:?} {:?} SSR message this record holds",
-                self.system, self.kind
-            )));
+            return Err(RtcmEncodeError::MessageNumber {
+                message_number: number,
+                record: RtcmRecordKind::Ssr {
+                    system: self.system,
+                    kind: self.kind,
+                },
+            }
+            .into());
         }
         let departures = self.check_lists(policy)?;
         self.check_header_flags()?;
@@ -397,10 +402,12 @@ impl SsrMessage {
             .into_iter()
             .find(|id| u64::from(*id) > widest)
         {
-            return Err(Error::InvalidInput(format!(
-                "RTCM SSR {number} satellite id {satellite_id} does not fit the {sat_bits}-bit \
-                 satellite field (0..={widest})"
-            )));
+            return Err(RtcmEncodeError::SsrSatelliteIdOutOfRange {
+                message_number: number,
+                value: satellite_id,
+                width: sat_bits as u8,
+            }
+            .into());
         }
         let mut w = FieldWriter::new(number);
         w.u("message number", u64::from(number), 12)?;
@@ -467,9 +474,7 @@ impl SsrMessage {
             };
             match policy {
                 RtcmPolicy::Strict => {
-                    return Err(Error::InvalidInput(format!(
-                        "{departure} (refused under the strict policy)"
-                    )))
+                    return Err(RtcmEncodeError::StrictDeparture(departure).into())
                 }
                 RtcmPolicy::Lenient => departures.push(departure),
             }
@@ -485,12 +490,15 @@ impl SsrMessage {
     /// and high-rate clock terms the message does not carry.
     fn check_lists(&self, policy: RtcmPolicy) -> Result<Vec<RtcmDeparture>> {
         let number = self.message_number;
-        let written = |name: &str, len: usize, writes: bool| -> Result<()> {
+        let written = |name: &'static str, len: usize, writes: bool| -> Result<()> {
             if len > 0 && !writes {
-                return Err(Error::InvalidInput(format!(
-                    "RTCM SSR {number} ({:?}) writes no {name} records, and {len} are given",
-                    self.kind
-                )));
+                return Err(RtcmEncodeError::SsrRecordsNotCarried {
+                    message_number: number,
+                    kind: self.kind,
+                    records: name,
+                    count: len,
+                }
+                .into());
             }
             Ok(())
         };
@@ -518,30 +526,34 @@ impl SsrMessage {
 
         if kind == SsrKind::CombinedOrbitClock {
             if self.orbit.len() != self.clock.len() {
-                return Err(Error::InvalidInput(format!(
-                    "RTCM SSR {number} combined orbit/clock message carries {} orbit records \
-                     and {} clock records; each satellite needs one of each",
-                    self.orbit.len(),
-                    self.clock.len()
-                )));
+                return Err(RtcmEncodeError::SsrCombinedRecordCounts {
+                    message_number: number,
+                    orbit: self.orbit.len(),
+                    clock: self.clock.len(),
+                }
+                .into());
             }
             for (index, (orbit, clock)) in self.orbit.iter().zip(&self.clock).enumerate() {
                 if orbit.satellite_id != clock.satellite_id {
-                    return Err(Error::InvalidInput(format!(
-                        "RTCM SSR {number} combined orbit/clock record {index} names satellite \
-                         id {} for its orbit and {} for its clock",
-                        orbit.satellite_id, clock.satellite_id
-                    )));
+                    return Err(RtcmEncodeError::SsrCombinedSatelliteMismatch {
+                        message_number: number,
+                        index,
+                        orbit_satellite: orbit.satellite_id,
+                        clock_satellite: clock.satellite_id,
+                    }
+                    .into());
                 }
             }
         }
         if kind == SsrKind::HighRateClock {
             if let Some(rec) = self.clock.iter().find(|rec| rec.c1 != 0 || rec.c2 != 0) {
-                return Err(Error::InvalidInput(format!(
-                    "RTCM SSR {number} high-rate clock record for satellite {} holds c1 {} and \
-                     c2 {}; the message carries only c0",
-                    rec.satellite_id, rec.c1, rec.c2
-                )));
+                return Err(RtcmEncodeError::SsrHighRateClockTerms {
+                    message_number: number,
+                    satellite: rec.satellite_id,
+                    c1: rec.c1,
+                    c2: rec.c2,
+                }
+                .into());
             }
         }
         let records = self.satellite_fields().len();
@@ -554,10 +566,12 @@ impl SsrMessage {
             }]);
         }
         if declared != records {
-            return Err(Error::InvalidInput(format!(
-                "RTCM SSR {number} header satellite count {declared} differs from the {records} \
-                 records the message writes"
-            )));
+            return Err(RtcmEncodeError::SsrSatelliteCount {
+                message_number: number,
+                declared,
+                records,
+            }
+            .into());
         }
         Ok(Vec::new())
     }
@@ -586,11 +600,16 @@ impl SsrMessage {
             ),
         ] {
             if present != carried {
-                return Err(Error::InvalidInput(if carried {
-                    format!("RTCM SSR {number} carries the {name}, and none is given")
-                } else {
-                    format!("RTCM SSR {number} carries no {name}, and one is given")
-                }));
+                return Err(RtcmEncodeError::FieldPresence {
+                    message_number: number,
+                    record: RtcmRecordKind::Ssr {
+                        system: self.system,
+                        kind: self.kind,
+                    },
+                    field: name,
+                    carried,
+                }
+                .into());
             }
         }
         Ok(())
@@ -1372,7 +1391,7 @@ mod tests {
             edit(&mut m);
             let err = m.encode().expect_err(needle);
             assert!(
-                matches!(err, Error::InvalidInput(ref text) if text.contains(needle)),
+                matches!(err, Error::RtcmEncode(ref e) if e.to_string().contains(needle)),
                 "expected {needle:?}, got {err}"
             );
         };
@@ -1673,7 +1692,7 @@ mod tests {
         let err = mismatched
             .encode()
             .expect_err("clock satellite differs from orbit satellite");
-        assert!(matches!(err, Error::InvalidInput(_)), "{err}");
+        assert!(matches!(err, Error::RtcmEncode(_)), "{err}");
         assert!(
             err.to_string()
                 .contains("record 0 names satellite id 3 for its orbit and 4 for its clock"),

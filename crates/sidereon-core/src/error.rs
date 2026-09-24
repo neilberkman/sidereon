@@ -49,6 +49,31 @@ pub enum Error {
         /// Datum the tile states.
         datum: crate::terrain::DtedHorizontalDatum,
     },
+    /// A terrain tile file named for a one-degree cell could not be read as a
+    /// DTED tile, or a lookup in a tile failed for a reason other than an
+    /// unknown elevation.
+    TerrainTile {
+        /// Integer latitude tile id.
+        lat_index: i32,
+        /// Integer longitude tile id.
+        lon_index: i32,
+        /// Why the tile could not be read or queried.
+        error: Box<crate::terrain::DtedTileError>,
+    },
+    /// A terrain tile file states an origin other than the one-degree cell
+    /// its name gives, so its postings are not where the name places them.
+    TerrainTileOrigin {
+        /// The tile file.
+        path: std::path::PathBuf,
+        /// Latitude tile id the file name gives.
+        lat_index: i32,
+        /// Longitude tile id the file name gives.
+        lon_index: i32,
+        /// Origin latitude the file states, whole degrees.
+        origin_latitude: i32,
+        /// Origin longitude the file states, whole degrees.
+        origin_longitude: i32,
+    },
     /// An IONEX slant-delay query lies outside the product coverage.
     IonexOutOfCoverage(crate::ionex::IonexCoverageError),
     /// An IONEX slant-delay interpolation weights grid nodes the product gives
@@ -67,6 +92,11 @@ pub enum Error {
     InvalidInput(String),
     /// An SBAS block holds a value the SBAS wire form cannot carry as held.
     SbasEncode(Box<crate::sbas::SbasEncodeError>),
+    /// An RTCM encoder refuses a value it cannot write as held.
+    RtcmEncode(Box<crate::rtcm::RtcmEncodeError>),
+    /// A decoded RTCM ephemeris names no satellite, or no broadcast record can
+    /// be built from it.
+    RtcmConversion(Box<crate::rtcm::RtcmConversionError>),
     /// The operation reads UT1 (Earth rotation) at an instant outside the UT1
     /// table and was not asked to accept the long-term UT1 there.
     Ut1OutsideCoverage(crate::astro::time::DegradeReason),
@@ -99,6 +129,23 @@ impl fmt::Display for Error {
                 f,
                 "terrain tile ({lat_index},{lon_index}) states horizontal datum {datum}, not WGS84"
             ),
+            Error::TerrainTile {
+                lat_index,
+                lon_index,
+                error,
+            } => write!(f, "terrain tile ({lat_index},{lon_index}): {error}"),
+            Error::TerrainTileOrigin {
+                path,
+                lat_index,
+                lon_index,
+                origin_latitude,
+                origin_longitude,
+            } => write!(
+                f,
+                "{}: DTED origin ({origin_latitude},{origin_longitude}) does not match tile \
+                 ({lat_index},{lon_index}) named by the file",
+                path.display()
+            ),
             Error::IonexOutOfCoverage(error) => write!(f, "IONEX out of coverage: {error}"),
             Error::IonexNodesNotAvailable(gap) => write!(f, "IONEX nodes not available: {gap}"),
             Error::IonexSlantUnavailable(refusal) => {
@@ -108,6 +155,8 @@ impl fmt::Display for Error {
             Error::EpochOutOfRange => write!(f, "epoch out of range"),
             Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Error::SbasEncode(error) => write!(f, "SBAS encode error: {error}"),
+            Error::RtcmEncode(error) => write!(f, "invalid input: {error}"),
+            Error::RtcmConversion(error) => write!(f, "invalid input: {error}"),
             Error::Ut1OutsideCoverage(reason) => write!(f, "UT1 outside the table: {reason}"),
         }
     }

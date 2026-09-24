@@ -25,6 +25,7 @@ use crate::rinex_nav::{
 
 use super::bits::{BitReader, FieldWriter};
 use super::{decode_body, write_trailing, DecodeContext, DecodeResult, RtcmDeparture, RtcmPolicy};
+use super::{RtcmConversionError, RtcmEncodeError};
 
 const SEMICIRCLE_TO_RAD: f64 = core::f64::consts::PI;
 const GALILEO_WEEK_OFFSET_TO_GPS: u32 = 1024;
@@ -49,7 +50,7 @@ fn gnss_week_tow(
 ) -> Result<GnssWeekTow> {
     GnssWeekTow::new(system, week, tow_s)
         .and_then(GnssWeekTow::normalized)
-        .map_err(|_| Error::InvalidInput(format!("RTCM broadcast {field} is not representable")))
+        .map_err(|_| RtcmConversionError::TimeNotRepresentable { field }.into())
 }
 
 /// First DF009 satellite ID that names an SBAS satellite rather than a GPS PRN.
@@ -62,16 +63,19 @@ const DF009_SBAS_PRN_OFFSET: u16 = 80;
 /// Refuse a raw satellite field value wider than the message's field.
 fn raw_satellite_field(
     satellite_id: u8,
-    field_bits: u32,
+    field_bits: u8,
     field: &'static str,
-    message: &'static str,
+    message_number: u16,
 ) -> Result<()> {
     let widest = (1u16 << field_bits) - 1;
     if u16::from(satellite_id) > widest {
-        return Err(Error::InvalidInput(format!(
-            "{field} {satellite_id} in {message} does not fit the \
-             {field_bits}-bit raw satellite field (0..={widest})"
-        )));
+        return Err(RtcmEncodeError::SatelliteIdOutOfRange {
+            message_number,
+            field,
+            value: satellite_id,
+            width: field_bits,
+        }
+        .into());
     }
     Ok(())
 }
@@ -100,19 +104,29 @@ fn raw_satellite_field(
 fn raw_satellite(
     system: GnssSystem,
     satellite_id: u8,
-    field_bits: u32,
+    field_bits: u8,
     field: &'static str,
-    message: &'static str,
+    message_number: u16,
 ) -> Result<GnssSatelliteId> {
     let widest = (1u16 << field_bits) - 1;
     if u16::from(satellite_id) > widest {
-        return Err(Error::Parse(format!(
-            "{field} {satellite_id} in {message} does not fit the \
-             {field_bits}-bit raw satellite field (0..={widest})"
-        )));
+        return Err(RtcmConversionError::SatelliteIdOutOfRange {
+            message_number,
+            field,
+            value: satellite_id,
+            width: field_bits,
+        }
+        .into());
     }
-    GnssSatelliteId::new(system, satellite_id)
-        .map_err(|e| Error::Parse(format!("invalid {field} in {message}: {e}")))
+    GnssSatelliteId::new(system, satellite_id).map_err(|error| {
+        RtcmConversionError::InvalidSatellite {
+            message_number,
+            field,
+            value: satellite_id,
+            error,
+        }
+        .into()
+    })
 }
 
 fn galileo_sisa_m(index: u8) -> Result<f64> {
@@ -121,27 +135,17 @@ fn galileo_sisa_m(index: u8) -> Result<f64> {
         50..=74 => Ok(0.50 + f64::from(index - 50) * 0.02),
         75..=99 => Ok(1.00 + f64::from(index - 75) * 0.04),
         100..=125 => Ok(2.00 + f64::from(index - 100) * 0.16),
-        126..=254 => Err(Error::InvalidInput(format!(
-            "RTCM Galileo ephemeris SISA index {index} is spare with no defined accuracy"
-        ))),
-        255 => Err(Error::InvalidInput(
-            "RTCM Galileo ephemeris SISA index 255 indicates no accuracy prediction available (NAPA)"
-                .to_string(),
-        )),
+        126..=254 => Err(RtcmConversionError::SisaSpare { index }.into()),
+        255 => Err(RtcmConversionError::SisaNoPrediction.into()),
     }
 }
 
-fn gps_ura_to_meters(index: u8, system_label: &'static str) -> Result<f64> {
+fn gps_ura_to_meters(index: u8, system: GnssSystem) -> Result<f64> {
     if index > 15 {
-        return Err(Error::InvalidInput(format!(
-            "RTCM {system_label} ephemeris URA index {index} exceeds 4-bit range"
-        )));
+        return Err(RtcmConversionError::UraOutOfRange { system, index }.into());
     }
-    gps_ura_index_to_meters(i64::from(index)).ok_or_else(|| {
-        Error::InvalidInput(format!(
-            "RTCM {system_label} ephemeris URA index {index} has no accuracy prediction"
-        ))
-    })
+    gps_ura_index_to_meters(i64::from(index))
+        .ok_or_else(|| RtcmConversionError::UraNoPrediction { system, index }.into())
 }
 
 fn raw_health(healthy: bool) -> f64 {
@@ -245,14 +249,14 @@ impl GpsEphemeris {
         if (DF009_FIRST_SBAS_ID..=DF009_LAST_ID).contains(&self.satellite_id) {
             let broadcast_prn = u16::from(self.satellite_id) + DF009_SBAS_PRN_OFFSET;
             return crate::sbas::store::sbas_prn_to_sat(broadcast_prn).ok_or_else(|| {
-                Error::Parse(format!(
-                    "GPS PRN {} in 1019 names SBAS PRN {broadcast_prn}, outside the SBAS \
-                     broadcast PRN window",
-                    self.satellite_id
-                ))
+                RtcmConversionError::SbasPrnOutsideWindow {
+                    value: self.satellite_id,
+                    broadcast_prn,
+                }
+                .into()
             });
         }
-        raw_satellite(GnssSystem::Gps, self.satellite_id, 6, "GPS PRN", "1019")
+        raw_satellite(GnssSystem::Gps, self.satellite_id, 6, "GPS PRN", 1019)
     }
 
     /// Decode a message 1019 body (without the transport frame).
@@ -310,9 +314,9 @@ impl GpsEphemeris {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
+    /// [`Error::RtcmEncode`] when `satellite_id` does not fit the 6-bit
     /// satellite field; writing it would keep only its low bits and name
-    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// another satellite. [`Error::RtcmEncode`] naming the field when any
     /// other value is wider than its field: an unsigned field of `n` bits holds
     /// `0..=2^n - 1`, a two's-complement one `-2^(n-1)..=2^(n-1) - 1`.
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -325,7 +329,7 @@ impl GpsEphemeris {
     /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
     /// under both policies.
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
-        raw_satellite_field(self.satellite_id, 6, "GPS PRN", "1019")?;
+        raw_satellite_field(self.satellite_id, 6, "GPS PRN", 1019)?;
         let mut w = FieldWriter::new(1019);
         w.u("message number", 1019, 12)?;
         w.u("satellite_id", u64::from(self.satellite_id), 6)?;
@@ -365,16 +369,18 @@ impl GpsEphemeris {
     /// Convert this decoded RTCM ephemeris to the broadcast record consumed by
     /// the solver. `full_week` is the caller-unrolled GPS week and must agree
     /// with the 10-bit RTCM week residue. Conversion fails with
-    /// [`Error::InvalidInput`] if the week residue disagrees, if an unrepresentable
+    /// [`Error::RtcmConversion`] if the week residue disagrees, if an unrepresentable
     /// time or invalid satellite ID is encountered, if the satellite ID names an
     /// SBAS satellite (DF009 40..=63), or if the accuracy index lacks a defined
     /// numerical accuracy prediction (URA index 15) or exceeds the 4-bit domain.
     pub fn to_broadcast_record(&self, full_week: u32) -> Result<BroadcastRecord> {
         if full_week % 1024 != u32::from(self.week_number) {
-            return Err(Error::InvalidInput(format!(
-                "GPS full week {full_week} disagrees with 10-bit RTCM week {}",
-                self.week_number
-            )));
+            return Err(RtcmConversionError::WeekMismatch {
+                message_number: 1019,
+                full_week,
+                week: self.week_number,
+            }
+            .into());
         }
         let satellite_id = self.satellite()?;
         // A DF009 SBAS satellite has no GPS LNAV record: the broadcast model
@@ -382,10 +388,11 @@ impl GpsEphemeris {
         // positions SBAS satellites from their own GEO navigation message
         // rather than from this one. The raw message keeps every field.
         if satellite_id.system != GnssSystem::Gps {
-            return Err(Error::InvalidInput(format!(
-                "1019 satellite {} names {satellite_id}, which has no GPS LNAV broadcast record",
-                self.satellite_id
-            )));
+            return Err(RtcmConversionError::NoLnavRecord {
+                value: self.satellite_id,
+                satellite: satellite_id,
+            }
+            .into());
         }
         let toe_sow = f64::from(self.t_oe) * 16.0;
         let toc_sow = f64::from(self.t_oc) * 16.0;
@@ -396,7 +403,7 @@ impl GpsEphemeris {
             i64::from(self.iode),
             i64::from(self.iodc),
         )
-        .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        .map_err(RtcmConversionError::FitInterval)?;
         Ok(BroadcastRecord {
             satellite_id,
             message: NavMessage::GpsLnav,
@@ -434,7 +441,7 @@ impl GpsEphemeris {
             group_delays: BroadcastGroupDelays::gps_lnav(scaled_i(self.t_gd, -31)),
             cnav: None,
             sv_health: f64::from(self.sv_health),
-            sv_accuracy_m: Some(gps_ura_to_meters(self.sv_accuracy, "GPS")?),
+            sv_accuracy_m: Some(gps_ura_to_meters(self.sv_accuracy, GnssSystem::Gps)?),
             fit_interval_s: Some(fit_interval_s),
             stated: StatedNavFields {
                 orbit5_field2: Some(f64::from(self.code_on_l2)),
@@ -555,7 +562,7 @@ impl GalileoFnavEphemeris {
             self.satellite_id,
             6,
             "Galileo SVID",
-            "1045",
+            1045,
         )
     }
 
@@ -619,9 +626,9 @@ impl GalileoFnavEphemeris {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
+    /// [`Error::RtcmEncode`] when `satellite_id` does not fit the 6-bit
     /// satellite field; writing it would keep only its low bits and name
-    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// another satellite. [`Error::RtcmEncode`] naming the field when any
     /// other value is wider than its field: an unsigned field of `n` bits holds
     /// `0..=2^n - 1`, a two's-complement one `-2^(n-1)..=2^(n-1) - 1`.
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -634,7 +641,7 @@ impl GalileoFnavEphemeris {
     /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
     /// under both policies.
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
-        raw_satellite_field(self.satellite_id, 6, "Galileo SVID", "1045")?;
+        raw_satellite_field(self.satellite_id, 6, "Galileo SVID", 1045)?;
         let mut w = FieldWriter::new(1045);
         w.u("message number", 1045, 12)?;
         w.u("satellite_id", u64::from(self.satellite_id), 6)?;
@@ -675,7 +682,7 @@ impl GalileoFnavEphemeris {
     /// `iod_nav`, SISA, group delay, and health are copied into their canonical
     /// record fields; an invalid SVID, overflowing aligned week, or SISA index
     /// lacking a defined numerical accuracy prediction (spare indices 126..=254
-    /// or NAPA 255) is rejected with [`Error::InvalidInput`].
+    /// or NAPA 255) is rejected with [`Error::RtcmConversion`].
     pub fn to_broadcast_record(&self) -> Result<BroadcastRecord> {
         galileo_to_record(
             self.satellite()?,
@@ -827,7 +834,7 @@ impl GalileoInavEphemeris {
             self.satellite_id,
             6,
             "Galileo SVID",
-            "1046",
+            1046,
         )
     }
 
@@ -894,9 +901,9 @@ impl GalileoInavEphemeris {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
+    /// [`Error::RtcmEncode`] when `satellite_id` does not fit the 6-bit
     /// satellite field; writing it would keep only its low bits and name
-    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// another satellite. [`Error::RtcmEncode`] naming the field when any
     /// other value is wider than its field: an unsigned field of `n` bits holds
     /// `0..=2^n - 1`, a two's-complement one `-2^(n-1)..=2^(n-1) - 1`.
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -909,7 +916,7 @@ impl GalileoInavEphemeris {
     /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
     /// under both policies.
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
-        raw_satellite_field(self.satellite_id, 6, "Galileo SVID", "1046")?;
+        raw_satellite_field(self.satellite_id, 6, "Galileo SVID", 1046)?;
         let mut w = FieldWriter::new(1046);
         w.u("message number", 1046, 12)?;
         w.u("satellite_id", u64::from(self.satellite_id), 6)?;
@@ -953,7 +960,7 @@ impl GalileoInavEphemeris {
     /// both group delays plus the combined signal-health state are retained;
     /// an invalid SVID, overflowing aligned week, or SISA index lacking a
     /// defined numerical accuracy prediction (spare indices 126..=254 or NAPA
-    /// 255) is rejected with [`Error::InvalidInput`].
+    /// 255) is rejected with [`Error::RtcmConversion`].
     pub fn to_broadcast_record(&self) -> Result<BroadcastRecord> {
         galileo_to_record(
             self.satellite()?,
@@ -1028,7 +1035,7 @@ fn galileo_to_record(
     let toc_sow = f64::from(t_oc) * 60.0;
     let gps_aligned_week = week
         .checked_add(GALILEO_WEEK_OFFSET_TO_GPS)
-        .ok_or_else(|| Error::InvalidInput("RTCM Galileo week overflows GPST axis".to_string()))?;
+        .ok_or(RtcmConversionError::GalileoWeekOverflow)?;
     let toe = gnss_week_tow(TimeScale::Gst, gps_aligned_week, toe_sow, "Galileo toe")?;
     let toc = gnss_week_tow(TimeScale::Gst, gps_aligned_week, toc_sow, "Galileo toc")?;
     Ok(BroadcastRecord {
@@ -1196,7 +1203,7 @@ impl BeidouEphemeris {
             self.satellite_id,
             6,
             "BeiDou satellite ID",
-            "1042",
+            1042,
         )
     }
 
@@ -1260,9 +1267,9 @@ impl BeidouEphemeris {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
+    /// [`Error::RtcmEncode`] when `satellite_id` does not fit the 6-bit
     /// satellite field; writing it would keep only its low bits and name
-    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// another satellite. [`Error::RtcmEncode`] naming the field when any
     /// other value is wider than its field: an unsigned field of `n` bits holds
     /// `0..=2^n - 1`, a two's-complement one `-2^(n-1)..=2^(n-1) - 1`.
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -1275,7 +1282,7 @@ impl BeidouEphemeris {
     /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
     /// under both policies.
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
-        raw_satellite_field(self.satellite_id, 6, "BeiDou satellite ID", "1042")?;
+        raw_satellite_field(self.satellite_id, 6, "BeiDou satellite ID", 1042)?;
         let mut w = FieldWriter::new(1042);
         w.u("message number", 1042, 12)?;
         w.u("satellite_id", u64::from(self.satellite_id), 6)?;
@@ -1315,7 +1322,7 @@ impl BeidouEphemeris {
     /// message tag, integer fields receive their broadcast scales, and both
     /// TGD terms are retained; an invalid satellite, unrepresentable time, or
     /// URA index lacking a defined numerical accuracy prediction (index 15) or
-    /// exceeding the 4-bit domain is rejected with [`Error::InvalidInput`].
+    /// exceeding the 4-bit domain is rejected with [`Error::RtcmConversion`].
     pub fn to_broadcast_record(&self) -> Result<BroadcastRecord> {
         let satellite_id = self.satellite()?;
         let week = u32::from(self.week_number);
@@ -1368,7 +1375,7 @@ impl BeidouEphemeris {
             ),
             cnav: None,
             sv_health: f64::from(u8::from(self.sv_health)),
-            sv_accuracy_m: Some(gps_ura_to_meters(self.sv_urai, "BeiDou")?),
+            sv_accuracy_m: Some(gps_ura_to_meters(self.sv_urai, GnssSystem::BeiDou)?),
             fit_interval_s: None,
             stated: StatedNavFields {
                 orbit7_field2: Some(f64::from(self.aodc)),
@@ -1490,7 +1497,7 @@ impl QzssEphemeris {
             self.satellite_id,
             4,
             "QZSS satellite ID",
-            "1044",
+            1044,
         )
     }
 
@@ -1555,9 +1562,9 @@ impl QzssEphemeris {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 4-bit
+    /// [`Error::RtcmEncode`] when `satellite_id` does not fit the 4-bit
     /// satellite field; writing it would keep only its low bits and name
-    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// another satellite. [`Error::RtcmEncode`] naming the field when any
     /// other value is wider than its field: an unsigned field of `n` bits holds
     /// `0..=2^n - 1`, a two's-complement one `-2^(n-1)..=2^(n-1) - 1`.
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -1570,7 +1577,7 @@ impl QzssEphemeris {
     /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
     /// under both policies.
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
-        raw_satellite_field(self.satellite_id, 4, "QZSS satellite ID", "1044")?;
+        raw_satellite_field(self.satellite_id, 4, "QZSS satellite ID", 1044)?;
         let mut w = FieldWriter::new(1044);
         w.u("message number", 1044, 12)?;
         w.u("satellite_id", u64::from(self.satellite_id), 4)?;
@@ -1612,13 +1619,15 @@ impl QzssEphemeris {
     /// applied before the record is returned, and mismatched weeks, invalid
     /// satellite IDs, unrepresentable times, or URA indices lacking a defined
     /// numerical accuracy prediction (index 15) or exceeding the 4-bit domain
-    /// are rejected with [`Error::InvalidInput`].
+    /// are rejected with [`Error::RtcmConversion`].
     pub fn to_broadcast_record(&self, full_week: u32) -> Result<BroadcastRecord> {
         if full_week % 1024 != u32::from(self.week_number) {
-            return Err(Error::InvalidInput(format!(
-                "QZSS full week {full_week} disagrees with 10-bit RTCM week {}",
-                self.week_number
-            )));
+            return Err(RtcmConversionError::WeekMismatch {
+                message_number: 1044,
+                full_week,
+                week: self.week_number,
+            }
+            .into());
         }
         let satellite_id = self.satellite()?;
         let toe_sow = f64::from(self.t_oe) * 16.0;
@@ -1662,7 +1671,7 @@ impl QzssEphemeris {
             group_delays: BroadcastGroupDelays::gps_lnav(scaled_i(self.t_gd, -31)),
             cnav: None,
             sv_health: f64::from(self.sv_health),
-            sv_accuracy_m: Some(gps_ura_to_meters(self.ura, "QZSS")?),
+            sv_accuracy_m: Some(gps_ura_to_meters(self.ura, GnssSystem::Qzss)?),
             // IS-QZSS-PNT: flag 0 is a two-hour fit, 1 more than two hours; RTKLIB
             // `decode_type1044` and `decode_eph` both read 1 as four hours, so a record
             // from RTCM and the same record from RINEX agree.
@@ -1827,7 +1836,7 @@ impl GlonassEphemeris {
             self.satellite_id,
             6,
             "GLONASS slot",
-            "1020",
+            1020,
         )
     }
 
@@ -1903,9 +1912,9 @@ impl GlonassEphemeris {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
+    /// [`Error::RtcmEncode`] when `satellite_id` does not fit the 6-bit
     /// satellite field; writing it would keep only its low bits and name
-    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// another satellite. [`Error::RtcmEncode`] naming the field when any
     /// other value is wider than its field (a sign-magnitude field holds
     /// `-(2^(n-1) - 1)..=2^(n-1) - 1`), when [`Self::negative_zero`] marks a
     /// field that holds a nonzero value, or when it sets a bit that names no
@@ -1920,12 +1929,13 @@ impl GlonassEphemeris {
     /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
     /// under both policies.
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
-        raw_satellite_field(self.satellite_id, 6, "GLONASS slot", "1020")?;
+        raw_satellite_field(self.satellite_id, 6, "GLONASS slot", 1020)?;
         if self.negative_zero & !Self::NEGATIVE_ZERO_FIELDS != 0 {
-            return Err(Error::InvalidInput(format!(
-                "RTCM 1020 negative_zero {:#06x} sets bits that name no sign-magnitude field",
-                self.negative_zero
-            )));
+            return Err(RtcmEncodeError::NegativeZeroMask {
+                message_number: 1020,
+                mask: self.negative_zero,
+            }
+            .into());
         }
         let mut w = FieldWriter::new(1020);
         w.u("message number", 1020, 12)?;
