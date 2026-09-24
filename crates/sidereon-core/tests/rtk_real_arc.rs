@@ -2055,11 +2055,34 @@ fn wettzell_kinematic_rtk_filter_tracks_rtklib_truth_class() {
     assert!(fixed_errors.iter().copied().fold(0.0, f64::max) < 0.02);
     assert!(mean_fixed_error_m < 0.01);
 
-    // The epochs whose fix status differs from RTKLIB's, with this filter's and RTKLIB's
-    // ratio, printed with the fix count.
+    // The oracle is RTKLIB run on this arc with this configuration: kinematic,
+    // L1, fix-and-hold, the 10 degree mask applied above at the base. Every
+    // epoch forms its double differences from the satellites RTKLIB uses and
+    // takes the fix status RTKLIB gives it. Epochs 0 and 1 are float in both
+    // (RTKLIB ratios 2.7 and 2.2 against the 3.0 threshold).
+    let oracle_epochs = oracle["per_epoch"].as_array().expect("oracle epochs");
+    assert_eq!(oracle_epochs.len(), epochs.len());
+    let satellite_differences = epochs
+        .iter()
+        .zip(oracle_epochs)
+        .enumerate()
+        .filter(|(_, (epoch, oracle_epoch))| {
+            (epoch.references.len() + epoch.nonref.len()) as u64
+                != oracle_epoch["satellites"]
+                    .as_u64()
+                    .expect("oracle satellites")
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert!(
+        satellite_differences.is_empty(),
+        "epochs whose satellite count differs from RTKLIB's: {satellite_differences:?}"
+    );
+    // The epochs whose fix status differs from RTKLIB's, with this filter's and
+    // RTKLIB's ratio.
     let status_differences = kinematic_updates
         .iter()
-        .zip(oracle["per_epoch"].as_array().expect("oracle epochs"))
+        .zip(oracle_epochs)
         .enumerate()
         .filter(|(_, (update, oracle_epoch))| {
             update.integer_fixed != (oracle_epoch["fix_status"] == "fixed")
@@ -2073,18 +2096,13 @@ fn wettzell_kinematic_rtk_filter_tracks_rtklib_truth_class() {
             )
         })
         .collect::<Vec<_>>();
-    eprintln!(
-        "wettzell kinematic: {kinematic_fixed} fixed epochs, RTKLIB {oracle_fixed_epochs}; \
-         differing epochs (index, fixed here, ratio here, RTKLIB ratio): \
-         {status_differences:?}"
-    );
-    // Re-frozen when the arcs moved to RTKLIB `satposs` placement of each receiver's
-    // transmission epochs (t_rx - P / c - dts, no whole-microsecond rounding).
-    assert_eq!(
-        kinematic_fixed, 118,
-        "fixed epochs; RTKLIB fixes {oracle_fixed_epochs}; differing epochs \
+    assert!(
+        status_differences.is_empty(),
+        "epochs whose fix status differs from RTKLIB's \
          (index, fixed here, ratio here, RTKLIB ratio): {status_differences:?}"
     );
+    assert_eq!(kinematic_fixed, oracle_fixed_epochs);
+    assert_eq!(kinematic_fixed, 118);
     assert_eq!(
         kinematic_baseline_m.map(f64::to_bits),
         [

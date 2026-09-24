@@ -15,7 +15,8 @@
 //! fields. Broadcast nav `nav/ESBC00DNK_R_20201770000_01D_MN.rnx`; Track B multi-GNSS
 //! uses BKG `nav/BRDC00WRD_R_20201770000_01D_GREC.rnx` (so GLONASS is present;
 //! GLONASS AR off, `pos2-gloarmode=off`). Primary cmd `rnx2rtkp -p 3 -f 1 -h -m 10`
-//! (kinematic/RTK, L1, fix-and-hold, 10 deg mask). Precise cmd adds
+//! with the base at the WTZR antenna reference point (`-r 4075580.3566 931854.0647
+//! 4801568.3343`; static RTK, L1, fix-and-hold, 10 deg mask). Precise cmd adds
 //! `-k precise_rinexhead.conf -a` with `pos1-sateph=precise`, CODE orbit
 //! `COD0MGXFIN_20201770000_01D_05M_ORB.SP3` + CNES/CLS clock
 //! `GRG0MGXFIN_20201770000_01D_30S_CLK.CLK`; max per-epoch baseline delta vs
@@ -25,6 +26,12 @@
 //! ephemeris (default `pos1-sateph=brdc`); RTKLIB 2.4.2 also fails uppercase `.SP3`
 //! paths, so the precise fixture staged CODE SP3 as `cod.sp3` and GRG clock as
 //! `grg.clk`.
+//!
+//! `wtzr_wtzz_kinematic_gps_rtklib_oracle.json`: the same RTKLIB 2.4.2 build, arc,
+//! base position and broadcast nav in kinematic mode, the command recorded in the
+//! fixture (`rnx2rtkp -p 2 -f 1 -h -m 10 ...`), the mask the kinematic test applies.
+//! Without `-m` RTKLIB masks at 15 deg, leaves G15 out at epoch 0 and fixes that
+//! epoch (ratio 3.7), so a run at another mask than the test's is no oracle for it.
 //!
 //! ## GSDC moving-rover arcs (RTKLIB Explorer demo5)
 //!
