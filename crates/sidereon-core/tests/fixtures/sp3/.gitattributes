@@ -1,0 +1,3 @@
+# AIUB's short-name CODE orbit files are committed byte for byte; SP3 pads its
+# header records with trailing blanks, which Git's whitespace check would report.
+COM*.EPH -whitespace

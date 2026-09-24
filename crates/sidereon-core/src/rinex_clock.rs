@@ -253,6 +253,14 @@ pub enum RinexClockNotice {
         /// One-based line number of the first.
         first_line: usize,
     },
+    /// Records read at a layout's columns with text after its last column that no
+    /// field holds ([`ClockRecordReading::ColumnsTrailingText`]).
+    TrailingTextRecords {
+        /// Number of records.
+        records: usize,
+        /// One-based line number of the first.
+        first_line: usize,
+    },
 }
 
 impl fmt::Display for RinexClockNotice {
@@ -301,6 +309,13 @@ impl fmt::Display for RinexClockNotice {
             } => write!(
                 f,
                 "{records} records read as whitespace-separated values, first at line {first_line}"
+            ),
+            Self::TrailingTextRecords {
+                records,
+                first_line,
+            } => write!(
+                f,
+                "{records} records carry text after their last column, first at line {first_line}"
             ),
         }
     }
@@ -618,6 +633,7 @@ impl RinexClock {
                         values: std::iter::once(point.bias_s)
                             .chain(point.additional_values)
                             .collect(),
+                        trailing_text: None,
                     }))
                 })
             })
@@ -1122,6 +1138,7 @@ impl RinexClock {
             name,
             epoch,
             values: record.values,
+            trailing_text: record.trailing_text,
         };
         self.check_writable(&typed)?;
         let position = if index == count {
@@ -1479,6 +1496,7 @@ impl RinexClock {
                     second_text: current.second_text,
                 },
                 values,
+                trailing_text: current.trailing_text,
             },
         };
         self.check_writable(&typed)?;
@@ -1656,6 +1674,7 @@ fn read_record_at(
         line_count: 1,
         reading: parent.reading,
         continuation_reading: None,
+        trailing_text: parent.trailing_text,
     };
     if count <= 2 {
         return Ok((record, 1));

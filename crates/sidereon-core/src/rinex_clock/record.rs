@@ -76,6 +76,14 @@ pub enum ClockRecordReading {
     /// Read as whitespace-separated values; the line does not follow either
     /// layout's columns.
     Whitespace,
+    /// Read at the columns of a layout, with text after that layout's last
+    /// column that no field of the record holds, where the line reads neither
+    /// at either layout's columns alone nor as whitespace-separated values.
+    /// AIUB's short-name CODE MGEX clock files flag some satellite records with
+    /// a letter in column 83, past the 80 columns of a version 2.00 record. The
+    /// exact text is retained separately, is not read as a value, and is
+    /// restated when the record's declared values are edited.
+    ColumnsTrailingText(ClockLayout),
     /// Built or edited through the typed API; the record is written in the
     /// product's layout.
     Edited,
@@ -96,6 +104,8 @@ pub struct ClockSurplusValue {
 /// A record read from a file keeps its source lines in the product; this view
 /// is derived from them. `values` are the declared values (bias first); values
 /// present beyond the declared count are kept separately in `surplus_values`.
+/// Uninterpreted trailing parent-line text is retained verbatim when the
+/// record is edited and written.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClockRecord {
     pub(super) record_type: ClockRecordType,
@@ -112,6 +122,8 @@ pub struct ClockRecord {
     pub(super) line_count: usize,
     pub(super) reading: ClockRecordReading,
     pub(super) continuation_reading: Option<ClockRecordReading>,
+    /// Exact uninterpreted parent-line bytes and their original start column.
+    pub(super) trailing_text: Option<TrailingText>,
 }
 
 impl ClockRecord {
@@ -158,6 +170,7 @@ impl ClockRecord {
             line_count: 0,
             reading: ClockRecordReading::Edited,
             continuation_reading: None,
+            trailing_text: None,
         })
     }
 
@@ -334,6 +347,13 @@ pub(super) struct ParentRead {
     pub(super) values: Vec<f64>,
     pub(super) surplus: Vec<ClockSurplusValue>,
     pub(super) reading: ClockRecordReading,
+    pub(super) trailing_text: Option<TrailingText>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct TrailingText {
+    pub(super) column: usize,
+    pub(super) text: String,
 }
 
 /// A continuation line read into typed fields.
@@ -367,7 +387,35 @@ pub(super) fn read_parent(
             }
         }
     }
-    read_parent_tokens(line_number, line, ctx)
+    let tokens = read_parent_tokens(line_number, line, ctx);
+    if tokens.is_ok() {
+        return tokens;
+    }
+    // A line that reads no other way and follows a layout's columns up to its
+    // last one, with text after it that no field holds: read the columns and
+    // keep the text in the source.
+    for candidate in layout_order(layout) {
+        let columns = parent_columns(candidate);
+        let end = columns[columns.len() - 1].1;
+        if !line.is_ascii() || line.len() <= end || line[end..].trim().is_empty() {
+            continue;
+        }
+        if let Some(fields) = fixed_record(&line[..end], columns) {
+            let code = fields[0];
+            if code.len() == 2 && code.chars().all(|c| c.is_ascii_alphabetic()) {
+                if let Ok(mut read) = read_parent_columns(line_number, line, fields, candidate, ctx)
+                {
+                    read.reading = ClockRecordReading::ColumnsTrailingText(candidate);
+                    read.trailing_text = Some(TrailingText {
+                        column: end,
+                        text: line[end..].to_string(),
+                    });
+                    return Ok(read);
+                }
+            }
+        }
+    }
+    tokens
 }
 
 fn read_parent_columns(
@@ -417,6 +465,7 @@ fn read_parent_columns(
             values,
             surplus,
             reading,
+            trailing_text: None,
         });
     }
 
@@ -461,6 +510,7 @@ fn read_parent_columns(
         values,
         surplus,
         reading,
+        trailing_text: None,
     })
 }
 
@@ -542,6 +592,7 @@ fn read_parent_tokens(
             values,
             surplus,
             reading,
+            trailing_text: None,
         });
     }
 
@@ -601,6 +652,7 @@ fn read_parent_tokens(
         values,
         surplus,
         reading,
+        trailing_text: None,
     })
 }
 
@@ -860,13 +912,15 @@ fn normalized_second_text(second: &str) -> String {
 
 /// A record whose authority is its typed values: built from series rows,
 /// inserted, or edited. It has no source lines and is written in the
-/// product's layout.
+/// product's layout; a source record's opaque parent-line suffix is retained.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct TypedRecord {
     pub(super) record_type: ClockRecordType,
     pub(super) name: String,
     pub(super) epoch: TypedEpoch,
     pub(super) values: Vec<f64>,
+    /// Exact uninterpreted parent-line bytes and their original start column.
+    pub(super) trailing_text: Option<TrailingText>,
 }
 
 /// The epoch of a typed record.
@@ -927,6 +981,7 @@ impl TypedRecord {
             line_count: 0,
             reading: ClockRecordReading::Edited,
             continuation_reading: None,
+            trailing_text: self.trailing_text.clone(),
         }
     }
 }
@@ -1143,6 +1198,16 @@ pub(super) fn render_record_with(
             (ClockLayout::V304, SigmaGap::Two) => "  ",
         });
         parent.push_str(sigma);
+    }
+    if let Some(trailing_text) = &record.trailing_text {
+        if parent.len() > trailing_text.column {
+            return Err(invalid_input(
+                "trailing_text",
+                "the rendered record overlaps the source suffix column",
+            ));
+        }
+        parent.push_str(&" ".repeat(trailing_text.column - parent.len()));
+        parent.push_str(&trailing_text.text);
     }
     lines.push(parent);
     if count > 2 {
