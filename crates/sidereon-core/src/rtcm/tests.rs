@@ -4313,6 +4313,9 @@ fn helmert(number: u16) -> HelmertTransformation {
 /// refused. The residual grids and projections round-trip with their widths.
 #[test]
 fn transformation_messages_round_trip_with_their_field_widths() {
+    let mut scale = helmert(1021);
+    scale.ds = 1_234_567;
+    assert!((scale.scale_correction_ppm() - 12.34567).abs() < 1.0e-12);
     for (number, rotation) in [(1021u16, 0usize), (1022, 105)] {
         let message = helmert(number);
         let body = message.encode().unwrap();

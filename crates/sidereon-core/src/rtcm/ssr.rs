@@ -1220,6 +1220,25 @@ mod tests {
     use super::*;
     use crate::rtcm::{decode_frame, encode_frame, Message, SsrStreamAssembler};
 
+    fn spec_body(fields: &[(u64, usize)]) -> Vec<u8> {
+        let bit_count: usize = fields.iter().map(|(_, width)| width).sum();
+        let mut bytes = vec![0u8; bit_count.div_ceil(8)];
+        let mut bit_offset = 0;
+        for &(value, width) in fields {
+            for shift in (0..width).rev() {
+                if value >> shift & 1 != 0 {
+                    bytes[bit_offset / 8] |= 1 << (7 - bit_offset % 8);
+                }
+                bit_offset += 1;
+            }
+        }
+        bytes
+    }
+
+    fn twos_complement(value: i64, width: usize) -> u64 {
+        (value as u64) & ((1u64 << width) - 1)
+    }
+
     const REAL_SSRA02IGS0_1243_FRAME_HEX: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/ssr/SSRA02IGS0_2026181234930_1243.hex"
@@ -1907,6 +1926,172 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("IOD CRC is given"));
+    }
+
+    #[test]
+    fn native_sbas_orbit_and_phase_bias_match_independent_field_vectors() {
+        // Fields are packed below from the RTCM 10403.3 message tables, without
+        // calling the production encoder. This vector exercises SBAS DF468 and
+        // DF469 plus each signed orbit field.
+        let orbit_fields = [
+            (1252, 12),
+            (0xABCDE, 20),
+            (3, 4),
+            (1, 1),
+            (1, 1),
+            (9, 4),
+            (0x1234, 16),
+            (4, 4),
+            (1, 6),
+            (40, 6),
+            (0x155, 9),
+            (0x654321, 24),
+            (twos_complement(-12_345, 22), 22),
+            (twos_complement(12_345, 20), 20),
+            (twos_complement(-23_456, 20), 20),
+            (twos_complement(-1_234, 21), 21),
+            (twos_complement(1_234, 19), 19),
+            (twos_complement(-2_345, 19), 19),
+        ];
+        let body = spec_body(&orbit_fields);
+        let decoded = SsrMessage::decode(&body).expect("spec-packed SBAS orbit");
+        assert_eq!(decoded.system, GnssSystem::Sbas);
+        assert_eq!(decoded.kind, SsrKind::Orbit);
+        assert_eq!(decoded.header.epoch_time_s, 0xABCDE);
+        assert_eq!(decoded.orbit[0].satellite_id, 40);
+        assert_eq!(decoded.orbit[0].iode, 0x155);
+        assert_eq!(decoded.orbit[0].iod_crc, Some(0x654321));
+        assert_eq!(decoded.orbit[0].delta_radial, -12_345);
+        assert_eq!(decoded.orbit[0].delta_along, 12_345);
+        assert_eq!(decoded.orbit[0].delta_cross, -23_456);
+        assert_eq!(decoded.orbit[0].dot_delta_radial, -1_234);
+        assert_eq!(decoded.orbit[0].dot_delta_along, 1_234);
+        assert_eq!(decoded.orbit[0].dot_delta_cross, -2_345);
+        assert_eq!(decoded.encode().unwrap(), body);
+
+        let other_sbas = [
+            (
+                1253,
+                SsrKind::Clock,
+                vec![
+                    (40, 6),
+                    (twos_complement(-1234, 22), 22),
+                    (twos_complement(2345, 21), 21),
+                    (twos_complement(-3456, 27), 27),
+                ],
+            ),
+            (
+                1254,
+                SsrKind::CodeBias,
+                vec![(40, 6), (1, 5), (17, 5), (twos_complement(-1234, 14), 14)],
+            ),
+            (
+                1255,
+                SsrKind::CombinedOrbitClock,
+                vec![
+                    (40, 6),
+                    (0x155, 9),
+                    (0x654321, 24),
+                    (twos_complement(-12_345, 22), 22),
+                    (twos_complement(12_345, 20), 20),
+                    (twos_complement(-23_456, 20), 20),
+                    (twos_complement(-1_234, 21), 21),
+                    (twos_complement(1_234, 19), 19),
+                    (twos_complement(-2_345, 19), 19),
+                    (twos_complement(456, 22), 22),
+                    (twos_complement(-567, 21), 21),
+                    (twos_complement(678, 27), 27),
+                ],
+            ),
+            (1256, SsrKind::Ura, vec![(40, 6), (37, 6)]),
+            (
+                1257,
+                SsrKind::HighRateClock,
+                vec![(40, 6), (twos_complement(-1234, 22), 22)],
+            ),
+        ];
+        for (number, expected_kind, record_fields) in other_sbas {
+            let carries_datum = matches!(expected_kind, SsrKind::CombinedOrbitClock);
+            let mut fields = vec![(number, 12), (0xABCDE, 20), (3, 4), (1, 1)];
+            if carries_datum {
+                fields.push((1, 1));
+            }
+            fields.extend([(9, 4), (0x1234, 16), (4, 4), (1, 6)]);
+            match expected_kind {
+                SsrKind::Clock | SsrKind::CombinedOrbitClock => {
+                    fields.extend(record_fields);
+                }
+                SsrKind::CodeBias | SsrKind::Ura | SsrKind::HighRateClock => {
+                    fields.extend(record_fields);
+                }
+                _ => unreachable!(),
+            }
+            let body = spec_body(&fields);
+            let decoded = SsrMessage::decode(&body).expect("spec-packed SBAS SSR");
+            assert_eq!(u64::from(decoded.message_number), number);
+            assert_eq!(decoded.kind, expected_kind);
+            assert_eq!(decoded.system, GnssSystem::Sbas);
+            assert_eq!(decoded.encode().unwrap(), body);
+        }
+
+        // DF392 is an eight-bit field whose MSB is reserved. The low seven
+        // bits are GLONASS tb; a set reserved bit remains readable verbatim.
+        let glonass = spec_body(&[
+            (1266, 12),
+            (0x12345, 17),
+            (2, 4),
+            (0, 1),
+            (3, 4),
+            (0x2345, 16),
+            (1, 4),
+            (1, 1),
+            (0, 1),
+            (1, 6),
+            (7, 5),
+            (1, 5),
+            (0x101, 9),
+            (twos_complement(-7, 8), 8),
+            (17, 5),
+            (1, 1),
+            (2, 2),
+            (9, 4),
+            (twos_complement(-123_456, 20), 20),
+        ]);
+        let decoded = SsrMessage::decode(&glonass).expect("spec-packed GLONASS phase bias");
+        assert_eq!(decoded.message_number, 1266);
+        assert_eq!(decoded.header.epoch_time_s, 0x12345);
+        assert_eq!(decoded.phase_bias[0].satellite_id, 7);
+        assert_eq!(decoded.phase_bias[0].yaw_rate, -7);
+        assert_eq!(decoded.phase_bias[0].biases[0].bias, -123_456);
+        assert_eq!(decoded.encode().unwrap(), glonass);
+
+        let sbas_phase = spec_body(&[
+            (1269, 12),
+            (0xABCDE, 20),
+            (3, 4),
+            (1, 1),
+            (9, 4),
+            (0x1234, 16),
+            (4, 4),
+            (1, 1),
+            (0, 1),
+            (1, 6),
+            (40, 6),
+            (1, 5),
+            (0x101, 9),
+            (twos_complement(-7, 8), 8),
+            (17, 5),
+            (1, 1),
+            (2, 2),
+            (9, 4),
+            (twos_complement(-123_456, 20), 20),
+        ]);
+        let decoded = SsrMessage::decode(&sbas_phase).expect("spec-packed SBAS phase bias");
+        assert_eq!(decoded.message_number, 1269);
+        assert_eq!(decoded.system, GnssSystem::Sbas);
+        assert_eq!(decoded.phase_bias[0].satellite_id, 40);
+        assert_eq!(decoded.phase_bias[0].biases[0].discontinuity_counter, 9);
+        assert_eq!(decoded.encode().unwrap(), sbas_phase);
     }
 
     #[test]

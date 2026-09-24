@@ -29,7 +29,7 @@ use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::observables::{ObservableEphemerisSource, ObservableState, ObservablesError};
 use crate::ppp_corrections::satellite_body_pco_to_ecef;
 use crate::rinex_nav::is_beidou_geo;
-use crate::rtcm::{Message, SsrKind, SsrMessage};
+use crate::rtcm::{Message, SsrKind, SsrMessage, SsrVtecEvaluation, SsrVtecMessage};
 use crate::spp::{EphemerisSource, PositionClock, PositionClockGroupDelay};
 use crate::staleness::StalenessPolicy;
 
@@ -215,6 +215,9 @@ pub struct SsrOrbitCorrection {
     pub nav_message: SsrNavigationMessage,
     /// Referenced broadcast issue.
     pub iode: u32,
+    /// Native RTCM SBAS/BeiDou IOD CRC (DF469/DF471), when transmitted.
+    /// RINEX SBAS broadcast records do not carry this value.
+    pub iod_crc: Option<u32>,
     /// IOD SSR.
     pub iod_ssr: u8,
     /// Orbit basis.
@@ -886,7 +889,7 @@ fn advance_has_watermark(watermark: &mut Option<f64>, epoch_j2000_s: f64) {
     *watermark = Some(watermark.map_or(epoch_j2000_s, |w| w.max(epoch_j2000_s)));
 }
 
-/// Active SSR corrections keyed by satellite.
+/// Active SSR corrections keyed by satellite and the latest retained SSR VTEC model.
 ///
 /// The store keeps Galileo HAS watermarks per satellite and signal, so it
 /// refuses a HAS record older than one it has already accepted. Replaying
@@ -895,8 +898,51 @@ fn advance_has_watermark(watermark: &mut Option<f64>, epoch_j2000_s: f64) {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SsrCorrectionStore {
     corrections: BTreeMap<GnssSatelliteId, SatCorrections>,
+    vtec: Option<StoredSsrVtec>,
     reference_point: SsrReferencePoint,
     staleness: StalenessPolicy,
+    vtec_age_policy: SsrVtecAgePolicy,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct StoredSsrVtec {
+    message: SsrVtecMessage,
+    epoch_j2000_s: f64,
+}
+
+/// Maximum-age policy used when evaluating a stored VTEC model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SsrVtecAgePolicy {
+    /// Expire after the interval advertised in IDF004/DF391.
+    AdvertisedUpdateInterval,
+    /// Use an application-selected maximum age instead of the advertised interval.
+    MaxAge(StalenessPolicy),
+}
+
+/// Outcome of querying the stored VTEC model under its age policy.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SsrVtecQuery {
+    /// No VTEC model has been ingested.
+    NoModel,
+    /// The query predates the retained model epoch.
+    BeforeModel {
+        /// Positive query-time distance before the retained model epoch, seconds.
+        seconds_before_model: f64,
+    },
+    /// The model is older than the configured maximum age.
+    Stale {
+        /// Age of the model at the query epoch, seconds.
+        age_s: f64,
+        /// Maximum age permitted by the selected policy, seconds.
+        max_age_s: f64,
+    },
+    /// The model is fresh enough and has been evaluated.
+    Evaluated {
+        /// Nonnegative query age relative to the retained model epoch.
+        age_s: f64,
+        /// Harmonic model result.
+        evaluation: SsrVtecEvaluation,
+    },
 }
 
 impl Default for SsrCorrectionStore {
@@ -910,8 +956,10 @@ impl SsrCorrectionStore {
     pub fn new() -> Self {
         Self {
             corrections: BTreeMap::new(),
+            vtec: None,
             reference_point: SsrReferencePoint::rtcm_ssr_default(),
             staleness: StalenessPolicy::seconds(DEFAULT_SSR_STALENESS_S),
+            vtec_age_policy: SsrVtecAgePolicy::AdvertisedUpdateInterval,
         }
     }
 
@@ -926,9 +974,18 @@ impl SsrCorrectionStore {
         self.reference_point
     }
 
-    /// Set the store staleness policy.
+    /// Set the orbit/clock age cap and the explicit VTEC maximum-age override.
     pub fn with_staleness(mut self, policy: StalenessPolicy) -> Self {
         self.staleness = policy;
+        self.vtec_age_policy = SsrVtecAgePolicy::MaxAge(policy);
+        self
+    }
+
+    /// Override VTEC's maximum age independently of orbit/clock correction age.
+    /// By default, the advertised update interval is the maximum age. This
+    /// override is an application policy, not a message expiry.
+    pub fn with_vtec_staleness(mut self, policy: StalenessPolicy) -> Self {
+        self.vtec_age_policy = SsrVtecAgePolicy::MaxAge(policy);
         self
     }
 
@@ -937,15 +994,113 @@ impl SsrCorrectionStore {
         self.staleness
     }
 
+    /// VTEC model maximum-age policy.
+    pub fn vtec_age_policy(&self) -> SsrVtecAgePolicy {
+        self.vtec_age_policy
+    }
+
     /// Ingest one RTCM message, ignoring non-SSR messages.
     ///
     /// `week` is the receiver time, in any GNSS, UTC or GLONASS week scale. Each
     /// SSR epoch is placed in the week (GLONASS: the day) nearest it.
     pub fn ingest(&mut self, message: &Message, week: GnssWeekTow) -> Result<()> {
-        if let Message::Ssr(ssr) = message {
-            self.ingest_ssr(ssr, week)?;
+        match message {
+            Message::Ssr(ssr) => self.ingest_ssr(ssr, week)?,
+            Message::SsrVtec(vtec) => self.ingest_vtec(vtec, week)?,
+            _ => {}
         }
         Ok(())
+    }
+
+    /// Retain the latest decoded RTCM 1264 or IGS SSR 4076 subtype 201 VTEC
+    /// model. The message epoch is resolved against `receiver_time` using the
+    /// SSR GPS-week convention. Older out-of-order models do not replace newer
+    /// retained data.
+    pub fn ingest_vtec(
+        &mut self,
+        message: &SsrVtecMessage,
+        receiver_time: GnssWeekTow,
+    ) -> Result<()> {
+        if !matches!(
+            (message.message_number, message.igs_ssr_version),
+            (1264, None) | (4076, Some(_))
+        ) || message.igs_ssr_version.is_some_and(|version| version > 7)
+        {
+            return Err(Error::InvalidInput(format!(
+                "RTCM SSR VTEC message number {} has an inconsistent IGS SSR version",
+                message.message_number
+            )));
+        }
+        let epoch_j2000_s = ssr_epoch_j2000_s(
+            GnssSystem::Gps,
+            message.message_number,
+            receiver_time,
+            message.epoch_time_s,
+        )?;
+        if self
+            .vtec
+            .as_ref()
+            .is_none_or(|retained| epoch_j2000_s >= retained.epoch_j2000_s)
+        {
+            self.vtec = Some(StoredSsrVtec {
+                message: message.clone(),
+                epoch_j2000_s,
+            });
+        }
+        Ok(())
+    }
+
+    /// Most recent retained RTCM 1264 or IGS SSR 4076 subtype 201 VTEC model.
+    pub fn vtec(&self) -> Option<&SsrVtecMessage> {
+        self.vtec.as_ref().map(|stored| &stored.message)
+    }
+
+    /// Evaluate the retained VTEC model if it is no older than the store's
+    /// configured VTEC age policy. A query before the model epoch and a stale
+    /// model have distinct outcomes; neither silently returns a correction.
+    /// Satellite ECEF coordinates are supplied at transmission time; `evaluate`
+    /// applies the IGS Sagnac rotation. By default, the message's advertised
+    /// update interval is the maximum age; `with_vtec_staleness` overrides that
+    /// cap, and `with_staleness` sets both store policies.
+    pub fn evaluate_vtec(
+        &self,
+        receiver_ecef_m: [f64; 3],
+        satellite_transmit_ecef_m: [f64; 3],
+        query_time: GnssWeekTow,
+        frequency_hz: f64,
+    ) -> Result<SsrVtecQuery> {
+        let Some(stored) = self.vtec.as_ref() else {
+            return Ok(SsrVtecQuery::NoModel);
+        };
+        let max_age_s = match self.vtec_age_policy {
+            SsrVtecAgePolicy::AdvertisedUpdateInterval => {
+                update_interval_s(stored.message.update_interval)?
+            }
+            SsrVtecAgePolicy::MaxAge(policy) => policy.max_staleness_s,
+        };
+        if !max_age_s.is_finite() || max_age_s < 0.0 {
+            return Err(Error::InvalidInput(
+                "VTEC staleness cap must be finite and nonnegative".to_string(),
+            ));
+        }
+        let query_epoch_j2000_s = receiver_gps_s(query_time)? - GPS_EPOCH_TO_J2000_S;
+        let age_s = query_epoch_j2000_s - stored.epoch_j2000_s;
+        if age_s < 0.0 {
+            return Ok(SsrVtecQuery::BeforeModel {
+                seconds_before_model: -age_s,
+            });
+        }
+        if age_s > max_age_s {
+            return Ok(SsrVtecQuery::Stale { age_s, max_age_s });
+        }
+        let gps_seconds_of_day = f64::from(stored.message.epoch_time_s).rem_euclid(SECONDS_PER_DAY);
+        let evaluation = stored.message.evaluate(
+            receiver_ecef_m,
+            satellite_transmit_ecef_m,
+            gps_seconds_of_day,
+            frequency_hz,
+        )?;
+        Ok(SsrVtecQuery::Evaluated { age_s, evaluation })
     }
 
     /// Ingest one decoded RTCM SSR message.
@@ -1443,6 +1598,7 @@ impl SsrCorrectionStore {
                         solution,
                         nav_message: SsrNavigationMessage::Has(record.nav_message),
                         iode: record.iode,
+                        iod_crc: None,
                         iod_ssr: message.header.iod_set_id,
                         basis: OrbitBasis::VelocityAligned,
                         crs_regional: false,
@@ -2815,6 +2971,7 @@ fn orbit_from_rtcm(
             SsrNavigationMessage::Rtcm
         },
         iode: record.iode,
+        iod_crc: record.iod_crc,
         iod_ssr: message.header.iod_ssr,
         basis: OrbitBasis::VelocityAligned,
         crs_regional: message.header.satellite_reference_datum.unwrap_or(false),
@@ -3136,10 +3293,11 @@ pub enum SsrStateUnavailable {
     /// is off by more than the limit.
     CorrectionExceedsLimit(SsrCorrectionSize),
     /// The satellite's system has no broadcast model SSR corrections are applied to here
-    /// (GPS, GLONASS, Galileo, QZSS and BeiDou have one).
+    /// (GPS, GLONASS, Galileo, QZSS, BeiDou and SBAS have one).
     NoBroadcastModel,
     /// No broadcast record valid at the epoch has the issue the orbit correction names
-    /// (its IODE; for BeiDou the IOD `mod(toe/720, 240)`; for GLONASS `tb`).
+    /// (its IODE; for BeiDou the IOD `mod(toe/720, 240)`; for GLONASS `tb`; for IGS SBAS
+    /// `IODN`; for native SBAS `t0 mod 8192 s` in 16-second units).
     NoMatchingBroadcastRecord {
         /// The IODE the orbit correction refers to.
         iode: u32,
@@ -3608,6 +3766,9 @@ impl<'a> SsrCorrectedEphemeris<'a> {
     ///   not iterated, less `2 r·v / c / c` (RTKLIB `satpos_ssr`; HAS SIS ICD Eq. 24).
     /// - GLONASS: the record whose `tb` is the IODE; the clock is `geph2pos`'s,
     ///   `-TauN + GammaN·tk`, with no relativistic term, as `satpos_ssr` leaves it.
+    /// - SBAS: IGS SSR matches the record's IODN; native RTCM SSR matches `t0 mod 8192 s`
+    ///   in 16-second units. The constant-acceleration position and first-order clock
+    ///   have no relativistic term. RINEX does not state the native IOD CRC.
     fn ssr_broadcast_state(
         &self,
         sat: GnssSatelliteId,
@@ -3616,6 +3777,24 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         selection_j2000_s: f64,
     ) -> std::result::Result<SsrBroadcastState, SsrStateUnavailable> {
         use SsrStateUnavailable as Unavailable;
+        if sat.system == GnssSystem::Sbas {
+            let (r, v, clock_s) = self
+                .broadcast
+                .sbas_ssr_state(
+                    sat,
+                    orbit.iode,
+                    orbit.nav_message == SsrNavigationMessage::IgsSsr,
+                    t_j2000_s,
+                    selection_j2000_s,
+                )
+                .ok_or(Unavailable::NoMatchingBroadcastRecord { iode: orbit.iode })?;
+            return Ok(SsrBroadcastState {
+                position_m: r,
+                velocity_m_s: v,
+                clock_s,
+                group_delay_s: None,
+            });
+        }
         if sat.system == GnssSystem::Glonass {
             let (r, v, clock_s) = self
                 .broadcast
@@ -4672,11 +4851,10 @@ fn glonass_ssr_epoch_gps_s(receiver_gps_s: f64, tod_s: u32) -> f64 {
 ///   bias), six bits otherwise (the IGS SSR layout). In both the broadcast PRN
 ///   is the field plus 192, which is the `Jnn` slot the field states.
 ///
-/// An RTCM SSR SBAS field (1252..1257, 1269) is refused: the store applies no
-/// native SBAS correction.
-/// NavIC is refused because no SSR layout for it is read here. An IGS SSR
-/// (4076) message reads its six-bit field by the IGS SSR table instead, SBAS
-/// included; see `igs_ssr_satellite`.
+/// SBAS fields in native RTCM SSR (1252..1257, 1269) and IGS SSR (4076) use
+/// their one-based IDF011-style identifiers, mapped to broadcast PRNs 120..158.
+/// The SBAS mapping is RTCM 10403.3 Table 3.5-101 / IGS SSR v1.00 IDF011.
+/// NavIC is refused because no SSR layout for it is read here.
 ///
 /// The raw width is checked separately from the identifier range. The shared
 /// satellite-token range is `1..=99` for every constellation, so `R32` is a
@@ -4692,7 +4870,17 @@ fn ssr_satellite(message: &SsrMessage, satellite_id: u8) -> Result<GnssSatellite
         GnssSystem::Gps | GnssSystem::Galileo | GnssSystem::BeiDou => 6,
         GnssSystem::Qzss if crate::rtcm::is_native_qzss_ssr(message.message_number) => 4,
         GnssSystem::Qzss => 6,
-        GnssSystem::Navic | GnssSystem::Sbas => {
+        GnssSystem::Sbas => {
+            if !(1..=39).contains(&satellite_id) {
+                return Err(Error::Parse(format!(
+                    "RTCM SSR SBAS satellite id {satellite_id} is outside the defined 1..=39 range"
+                )));
+            }
+            return crate::sbas::store::sbas_prn_to_sat(119 + u16::from(satellite_id)).ok_or_else(
+                || Error::Parse(format!("invalid RTCM SSR SBAS satellite id {satellite_id}")),
+            );
+        }
+        GnssSystem::Navic => {
             return Err(Error::Parse(format!(
                 "no SSR layout read here carries {system} corrections, \
                  so satellite id {satellite_id} has no defined field layout"
@@ -4930,8 +5118,8 @@ mod tests {
         HasOrbitCorrection, HasPhaseBias, HasPhaseBiasBlock,
     };
     use crate::rtcm::{
-        Message, SsrClockRecord, SsrHeader, SsrOrbitRecord, SsrPhaseBiasRecord, SsrPhaseBiasSignal,
-        SsrStreamAssembler,
+        Message, SsrClockRecord, SsrCodeBiasRecord, SsrHeader, SsrOrbitRecord, SsrPhaseBiasRecord,
+        SsrPhaseBiasSignal, SsrStreamAssembler, SsrVtecLayer, SsrVtecMessage,
     };
     use crate::sp3::Sp3;
 
@@ -5007,6 +5195,316 @@ mod tests {
         assert_eq!(clock.c0_m.to_bits(), 1.0_f64.to_bits());
         assert!((clock.c1_m_s + 0.002).abs() < 1.0e-18);
         assert!((clock.c2_m_s2 - 6.0e-6).abs() < 1.0e-18);
+    }
+
+    #[test]
+    fn store_ingests_igs_sbas_orbit_and_igs_vtec() {
+        let mut store = SsrCorrectionStore::new();
+        let week = GnssWeekTow::new(TimeScale::Gpst, 2_400, 100_000.0).unwrap();
+        let message = SsrMessage {
+            message_number: 4076,
+            igs_ssr_version: Some(1),
+            system: GnssSystem::Sbas,
+            kind: SsrKind::Orbit,
+            header: SsrHeader {
+                satellite_reference_datum: Some(false),
+                ..header(SsrKind::Orbit)
+            },
+            orbit: vec![SsrOrbitRecord {
+                satellite_id: 1,
+                iode: 42,
+                iod_crc: None,
+                delta_radial: 10_000,
+                delta_along: -20_000,
+                delta_cross: 30_000,
+                dot_delta_radial: 100,
+                dot_delta_along: -200,
+                dot_delta_cross: 300,
+            }],
+            clock: Vec::new(),
+            code_bias: Vec::new(),
+            phase_bias: Vec::new(),
+            ura: Vec::new(),
+            padding_bits: Vec::new(),
+        };
+        store.ingest(&Message::Ssr(message), week).unwrap();
+        let sat = GnssSatelliteId::new(GnssSystem::Sbas, 20).unwrap();
+        let orbit = store.orbit(sat).expect("IGS SBAS orbit correction");
+        assert_eq!(orbit.iode, 42);
+        assert_eq!(orbit.radial_m.to_bits(), (-1.0_f64).to_bits());
+
+        let native = orbit_message(GnssSystem::Sbas, 1);
+        store.ingest_ssr(&native, week).unwrap();
+        let native_sat = GnssSatelliteId::new(GnssSystem::Sbas, 20).unwrap();
+        assert_eq!(
+            store.orbit(native_sat).unwrap().solution.source,
+            SsrSource::RtcmSsr
+        );
+
+        let mut native_code_bias = orbit_message(GnssSystem::Sbas, 1);
+        native_code_bias.message_number = 1254;
+        native_code_bias.kind = SsrKind::CodeBias;
+        native_code_bias.header = header(SsrKind::CodeBias);
+        native_code_bias.orbit.clear();
+        native_code_bias.code_bias = vec![SsrCodeBiasRecord {
+            satellite_id: 1,
+            biases: vec![(0, -123)],
+        }];
+        store.ingest_ssr(&native_code_bias, week).unwrap();
+        assert!(
+            (store
+                .code_bias(native_sat, rtcm_sig(native_sat, 0))
+                .unwrap()
+                + 1.23)
+                .abs()
+                < 1.0e-12
+        );
+
+        let mut native_phase_bias = orbit_message(GnssSystem::Sbas, 1);
+        native_phase_bias.message_number = 1269;
+        native_phase_bias.kind = SsrKind::PhaseBias;
+        native_phase_bias.header = header(SsrKind::PhaseBias);
+        native_phase_bias.orbit.clear();
+        native_phase_bias.phase_bias = vec![SsrPhaseBiasRecord {
+            satellite_id: 1,
+            yaw_angle: 0,
+            yaw_rate: 0,
+            biases: vec![SsrPhaseBiasSignal {
+                signal_id: 0,
+                integer_indicator: 1,
+                wide_lane_integer_indicator: 0,
+                discontinuity_counter: 3,
+                bias: 12_345,
+            }],
+        }];
+        store.ingest_ssr(&native_phase_bias, week).unwrap();
+        assert!(
+            (store
+                .phase_bias(native_sat, rtcm_sig(native_sat, 0))
+                .unwrap()
+                - 1.2345)
+                .abs()
+                < 1.0e-12
+        );
+
+        let vtec = SsrVtecMessage {
+            message_number: 4076,
+            igs_ssr_version: Some(1),
+            epoch_time_s: 100_000,
+            update_interval: 3,
+            multiple_message: false,
+            iod_ssr: 4,
+            provider_id: 7,
+            solution_id: 2,
+            quality_indicator: 123,
+            layers: vec![SsrVtecLayer {
+                height: 45,
+                degree: 1,
+                order: 1,
+                cosine: vec![100, -200, 300],
+                sine: vec![400],
+            }],
+            trailing_bits: Vec::new(),
+        };
+        let vtec = SsrVtecMessage {
+            layers: vec![SsrVtecLayer {
+                height: 45,
+                degree: 1,
+                order: 1,
+                cosine: vec![100, 200, 0],
+                sine: vec![0],
+            }],
+            ..vtec
+        };
+        store.ingest(&Message::SsrVtec(vtec.clone()), week).unwrap();
+        assert_eq!(store.vtec(), Some(&vtec));
+        let result = store
+            .evaluate_vtec(
+                [0.0, 0.0, 6_370_000.0],
+                [0.0, 0.0, 26_000_000.0],
+                week,
+                1.0e9,
+            )
+            .unwrap();
+        let SsrVtecQuery::Evaluated { age_s, evaluation } = result else {
+            panic!("fresh VTEC model must evaluate");
+        };
+        assert_eq!(age_s, 0.0);
+        let expected_vtec_tecu = 0.5 + libm::sqrt(3.0);
+        assert!((evaluation.stec_tecu - expected_vtec_tecu).abs() < 1.0e-12);
+        assert!(
+            (evaluation.pseudorange_delay_m - 40.3e16 * expected_vtec_tecu / 1.0e18).abs()
+                < 1.0e-12
+        );
+        assert_eq!(
+            evaluation.phase_range_advance_m,
+            -evaluation.pseudorange_delay_m
+        );
+
+        let eleven_seconds_later = GnssWeekTow::new(TimeScale::Gpst, 2_400, 100_011.0).unwrap();
+        assert!(matches!(
+            store
+                .evaluate_vtec(
+                    [0.0, 0.0, 6_370_000.0],
+                    [0.0, 0.0, 26_000_000.0],
+                    eleven_seconds_later,
+                    1.0e9,
+                )
+                .unwrap(),
+            SsrVtecQuery::Stale {
+                age_s: 11.0,
+                max_age_s: 10.0
+            }
+        ));
+
+        let mut inconsistent = vtec;
+        inconsistent.igs_ssr_version = None;
+        assert!(store.ingest_vtec(&inconsistent, week).is_err());
+
+        let stale_store =
+            SsrCorrectionStore::new().with_vtec_staleness(StalenessPolicy::seconds(5.0));
+        let mut stale_store = stale_store;
+        stale_store
+            .ingest_vtec(store.vtec().unwrap(), week)
+            .unwrap();
+        let six_seconds_later = GnssWeekTow::new(TimeScale::Gpst, 2_400, 100_006.0).unwrap();
+        assert!(matches!(
+            stale_store
+                .evaluate_vtec(
+                    [0.0, 0.0, 6_370_000.0],
+                    [0.0, 0.0, 26_000_000.0],
+                    six_seconds_later,
+                    1.0e9,
+                )
+                .unwrap(),
+            SsrVtecQuery::Stale {
+                age_s: 6.0,
+                max_age_s: 5.0
+            }
+        ));
+    }
+
+    #[test]
+    fn corrected_sbas_state_matches_native_t0_and_igs_iodn() {
+        let nav_text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/nav/KMS300DNK_R_20221591000_01H_MN.rnx"
+        ))
+        .expect("read SBAS broadcast fixture");
+        let broadcast = BroadcastEphemeris::from_nav(&nav_text).expect("parse SBAS broadcast");
+        let record = *broadcast
+            .sbas_records()
+            .iter()
+            .find(|record| record.iodn.is_some())
+            .expect("fixture SBAS record with IODN");
+        let sat = record.satellite_id;
+        let gps_epoch_s = record.t0_j2000_s() + GPS_EPOCH_TO_J2000_S;
+        let week = (gps_epoch_s / SECONDS_PER_WEEK).floor() as u32;
+        let tow_s = gps_epoch_s.rem_euclid(SECONDS_PER_WEEK);
+        let query_time = GnssWeekTow::new(TimeScale::Gpst, week, tow_s + 1.0)
+            .expect("query just after SBAS ephemeris epoch");
+        let query_j2000_s = record.t0_j2000_s() + 1.0;
+        let native_t0_mod = (tow_s / 16.0).floor() as u32 % 512;
+        assert!(
+            tow_s / 16.0 >= 512.0,
+            "fixture exercises native IOD rollover"
+        );
+
+        let broadcast_position = record.position_at(1.0);
+        let stepped_position = record.position_at(1.001);
+        let broadcast_velocity = [
+            (stepped_position[0] - broadcast_position[0]) / 0.001,
+            (stepped_position[1] - broadcast_position[1]) / 0.001,
+            (stepped_position[2] - broadcast_position[2]) / 0.001,
+        ];
+        let norm = |vector: [f64; 3]| {
+            (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt()
+        };
+        let unit = |vector: [f64; 3]| {
+            let length = norm(vector);
+            [vector[0] / length, vector[1] / length, vector[2] / length]
+        };
+        let cross = |a: [f64; 3], b: [f64; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let along_axis = unit(broadcast_velocity);
+        let cross_axis = unit(cross(broadcast_position, broadcast_velocity));
+        let radial_axis = cross(along_axis, cross_axis);
+        let expected_position_delta = [
+            -radial_axis[0] - 2.0 * along_axis[0] + cross_axis[0],
+            -radial_axis[1] - 2.0 * along_axis[1] + cross_axis[1],
+            -radial_axis[2] - 2.0 * along_axis[2] + cross_axis[2],
+        ];
+
+        for igs in [false, true] {
+            let mut message = combined_message(&[(1, 1)]);
+            message.system = GnssSystem::Sbas;
+            message.message_number = if igs { 4076 } else { 1255 };
+            message.igs_ssr_version = igs.then_some(1);
+            message.header.epoch_time_s = tow_s.floor() as u32;
+            message.header.update_interval = 0;
+            message.orbit[0].satellite_id = sat.prn - 119;
+            message.clock[0].satellite_id = sat.prn - 119;
+            message.orbit[0].iode = if igs {
+                record.iodn.expect("IODN") as u32
+            } else {
+                native_t0_mod
+            };
+            message.orbit[0].delta_radial = 10_000;
+            message.orbit[0].delta_along = 5_000;
+            message.orbit[0].delta_cross = -2_500;
+            message.orbit[0].iod_crc = (!igs).then_some(0x654321);
+
+            let mut corrections = SsrCorrectionStore::new();
+            corrections
+                .ingest_ssr(&message, query_time)
+                .expect("ingest SBAS SSR orbit and clock");
+            assert_eq!(
+                corrections.orbit(sat).and_then(|orbit| orbit.iod_crc),
+                (!igs).then_some(0x654321)
+            );
+            let source = SsrCorrectedEphemeris::new(&broadcast, &corrections);
+            assert!(source
+                .applied_orbit_clock_status(sat, query_j2000_s)
+                .is_ok());
+            let corrected = source
+                .corrected_state(sat, query_j2000_s)
+                .expect("matching SBAS issue applies corrections");
+            let plain = broadcast
+                .position_clock_at_j2000_s(sat, query_j2000_s)
+                .expect("plain SBAS state");
+            for axis in 0..3 {
+                assert!(
+                    ((corrected.0[axis] - plain.0[axis]) - expected_position_delta[axis]).abs()
+                        < 1.0e-6,
+                    "SBAS SSR position delta on axis {axis}"
+                );
+            }
+            assert!(
+                ((corrected.1 - plain.1) - 0.01 / C_M_S).abs() < 1.0e-15,
+                "SBAS SSR clock delta"
+            );
+
+            let mut wrong_message = message;
+            wrong_message.orbit[0].iode = if igs {
+                (wrong_message.orbit[0].iode + 128) % 256
+            } else {
+                (wrong_message.orbit[0].iode + 256) % 512
+            };
+            let mut wrong_issue = SsrCorrectionStore::new();
+            wrong_issue
+                .ingest_ssr(&wrong_message, query_time)
+                .expect("wrong SBAS issue is still a valid correction");
+            assert!(matches!(
+                SsrCorrectedEphemeris::new(&broadcast, &wrong_issue)
+                    .applied_orbit_clock_status(sat, query_j2000_s),
+                Err(SsrStateUnavailable::NoMatchingBroadcastRecord { .. })
+            ));
+        }
     }
 
     /// Build a one-record SSR orbit message for the given constellation and raw
@@ -5205,22 +5703,24 @@ mod tests {
         assert!(err.to_string().contains("6-bit"), "{err}");
     }
 
-    /// SBAS and NavIC have no SSR layout read here. RTKLIB offsets the SBAS
-    /// field by 120 or 119 depending on the layout, and reading the field as
-    /// the slot itself matched neither, so a hand-built message naming either
-    /// system is refused rather than given a guessed width and offset.
+    /// NavIC has no SSR layout read here. Native SBAS uses its six-bit ID in
+    /// the one-based SBAS range and applies it to the slot-keyed correction
+    /// store; zero and values above 39 have no corresponding SBAS broadcast PRN.
     #[test]
-    fn ssr_refuses_constellations_with_no_layout_read_here() {
-        for system in [GnssSystem::Navic, GnssSystem::Sbas] {
-            let mut store = SsrCorrectionStore::new();
+    fn ssr_refuses_navic_and_unmapped_native_sbas_ids() {
+        let mut store = SsrCorrectionStore::new();
+        let err = store
+            .ingest_ssr(&orbit_message(GnssSystem::Navic, 5), ssr_week())
+            .expect_err("no SSR layout read here carries NavIC");
+        assert!(err.to_string().contains("no SSR layout read here"), "{err}");
+        assert!(store.corrections.is_empty());
+
+        for invalid_id in [0, 40, 63] {
             let err = store
-                .ingest_ssr(&orbit_message(system, 5), ssr_week())
-                .expect_err("no SSR layout read here carries this constellation");
-            assert!(
-                err.to_string().contains("no SSR layout read here"),
-                "{system:?} refusal must say why, got {err}"
-            );
-            assert!(store.corrections.is_empty(), "{system:?}");
+                .ingest_ssr(&orbit_message(GnssSystem::Sbas, invalid_id), ssr_week())
+                .expect_err("native SBAS identifiers outside 1..=39 are unmapped");
+            assert!(err.to_string().contains("SBAS satellite id"), "{err}");
+            assert!(store.corrections.is_empty(), "id {invalid_id}");
         }
     }
 
@@ -16683,6 +17183,16 @@ mod tests {
             Err(SsrStateUnavailable::NoMatchingBroadcastRecord {
                 iode: (tb + 48) % 96
             })
+        );
+
+        // RTCM 10403.2 DF392 reserves the MSB; if it is one the SSR satellite
+        // record must not match a broadcast `tb`, whose seven bits occupy the
+        // low bits of DF392.
+        let reserved_bit = store_for(tb | 0x80);
+        assert_eq!(
+            SsrCorrectedEphemeris::new(&broadcast, &reserved_bit)
+                .applied_orbit_clock_status(sat, t),
+            Err(SsrStateUnavailable::NoMatchingBroadcastRecord { iode: tb | 0x80 })
         );
     }
 

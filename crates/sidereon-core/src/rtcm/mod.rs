@@ -171,7 +171,7 @@ pub use transformation::{
     GridResidual, HelmertTransformation, Projection, ProjectionParameters, ResidualGrid,
     RotationPoint, RESIDUAL_GRID_POINTS,
 };
-pub use vtec::{SsrVtecLayer, SsrVtecMessage};
+pub use vtec::{SsrVtecEvaluation, SsrVtecLayer, SsrVtecLayerEvaluation, SsrVtecMessage};
 
 /// A message whose number is recognized but whose body this codec does not
 /// decode. The raw body is preserved so the frame still round-trips.
@@ -235,6 +235,21 @@ pub enum RtcmDeparture {
         /// Satellite count times signal count.
         cells: usize,
     },
+    /// A VTEC spherical-harmonics layer states an order greater than its
+    /// degree. Lenient decoding/encoding interprets the listed coefficient
+    /// sequence with terms limited to `n <= degree`; this interpretation is
+    /// explicitly nonconforming, and for `order >= degree + 2` differs from
+    /// the IGS coefficient-count formula.
+    OrderExceedsDegree {
+        /// The RTCM message number (1264 or IGS SSR 4076).
+        message_number: u16,
+        /// Zero-based layer index in the message.
+        layer_index: usize,
+        /// The spherical-harmonics degree `N`.
+        degree: u8,
+        /// The spherical-harmonics order `M`.
+        order: u8,
+    },
     /// An SSR body that ends before the records its header's satellite count
     /// (DF387) states. RTKLIB `decode_ssr1`..`decode_ssr7` read the complete
     /// records. The header count is kept as transmitted and the bits of the
@@ -283,6 +298,15 @@ impl core::fmt::Display for RtcmDeparture {
             } => write!(
                 f,
                 "RTCM MSM {message_number} cell mask is {cells} bits, over the 64 RTCM allows"
+            ),
+            Self::OrderExceedsDegree {
+                message_number,
+                layer_index,
+                degree,
+                order,
+            } => write!(
+                f,
+                "RTCM {message_number} VTEC layer {layer_index} order {order} exceeds degree {degree}"
             ),
             Self::SsrRecordsShort {
                 message_number,
@@ -713,12 +737,12 @@ impl Message {
             }
             n if ssr::is_supported_ssr(n) => Message::Ssr(SsrMessage::decode_inner(body, ctx)?),
             n if vtec::is_rtcm_vtec(n) => {
-                Message::SsrVtec(decode_body(body, ctx, |r, _| SsrVtecMessage::read(r))?)
+                Message::SsrVtec(decode_body(body, ctx, SsrVtecMessage::read)?)
             }
             IGS_SSR_MESSAGE_NUMBER => {
                 let (_, subtype) = ssr::igs_ssr_identity(body)?;
                 if subtype == vtec::IGS_SSR_VTEC_SUBTYPE {
-                    Message::SsrVtec(decode_body(body, ctx, |r, _| SsrVtecMessage::read(r))?)
+                    Message::SsrVtec(decode_body(body, ctx, SsrVtecMessage::read)?)
                 } else if ssr::igs_ssr_kind(subtype).is_some() {
                     Message::Ssr(SsrMessage::decode_inner(body, ctx)?)
                 } else {
