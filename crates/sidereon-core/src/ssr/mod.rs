@@ -34,7 +34,9 @@ use crate::spp::{EphemerisSource, PositionClock, PositionClockGroupDelay};
 use crate::staleness::StalenessPolicy;
 
 mod signal;
-pub use signal::{has_signal, rtcm_ssr_signal, GnssSignal, SignalCode, SsrRawSignal, SsrSignalKey};
+pub use signal::{
+    has_signal, igs_ssr_signal, rtcm_ssr_signal, GnssSignal, SignalCode, SsrRawSignal, SsrSignalKey,
+};
 
 const DEFAULT_SSR_STALENESS_S: f64 = 90.0;
 /// Largest age of an RTCM SSR orbit or clock correction, measured from its
@@ -71,6 +73,18 @@ pub enum SsrSource {
     RtcmSsr,
     /// Galileo HAS messages.
     GalileoHas,
+    /// IGS SSR messages (RTCM message 4076). They follow the RTCM SSR update,
+    /// age and discontinuity rules; their signal identifiers and broadcast
+    /// issues are IGS SSR v1.00's.
+    IgsSsr,
+}
+
+impl SsrSource {
+    /// Whether the source is an RTCM 3 SSR format, RTCM SSR or IGS SSR, whose
+    /// corrections follow the RTCM SSR update, age and discontinuity rules.
+    pub const fn is_rtcm(self) -> bool {
+        matches!(self, Self::RtcmSsr | Self::IgsSsr)
+    }
 }
 
 /// Orbital basis used by stored RAC components.
@@ -166,6 +180,13 @@ pub enum SsrNavigationMessage {
     /// BeiDou D1 (D2 for a geostationary satellite) by the IOD
     /// `mod(toe/720, 240)` (IGS SSR v1.00, IDF012), GLONASS by `tb`.
     Rtcm,
+    /// An IGS SSR (4076) correction. Its eight-bit issue (IDF012) names the
+    /// record as [`Self::Rtcm`]'s does, except Galileo: the issue is the eight
+    /// least significant bits of the I/NAV IODnav, and the record is the first
+    /// valid one whose IODnav has those low bits. RTKLIB `satpos_ssr` compares
+    /// the eight bits with the whole IODnav, which matches no record with an
+    /// IODnav of 256 or more; IGS SSR v1.00 defines the low bits.
+    IgsSsr,
     /// A Galileo HAS correction, with the navigation-message index NM its mask
     /// states, as transmitted (HAS SIS ICD 5.2.1.6, Table 21). Index 0 is GPS
     /// LNAV or Galileo I/NAV. Indices 1..=7 are reserved: the correction is
@@ -956,10 +977,20 @@ impl SsrCorrectionStore {
         } else {
             transmitted_epoch_j2000_s + update_interval_s / 2.0
         };
+        let igs = message.igs_ssr_version.is_some();
         let solution = SsrSolution {
-            source: SsrSource::RtcmSsr,
+            source: if igs {
+                SsrSource::IgsSsr
+            } else {
+                SsrSource::RtcmSsr
+            },
             provider_id: message.header.provider_id,
             solution_id: message.header.solution_id,
+        };
+        let nav_message = if igs {
+            SsrNavigationMessage::IgsSsr
+        } else {
+            SsrNavigationMessage::Rtcm
         };
 
         let mut staged = self.corrections.clone();
@@ -987,7 +1018,7 @@ impl SsrCorrectionStore {
                     let entry = staged.entry(sat).or_default();
                     let mut clock = SsrClockCorrection {
                         solution,
-                        nav_message: SsrNavigationMessage::Rtcm,
+                        nav_message,
                         iod_ssr: message.header.iod_ssr,
                         c0_m: f64::from(record.c0) * RTCM_SSR_RADIAL_CLOCK_SCALE_M,
                         c1_m_s: f64::from(record.c1) * RTCM_SSR_RADIAL_CLOCK_RATE_SCALE_M_S,
@@ -1047,7 +1078,7 @@ impl SsrCorrectionStore {
                     entry.orbit = Some(orbit);
                     let mut clock = SsrClockCorrection {
                         solution,
-                        nav_message: SsrNavigationMessage::Rtcm,
+                        nav_message,
                         iod_ssr: message.header.iod_ssr,
                         c0_m: f64::from(clock_record.c0) * RTCM_SSR_RADIAL_CLOCK_SCALE_M,
                         c1_m_s: f64::from(clock_record.c1) * RTCM_SSR_RADIAL_CLOCK_RATE_SCALE_M_S,
@@ -1088,7 +1119,7 @@ impl SsrCorrectionStore {
                     // Keyed by the physical signal the RTCM table assigns the index,
                     // so a HAS record of the same signal shares the entry and one of
                     // another signal with the same index does not.
-                    let signal = SsrRawSignal::rtcm_ssr(message.system, index);
+                    let signal = SsrRawSignal::new(solution.source, message.system, index);
                     let sig_entry = staged
                         .entry(sat)
                         .or_default()
@@ -1143,7 +1174,7 @@ impl SsrCorrectionStore {
                 for ((sat, _), bias) in last {
                     let sat_entry = staged.entry(sat).or_default();
                     let bias_m = f64::from(bias.bias) * RTCM_SSR_PHASE_BIAS_SCALE_M;
-                    let signal = SsrRawSignal::rtcm_ssr(message.system, bias.signal_id);
+                    let signal = SsrRawSignal::new(solution.source, message.system, bias.signal_id);
                     let key = signal.key();
                     let sig_entry = sat_entry.phase_bias.signals.entry(key).or_default();
                     let continuity_ref_epoch_bits = match &sig_entry.active {
@@ -1154,7 +1185,7 @@ impl SsrCorrectionStore {
                             ref_epoch_j2000_s.to_bits()
                         }
                         Some(prev) => {
-                            if prev.solution.source != SsrSource::RtcmSsr
+                            if prev.solution.source != solution.source
                                 || prev.solution.provider_id != solution.provider_id
                                 || prev.solution.solution_id != solution.solution_id
                             {
@@ -1209,7 +1240,7 @@ impl SsrCorrectionStore {
                     let token = PhaseContinuityToken {
                         sat,
                         signal: key,
-                        source: SsrSource::RtcmSsr,
+                        source: solution.source,
                         provider_id: solution.provider_id,
                         solution_id: solution.solution_id,
                         continuity_ref_epoch_bits,
@@ -1232,7 +1263,6 @@ impl SsrCorrectionStore {
                     });
                 }
             }
-            SsrKind::Vtec => {}
         }
         self.corrections = staged;
         Ok(())
@@ -1636,7 +1666,7 @@ impl SsrCorrectionStore {
                 let is_rtcm_active = sig_entry
                     .active
                     .as_ref()
-                    .is_some_and(|r| r.solution.source == SsrSource::RtcmSsr);
+                    .is_some_and(|r| r.solution.source.is_rtcm());
 
                 let reason = match sig_entry.has_watermark {
                     Some(wm) => {
@@ -1701,7 +1731,7 @@ impl SsrCorrectionStore {
 
                 let resulting_status = if reason.is_refused() {
                     match &sig_entry.active {
-                        Some(rec) if rec.solution.source == SsrSource::RtcmSsr => {
+                        Some(rec) if rec.solution.source.is_rtcm() => {
                             ActiveProvenanceStatus::ActiveRtcmUsable
                         }
                         Some(rec) if rec.value_m.is_some() => {
@@ -1783,7 +1813,7 @@ impl SsrCorrectionStore {
                 let is_rtcm_active = sig_entry
                     .active
                     .as_ref()
-                    .is_some_and(|r| r.solution.source == SsrSource::RtcmSsr);
+                    .is_some_and(|r| r.solution.source.is_rtcm());
 
                 let reason = match sig_entry.has_watermark {
                     Some(wm) => {
@@ -1858,7 +1888,7 @@ impl SsrCorrectionStore {
 
                 if reason.is_refused() {
                     let resulting_status = match &sig_entry.active {
-                        Some(rec) if rec.solution.source == SsrSource::RtcmSsr => {
+                        Some(rec) if rec.solution.source.is_rtcm() => {
                             ActiveProvenanceStatus::ActiveRtcmUsable
                         }
                         Some(rec) if rec.value_m.is_some() || rec.value_cycles.is_some() => {
@@ -2682,7 +2712,7 @@ fn evaluate_phase_continuity(
     // its provider and solution.
     let solution_differs = match current_token.source {
         SsrSource::GalileoHas => false,
-        SsrSource::RtcmSsr => {
+        SsrSource::RtcmSsr | SsrSource::IgsSsr => {
             ack.provider_id != current_token.provider_id
                 || ack.solution_id != current_token.solution_id
         }
@@ -2706,10 +2736,12 @@ fn evaluate_phase_continuity(
             previous: ack.raw_indicator,
             current: current_token.raw_indicator,
         },
-        SsrSource::RtcmSsr => SsrDiscontinuityDetails::RtcmDiscontinuityCounterChanged {
-            previous: ack.raw_indicator,
-            current: current_token.raw_indicator,
-        },
+        SsrSource::RtcmSsr | SsrSource::IgsSsr => {
+            SsrDiscontinuityDetails::RtcmDiscontinuityCounterChanged {
+                previous: ack.raw_indicator,
+                current: current_token.raw_indicator,
+            }
+        }
     };
     // Position on the arc timeline. A store only ever advances the generation counter,
     // and it stamps the continuity reference epoch whenever it does, so generation and
@@ -2777,7 +2809,11 @@ fn orbit_from_rtcm(
 ) -> SsrOrbitCorrection {
     SsrOrbitCorrection {
         solution,
-        nav_message: SsrNavigationMessage::Rtcm,
+        nav_message: if message.igs_ssr_version.is_some() {
+            SsrNavigationMessage::IgsSsr
+        } else {
+            SsrNavigationMessage::Rtcm
+        },
         iode: record.iode,
         iod_ssr: message.header.iod_ssr,
         basis: OrbitBasis::VelocityAligned,
@@ -3602,6 +3638,17 @@ impl<'a> SsrCorrectedEphemeris<'a> {
                 nav_message,
                 selection_j2000_s,
             )
+        } else if sat.system == GnssSystem::Galileo
+            && orbit.nav_message == SsrNavigationMessage::IgsSsr
+        {
+            // IGS SSR IDF012: the eight least significant bits of IODnav.
+            self.broadcast.select_by_issue_low_bits_at(
+                sat,
+                orbit.iode,
+                8,
+                nav_message,
+                selection_j2000_s,
+            )
         } else {
             let issue = BroadcastIssue {
                 issue: orbit.iode,
@@ -3815,7 +3862,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
                 t_j2000_s >= ref_epoch_j2000_s
                     && t_j2000_s <= ref_epoch_j2000_s + cap_s.min(update_interval_s)
             }
-            SsrSource::RtcmSsr => {
+            SsrSource::RtcmSsr | SsrSource::IgsSsr => {
                 if !t_j2000_s.is_finite() || !transmitted_epoch_j2000_s.is_finite() {
                     return false;
                 }
@@ -4625,12 +4672,11 @@ fn glonass_ssr_epoch_gps_s(receiver_gps_s: f64, tod_s: u32) -> f64 {
 ///   bias), six bits otherwise (the IGS SSR layout). In both the broadcast PRN
 ///   is the field plus 192, which is the `Jnn` slot the field states.
 ///
-/// SBAS is refused. RTKLIB adds 120 to the native field (1252..1257) and 119
-/// to the IGS SSR field, so the offset depends on a layout an `SsrMessage` here
-/// does not identify, and the native layout carries an IOD CRC these records do
-/// not hold. Reading the field as the `Snn` slot itself, as this function once
-/// did, matched neither layout. NavIC is refused because no SSR layout for it
-/// is read here.
+/// An RTCM SSR SBAS field is refused: no native SBAS SSR layout (1252..1257,
+/// whose records carry an IOD CRC these records do not hold) is read here.
+/// NavIC is refused because no SSR layout for it is read here. An IGS SSR
+/// (4076) message reads its six-bit field by the IGS SSR table instead, SBAS
+/// included; see `igs_ssr_satellite`.
 ///
 /// The raw width is checked separately from the identifier range. The shared
 /// satellite-token range is `1..=99` for every constellation, so `R32` is a
@@ -4638,6 +4684,9 @@ fn glonass_ssr_epoch_gps_s(receiver_gps_s: f64, tod_s: u32) -> f64 {
 /// identifier constructor cannot reject 32 there, and the width check does.
 fn ssr_satellite(message: &SsrMessage, satellite_id: u8) -> Result<GnssSatelliteId> {
     let system = message.system;
+    if message.igs_ssr_version.is_some() {
+        return igs_ssr_satellite(system, satellite_id);
+    }
     let field_bits = match system {
         GnssSystem::Glonass => 5u32,
         GnssSystem::Gps | GnssSystem::Galileo | GnssSystem::BeiDou => 6,
@@ -4659,6 +4708,37 @@ fn ssr_satellite(message: &SsrMessage, satellite_id: u8) -> Result<GnssSatellite
     }
     GnssSatelliteId::new(system, satellite_id)
         .map_err(|e| Error::Parse(format!("invalid SSR satellite id {satellite_id}: {e}")))
+}
+
+/// The satellite an IGS SSR satellite ID (IDF011, six bits) names, by IGS SSR
+/// v1.00's IDF011 table: GPS, GLONASS and BeiDou `1..=63` are the PRN or slot
+/// and `0` is 64; Galileo is the PRN; QZSS `n` is PRN `192 + n`, the `Jnn`
+/// slot; SBAS `n` is PRN `119 + n` for `n` in `1..=39`. RTKLIB `decode_ssr1`
+/// adds the same offsets and has no satellite for the value 0. NavIC has no
+/// IGS SSR messages.
+fn igs_ssr_satellite(system: GnssSystem, satellite_id: u8) -> Result<GnssSatelliteId> {
+    if satellite_id > 63 {
+        return Err(Error::Parse(format!(
+            "IGS SSR {system} satellite id {satellite_id} does not fit the 6-bit IDF011 field"
+        )));
+    }
+    let number = match (system, satellite_id) {
+        (GnssSystem::Gps | GnssSystem::Glonass | GnssSystem::BeiDou, 0) => 64,
+        (GnssSystem::Sbas, n) => {
+            return crate::sbas::store::sbas_prn_to_sat(119 + u16::from(n)).ok_or_else(|| {
+                Error::Parse(format!(
+                    "IGS SSR SBAS satellite id {n} is reserved: IDF011 names SBAS PRN 120..158 \
+                     as 1..39"
+                ))
+            })
+        }
+        (_, n) => n,
+    };
+    GnssSatelliteId::new(system, number).map_err(|e| {
+        Error::Parse(format!(
+            "invalid IGS SSR {system} satellite id {satellite_id}: {e}"
+        ))
+    })
 }
 
 /// Refuse a HAS orbit or clock record whose navigation-message index cannot have
@@ -4886,6 +4966,7 @@ mod tests {
     fn rtcm_ingest_scales_orbit_and_clock() {
         let message = SsrMessage {
             message_number: 1060,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CombinedOrbitClock,
             header: header(SsrKind::CombinedOrbitClock),
@@ -4944,6 +5025,7 @@ mod tests {
         };
         SsrMessage {
             message_number,
+            igs_ssr_version: None,
             system,
             kind: SsrKind::Orbit,
             header: header(SsrKind::Orbit),
@@ -5104,9 +5186,10 @@ mod tests {
             .expect_err("1268 carries a four-bit QZSS field");
         assert!(err.to_string().contains("4-bit"), "{err}");
 
-        // Outside 1246..1251 the field is the six-bit IGS SSR one.
+        // An IGS SSR (4076) message carries the six-bit IDF011 field.
         let mut igs = orbit_message(GnssSystem::Qzss, 63);
         igs.message_number = 4076;
+        igs.igs_ssr_version = Some(1);
         let mut store = SsrCorrectionStore::new();
         store
             .ingest_ssr(&igs, ssr_week())
@@ -5195,11 +5278,130 @@ mod tests {
         assert_eq!(store.orbit(g06).unwrap().update_interval_s, 10800.0);
     }
 
+    /// IGS SSR IDF011 names GPS, GLONASS and BeiDou satellite 64 by the value
+    /// 0, QZSS PRN `192 + n` by `n` and SBAS PRN `119 + n` by `n` in `1..=39`;
+    /// the six-bit field also carries GLONASS slots above 31.
+    #[test]
+    fn igs_ssr_satellite_ids_follow_the_idf011_table() {
+        let igs = |system, id| {
+            let mut message = orbit_message(system, id);
+            message.message_number = 4076;
+            message.igs_ssr_version = Some(1);
+            message
+        };
+        for (system, id, expected) in [
+            (GnssSystem::Gps, 0, "G64"),
+            (GnssSystem::Glonass, 0, "R64"),
+            (GnssSystem::Glonass, 40, "R40"),
+            (GnssSystem::BeiDou, 0, "C64"),
+            (GnssSystem::Qzss, 3, "J03"),
+            (GnssSystem::Sbas, 1, "S20"),
+            (GnssSystem::Sbas, 39, "S58"),
+        ] {
+            let mut store = SsrCorrectionStore::new();
+            store
+                .ingest_ssr(&igs(system, id), ssr_week())
+                .unwrap_or_else(|err| panic!("{system:?} {id}: {err}"));
+            let sat: GnssSatelliteId = expected.parse().unwrap();
+            let orbit = store.orbit(sat).expect(expected);
+            assert_eq!(orbit.solution.source, SsrSource::IgsSsr, "{expected}");
+            assert_eq!(
+                orbit.nav_message,
+                SsrNavigationMessage::IgsSsr,
+                "{expected}"
+            );
+        }
+        for (system, id) in [
+            (GnssSystem::Sbas, 0),
+            (GnssSystem::Sbas, 40),
+            (GnssSystem::Galileo, 0),
+        ] {
+            assert!(
+                SsrCorrectionStore::new()
+                    .ingest_ssr(&igs(system, id), ssr_week())
+                    .is_err(),
+                "{system:?} {id}"
+            );
+        }
+    }
+
+    /// IGS SSR carries the eight least significant bits of the Galileo IODnav
+    /// (IDF012). The correction names the I/NAV record whose IODnav has those
+    /// low bits, an IODnav of 256 or more included, which RTKLIB `satpos_ssr`
+    /// misses by comparing the eight bits with the whole IODnav. An RTCM SSR
+    /// correction (1243) carries the whole ten-bit IODnav and is matched
+    /// exactly, so its eight low bits alone name no record.
+    #[test]
+    fn igs_ssr_galileo_iod_names_the_record_by_its_low_eight_bits() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx"
+        ))
+        .expect("read NAV fixture");
+        // Every E02 record's IODnav raised by 256: the low eight bits stay.
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        let body = lines
+            .iter()
+            .position(|line| line.contains("END OF HEADER"))
+            .expect("header")
+            + 1;
+        for index in body..lines.len() - 1 {
+            if lines[index].starts_with("E02 ") {
+                let orbit1 = lines[index + 1].clone();
+                let iodnav: f64 = orbit1[4..23].trim().parse().expect("IODnav");
+                assert!(iodnav < 256.0);
+                lines[index + 1] =
+                    format!("     {:.12}e+02{}", (iodnav + 256.0) / 100.0, &orbit1[23..]);
+            }
+        }
+        let broadcast = BroadcastEphemeris::from_nav(&(lines.join("\n") + "\n")).expect("parse");
+        let sat = GnssSatelliteId::new(GnssSystem::Galileo, 2).unwrap();
+        let record = *broadcast
+            .records()
+            .iter()
+            .find(|r| r.satellite_id == sat && r.message == NavMessage::GalileoInav)
+            .expect("an E02 I/NAV record");
+        let iodnav = record.issue_of_data.expect("IODnav").issue;
+        assert!(iodnav >= 256);
+        let week = record.toe;
+        // A Galileo record is used only after its reference epoch (RTKLIB
+        // `seleph`): the SSR epoch is a minute after it.
+        let epoch_time_s = record.elements.toe_sow as u32 + 60;
+
+        let mut message = combined_message(&[(2, 2)]);
+        message.system = GnssSystem::Galileo;
+        message.message_number = 4076;
+        message.igs_ssr_version = Some(1);
+        message.header.epoch_time_s = epoch_time_s;
+        message.header.update_interval = 0;
+        message.orbit[0].iode = iodnav & 0xFF;
+        let t = ssr_epoch_j2000_s(GnssSystem::Galileo, 4076, week, epoch_time_s).unwrap();
+        let state = |message: &SsrMessage| {
+            let mut store = SsrCorrectionStore::new();
+            store.ingest_ssr(message, week).expect("ingest");
+            SsrCorrectedEphemeris::new(&broadcast, &store)
+                .corrected_state(sat, t)
+                .map(|(position, clock)| (position.map(f64::to_bits), clock.to_bits()))
+        };
+        let igs = state(&message).expect("the low eight bits name the record");
+
+        let mut rtcm = message.clone();
+        rtcm.message_number = 1243;
+        rtcm.igs_ssr_version = None;
+        assert!(state(&rtcm).is_none(), "1243 matches the whole IODnav");
+        rtcm.orbit[0].iode = iodnav;
+        assert_eq!(
+            state(&rtcm).expect("the whole IODnav names the record"),
+            igs
+        );
+    }
+
     fn combined_message(pairs: &[(u8, u8)]) -> SsrMessage {
         let template = orbit_message(GnssSystem::Gps, 1);
         let orbit_record = template.orbit[0].clone();
         SsrMessage {
             message_number: 1060,
+            igs_ssr_version: None,
             kind: SsrKind::CombinedOrbitClock,
             header: header(SsrKind::CombinedOrbitClock),
             orbit: pairs
@@ -5434,6 +5636,7 @@ mod tests {
             code_header.update_interval = index;
             let code = SsrMessage {
                 message_number: 1059,
+                igs_ssr_version: None,
                 kind: SsrKind::CodeBias,
                 header: code_header,
                 orbit: Vec::new(),
@@ -5447,6 +5650,7 @@ mod tests {
             phase_header.update_interval = index;
             let phase = SsrMessage {
                 message_number: 1265,
+                igs_ssr_version: None,
                 kind: SsrKind::PhaseBias,
                 header: phase_header,
                 orbit: Vec::new(),
@@ -5657,6 +5861,7 @@ mod tests {
         let empty = orbit_message(GnssSystem::Gps, 1);
         let code = SsrMessage {
             message_number: 1059,
+            igs_ssr_version: None,
             kind: SsrKind::CodeBias,
             header: header(SsrKind::CodeBias),
             orbit: Vec::new(),
@@ -5681,6 +5886,7 @@ mod tests {
         };
         let phase = SsrMessage {
             message_number: 1265,
+            igs_ssr_version: None,
             kind: SsrKind::PhaseBias,
             header: header(SsrKind::PhaseBias),
             orbit: Vec::new(),
@@ -5793,6 +5999,7 @@ mod tests {
     fn reference_point_tag_round_trips_through_store_ingest() {
         let message = SsrMessage {
             message_number: 1057,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::Orbit,
             header: header(SsrKind::Orbit),
@@ -5892,6 +6099,7 @@ mod tests {
         let week = GnssWeekTow::new(TimeScale::Gpst, 2_400, 100_000.0).unwrap();
         let low = SsrMessage {
             message_number: 1058,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::Clock,
             header: header(SsrKind::Clock),
@@ -5909,6 +6117,7 @@ mod tests {
         };
         let high = SsrMessage {
             message_number: 1062,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::HighRateClock,
             header: header(SsrKind::HighRateClock),
@@ -5963,6 +6172,7 @@ mod tests {
         let clock_correction_m = 0.5;
         let message = Message::Ssr(SsrMessage {
             message_number: 1060,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CombinedOrbitClock,
             header: SsrHeader {
@@ -6065,6 +6275,7 @@ mod tests {
         let stale_iode = (record.issue_of_data.expect("broadcast issue").issue + 1) & 0xff;
         let message = Message::Ssr(SsrMessage {
             message_number: 1060,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CombinedOrbitClock,
             header: SsrHeader {
@@ -6146,6 +6357,7 @@ mod tests {
             .expect("broadcast record at SSR epoch");
         let message = Message::Ssr(SsrMessage {
             message_number: 1060,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CombinedOrbitClock,
             header: SsrHeader {
@@ -6243,6 +6455,7 @@ mod tests {
         let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
         let message = Message::Ssr(SsrMessage {
             message_number: 1265,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::PhaseBias,
             header: SsrHeader {
@@ -10746,6 +10959,7 @@ mod tests {
         clock_hdr.update_interval = 5;
         let rtcm_clock = SsrMessage {
             message_number: 1058,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::Clock,
             header: clock_hdr,
@@ -10767,6 +10981,7 @@ mod tests {
         hr_hdr.update_interval = 0;
         let rtcm_hr = SsrMessage {
             message_number: 1062,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::HighRateClock,
             header: hr_hdr,
@@ -11038,6 +11253,7 @@ mod tests {
         // correction applies while |t - t_ref| <= 90 s (RTKLIB `MAXAGESSR`).
         let rtcm_combined = SsrMessage {
             message_number: 1060,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CombinedOrbitClock,
             header: SsrHeader {
@@ -11078,6 +11294,7 @@ mod tests {
         // attaches on arrival. Transmitted at t_ref, update interval index 6 = 60 s.
         let rtcm_high_rate = SsrMessage {
             message_number: 1062,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::HighRateClock,
             header: SsrHeader {
@@ -11661,6 +11878,7 @@ mod tests {
         let mut store_rtcm = SsrCorrectionStore::new();
         let rtcm_msg = SsrMessage {
             message_number: 1057,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::Orbit,
             header: header(SsrKind::Orbit),
@@ -12106,6 +12324,7 @@ mod tests {
             .unwrap();
         let rtcm_code_msg = SsrMessage {
             message_number: 1059,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CodeBias,
             header: header(SsrKind::CodeBias),
@@ -13099,6 +13318,7 @@ mod tests {
         rtcm_code_hdr.epoch_time_s = (t0_tow + 25.0) as u32;
         let rtcm_code = SsrMessage {
             message_number: 1059,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CodeBias,
             header: rtcm_code_hdr,
@@ -13118,6 +13338,7 @@ mod tests {
         rtcm_phase_hdr.epoch_time_s = (t0_tow + 25.0) as u32;
         let rtcm_phase = SsrMessage {
             message_number: 1265,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::PhaseBias,
             header: rtcm_phase_hdr,
@@ -13399,6 +13620,7 @@ mod tests {
         rtcm_code_hdr.epoch_time_s = (t0_tow + 30.0) as u32;
         let rtcm_code = SsrMessage {
             message_number: 1059,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CodeBias,
             header: rtcm_code_hdr,
@@ -13420,6 +13642,7 @@ mod tests {
         rtcm_phase_hdr.epoch_time_s = (t0_tow + 15.0) as u32;
         let rtcm_phase = SsrMessage {
             message_number: 1265,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::PhaseBias,
             header: rtcm_phase_hdr,
@@ -13581,6 +13804,7 @@ mod tests {
         rtcm_code_hdr.epoch_time_s = (t0_tow + 50.0) as u32;
         let rtcm_code = SsrMessage {
             message_number: 1059,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CodeBias,
             header: rtcm_code_hdr,
@@ -13892,6 +14116,7 @@ mod tests {
         rtcm_hdr.epoch_time_s = (t0_tow + 20.0) as u32;
         let rtcm_phase = SsrMessage {
             message_number: 1265,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::PhaseBias,
             header: rtcm_hdr,
@@ -14215,6 +14440,7 @@ mod tests {
         rtcm_code_hdr.epoch_time_s = (t0_tow + 15.0) as u32;
         let rtcm_code = SsrMessage {
             message_number: 1059,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CodeBias,
             header: rtcm_code_hdr,
@@ -14234,6 +14460,7 @@ mod tests {
         rtcm_phase_hdr.epoch_time_s = (t0_tow + 15.0) as u32;
         let rtcm_phase = SsrMessage {
             message_number: 1265,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::PhaseBias,
             header: rtcm_phase_hdr,
@@ -15074,6 +15301,7 @@ mod tests {
         rtcm_hdr.epoch_time_s = (t0_tow + 15.0) as u32;
         let rtcm_phase = SsrMessage {
             message_number: 1265,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::PhaseBias,
             header: rtcm_hdr,
@@ -15259,6 +15487,7 @@ mod tests {
         rtcm_hdr.update_interval = 4; // update interval 10 s
         let rtcm_msg = SsrMessage {
             message_number: 1059,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CodeBias,
             header: rtcm_hdr,
@@ -15423,6 +15652,7 @@ mod tests {
     fn rtcm_g30_store(iode: u32, c0: i32) -> SsrCorrectionStore {
         let message = SsrMessage {
             message_number: 1060,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CombinedOrbitClock,
             header: SsrHeader {
@@ -16350,6 +16580,7 @@ mod tests {
         let store_for = |iode: u32| {
             let message = SsrMessage {
                 message_number: 1066,
+                igs_ssr_version: None,
                 system: GnssSystem::Glonass,
                 kind: SsrKind::CombinedOrbitClock,
                 header: SsrHeader {
@@ -16590,6 +16821,7 @@ mod tests {
             header.epoch_time_s = (tow + 20.0) as u32;
             let mut message = SsrMessage {
                 message_number,
+                igs_ssr_version: None,
                 system,
                 kind,
                 header,
@@ -16786,6 +17018,7 @@ mod tests {
         // RTCM SSR GPS index 12 is unassigned in RTKLIB `ssr_sig_gps`.
         let message = SsrMessage {
             message_number: 1059,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CodeBias,
             header,

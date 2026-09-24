@@ -37,6 +37,7 @@ GMSD7="1710 138"      # GMSD7_20121014.rtcm3, 2012-10-14
 TESTGLO="1562 515220" # testglo.rtcm3, 2009-12
 RTK2GO="2437 361600"  # the rtk2go captures, 2026-09-24 04:26 UTC
 NAVIC="2437 172800"   # BRDM00DLR_S_20262650000_01D_MN_navic.rnx, 2026-09-22
+SSRA03="2426 223638"  # SSRA03IGS0_2026188140760_3epoch.rtcm3, 2026-07-07
 
 # Streams RTKLIB's encoder writes from real data.
 "$ORACLE" encode-msm "$DATA/rcvraw/GMSD7_20121014.rtcm3" $GMSD7 12 \
@@ -45,6 +46,8 @@ NAVIC="2437 172800"   # BRDM00DLR_S_20262650000_01D_MN_navic.rnx, 2026-09-22
     "$FAM/rtklib_encoded_legacy.rtcm3"
 "$ORACLE" encode-1041 "$FIX/nav/BRDM00DLR_S_20262650000_01D_MN_navic.rnx" \
     "$FAM/rtklib_encoded_1041.rtcm3"
+"$ORACLE" encode-4076 "$FIX/ssr/SSRA03IGS0_2026188140760_3epoch.rtcm3" $SSRA03 2 \
+    "$FAM/rtklib_encoded_4076.rtcm3"
 
 decode() {
     "$ORACLE" decode "$FAM/$1" $2 $3 > "$FAM/$1.rtklib.jsonl"
@@ -68,3 +71,6 @@ decode rtk2go_mirmenhof_legacy.rtcm3 $RTK2GO
 # NavIC ephemeris 1041 and GLONASS code-phase biases 1230.
 decode rtklib_encoded_1041.rtcm3 $NAVIC
 decode rtk2go_1230.rtcm3 $RTK2GO
+
+# IGS SSR 4076.
+decode rtklib_encoded_4076.rtcm3 $SSRA03

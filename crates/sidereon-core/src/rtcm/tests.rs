@@ -1559,6 +1559,7 @@ fn message_enum_is_matched_exhaustively_without_wildcard() {
         Message::GalileoFnavEphemeris(_) => 1045,
         Message::GalileoInavEphemeris(_) => 1046,
         Message::Ssr(s) => s.message_number,
+        Message::SsrVtec(v) => v.message_number,
         Message::Unsupported(u) => u.message_number,
     };
     assert_eq!(number, 1005);
@@ -2578,6 +2579,7 @@ fn trailing_bits_after_the_last_field_are_a_departure() {
     // SSR keeps its tail in `padding_bits` and is held to the same rule.
     let ssr = Message::Ssr(crate::rtcm::SsrMessage {
         message_number: 1058,
+        igs_ssr_version: None,
         system: crate::id::GnssSystem::Gps,
         kind: SsrKind::Clock,
         header: SsrHeader {
@@ -3785,4 +3787,298 @@ fn glonass_code_phase_biases_round_trip_by_mask() {
         .unwrap_err()
         .to_string()
         .contains("reserved 8"));
+}
+
+fn igs_header(kind: SsrKind, count: u8) -> SsrHeader {
+    SsrHeader {
+        epoch_time_s: 345_600,
+        update_interval: 3,
+        multiple_message: true,
+        iod_ssr: 7,
+        provider_id: 258,
+        solution_id: 2,
+        satellite_reference_datum: matches!(kind, SsrKind::Orbit | SsrKind::CombinedOrbitClock)
+            .then_some(true),
+        dispersive_bias_consistency: (kind == SsrKind::PhaseBias).then_some(true),
+        mw_consistency: (kind == SsrKind::PhaseBias).then_some(false),
+        satellite_count: count,
+    }
+}
+
+/// An IGS SSR message of every group for `system`, one satellite, with an
+/// eight-bit issue.
+fn igs_message(system: crate::id::GnssSystem, kind: SsrKind) -> SsrMessage {
+    let orbit = SsrOrbitRecord {
+        satellite_id: 36,
+        iode: 0xA5,
+        delta_radial: -12_345,
+        delta_along: 23_456,
+        delta_cross: -34_567,
+        dot_delta_radial: 456,
+        dot_delta_along: -567,
+        dot_delta_cross: 678,
+    };
+    let clock = SsrClockRecord {
+        satellite_id: 36,
+        c0: -78_901,
+        c1: 89_012,
+        c2: -9_012_345,
+    };
+    let mut message = SsrMessage {
+        message_number: IGS_SSR_MESSAGE_NUMBER,
+        igs_ssr_version: Some(1),
+        system,
+        kind,
+        header: igs_header(kind, 1),
+        orbit: Vec::new(),
+        clock: Vec::new(),
+        code_bias: Vec::new(),
+        phase_bias: Vec::new(),
+        ura: Vec::new(),
+        padding_bits: Vec::new(),
+    };
+    match kind {
+        SsrKind::Orbit => message.orbit.push(orbit),
+        SsrKind::Clock => message.clock.push(clock),
+        SsrKind::CombinedOrbitClock => {
+            message.orbit.push(orbit);
+            message.clock.push(clock);
+        }
+        SsrKind::HighRateClock => message.clock.push(SsrClockRecord {
+            c1: 0,
+            c2: 0,
+            ..clock
+        }),
+        SsrKind::CodeBias => message.code_bias.push(SsrCodeBiasRecord {
+            satellite_id: 36,
+            biases: vec![(0, -1234), (9, 2345), (11, 1)],
+        }),
+        SsrKind::PhaseBias => message.phase_bias.push(SsrPhaseBiasRecord {
+            satellite_id: 36,
+            yaw_angle: 300,
+            yaw_rate: -7,
+            biases: vec![SsrPhaseBiasSignal {
+                signal_id: 5,
+                integer_indicator: 1,
+                wide_lane_integer_indicator: 2,
+                discontinuity_counter: 9,
+                bias: -123_456,
+            }],
+        }),
+        SsrKind::Ura => message.ura.push((36, 41)),
+    }
+    message
+}
+
+/// Every IGS SSR satellite message round-trips, and its body is the layout of
+/// IGS SSR v1.00 Tables 8-23: a 79-bit orbit or combined header (the CRS
+/// indicator after the solution ID), a 78-bit clock, high-rate clock, code-bias
+/// or URA header, an 80-bit phase-bias header, and per satellite 135 (orbit),
+/// 76 (clock), 205 (combined), 28 (high-rate clock), 11 + 19 per bias (code
+/// bias), 28 + 32 per bias (phase bias) or 12 (URA) bits, with a six-bit
+/// satellite ID and an eight-bit IOD for every system.
+#[test]
+fn igs_ssr_messages_round_trip_with_their_field_widths() {
+    use crate::id::GnssSystem::*;
+    for (system, offset) in [
+        (Gps, 20u8),
+        (Glonass, 40),
+        (Galileo, 60),
+        (Qzss, 80),
+        (BeiDou, 100),
+        (Sbas, 120),
+    ] {
+        for (kind, digit, bits) in [
+            (SsrKind::Orbit, 1u8, 79 + 135),
+            (SsrKind::Clock, 2, 78 + 76),
+            (SsrKind::CombinedOrbitClock, 3, 79 + 205),
+            (SsrKind::HighRateClock, 4, 78 + 28),
+            (SsrKind::CodeBias, 5, 78 + 11 + 3 * 19),
+            (SsrKind::PhaseBias, 6, 80 + 28 + 32),
+            (SsrKind::Ura, 7, 78 + 12),
+        ] {
+            let message = igs_message(system, kind);
+            assert_eq!(message.igs_ssr_subtype(), Some(offset + digit));
+            let body = message.encode().unwrap();
+            let at = format!("{system:?} {kind:?}");
+            assert_eq!(body.len(), (bits as usize).div_ceil(8), "{at}");
+            let mut r = BitReader::new(&body);
+            assert_eq!(r.u(12).unwrap(), 4076, "{at}");
+            assert_eq!(r.u(3).unwrap(), 1, "{at} version");
+            assert_eq!(r.u(8).unwrap(), u64::from(offset + digit), "{at} subtype");
+            let mut decoded = SsrMessage::decode(&body).unwrap();
+            assert!(decoded.padding_bits.iter().all(|bit| !bit), "{at}");
+            decoded.padding_bits.clear();
+            assert_eq!(decoded, message, "{at}");
+            let decoded = Message::decode(&body).unwrap();
+            assert!(matches!(decoded, Message::Ssr(_)), "{at}");
+            assert_eq!(decoded.encode().unwrap(), body, "{at}");
+        }
+    }
+
+    // The orbit header ends with the CRS indicator after the solution ID.
+    let body = igs_message(Galileo, SsrKind::Orbit).encode().unwrap();
+    let mut r = BitReader::new(&body);
+    r.u(12 + 3 + 8 + 20).unwrap();
+    r.u(4 + 1 + 4 + 16 + 4).unwrap();
+    assert_eq!(r.u(1).unwrap(), 1, "CRS indicator");
+    assert_eq!(r.u(6).unwrap(), 1, "satellite count");
+    assert_eq!(r.u(6).unwrap(), 36, "satellite ID");
+    assert_eq!(
+        r.u(8).unwrap(),
+        0xA5,
+        "IDF012: the eight low bits of IODnav"
+    );
+}
+
+/// A 4076 message is written only in the IGS SSR layout and an RTCM SSR one
+/// only in its own: an IGS SSR version missing, given for an RTCM number, a
+/// NavIC group (IGS SSR has none) and an issue wider than eight bits are
+/// refused. A 4076 subtype this codec does not decode is kept as unsupported
+/// and written back; a decoded one is not held as unsupported.
+#[test]
+fn igs_ssr_layout_refusals_and_unsupported_subtypes() {
+    use crate::id::GnssSystem::*;
+    let mut m = igs_message(Gps, SsrKind::Orbit);
+    m.igs_ssr_version = None;
+    assert!(m
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("IGS SSR version"));
+    let mut m = igs_message(Gps, SsrKind::Orbit);
+    m.message_number = 1057;
+    assert!(m
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("carries no IGS SSR version"));
+    let m = igs_message(Navic, SsrKind::Orbit);
+    assert!(m
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("IGS SSR has no"));
+    let mut m = igs_message(Galileo, SsrKind::Orbit);
+    m.orbit[0].iode = 0x1A5;
+    assert!(m.encode().unwrap_err().to_string().contains("IODE 421"));
+    let mut m = igs_message(Glonass, SsrKind::Clock);
+    m.clock[0].satellite_id = 64;
+    assert!(m.encode().unwrap_err().to_string().contains("6-bit"));
+
+    for subtype in [0u8, 28, 140, 200, 255] {
+        let mut w = BitWriter::new();
+        w.push_u(4076, 12);
+        w.push_u(1, 3);
+        w.push_u(u64::from(subtype), 8);
+        w.push_u(0xABC, 12);
+        let body = w.into_bytes();
+        let decoded = Message::decode(&body).unwrap();
+        assert!(
+            matches!(&decoded, Message::Unsupported(u) if u.body == body),
+            "{subtype}"
+        );
+        assert_eq!(decoded.encode().unwrap(), body, "{subtype}");
+    }
+    let body = igs_message(Qzss, SsrKind::Ura).encode().unwrap();
+    let held = UnsupportedMessage {
+        message_number: 4076,
+        body,
+    };
+    assert!(held
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("decoded into its typed variant"));
+}
+
+fn vtec_message(message_number: u16) -> SsrVtecMessage {
+    SsrVtecMessage {
+        message_number,
+        igs_ssr_version: (message_number == 4076).then_some(1),
+        epoch_time_s: 345_600,
+        update_interval: 5,
+        multiple_message: false,
+        iod_ssr: 3,
+        provider_id: 258,
+        solution_id: 1,
+        quality_indicator: 511,
+        layers: vec![
+            SsrVtecLayer {
+                height: 45,
+                degree: 3,
+                order: 2,
+                cosine: (0..9).map(|k| 100 * k - 400).collect(),
+                sine: (0..5).map(|k| -7 * k).collect(),
+            },
+            SsrVtecLayer {
+                height: 100,
+                degree: 1,
+                order: 3,
+                cosine: vec![i16::MIN, 1, i16::MAX],
+                sine: vec![-1],
+            },
+        ],
+        trailing_bits: Vec::new(),
+    }
+}
+
+/// The VTEC coefficient counts follow the sequence IGS SSR v1.00 and RTCM
+/// 10403.3 state, `C_nm` for `m = 0..=M`, `n = m..=N` and `S_nm` for
+/// `m = 1..=M`, `n = m..=N`: degree 3 and order 2 carry 9 and 5 (the example
+/// of IGS SSR v1.00 section 8.4.1); an order above the degree carries no term
+/// for `m > N`.
+#[test]
+fn vtec_coefficient_counts_follow_the_stated_sequence() {
+    assert_eq!(SsrVtecLayer::coefficient_counts(3, 2), (9, 5));
+    assert_eq!(SsrVtecLayer::coefficient_counts(1, 1), (3, 1));
+    assert_eq!(SsrVtecLayer::coefficient_counts(16, 16), (153, 136));
+    assert_eq!(SsrVtecLayer::coefficient_counts(1, 3), (3, 1));
+    for n in 1..=16u8 {
+        for m in 1..=n {
+            let (c, s) = SsrVtecLayer::coefficient_counts(n, m);
+            let (n, m) = (usize::from(n), usize::from(m));
+            assert_eq!(c, (n + 1) * (n + 2) / 2 - (n - m) * (n - m + 1) / 2);
+            assert_eq!(s, c - (n + 1));
+        }
+    }
+}
+
+/// The IGS SSR VTEC message (4076 subtype 201) and RTCM 1264 round-trip; their
+/// bodies differ by the IGS identification only: an 83-bit (4076) or 72-bit
+/// (1264) header, then per layer 16 bits and 16 per coefficient.
+#[test]
+fn vtec_messages_round_trip_with_their_field_widths() {
+    for (number, header) in [(4076u16, 83usize), (1264, 72)] {
+        let message = vtec_message(number);
+        let body = message.encode().unwrap();
+        let bits = header + 2 * 16 + 16 * (9 + 5 + 3 + 1);
+        assert_eq!(body.len(), bits.div_ceil(8), "{number}");
+        assert_eq!(SsrVtecMessage::decode(&body).unwrap(), message, "{number}");
+        assert_eq!(
+            Message::decode(&body).unwrap(),
+            Message::SsrVtec(message.clone()),
+            "{number}"
+        );
+        assert_eq!(Message::SsrVtec(message).message_number(), number);
+    }
+    let refused = |message: SsrVtecMessage, needle: &str| {
+        let err = message.encode().expect_err(needle).to_string();
+        assert!(err.contains(needle), "expected {needle:?}, got {err}");
+    };
+    let mut m = vtec_message(4076);
+    m.layers[0].sine.pop();
+    refused(m, "holds 4 sine coefficients; degree 3 and order 2 carry 5");
+    let mut m = vtec_message(1264);
+    m.layers[1].degree = 17;
+    refused(m, "degree 17 is outside 1..=16");
+    let mut m = vtec_message(1264);
+    m.layers.clear();
+    refused(m, "holds 0 layers");
+    let mut m = vtec_message(1264);
+    m.igs_ssr_version = Some(1);
+    refused(m, "RTCM 1264 carries no IGS SSR version");
+    let mut m = vtec_message(4076);
+    m.quality_indicator = 512;
+    refused(m, "VTEC quality indicator 512");
 }

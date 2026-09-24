@@ -183,6 +183,7 @@ impl SsrRawSignal {
         match self.source {
             SsrSource::GalileoHas => has_signal(self.system, self.index),
             SsrSource::RtcmSsr => rtcm_ssr_signal(self.system, self.index),
+            SsrSource::IgsSsr => igs_ssr_signal(self.system, self.index),
         }
     }
 
@@ -201,6 +202,7 @@ impl fmt::Display for SsrRawSignal {
         let source = match self.source {
             SsrSource::GalileoHas => "Galileo HAS",
             SsrSource::RtcmSsr => "RTCM SSR",
+            SsrSource::IgsSsr => "IGS SSR",
         };
         write!(f, "{source} {} signal {}", self.system, self.index)
     }
@@ -402,6 +404,19 @@ pub fn rtcm_ssr_signal(system: GnssSystem, index: u8) -> Option<GnssSignal> {
         GnssSystem::Navic => return None,
     };
     table_entry(table, system, index)
+}
+
+/// Physical signal of an IGS SSR signal and tracking mode identifier (IDF024,
+/// IGS SSR v1.00): the RTCM SSR tables but for the identifiers IGS SSR leaves
+/// reserved where RTKLIB's `ssr_sig_*` tables assign them, GPS 9 (L2 L2C(M+L))
+/// and Galileo 11 and 12 (E5 I and Q). RTKLIB reads 4076 through the RTCM
+/// tables; the identifiers IGS SSR reserves are held here by their raw value
+/// and name no signal.
+pub fn igs_ssr_signal(system: GnssSystem, index: u8) -> Option<GnssSignal> {
+    match (system, index) {
+        (GnssSystem::Gps, 9) | (GnssSystem::Galileo, 11 | 12) => None,
+        _ => rtcm_ssr_signal(system, index),
+    }
 }
 
 #[cfg(test)]
