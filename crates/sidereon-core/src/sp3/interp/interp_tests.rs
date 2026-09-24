@@ -20,6 +20,7 @@ use super::{
     eval_cubic_spline_for_test as eval_spline, instant_to_j2000_seconds,
     interpolate_position_neville, precise_node_j2000_seconds,
     precise_node_j2000_seconds_from_instant, PreciseQuery, DEFAULT_GAP_THRESHOLD_FACTOR,
+    NEVILLE_POINTS,
 };
 use crate::astro::constants::time::SECONDS_PER_DAY_I64;
 use crate::astro::time::civil::{J2000_JULIAN_DAY_NUMBER, J2000_NOON_OFFSET_S};
@@ -792,71 +793,115 @@ fn single_node_axis_is_out_of_range_and_empty_axis_is_unknown() {
     }
 }
 
+fn assert_gap_policy_insufficient(x: &[f64], kz: &[f64], query: f64, nodes: usize) {
+    match gap_policy_state(x, kz, query) {
+        Err(Error::InsufficientPreciseNodes {
+            nodes: got,
+            required: NEVILLE_POINTS,
+            ..
+        }) if got == nodes => {}
+        other => panic!(
+            "query {query} on axis {x:?} must be refused for a {nodes}-node run, got {other:?}"
+        ),
+    }
+}
+
+/// `count` nodes at a 10 s cadence from `first`, each `value` km.
+fn run(first: f64, count: usize, value: f64) -> (Vec<f64>, Vec<f64>) {
+    (
+        (0..count).map(|i| first + 10.0 * i as f64).collect(),
+        vec![value; count],
+    )
+}
+
 #[test]
 fn leading_gap_isolates_the_first_node_without_crossing() {
-    // One node, a 100 s hole, then a 10 s cadence run.
-    let x = [0.0, 100.0, 110.0, 120.0, 130.0, 140.0];
-    let kz = [-3.0, 7.0, 7.0, 7.0, 7.0, 7.0];
+    // One node, a 100 s hole, then an eleven-node run at a 10 s cadence.
+    let (mut x, mut kz) = (vec![0.0], vec![-3.0]);
+    let (run_x, run_kz) = run(100.0, 11, 7.0);
+    x.extend(run_x);
+    kz.extend(run_kz);
 
-    // The isolated first node is usable within one nominal spacing on both
-    // sides and never sees the run across the hole.
+    // The isolated first node is served nowhere: a one-node window is that
+    // node's value, stale by up to a spacing, and RTKLIB pephpos takes eleven.
+    // It never sees the run across the hole either.
     for q in [-10.0, -5.0, 0.0, 5.0, 10.0] {
-        assert_gap_policy_constant(&x, &kz, q, -3.0);
+        assert_gap_policy_insufficient(&x, &kz, q, 1);
     }
-    // Deep inside the hole is refused, up to one spacing short of the run.
+    // Deep inside the hole is out of range, up to one spacing short of the run.
     for q in [10.5, 50.0, 89.5] {
         assert_gap_policy_rejects(&x, &kz, q);
     }
     // From one spacing before the run onward, the run answers.
-    for q in [90.0, 95.0, 100.0, 125.0, 140.0, 150.0] {
+    for q in [90.0, 95.0, 100.0, 150.0, 200.0, 210.0] {
         assert_gap_policy_constant(&x, &kz, q, 7.0);
     }
     assert_gap_policy_rejects(&x, &kz, -10.5);
-    assert_gap_policy_rejects(&x, &kz, 150.5);
+    assert_gap_policy_rejects(&x, &kz, 210.5);
 }
 
 #[test]
 fn trailing_gap_isolates_the_last_node_without_crossing() {
-    // A 10 s cadence run, a 100 s hole, then one node.
-    let x = [0.0, 10.0, 20.0, 30.0, 40.0, 140.0];
-    let kz = [7.0, 7.0, 7.0, 7.0, 7.0, -3.0];
+    // An eleven-node run at a 10 s cadence, a 100 s hole, then one node.
+    let (mut x, mut kz) = run(0.0, 11, 7.0);
+    x.push(200.0);
+    kz.push(-3.0);
 
-    for q in [-10.0, 0.0, 15.0, 40.0, 45.0, 50.0] {
+    for q in [-10.0, 0.0, 55.0, 100.0, 105.0, 110.0] {
         assert_gap_policy_constant(&x, &kz, q, 7.0);
     }
-    for q in [50.5, 95.0, 129.5] {
+    for q in [110.5, 150.0, 189.5] {
         assert_gap_policy_rejects(&x, &kz, q);
     }
-    for q in [130.0, 135.0, 140.0, 145.0, 150.0] {
-        assert_gap_policy_constant(&x, &kz, q, -3.0);
+    for q in [190.0, 195.0, 200.0, 205.0, 210.0] {
+        assert_gap_policy_insufficient(&x, &kz, q, 1);
     }
     assert_gap_policy_rejects(&x, &kz, -10.5);
-    assert_gap_policy_rejects(&x, &kz, 150.5);
+    assert_gap_policy_rejects(&x, &kz, 210.5);
 }
 
 #[test]
 fn multiple_gaps_bracket_each_arc_independently() {
-    // Three 3-node arcs at a 10 s cadence separated by 80 s holes.
-    let x = [0.0, 10.0, 20.0, 100.0, 110.0, 120.0, 200.0, 210.0, 220.0];
-    let kz = [-3.0, -3.0, -3.0, 7.0, 7.0, 7.0, 11.0, 11.0, 11.0];
+    // Three eleven-node arcs at a 10 s cadence separated by 100 s holes.
+    let mut x = Vec::new();
+    let mut kz = Vec::new();
+    for (first, value) in [(0.0, -3.0), (200.0, 7.0), (400.0, 11.0)] {
+        let (run_x, run_kz) = run(first, 11, value);
+        x.extend(run_x);
+        kz.extend(run_kz);
+    }
 
-    for q in [-10.0, 0.0, 15.0, 20.0, 30.0] {
+    for q in [-10.0, 0.0, 55.0, 100.0, 110.0] {
         assert_gap_policy_constant(&x, &kz, q, -3.0);
     }
-    for q in [30.5, 60.0, 89.5] {
+    for q in [110.5, 150.0, 189.5] {
         assert_gap_policy_rejects(&x, &kz, q);
     }
-    for q in [90.0, 100.0, 115.0, 120.0, 130.0] {
+    for q in [190.0, 200.0, 255.0, 300.0, 310.0] {
         assert_gap_policy_constant(&x, &kz, q, 7.0);
     }
-    for q in [130.5, 160.0, 189.5] {
+    for q in [310.5, 350.0, 389.5] {
         assert_gap_policy_rejects(&x, &kz, q);
     }
-    for q in [190.0, 200.0, 215.0, 220.0, 230.0] {
+    for q in [390.0, 400.0, 455.0, 500.0, 510.0] {
         assert_gap_policy_constant(&x, &kz, q, 11.0);
     }
     assert_gap_policy_rejects(&x, &kz, -10.5);
-    assert_gap_policy_rejects(&x, &kz, 230.5);
+    assert_gap_policy_rejects(&x, &kz, 510.5);
+}
+
+#[test]
+fn a_run_shorter_than_the_window_is_refused_by_count() {
+    // Ten nodes are one short of the eleven RTKLIB pephpos takes: every query
+    // is refused by count, including one on a node. Eleven are served.
+    let (x, kz) = run(0.0, 10, 7.0);
+    for q in [0.0, 45.0, 90.0, 95.0] {
+        assert_gap_policy_insufficient(&x, &kz, q, 10);
+    }
+    let (x, kz) = run(0.0, 11, 7.0);
+    for q in [0.0, 45.0, 100.0, 105.0] {
+        assert_gap_policy_constant(&x, &kz, q, 7.0);
+    }
 }
 
 #[test]

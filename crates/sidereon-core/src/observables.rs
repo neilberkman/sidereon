@@ -803,13 +803,15 @@ fn reserve_at_least<T>(values: &mut Vec<T>, capacity: usize) {
 /// Whether a scalar observable-state error represents a data gap.
 ///
 /// This is the same classification used by ephemeris grid sampling: missing
-/// data, out-of-range precise interpolation, and unknown satellites are gaps;
-/// malformed inputs and other source errors are not.
+/// data, out-of-range precise interpolation, a precise-orbit run too short to
+/// interpolate, and unknown satellites are gaps; malformed inputs and other
+/// source errors are not.
 pub fn is_observable_state_gap(error: &ObservablesError) -> bool {
     matches!(
         error,
         ObservablesError::NoEphemeris
             | ObservablesError::Ephemeris(crate::Error::EpochOutOfRange)
+            | ObservablesError::Ephemeris(crate::Error::InsufficientPreciseNodes { .. })
             | ObservablesError::Ephemeris(crate::Error::UnknownSatellite(_))
     )
 }

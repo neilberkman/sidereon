@@ -220,8 +220,11 @@ impl Sp3 {
     ///
     /// Errors:
     /// - [`Error::UnknownSatellite`] if `sat` has no position nodes.
-    /// - [`Error::EpochOutOfRange`] if fewer than two position nodes exist (a
-    ///   spline needs at least two points) or the epoch is not representable.
+    /// - [`Error::EpochOutOfRange`] if the epoch lies more than one nominal
+    ///   spacing outside the position nodes or inside a coverage gap, or is not
+    ///   representable.
+    /// - [`Error::InsufficientPreciseNodes`] if the contiguous run serving the
+    ///   epoch holds fewer than the eleven nodes the interpolator takes.
     /// - [`Error::InvalidInput`] if `epoch` is tagged with a different time
     ///   scale than the SP3 product.
     pub fn position(&self, sat: GnssSatelliteId, epoch: Instant) -> Result<Sp3State> {
@@ -586,44 +589,9 @@ pub(super) fn interpolate_precise_position(
     if pos_x.is_empty() {
         return Err(Error::UnknownSatellite(sat));
     }
-    if pos_x.len() < 2 {
-        // A cubic spline needs >= 2 points; a single node cannot define one.
-        return Err(Error::EpochOutOfRange);
-    }
     validate_strictly_increasing_nodes(pos_x)?;
-
-    // Refuse grossly out-of-coverage queries instead of silently returning a
-    // diverging extrapolation. The underlying cubic spline mirrors scipy
-    // CubicSpline(extrapolate=True): a query well past the node span runs off
-    // to nonsense (megametres and worse). We allow up to one node spacing of
-    // edge extrapolation (the end cubic is still physically reasonable that
-    // close to the data) and reject anything beyond. In-coverage interpolation
-    // is bit-for-bit unchanged, so 0-ULP parity is preserved. Nodes are in
-    // ascending epoch order.
-    // Reject a query that lands deep inside an interior coverage gap rather
-    // than interpolating across it. Nominal spacing is the smallest
-    // consecutive node gap; a bracketing interval far larger than that is a
-    // gap. One nominal spacing of interpolation past either edge node is
-    // allowed (the near-gap edge stays usable); beyond that the query is in
-    // the gap and is refused.
-    let nominal = nominal_positive_spacing(pos_x).ok_or(Error::EpochOutOfRange)?;
-    let first = pos_x[0];
-    let last = pos_x[pos_x.len() - 1];
-    if query < first - nominal || query > last + nominal {
-        return Err(Error::EpochOutOfRange);
-    }
-
-    let gap_thresh = gap_threshold_factor * nominal;
-    let mut bi = 0usize;
-    while bi + 1 < pos_x.len() && pos_x[bi + 1] <= query {
-        bi += 1;
-    }
-    if bi + 1 < pos_x.len() {
-        let (lo, hi) = (pos_x[bi], pos_x[bi + 1]);
-        if hi - lo > gap_thresh && query > lo + nominal && query < hi - nominal {
-            return Err(Error::EpochOutOfRange);
-        }
-    }
+    select_position_nodes(pos_x.len(), query, gap_threshold_factor, |i| pos_x[i])
+        .map_err(|refusal| refusal.into_error(sat))?;
 
     let (x_m, y_m, z_m) = interpolate_position_neville(
         pos_x,
@@ -644,6 +612,87 @@ pub(super) fn interpolate_precise_position(
     Ok((x_m, y_m, z_m))
 }
 
+/// Why the position interpolator serves no value at a query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NodeRefusal {
+    /// The query lies more than one nominal spacing outside the node span, or
+    /// more than one nominal spacing inside a coverage gap.
+    OutOfRange,
+    /// The contiguous run serving the query holds fewer than
+    /// [`NEVILLE_POINTS`] nodes.
+    Insufficient {
+        /// Nodes the serving run holds.
+        nodes: usize,
+    },
+}
+
+impl NodeRefusal {
+    pub(super) fn into_error(self, sat: GnssSatelliteId) -> Error {
+        match self {
+            Self::OutOfRange => Error::EpochOutOfRange,
+            Self::Insufficient { nodes } => Error::InsufficientPreciseNodes {
+                sat,
+                nodes,
+                required: NEVILLE_POINTS,
+            },
+        }
+    }
+}
+
+/// The nodes the position interpolator uses at `query`, or why it serves no
+/// value there.
+///
+/// This is the one serving rule. The in-memory interpolator, the mapped store,
+/// the continuity hold-out check and window-scoped node queries all call it.
+/// `node(i)` is the `i`-th of `n` strictly increasing node epochs.
+///
+/// A query is refused more than one nominal spacing outside the node span, and
+/// more than one nominal spacing inside a coverage gap (a consecutive spacing
+/// wider than `gap_threshold_factor` times nominal); a single node has no
+/// spacing and serves nothing. A query that passes is still refused when the
+/// run serving it holds fewer than [`NEVILLE_POINTS`] nodes, as RTKLIB
+/// `preceph.c` pephpos refuses a product with fewer than `NMAX + 1` epochs and
+/// a window that reaches an outage: a shorter window is a lower-degree
+/// polynomial, and a one-node window is that node's value, stale by up to a
+/// spacing. Otherwise the nodes are [`neville_window`]'s.
+pub(super) fn select_position_nodes(
+    n: usize,
+    query: f64,
+    gap_threshold_factor: f64,
+    node: impl Fn(usize) -> f64,
+) -> core::result::Result<core::ops::Range<usize>, NodeRefusal> {
+    let nominal = (1..n)
+        .map(|i| node(i) - node(i - 1))
+        .filter(|&d| d > 0.0)
+        .fold(f64::INFINITY, f64::min);
+    if !nominal.is_finite() {
+        return Err(NodeRefusal::OutOfRange);
+    }
+    if query < node(0) - nominal || query > node(n - 1) + nominal {
+        return Err(NodeRefusal::OutOfRange);
+    }
+
+    let gap_thresh = gap_threshold_factor * nominal;
+    let mut bi = 0usize;
+    while bi + 1 < n && node(bi + 1) <= query {
+        bi += 1;
+    }
+    if bi + 1 < n {
+        let (lo, hi) = (node(bi), node(bi + 1));
+        if hi - lo > gap_thresh && query > lo + nominal && query < hi - nominal {
+            return Err(NodeRefusal::OutOfRange);
+        }
+    }
+
+    let window = neville_window(n, nominal, gap_threshold_factor, query, &node);
+    if window.len() < NEVILLE_POINTS {
+        return Err(NodeRefusal::Insufficient {
+            nodes: window.len(),
+        });
+    }
+    Ok(window)
+}
+
 fn map_query_input(error: validate::FieldError) -> Error {
     Error::InvalidInput(format!("{} {}", error.field(), error.reason()))
 }
@@ -652,9 +701,10 @@ fn map_query_input(error: validate::FieldError) -> Error {
 ///
 /// Derived from the same rules the position interpolator applies to `x`, so
 /// the two cannot disagree: nodes split into contiguous runs at gaps wider than
-/// `gap_threshold_factor` times the nominal spacing; within a run the window
-/// holds `min(NEVILLE_POINTS, run_len)` consecutive nodes and slides inward at
-/// the run edges; and a query is served up to one nominal spacing outside the
+/// `gap_threshold_factor` times the nominal spacing; a run of fewer than
+/// `NEVILLE_POINTS` nodes serves no query; within a longer run the window holds
+/// `NEVILLE_POINTS` consecutive nodes and slides inward at the run edges; and a
+/// query is served up to one nominal spacing outside the
 /// node span or across a gap, anchored to the nearer run. The farthest node is
 /// therefore at most one window span plus one nominal spacing from the query.
 ///
@@ -672,10 +722,10 @@ pub(super) fn selectable_reach_s(x: &[f64], gap_threshold_factor: f64) -> Option
         let run_ends = i == x.len() || (x[i] - x[i - 1]) > gap_thresh;
         if run_ends {
             let run = &x[run_lo..i];
-            let win = NEVILLE_POINTS.min(run.len());
-            if win >= 2 {
-                for start in 0..=run.len() - win {
-                    widest_span = widest_span.max(run[start + win - 1] - run[start]);
+            // A run shorter than the window serves no query.
+            if run.len() >= NEVILLE_POINTS {
+                for start in 0..=run.len() - NEVILLE_POINTS {
+                    widest_span = widest_span.max(run[start + NEVILLE_POINTS - 1] - run[start]);
                 }
             }
             run_lo = i;
@@ -907,6 +957,80 @@ impl Sp3InterpolationOptions {
     }
 }
 
+/// Indices of the nodes the position interpolator selects for `query`.
+///
+/// This is the one node-selection rule. The position interpolator
+/// ([`interpolate_position_neville`]), the mapped store's interpolator and the
+/// continuity hold-out attribution all call it, so the nodes a finding is
+/// attributed to are the nodes the prediction actually used.
+///
+/// `node(i)` is the `i`-th of `n` ascending node epochs (J2000 seconds) and
+/// `nominal` their nominal spacing (the smallest positive consecutive gap). The
+/// rule, after RTKLIB `preceph.c` pephpos: take the last node strictly before
+/// the query as the pivot (the first node when none is), as pephpos's binary
+/// search does, moving it to the next run when the query sits within one
+/// nominal spacing of a run beyond a coverage gap; extend the pivot's
+/// contiguous run while consecutive gaps stay within `gap_threshold_factor`
+/// times `nominal`; and take `min(NEVILLE_POINTS, run_len)` consecutive nodes
+/// starting five before the pivot, shifted inward at the run edges. A window
+/// shorter than [`NEVILLE_POINTS`] is not served; see
+/// [`select_position_nodes`]. No nodes select an empty range.
+pub(super) fn neville_window(
+    n: usize,
+    nominal: f64,
+    gap_threshold_factor: f64,
+    query: f64,
+    node: impl Fn(usize) -> f64,
+) -> core::ops::Range<usize> {
+    if n == 0 {
+        return 0..0;
+    }
+    let gap_thresh = gap_threshold_factor * nominal;
+
+    // Last node strictly before the query, or the first node (RTKLIB pephpos:
+    // `index = i <= 0 ? 0 : i - 1` after its search for the first node at or
+    // after the query).
+    let mut pivot = 0usize;
+    while pivot + 1 < n && node(pivot + 1) < query {
+        pivot += 1;
+    }
+    // The gap policy admits one nominal spacing of extrapolation from either
+    // arc. Near the next arc, anchor the window there instead of extrapolating
+    // the previous arc across the whole gap.
+    if pivot + 1 < n
+        && (node(pivot + 1) - node(pivot)) > gap_thresh
+        && query >= node(pivot + 1) - nominal
+    {
+        pivot += 1;
+    }
+
+    // Contiguous run [run_lo, run_hi) around the pivot: extend while the
+    // neighbour gap stays within the threshold (do not cross a coverage gap).
+    let mut run_lo = pivot;
+    while run_lo > 0 && (node(run_lo) - node(run_lo - 1)) <= gap_thresh {
+        run_lo -= 1;
+    }
+    let mut run_hi = pivot + 1;
+    while run_hi < n && (node(run_hi) - node(run_hi - 1)) <= gap_thresh {
+        run_hi += 1;
+    }
+    let run_len = run_hi - run_lo;
+
+    // RTKLIB window: start (NMAX + 1) / 2 = 5 nodes before the pivot, width =
+    // min(NEVILLE_POINTS, run_len), clamped to the run.
+    let win = NEVILLE_POINTS.min(run_len);
+    let half = (NEVILLE_POINTS / 2) as isize;
+    let mut start = pivot as isize - half;
+    if start < run_lo as isize {
+        start = run_lo as isize;
+    }
+    if start + win as isize > run_hi as isize {
+        start = run_hi as isize - win as isize;
+    }
+    let start = start as usize;
+    start..start + win
+}
+
 /// Sliding-window Lagrange (Neville) satellite-POSITION interpolation, matching
 /// RTKLIB `preceph.c` pephpos/interppol. Replaces the global not-a-knot cubic
 /// spline, which is degree-3 over the whole day and errs ~200 m at the day
@@ -932,49 +1056,10 @@ fn interpolate_position_neville(
     gap_threshold_factor: f64,
 ) -> (f64, f64, f64) {
     let query = precise_query.j2000_s();
-    let n = x.len();
-
-    // Nominal node spacing = smallest positive consecutive gap (robust to one
-    // large coverage gap); the gap threshold marks a non-contiguous jump.
     let nominal = nominal_positive_spacing(x).unwrap_or(1.0);
-    let gap_thresh = gap_threshold_factor * nominal;
-
-    // Last node at or before the query (clamped into range).
-    let mut pivot = 0usize;
-    while pivot + 1 < n && x[pivot + 1] <= query {
-        pivot += 1;
-    }
-    // The gap policy admits one nominal spacing of extrapolation from either
-    // arc. Near the next arc, anchor the window there instead of extrapolating
-    // the previous arc across the whole gap.
-    if pivot + 1 < n && (x[pivot + 1] - x[pivot]) > gap_thresh && query >= x[pivot + 1] - nominal {
-        pivot += 1;
-    }
-
-    // Contiguous run [run_lo, run_hi) around the pivot: extend while the
-    // neighbour gap stays within the threshold (do not cross a coverage gap).
-    let mut run_lo = pivot;
-    while run_lo > 0 && (x[run_lo] - x[run_lo - 1]) <= gap_thresh {
-        run_lo -= 1;
-    }
-    let mut run_hi = pivot + 1;
-    while run_hi < n && (x[run_hi] - x[run_hi - 1]) <= gap_thresh {
-        run_hi += 1;
-    }
-    let run_len = run_hi - run_lo;
-
-    // RTKLIB window: centre on the pivot, width = min(NEVILLE_POINTS, run_len),
-    // clamped to the run.
-    let win = NEVILLE_POINTS.min(run_len);
-    let half = (NEVILLE_POINTS / 2) as isize;
-    let mut start = pivot as isize - half;
-    if start < run_lo as isize {
-        start = run_lo as isize;
-    }
-    if start + win as isize > run_hi as isize {
-        start = run_hi as isize - win as isize;
-    }
-    let start = start as usize;
+    let window = neville_window(x.len(), nominal, gap_threshold_factor, query, |i| x[i]);
+    let start = window.start;
+    let win = window.len();
 
     // Windowed nodes on the (t = node - query) abscissa, earth-rotation-corrected
     // into the query-epoch frame; query is t = 0.

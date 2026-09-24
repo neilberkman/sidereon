@@ -153,18 +153,23 @@ are of the committed files.
 - **Derived from:** `GRG0MGXFIN_20201760000_01D_15M_ORB.SP3` above.
 - **Content:** a hand-assembled SP3-c file (agency and data-used fields
   `TEST`) with the source's position and clock records for G08, G10, G16,
-  G18, G20, G21, G26 and G27 at the five epochs 11:45 through 12:45 GPST on
-  2020-06-24. The values are the source's; one record (G26 at 12:15) has its
-  clock field one column left of the source's. The file ends at the last
-  record, without `EOF`.
-- **Committed file:** 3192 bytes, SHA-256
-  `8f71a12445f3067eea25b06617926da25baceffa29f87587a836252f93bd38ae`.
+  G18, G20, G21, G26 and G27 at the thirteen epochs 10:30 through 13:30 GPST
+  on 2020-06-24. The values are the source's, each record its first 60
+  columns; one record (G26 at 12:15) has its clock field one column left of
+  the source's. The file ends at the last record, without `EOF`. It first held
+  the five epochs 11:45 through 12:45; the eight around them were added from
+  the source because the position interpolator takes eleven nodes (RTKLIB
+  pephpos's `NMAX + 1`), and a query near 12:00 selects 10:30 through 13:00.
+- **Committed file:** 7352 bytes, SHA-256
+  `ca8775f84c65b069a6f956badba55a66326793ca908176d3ec2802fe0bd247d3`.
 - **Used by:** `tests/go_fixture_parity.rs` and the static-positioning tests.
 
 ## `degenerate_coincident_5sat.sp3`
 
 Hand-written, not a redistributed product: five GPS satellites placed at one
-ECEF point, for the rank-deficient geometry path.
+ECEF point at eleven 15-minute epochs, 00:00 through 02:30 GPST on 2020-06-24,
+for the rank-deficient geometry path. Eleven is the node count the position
+interpolator takes (RTKLIB pephpos's `NMAX + 1`), so every epoch is served.
 
 ## `COM17733.EPH`
 

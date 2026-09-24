@@ -26,7 +26,7 @@
 //!     Lagrange window never interpolates across a gap.
 //!   * `degenerate_coincident_5sat.sp3`: hand-authored (no external source), valid
 //!     SP3-c with five GPS sats (G01-G05) at identical ECEF (26560,0,0) km, zero
-//!     clock, two 15-min epochs. Rank-deficient geometry; proves graceful degrade
+//!     clock, eleven 15-min epochs. Rank-deficient geometry; proves graceful degrade
 //!     (position with no DOP, no panic).
 //!   * `GBM0MGXRAP_20201770000_01D_05M_ORB.SP3`: GFZ rapid MGEX, 2020 DOY 177,
 //!     5-min, 122 sats incl. BeiDou C01-C60. From
@@ -2208,11 +2208,13 @@ fn nodes_admitted_too_far_from_the_query_to_stay_distinct_are_an_error_not_a_pan
     use super::interp::interpolate_precise_state;
 
     let g01 = id(GnssSystem::Gps, 1);
-    // Six nodes a second apart and one 1e100 s away. A factor of f64::MAX
-    // admits the far node into the run; measured from a query of 5e99 the six
-    // near nodes coincide, and Neville divides by zero.
-    let x = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 1e100];
-    let k = [26_000.0; 7];
+    // Eleven nodes a second apart and one 1e100 s away. A factor of f64::MAX
+    // admits the far node into the run; measured from a query of 5e99 the near
+    // nodes in the window coincide, and Neville divides by zero.
+    let x = [
+        0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 1e100,
+    ];
+    let k = [26_000.0; 12];
     let query = 5e99;
     assert_eq!(
         interpolate_precise_state(
@@ -2567,7 +2569,12 @@ EOF
     assert!(sp3.state(g01, 1).is_ok());
     assert!(sp3.interp_raw[0].contains_key(&g01));
     assert!(sp3.interp_raw[1].contains_key(&g01));
-    assert!(sp3.position(g01, sp3.epochs[0]).is_ok());
+    // Two orbit nodes are fewer than the eleven the interpolator takes, so
+    // G01 is refused by count - it has nodes, where G02 below has none.
+    assert!(matches!(
+        sp3.position(g01, sp3.epochs[0]),
+        Err(Error::InsufficientPreciseNodes { sat, nodes: 2, required: 11 }) if sat == g01
+    ));
 
     // G02 has only clock records: never creates an interpolation node or valid orbit state
     assert!(sp3.clock_record(g02, 0).is_ok());

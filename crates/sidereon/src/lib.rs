@@ -1634,7 +1634,7 @@ mod tests {
     use std::path::PathBuf;
 
     // A tiny real SP3 product: five GPS satellites at coincident positions over
-    // two epochs. It parses cleanly but is geometrically degenerate, so any SPP
+    // eleven epochs. It parses cleanly but is geometrically degenerate, so any SPP
     // solve against it fails. Reused from the core parity fixtures.
     const DEGENERATE_SP3: &[u8] =
         include_bytes!("../../sidereon-core/tests/fixtures/sp3/degenerate_coincident_5sat.sp3");
@@ -1863,7 +1863,7 @@ mod tests {
     #[test]
     fn load_sp3_parses_a_precise_product() {
         let sp3 = load_sp3(DEGENERATE_SP3).expect("the fixture parses");
-        assert_eq!(sp3.epoch_count(), 2);
+        assert_eq!(sp3.epoch_count(), 11);
         assert_eq!(sp3.satellites().len(), 5);
     }
 

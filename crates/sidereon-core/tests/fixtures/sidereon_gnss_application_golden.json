@@ -447,7 +447,7 @@
       {
         "satellite_id": "G16",
         "elevation_deg": "0x1.02d09e736e382p+6",
-        "azimuth_deg": "0x1.e45bd72088dc0p+7"
+        "azimuth_deg": "0x1.e45bd72088dc1p+7"
       },
       {
         "satellite_id": "G18",
@@ -471,12 +471,12 @@
       },
       {
         "satellite_id": "G10",
-        "elevation_deg": "0x1.8837b8e12a5f3p+4",
+        "elevation_deg": "0x1.8837b8e12a5f2p+4",
         "azimuth_deg": "0x1.45dd7aa435731p+7"
       },
       {
         "satellite_id": "G08",
-        "elevation_deg": "0x1.1c7949caef4f1p+4",
+        "elevation_deg": "0x1.1c7949caef4f2p+4",
         "azimuth_deg": "0x1.1d431e8cd0776p+8"
       },
       {
