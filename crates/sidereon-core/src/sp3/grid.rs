@@ -6,8 +6,9 @@
 //! epochs are one instant exactly when their ticks are equal, and a step
 //! between epochs is an exact integer.
 //!
-//! [`product_grid`] is the one rule for which grid a product's epochs lie on;
-//! [`Sp3::satellite_coverage`] reports it.
+//! [`product_grid`] is the one rule for which grid a product's epochs lie on.
+//! The merge applies it to each input and [`Sp3::satellite_coverage`] reports
+//! it, so the two cannot disagree about a product's cadence.
 
 use super::write::epoch_tick;
 use super::Sp3;
@@ -21,6 +22,13 @@ pub(super) const TICKS_PER_SECOND: i128 = 100_000_000;
 /// the eight-decimal field reads back as.
 pub(super) fn interval_seconds(ticks: i128) -> f64 {
     ticks as f64 / TICKS_PER_SECOND as f64
+}
+
+/// Seconds since J2000 for a whole number of ticks since J2000, whole seconds
+/// and remainder converted separately so a whole-second epoch is exact.
+pub(super) fn tick_seconds(ticks: i128) -> f64 {
+    ticks.div_euclid(TICKS_PER_SECOND) as f64
+        + ticks.rem_euclid(TICKS_PER_SECOND) as f64 / TICKS_PER_SECOND as f64
 }
 
 /// The whole number of ticks an interval states, when it is positive and is
@@ -136,4 +144,13 @@ pub(super) fn product_grid(ticks: &[Option<i128>], header_interval_s: f64) -> Gr
         out_of_order,
         unplaced,
     }
+}
+
+/// Greatest common divisor of two non-negative tick counts.
+pub(super) fn gcd(a: i128, b: i128) -> i128 {
+    let (mut a, mut b) = (a.abs(), b.abs());
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }

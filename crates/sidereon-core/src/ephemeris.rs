@@ -68,9 +68,10 @@ pub use crate::sp3::{
     WindowContinuityDecision, WindowContinuityVerdict,
 };
 pub use crate::sp3::{
-    CellProvenance, CellSelection, ContributorCoverage, MergeContinuityCell,
-    MergeContinuityCellRole, MergeContinuityReport, MergeContinuityViolation, MergeProvenance,
-    PrecedenceTransition, ProvenanceMode, TransitionReason,
+    CellProvenance, CellSelection, ClockOmission, ClockOmissionReason, ContributorCoverage,
+    DroppedEpochReason, DroppedInputEpoch, MergeContinuityCell, MergeContinuityCellRole,
+    MergeContinuityReport, MergeContinuityViolation, MergeProvenance, PrecedenceTransition,
+    ProvenanceMode, TransitionReason,
 };
 pub use crate::sp3::{
     Sp3ChannelCoverage, Sp3Coverage, Sp3CoverageGap, Sp3CoverageSpan, Sp3EpochGrid,

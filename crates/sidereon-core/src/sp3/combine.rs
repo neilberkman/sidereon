@@ -20,12 +20,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::astro::math::vec3;
 use crate::astro::time::civil::{
     civil_from_julian_day_number, fractional_day_of_year_from_instant, is_leap_year,
-    julian_date_from_instant, mjd_from_jd,
+    julian_date_from_instant,
 };
-use crate::astro::time::gnss;
 use crate::astro::time::model::Instant;
 
-use super::interp::{instant_to_j2000_seconds, sp3_epoch_j2000_seconds, Sp3InterpolationOptions};
+use super::grid::{
+    gcd, interval_seconds, interval_ticks, product_grid, product_ticks, tick_seconds,
+    TICKS_PER_SECOND,
+};
+use super::interp::{precise_node_j2000_seconds_from_instant, Sp3InterpolationOptions};
 use super::{
     RawNode, Sp3, Sp3ClockRecord, Sp3DataType, Sp3Flags, Sp3Header, Sp3State, TerminalRecordState,
 };
@@ -40,7 +43,6 @@ use crate::sp3::continuity::{
     check_continuity, ContinuityDefect, ContinuityOptions, ContinuityReport, EpochWindow,
     InterpolationNodes, WindowContinuityDecision, WindowContinuityVerdict,
 };
-use crate::tolerances::WHOLE_SECOND_EPS_S;
 use crate::validate;
 use crate::{Error, Result};
 
@@ -72,37 +74,51 @@ pub struct ClockReferenceOffset {
 /// common clocks are omitted rather than reported as a fragile one- or
 /// two-satellite estimate.
 ///
-/// Epochs are matched by their J2000 second floored to a whole second (the same
-/// node-axis convention the interpolator uses). Non-finite clock differences are
-/// skipped. Epochs present in only one product, or below `min_common`, are
-/// omitted from the result.
-///
-/// The floored-whole-second key assumes the input cadence is at least one second,
-/// which holds for every standard SP3 product (15 min, 5 min, 1 min, ... down to
-/// 1 s). Two distinct epochs less than a second apart would collapse onto the
-/// same key and be matched as one; the same applies to the floored key in
-/// [`MergeReport::per_epoch_agreement`]. This is kept deliberately aligned with
-/// the interpolator's node axis rather than refined to sub-second resolution, so
-/// that matching here and interpolation downstream use one consistent grid.
+/// Epochs are matched exactly, on the 10-nanosecond tick axis an SP3 epoch
+/// record states (`super::grid`): two epochs are matched only when they are the
+/// same instant, so distinct epochs never collapse onto one, however close.
+/// Non-finite clock differences are skipped. Epochs present in only one
+/// product, epochs no SP3 record states exactly, and epochs below `min_common`
+/// are omitted from the result.
 pub fn clock_reference_offset(
     reference: &Sp3,
     other: &Sp3,
     min_common: usize,
 ) -> Vec<ClockReferenceOffset> {
-    let mut other_index: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
-    for (idx, epoch) in other.epochs.iter().enumerate() {
-        if let Some(seconds) = sp3_epoch_j2000_seconds(other, idx, epoch) {
-            other_index.insert(seconds.floor() as i64, idx);
-        }
-    }
+    clock_offsets_by_tick(
+        reference,
+        &product_ticks(reference),
+        other,
+        &product_ticks(other),
+        min_common,
+    )
+    .into_iter()
+    .map(|(_, offset)| offset)
+    .collect()
+}
+
+/// [`clock_reference_offset`] keyed by the tick of each matched epoch, given
+/// both products' epochs on the tick axis.
+fn clock_offsets_by_tick(
+    reference: &Sp3,
+    reference_ticks: &[Option<i128>],
+    other: &Sp3,
+    other_ticks: &[Option<i128>],
+    min_common: usize,
+) -> Vec<(i128, ClockReferenceOffset)> {
+    let other_index: BTreeMap<i128, usize> = other_ticks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, tick)| tick.map(|tick| (tick, index)))
+        .collect();
 
     let mut offsets = Vec::new();
 
     for (ref_idx, epoch) in reference.epochs.iter().enumerate() {
-        let Some(ref_seconds) = sp3_epoch_j2000_seconds(reference, ref_idx, epoch) else {
+        let Some(tick) = reference_ticks.get(ref_idx).copied().flatten() else {
             continue;
         };
-        let Some(&other_idx) = other_index.get(&(ref_seconds.floor() as i64)) else {
+        let Some(&other_idx) = other_index.get(&tick) else {
             continue;
         };
 
@@ -146,11 +162,14 @@ pub fn clock_reference_offset(
 
         if diffs.len() >= min_common.max(1) {
             if let Some(offset_s) = median(&mut diffs) {
-                offsets.push(ClockReferenceOffset {
-                    epoch: *epoch,
-                    offset_s,
-                    satellites: diffs.len(),
-                });
+                offsets.push((
+                    tick,
+                    ClockReferenceOffset {
+                        epoch: *epoch,
+                        offset_s,
+                        satellites: diffs.len(),
+                    },
+                ));
             }
         }
     }
@@ -187,7 +206,10 @@ pub enum MergePrecedenceScope {
     /// `(epoch, satellite)` cell. This maximizes coverage and is the default.
     Cell,
     /// Select one earliest-listed source for the whole satellite arc. Missing
-    /// cells in that source remain holes even when a later source has them.
+    /// cells in that source remain holes even when a later source has them;
+    /// each such withheld position is listed in [`MergeReport::arc_withheld`],
+    /// and an epoch left with no cell at all is omitted from the product and
+    /// listed in [`MergeReport::omitted_epochs`].
     SatelliteArc,
 }
 
@@ -254,10 +276,13 @@ pub struct MergeOptions {
     /// Optional consensus guard for precedence-selected values. `None` preserves
     /// the historical contested-cell behavior.
     pub outlier_reject: Option<OutlierRejectOptions>,
-    /// Optional target epoch interval, in seconds. When unset the finest input
-    /// interval is used. Coarser inputs contribute at the target-grid epochs
-    /// they actually carry; values are never interpolated. Input and target
-    /// intervals must be integer-commensurate.
+    /// Optional target epoch interval, in seconds; it must be a whole number of
+    /// the 10-nanosecond ticks an SP3 interval states. When unset the output
+    /// grid is the greatest common divisor of the inputs' grid steps and epoch
+    /// offsets, which holds every input epoch. When set, the grid is anchored
+    /// at the earliest input epoch, inputs contribute at the grid epochs they
+    /// actually carry, and every input epoch off the grid is listed in
+    /// [`MergeReport::dropped_input_epochs`]. Values are never interpolated.
     pub target_epoch_interval_s: Option<f64>,
     /// Optional constellation/system filter. When set, only satellites whose
     /// system is in this set are considered for the merged product.
@@ -367,8 +392,79 @@ pub struct MergeFlag {
     /// The source indices (into the input slice) this flag refers to: for
     /// `single_source`, the lone contributor; for `quarantined`, all sources
     /// that disagreed; for `position_outliers` or `clock_outliers`, the sources
-    /// rejected from an otherwise-accepted consensus.
+    /// rejected from an otherwise-accepted consensus; for `arc_withheld`, the
+    /// sources whose positions were withheld.
     pub sources: Vec<usize>,
+}
+
+/// Why a source's clock for a cell was not written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockOmissionReason {
+    /// The source's datum offset to source 0 could not be estimated at this
+    /// epoch: no bracketing epochs with at least
+    /// [`MergeOptions::clock_min_common`] common clocks. The offset is never
+    /// extrapolated, so the clock takes no part in the consensus, whether or not
+    /// the cell gets a clock from other sources.
+    DatumNotObservable,
+    /// Precedence writes a clock only from the preferred source - under
+    /// [`MergePrecedenceScope::SatelliteArc`] the satellite's arc owner - and
+    /// that source had no clock on the reference datum for the cell, so this
+    /// source's clock was not written either.
+    PreferredSourceWithoutClock {
+        /// The preferred source, when the merge had one for the satellite.
+        preferred: Option<usize>,
+    },
+    /// Clocks on the reference datum disagreed and no agreeing subset met the
+    /// consensus rule, so no clock was written. When an outlier guard refused
+    /// the cell, the same sources are also in [`MergeReport::clock_outliers`].
+    NoConsensus,
+}
+
+/// One source's clock for a cell that the merge did not write.
+///
+/// One entry per source and cell. A clock rejected as an outlier from a clock
+/// consensus that was accepted is in [`MergeReport::clock_outliers`] instead.
+/// Cells for which no source carried a clock are not listed;
+/// [`Sp3::satellite_coverage`] on the merged product shows every clock the
+/// product lacks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClockOmission {
+    /// The epoch.
+    pub epoch: Instant,
+    /// The satellite.
+    pub satellite: GnssSatelliteId,
+    /// Index into the input slice of the source whose clock was not written.
+    pub source: usize,
+    /// Why it was not written.
+    pub reason: ClockOmissionReason,
+    /// Whether the merged cell carries a clock from other sources.
+    pub cell_has_clock: bool,
+}
+
+/// Why an input epoch took no part in a merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DroppedEpochReason {
+    /// The epoch is not on the explicit [`MergeOptions::target_epoch_interval_s`]
+    /// grid. The default grid holds every input epoch, so this reason arises
+    /// only from an explicit target.
+    OffTargetGrid,
+    /// No SP3 record states the epoch exactly: its instant is not a whole
+    /// number of the 10-nanosecond ticks an epoch record resolves, so it has no
+    /// place on the merge's exact epoch axis.
+    NotOnTickAxis,
+}
+
+/// An input epoch that took no part in a merge, with the reason.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DroppedInputEpoch {
+    /// Index into the input slice.
+    pub source: usize,
+    /// Index into that source's [`Sp3::epochs`].
+    pub epoch_index: usize,
+    /// The epoch.
+    pub epoch: Instant,
+    /// Why it took no part.
+    pub reason: DroppedEpochReason,
 }
 
 /// Per-(epoch, satellite) agreement statistics for one accepted consensus cell:
@@ -853,6 +949,26 @@ pub struct MergeReport {
     /// Continuity verification of the merged product, present only when
     /// [`MergeOptions::verify_continuity`] requested it.
     pub continuity: Option<MergeContinuityReport>,
+    /// Union-grid epochs at which the merge accepted no cell, in time order.
+    /// None of them is written to the product: an epoch block whose every
+    /// record is the missing sentinel states nothing and would stretch the
+    /// product's apparent coverage past its data. Each position some source
+    /// carried there is in [`Self::quarantined`] or [`Self::arc_withheld`], and
+    /// each source's clock in [`Self::clock_omissions`].
+    pub omitted_epochs: Vec<Instant>,
+    /// Cells whose position some source carried but precedence did not write,
+    /// because the preferred source carried none there. Under
+    /// [`MergePrecedenceScope::SatelliteArc`] this is each cell outside the arc
+    /// owner's coverage that a later source fills; cell-scoped precedence
+    /// always prefers a source that is present.
+    pub arc_withheld: Vec<MergeFlag>,
+    /// Each source's clock that the merge did not write, with the reason, in
+    /// (epoch, satellite, source) order - including a clock left out of a
+    /// cell that got its clock from other sources.
+    pub clock_omissions: Vec<ClockOmission>,
+    /// Input epochs that took no part in the merge, with the reason, in
+    /// (source, epoch) order.
+    pub dropped_input_epochs: Vec<DroppedInputEpoch>,
 }
 
 impl MergeReport {
@@ -953,10 +1069,10 @@ impl MergeReport {
     /// `None` position spread so the caller sees every output epoch.
     pub fn per_epoch_agreement(&self) -> Vec<EpochAgreement> {
         let mut out: Vec<EpochAgreement> = Vec::new();
-        let mut current_key: Option<i64> = None;
         for m in &self.agreement {
-            let key = instant_to_j2000_seconds(&m.epoch).map(|s| s.floor() as i64);
-            if current_key != key || out.is_empty() {
+            // Cells of one output epoch are consecutive and carry that epoch's
+            // one instant, so grouping compares the instant itself.
+            if out.last().is_none_or(|agg| agg.epoch != m.epoch) {
                 out.push(EpochAgreement {
                     epoch: m.epoch,
                     satellites: 0,
@@ -965,7 +1081,6 @@ impl MergeReport {
                     clock_rms_s: None,
                     clock_max_s: None,
                 });
-                current_key = key;
             }
             // invariant: the branch above pushes the first aggregate before this
             // lookup, and every later aggregate remains in `out`.
@@ -988,20 +1103,16 @@ impl MergeReport {
         // Pooled RMS per epoch needs the sum of squared distances, which the per
         // entry RMS encodes; recompute it in a second pass grouped by epoch key.
         for agg in &mut out {
-            let key = instant_to_j2000_seconds(&agg.epoch).map(|s| s.floor() as i64);
             agg.position_rms_m = pooled_rms(
                 self.agreement
                     .iter()
-                    .filter(|m| {
-                        m.position_members >= 2
-                            && instant_to_j2000_seconds(&m.epoch).map(|s| s.floor() as i64) == key
-                    })
+                    .filter(|m| m.position_members >= 2 && m.epoch == agg.epoch)
                     .filter_map(|m| m.position_rms_m.map(|rms| (rms, m.position_members))),
             );
             agg.clock_rms_s = pooled_rms(
                 self.agreement
                     .iter()
-                    .filter(|m| instant_to_j2000_seconds(&m.epoch).map(|s| s.floor() as i64) == key)
+                    .filter(|m| m.epoch == agg.epoch)
                     .filter_map(|m| {
                         m.clock_rms_s
                             .filter(|_| m.clock_members >= 2)
@@ -1038,10 +1149,19 @@ fn fold_max(acc: Option<f64>, value: f64) -> f64 {
 /// consistent precise-ephemeris dataset.
 ///
 /// Orthogonal to time-stitching: this combines providers at the **same** epochs.
-/// Inputs must each have a uniform epoch grid. Mixed-cadence products are
-/// unioned onto the finest input cadence by default (or an explicit compatible
-/// target cadence), using only epochs actually present in an input and never
-/// interpolating. For every (epoch, satellite) cell on that union grid:
+/// Every epoch is placed on the exact 10-nanosecond tick axis an SP3 epoch
+/// record states, so two inputs share an epoch only when they state the same
+/// instant. Each input must lie on a grid: equal steps, or steps that are all
+/// whole multiples of its declared interval (a product that skips epochs of
+/// its grid); one whose steps are neither is refused, as are epochs out of
+/// order. By default the output grid is the greatest common divisor of every
+/// input's grid step and every input epoch's offset from the earliest, so it
+/// holds every input epoch and the header states its step. An explicit
+/// [`MergeOptions::target_epoch_interval_s`], anchored at the earliest epoch,
+/// keeps only the input epochs on its grid and lists every other one in
+/// [`MergeReport::dropped_input_epochs`]. Only epochs actually present in an
+/// input are used, and nothing is interpolated. For every (epoch, satellite)
+/// cell on that union grid:
 ///
 /// - **Union satellite coverage.** A satellite present in any input may appear
 ///   in the output at every union-grid epoch where an input carries that cell.
@@ -1058,7 +1178,22 @@ fn fold_max(acc: Option<f64>, value: f64) -> f64 {
 ///   bracketing epochs where at least `clock_min_common` common clocks made it
 ///   observable. Outside that bracket, or when no bracket exists, the source
 ///   contributes **no** clock rather than an unaligned one; its position is
-///   still merged.
+///   still merged. Every source clock the merge does not write is listed in
+///   [`MergeReport::clock_omissions`] with the reason, including one left out
+///   of a cell that got its clock from other sources.
+/// - **No empty epochs.** A union-grid epoch at which no cell was accepted is
+///   not written, and is listed in [`MergeReport::omitted_epochs`]. A merge
+///   that accepts no cell at any epoch returns a product with no epochs, whose
+///   header describes the first union-grid epoch, together with the report
+///   that says why. SP3 sets no minimum epoch count, so that product writes as
+///   a header whose line 1 states that start.
+///
+/// The union epoch grid is not a statement of what each satellite carries. Use
+/// [`Sp3::satellite_coverage`] on the merged product for each satellite's
+/// position and clock coverage and its gaps. A continuity check with no
+/// findings attests that the records present are mutually consistent; it does
+/// not say that every epoch of the grid can be interpolated for every
+/// satellite.
 ///
 /// `Precedence` is resolved per cell by default, so a lower-precedence source
 /// fills a cell missing from all earlier sources. Whole-satellite-arc ownership
@@ -1076,8 +1211,10 @@ fn fold_max(acc: Option<f64>, value: f64) -> f64 {
 /// are the union (OR) of the contributing sources' flags - in particular a
 /// `clock_event` on any clock-consensus member is preserved, so the interpolator
 /// still splits the clock arc. The merged header is **synthetic**: its
-/// first-epoch fields describe the union's first epoch and its data type is
-/// position-only.
+/// first-epoch fields describe the first epoch written, each the value its
+/// field states, and its data type is position-only. The MJD fraction is the within-day tick count rounded once to
+/// the thirteen decimals its field holds, so an off-midnight start such as
+/// 05:00 writes and reads back as the value a real file holds.
 ///
 /// Preservation of velocities and rates: merge policy intentionally drops
 /// velocities and clock rates for all records (both position states and clock-only
@@ -1100,18 +1237,35 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
     let sources = prepared_sources.as_slice();
 
     let timing = prepare_merge_timing(sources, opts)?;
-    let epoch_interval_s = timing.epoch_interval_s;
+    let epoch_interval_s = interval_seconds(timing.step_ticks);
     let cells = emit_merge_cells(sources, opts, &timing, frame_reconciliations)?;
 
+    // The header's first-epoch fields describe the first epoch written. A merge
+    // that accepted no cell writes no epoch; its header then describes the first
+    // union-grid epoch, the one every omission is counted from.
+    let header_tick = match cells.out_ticks.first() {
+        Some(&tick) => tick,
+        None => {
+            // invariant: `prepare_merge_timing` refuses an empty union grid.
+            #[allow(clippy::expect_used)]
+            let (&tick, _) = timing
+                .epoch_keys
+                .iter()
+                .next()
+                .expect("non-empty union grid");
+            tick
+        }
+    };
     let synthesized = synthesize_merge_header(
         sources,
-        &cells.out_epochs,
-        &cells.out_epoch_j2000_s,
+        &timing.first_ticks,
+        header_tick,
+        cells.out_ticks.len(),
         &cells.all_sats,
         epoch_interval_s,
     )?;
     let (merged, mut report, continuity_selection) =
-        emit_merged_product(sources, synthesized, cells);
+        emit_merged_product(sources, synthesized, header_tick, cells);
 
     if let Some(continuity_options) = opts.verify_continuity.as_ref() {
         report.continuity = Some(verify_merged_continuity(
@@ -1131,7 +1285,8 @@ struct PreparedMergeInputs {
 
 struct MergeCellOutput {
     out_epochs: Vec<Instant>,
-    out_epoch_j2000_s: Vec<f64>,
+    /// Each written epoch on the tick axis, parallel to `out_epochs`.
+    out_ticks: Vec<i128>,
     out_states: Vec<BTreeMap<GnssSatelliteId, Sp3State>>,
     out_clock_records: Vec<BTreeMap<GnssSatelliteId, Sp3ClockRecord>>,
     out_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>>,
@@ -1153,6 +1308,7 @@ struct MergeHeaderOutput {
 fn emit_merged_product(
     sources: &[Sp3],
     synthesized: MergeHeaderOutput,
+    header_tick: i128,
     cells: MergeCellOutput,
 ) -> (
     Sp3,
@@ -1168,7 +1324,7 @@ fn emit_merged_product(
     } = synthesized;
     let MergeCellOutput {
         out_epochs,
-        out_epoch_j2000_s,
+        out_ticks,
         out_states,
         out_clock_records,
         out_raw,
@@ -1176,11 +1332,14 @@ fn emit_merged_product(
         continuity_selection,
         ..
     } = cells;
+    let out_epoch_j2000_s: Vec<f64> = out_ticks.iter().map(|&tick| tick_seconds(tick)).collect();
     let merged = Sp3 {
         header,
         epochs: out_epochs,
         declared_num_epochs: out_epoch_j2000_s.len() as u64,
-        declared_start_j2000_s: out_epoch_j2000_s.first().copied(),
+        // Line 1 states the header's start: the first epoch written, or for a
+        // merge that wrote none, the first union-grid epoch.
+        declared_start_j2000_s: Some(tick_seconds(header_tick)),
         terminal_record: TerminalRecordState::valid(),
         satellite_header_lines: mandatory_header_lines,
         accuracy_header_lines: mandatory_header_lines,
@@ -1208,8 +1367,9 @@ fn emit_merged_product(
 /// SP3 header plus the canonical output record-token sequences.
 fn synthesize_merge_header(
     sources: &[Sp3],
-    out_epochs: &[Instant],
-    out_epoch_j2000_s: &[f64],
+    first_ticks: &[Option<i128>],
+    first_tick: i128,
+    epoch_count: usize,
     all_sats: &BTreeSet<GnssSatelliteId>,
     epoch_interval_s: f64,
 ) -> Result<MergeHeaderOutput> {
@@ -1217,31 +1377,19 @@ fn synthesize_merge_header(
     // header fields from the merged grid itself. Mixed cadence / coverage can make
     // the merged first epoch later than every input's first epoch, so cloning
     // those fields from any input would make the `##` line stale.
-    let first_key = Some(out_epoch_j2000_s[0].floor() as i64);
-    let base_idx = sources
+    let base_idx = first_ticks
         .iter()
-        .position(|s| {
-            s.epochs
-                .first()
-                .and_then(|ep| sp3_epoch_j2000_seconds(s, 0, ep))
-                .map(|sec| sec.floor() as i64)
-                == first_key
-        })
+        .position(|tick| *tick == Some(first_tick))
         .or_else(|| {
-            sources
+            first_ticks
                 .iter()
                 .enumerate()
-                .filter_map(|(i, s)| {
-                    s.epochs
-                        .first()
-                        .and_then(|ep| sp3_epoch_j2000_seconds(s, 0, ep))
-                        .map(|sec| (sec, i))
-                })
-                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
-                .map(|(_, i)| i)
+                .filter_map(|(index, tick)| tick.map(|tick| (tick, index)))
+                .min()
+                .map(|(_, index)| index)
         })
         .unwrap_or(0);
-    let first_epoch_header = first_epoch_header_fields(&out_epochs[0]).ok_or_else(|| {
+    let first_epoch_header = first_epoch_header_fields(first_tick).ok_or_else(|| {
         Error::InvalidInput("merged SP3 first epoch cannot be represented in header fields".into())
     })?;
 
@@ -1266,7 +1414,7 @@ fn synthesize_merge_header(
         .collect();
 
     let header = Sp3Header {
-        num_epochs: out_epochs.len() as u64,
+        num_epochs: epoch_count as u64,
         satellites,
         satellite_accuracy_codes,
         data_type: Sp3DataType::Position,
@@ -1284,7 +1432,7 @@ fn synthesize_merge_header(
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    let epoch_position_tokens = vec![declared_satellite_tokens.clone(); out_epochs.len()];
+    let epoch_position_tokens = vec![declared_satellite_tokens.clone(); epoch_count];
     let epoch_state_record_sequence = epoch_position_tokens
         .iter()
         .map(|tokens| {
@@ -1349,7 +1497,7 @@ fn emit_merge_cells(
     let mut prov_previous: BTreeMap<GnssSatelliteId, CellSelection> = BTreeMap::new();
     let mut continuity_selection: BTreeMap<(GnssSatelliteId, i64), CellSelection> = BTreeMap::new();
 
-    let mut out_epoch_j2000_s: Vec<f64> = Vec::with_capacity(epoch_keys.len());
+    let mut out_ticks: Vec<i128> = Vec::with_capacity(epoch_keys.len());
     let mut out_states: Vec<BTreeMap<GnssSatelliteId, Sp3State>> =
         Vec::with_capacity(epoch_keys.len());
     let mut out_clock_records: Vec<BTreeMap<GnssSatelliteId, Sp3ClockRecord>> =
@@ -1357,13 +1505,15 @@ fn emit_merge_cells(
     let mut out_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>> = Vec::with_capacity(epoch_keys.len());
     let mut report = MergeReport {
         frame_reconciliations,
+        dropped_input_epochs: timing.dropped.clone(),
         ..MergeReport::default()
     };
     let mut all_sats: BTreeSet<GnssSatelliteId> = BTreeSet::new();
 
     for (&key, &epoch) in epoch_keys {
-        out_epochs.push(epoch);
-        out_epoch_j2000_s.push(key as f64);
+        // The continuity check reads the product on the interpolation node
+        // axis, so its findings are keyed back to cells by that axis.
+        let node_key = precise_node_j2000_seconds_from_instant(&epoch).map(|node| node as i64);
         let mut states: BTreeMap<GnssSatelliteId, Sp3State> = BTreeMap::new();
         let mut clock_records: BTreeMap<GnssSatelliteId, Sp3ClockRecord> = BTreeMap::new();
         let mut raws: BTreeMap<GnssSatelliteId, RawNode> = BTreeMap::new();
@@ -1394,6 +1544,9 @@ fn emit_merge_cells(
 
             let mut pos: Vec<(usize, [f64; 3], Sp3Flags)> = Vec::new();
             let mut clk: Vec<(usize, f64, Sp3Flags)> = Vec::new();
+            // Sources that carried a clock here whose datum offset to source 0
+            // could not be estimated at this epoch.
+            let mut unaligned_clk: Vec<usize> = Vec::new();
             for (idx, s) in sources.iter().enumerate() {
                 let Some(&ei) = epoch_index[idx].get(&key) else {
                     continue;
@@ -1412,6 +1565,8 @@ fn emit_merge_cells(
                                 if aligned.is_finite() {
                                     clk.push((idx, aligned, state.flags));
                                 }
+                            } else {
+                                unaligned_clk.push(idx);
                             }
                         }
                     }
@@ -1428,6 +1583,8 @@ fn emit_merge_cells(
                             if aligned.is_finite() {
                                 clk.push((idx, aligned, clock_rec.flags));
                             }
+                        } else {
+                            unaligned_clk.push(idx);
                         }
                     }
                 }
@@ -1447,6 +1604,20 @@ fn emit_merge_cells(
                 satellite: sat,
                 sources: srcs,
             };
+
+            // Precedence writes a position only from the preferred source. Under
+            // satellite-arc scope that is the arc owner, which can be missing
+            // from a cell other sources carry; those positions are withheld,
+            // and recorded rather than dropped without trace.
+            if opts.combine == MergeCombine::Precedence
+                && !pos.is_empty()
+                && !position_preferred_source
+                    .is_some_and(|preferred| pos.iter().any(|(src, _, _)| *src == preferred))
+            {
+                report
+                    .arc_withheld
+                    .push(flag(pos.iter().map(|(src, _, _)| *src).collect()));
+            }
 
             // Position consensus -> the merged position and the indices (into
             // `pos`) of the sources that contributed it. Cell precedence selects
@@ -1660,6 +1831,38 @@ fn emit_merge_cells(
                 }
             };
 
+            // Every source clock the cell does not write, per source: a clock
+            // off the reference datum takes no part in the consensus whether or
+            // not the cell gets a clock from other sources; aligned clocks are
+            // left out only when the cell gets none.
+            let mut omitted: Vec<(usize, ClockOmissionReason)> = unaligned_clk
+                .iter()
+                .map(|&source| (source, ClockOmissionReason::DatumNotObservable))
+                .collect();
+            if clock_s.is_none() && !clk.is_empty() {
+                let reason = if opts.combine == MergeCombine::Precedence
+                    && !clock_preferred_source
+                        .is_some_and(|preferred| clk.iter().any(|(src, _, _)| *src == preferred))
+                {
+                    ClockOmissionReason::PreferredSourceWithoutClock {
+                        preferred: clock_preferred_source,
+                    }
+                } else {
+                    ClockOmissionReason::NoConsensus
+                };
+                omitted.extend(clk.iter().map(|(source, _, _)| (*source, reason)));
+            }
+            omitted.sort_by_key(|(source, _)| *source);
+            report
+                .clock_omissions
+                .extend(omitted.into_iter().map(|(source, reason)| ClockOmission {
+                    epoch,
+                    satellite: sat,
+                    source,
+                    reason,
+                    cell_has_clock: clock_s.is_some(),
+                }));
+
             // If neither position nor clock was agreed upon, satellite is absent.
             if pos_result.is_none() && clock_s.is_none() {
                 continue;
@@ -1704,8 +1907,8 @@ fn emit_merge_cells(
                     clock_max_s,
                 });
 
-                if opts.verify_continuity.is_some() {
-                    continuity_selection.insert((sat, key), pos_selection.clone());
+                if let (true, Some(node_key)) = (opts.verify_continuity.is_some(), node_key) {
+                    continuity_selection.insert((sat, node_key), pos_selection.clone());
                 }
 
                 if let Some(provenance_mode) = opts.provenance {
@@ -1792,9 +1995,9 @@ fn emit_merge_cells(
                     report.single_source.push(flag(vec![clk[0].0]));
                 }
 
-                if opts.verify_continuity.is_some() {
+                if let (true, Some(node_key)) = (opts.verify_continuity.is_some(), node_key) {
                     if let Some(ref clk_sel) = clk_selection {
-                        continuity_selection.insert((sat, key), clk_sel.clone());
+                        continuity_selection.insert((sat, node_key), clk_sel.clone());
                     }
                 }
 
@@ -1848,6 +2051,15 @@ fn emit_merge_cells(
             }
         }
 
+        // An epoch at which no cell was accepted is not written: an SP3 epoch
+        // block whose every record is the missing sentinel states nothing, and
+        // it would stretch the product's apparent coverage past the data.
+        if states.is_empty() && clock_records.is_empty() {
+            report.omitted_epochs.push(epoch);
+            continue;
+        }
+        out_epochs.push(epoch);
+        out_ticks.push(key);
         out_states.push(states);
         out_clock_records.push(clock_records);
         out_raw.push(raws);
@@ -1871,7 +2083,7 @@ fn emit_merge_cells(
 
     Ok(MergeCellOutput {
         out_epochs,
-        out_epoch_j2000_s,
+        out_ticks,
         out_states,
         out_clock_records,
         out_raw,
@@ -1882,10 +2094,17 @@ fn emit_merge_cells(
 }
 
 struct MergeTiming {
-    epoch_index: Vec<BTreeMap<i64, usize>>,
-    epoch_interval_s: f64,
-    clock_offset: Vec<BTreeMap<i64, f64>>,
-    epoch_keys: BTreeMap<i64, Instant>,
+    /// Per source, tick -> index into its epochs.
+    epoch_index: Vec<BTreeMap<i128, usize>>,
+    /// Per source, the tick of its first placed epoch.
+    first_ticks: Vec<Option<i128>>,
+    /// The output grid step in ticks.
+    step_ticks: i128,
+    clock_offset: Vec<BTreeMap<i128, f64>>,
+    /// The union grid: tick -> representative epoch from the earliest-listed
+    /// source carrying it.
+    epoch_keys: BTreeMap<i128, Instant>,
+    dropped: Vec<DroppedInputEpoch>,
 }
 
 /// Consume raw SP3 sources and merge options, validate their combinability, and
@@ -1921,78 +2140,153 @@ fn prepare_merge_inputs(sources: &[Sp3], opts: &MergeOptions) -> Result<Prepared
 }
 
 /// Consume frame-reconciled sources and merge timing options, and produce the
-/// ordered epoch indexes, clock-datum offsets, cadence, and union output grid.
+/// exact epoch index of every input, the clock-datum offsets, the output grid
+/// step and the union grid.
+///
+/// Every epoch is placed on the exact 10-nanosecond tick axis
+/// ([`super::grid`]), so two inputs share an epoch only when they state the
+/// same instant, and epochs never fuse by rounding. Each input must lie on a
+/// grid by the rule [`Sp3::satellite_coverage`] also reports
+/// ([`super::grid::product_grid`]): equal steps, or steps that are all whole
+/// multiples of its declared interval. The default output grid is the greatest
+/// common divisor of every input's grid step and every input epoch's offset
+/// from the earliest one, so it holds every input epoch and none is dropped. An
+/// explicit target grid, anchored at the earliest epoch, drops the input
+/// epochs it does not hold, and reports each.
 fn prepare_merge_timing(sources: &[Sp3], opts: &MergeOptions) -> Result<MergeTiming> {
-    // floored-J2000-second -> epoch index, per source.
-    let epoch_index: Vec<BTreeMap<i64, usize>> = sources
+    let source_ticks: Vec<Vec<Option<i128>>> = sources.iter().map(product_ticks).collect();
+    let mut dropped: Vec<DroppedInputEpoch> = Vec::new();
+    let mut steps: Vec<i128> = Vec::new();
+    for (idx, (source, ticks)) in sources.iter().zip(&source_ticks).enumerate() {
+        let facts = product_grid(ticks, source.header.epoch_interval_s);
+        if !facts.out_of_order.is_empty() {
+            return Err(Error::InvalidInput(
+                "merge input epochs must be strictly increasing".into(),
+            ));
+        }
+        let placed = ticks.iter().flatten().count();
+        match facts.step {
+            Some(step) => steps.push(step),
+            None if placed >= 2 => {
+                return Err(Error::InvalidInput(format!(
+                    "merge input {idx} epochs lie on no grid: its steps differ and are not all whole multiples of its declared {} s interval",
+                    source.header.epoch_interval_s
+                )))
+            }
+            None => {}
+        }
+        for &epoch_index in &facts.unplaced {
+            dropped.push(DroppedInputEpoch {
+                source: idx,
+                epoch_index,
+                epoch: source.epochs[epoch_index],
+                reason: DroppedEpochReason::NotOnTickAxis,
+            });
+        }
+    }
+
+    let epoch_index: Vec<BTreeMap<i128, usize>> = source_ticks
         .iter()
-        .map(|s| {
-            s.epochs
+        .map(|ticks| {
+            ticks
                 .iter()
                 .enumerate()
-                .filter_map(|(i, ep)| {
-                    sp3_epoch_j2000_seconds(s, i, ep).map(|sec| (sec.floor() as i64, i))
-                })
+                .filter_map(|(index, tick)| tick.map(|tick| (tick, index)))
                 .collect()
         })
         .collect();
+    let first_ticks: Vec<Option<i128>> = source_ticks
+        .iter()
+        .map(|ticks| ticks.iter().flatten().copied().min())
+        .collect();
+    let Some(anchor) = first_ticks.iter().flatten().copied().min() else {
+        return Err(Error::InvalidInput(
+            "merge inputs have no epochs on the requested time grid".into(),
+        ));
+    };
 
-    let epoch_interval_s = resolve_common_epoch_interval(sources, opts.target_epoch_interval_s)?;
+    let step_ticks = match opts.target_epoch_interval_s {
+        Some(target) => {
+            if !target.is_finite() || target <= 0.0 {
+                return Err(Error::InvalidInput(format!(
+                    "merge target epoch interval must be positive and finite, got {target}"
+                )));
+            }
+            interval_ticks(target).ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "merge target epoch interval {target} s is not a whole number of the 10-nanosecond ticks an SP3 interval states"
+                ))
+            })?
+        }
+        None => {
+            let mut step = steps.iter().fold(0, |acc, &step| gcd(acc, step));
+            for ticks in &source_ticks {
+                for tick in ticks.iter().flatten() {
+                    step = gcd(step, tick - anchor);
+                }
+            }
+            if step == 0 {
+                return Err(Error::InvalidInput(
+                    "merge inputs hold one instant and declare no positive epoch interval".into(),
+                ));
+            }
+            step
+        }
+    };
+
+    // Union of epochs by exact tick, retaining the representative Instant from
+    // the earliest-listed source on duplicate ticks. This is what lets a dense
+    // source fill cells absent from a sparse preferred source.
+    let mut epoch_keys: BTreeMap<i128, Instant> = BTreeMap::new();
+    for (idx, (source, ticks)) in sources.iter().zip(&source_ticks).enumerate() {
+        for (epoch_index, tick) in ticks.iter().enumerate() {
+            let Some(tick) = *tick else {
+                continue;
+            };
+            if (tick - anchor).rem_euclid(step_ticks) == 0 {
+                epoch_keys.entry(tick).or_insert(source.epochs[epoch_index]);
+            } else {
+                dropped.push(DroppedInputEpoch {
+                    source: idx,
+                    epoch_index,
+                    epoch: source.epochs[epoch_index],
+                    reason: DroppedEpochReason::OffTargetGrid,
+                });
+            }
+        }
+    }
+    dropped.sort_by_key(|entry| (entry.source, entry.epoch_index));
 
     // Per-source per-epoch clock-datum offset relative to source 0. Source 0 is
     // the datum, so its offset is identically zero.
-    let clock_offset: Vec<BTreeMap<i64, f64>> = sources
+    let clock_offset: Vec<BTreeMap<i128, f64>> = sources
         .iter()
         .enumerate()
-        .map(|(idx, s)| {
+        .map(|(idx, source)| {
             if idx == 0 {
                 BTreeMap::new()
             } else {
-                clock_reference_offset(&sources[0], s, opts.clock_min_common)
-                    .into_iter()
-                    .filter_map(|o| {
-                        instant_to_j2000_seconds(&o.epoch)
-                            .map(|sec| (sec.floor() as i64, o.offset_s))
-                    })
-                    .collect()
+                clock_offsets_by_tick(
+                    &sources[0],
+                    &source_ticks[0],
+                    source,
+                    &source_ticks[idx],
+                    opts.clock_min_common,
+                )
+                .into_iter()
+                .map(|(tick, offset)| (tick, offset.offset_s))
+                .collect()
             }
         })
         .collect();
 
-    // Union of epochs (by floored second), retaining the representative Instant
-    // from the earliest-listed source on duplicate keys. This is what lets a
-    // dense source fill cells absent from a sparse preferred source.
-    let mut epoch_keys: BTreeMap<i64, Instant> = BTreeMap::new();
-    for source in sources {
-        for (idx, ep) in source.epochs.iter().enumerate() {
-            if let Some(sec) = sp3_epoch_j2000_seconds(source, idx, ep) {
-                epoch_keys.entry(sec.floor() as i64).or_insert(*ep);
-            }
-        }
-    }
-
-    // Restrict the union to the resolved output grid (anchored at the earliest
-    // union epoch), dropping off-grid epochs by exact subset selection. This is
-    // a no-op at the default finest cadence and performs deterministic
-    // decimation for an explicit coarser target.
-    if let Some((&anchor, _)) = epoch_keys.iter().next() {
-        let step = epoch_interval_s.round() as i64;
-        if step > 0 {
-            epoch_keys.retain(|&key, _| (key - anchor).rem_euclid(step) == 0);
-        }
-    }
-
-    if epoch_keys.is_empty() {
-        return Err(Error::InvalidInput(
-            "merge inputs have no epochs on the requested time grid".into(),
-        ));
-    }
-
     Ok(MergeTiming {
         epoch_index,
-        epoch_interval_s,
+        first_ticks,
+        step_ticks,
         clock_offset,
         epoch_keys,
+        dropped,
     })
 }
 
@@ -2371,31 +2665,49 @@ struct FirstEpochHeaderFields {
     mjd_fraction: f64,
 }
 
-fn first_epoch_header_fields(epoch: &Instant) -> Option<FirstEpochHeaderFields> {
-    let split = epoch.julian_date()?;
+/// The line-2 fields for a first epoch `tick` ticks from the J2000 origin in
+/// the product's own scale, each the value its field states and the reader
+/// holds for a real file.
+///
+/// The GPS week and seconds of week count from the GPS epoch (1980-01-06
+/// 00:00:00) in whole ticks, so the seconds of week is exact in its eight
+/// decimals. The MJD is the civil day's, and the MJD fraction is the within-day
+/// tick count as a fraction of a day rounded once, half to even, to the
+/// thirteen decimals its field states; a fraction that rounds to a whole day
+/// is carried into the next MJD. Both come from the exact count, so no
+/// intermediate `f64` rounding reaches a field.
+fn first_epoch_header_fields(tick: i128) -> Option<FirstEpochHeaderFields> {
+    const TICKS_PER_DAY: i128 = 86_400 * TICKS_PER_SECOND;
+    const TICKS_PER_WEEK: i128 = 7 * TICKS_PER_DAY;
+    const J2000_NOON_TICKS: i128 = TICKS_PER_DAY / 2;
+    // MJD 51544 is the civil day of the J2000 origin (MJD 51544.5).
+    const J2000_MJD_DAY: i128 = 51_544;
+    const FRACTION_UNITS: i128 = 10_000_000_000_000;
 
-    let mjd_day = mjd_from_jd(split.jd_whole);
-    let mut mjd = mjd_day.floor();
-    let mut mjd_fraction = split.fraction + (mjd_day - mjd);
-    let fraction_days = mjd_fraction.floor();
-    if fraction_days != 0.0 {
-        mjd += fraction_days;
-        mjd_fraction -= fraction_days;
+    let from_midnight = tick.checked_add(J2000_NOON_TICKS)?;
+    let mut day = J2000_MJD_DAY + from_midnight.div_euclid(TICKS_PER_DAY);
+    let within_day = from_midnight.rem_euclid(TICKS_PER_DAY);
+    let scaled = within_day.checked_mul(FRACTION_UNITS)?;
+    let mut units = scaled / TICKS_PER_DAY;
+    let remainder = scaled % TICKS_PER_DAY;
+    if remainder * 2 > TICKS_PER_DAY || (remainder * 2 == TICKS_PER_DAY && units % 2 == 1) {
+        units += 1;
     }
-    if !(0.0..=u32::MAX as f64).contains(&mjd) {
-        return None;
+    if units == FRACTION_UNITS {
+        day += 1;
+        units = 0;
     }
+    let mjd = u32::try_from(day).ok()?;
+    let mjd_fraction = units as f64 / FRACTION_UNITS as f64;
 
-    let gps_seconds = instant_to_j2000_seconds(epoch)? + GPS_EPOCH_TO_J2000_S;
-    let (gnss_week, seconds_of_week) = gnss::week_and_seconds_of_week(gps_seconds);
-    if !(0.0..=u32::MAX as f64).contains(&gnss_week) {
-        return None;
-    }
+    let gps_ticks = tick.checked_add(GPS_EPOCH_TO_J2000_S as i128 * TICKS_PER_SECOND)?;
+    let gnss_week = u32::try_from(gps_ticks.div_euclid(TICKS_PER_WEEK)).ok()?;
+    let seconds_of_week = interval_seconds(gps_ticks.rem_euclid(TICKS_PER_WEEK));
 
     Some(FirstEpochHeaderFields {
-        gnss_week: gnss_week as u32,
+        gnss_week,
         seconds_of_week,
-        mjd: mjd as u32,
+        mjd,
         mjd_fraction,
     })
 }
@@ -2441,7 +2753,7 @@ fn clock_dispersion(
 /// Datum offset at `key`, using an exact estimate when available or linear
 /// interpolation between the nearest bracketing estimates. Never extrapolates
 /// beyond the observed offset interval.
-fn clock_offset_at(offsets: &BTreeMap<i64, f64>, key: i64) -> Option<f64> {
+fn clock_offset_at(offsets: &BTreeMap<i128, f64>, key: i128) -> Option<f64> {
     if let Some(offset) = offsets.get(&key) {
         return Some(*offset);
     }
@@ -2482,9 +2794,9 @@ fn source_clock_raw_at(
 }
 
 fn source_has_zero_applied_offset(
-    clock_offset: &[BTreeMap<i64, f64>],
+    clock_offset: &[BTreeMap<i128, f64>],
     source_idx: usize,
-    key: i64,
+    key: i128,
 ) -> bool {
     let offset = if source_idx == 0 {
         Some(0.0)
@@ -2509,11 +2821,11 @@ fn source_has_zero_applied_offset(
 ///   non-zero applied offset, missing raw values, or modified clock seconds).
 fn preserved_source_raw_clock_us(
     sources: &[Sp3],
-    epoch_index: &[BTreeMap<i64, usize>],
-    key: i64,
+    epoch_index: &[BTreeMap<i128, usize>],
+    key: i128,
     sat: &GnssSatelliteId,
     clock_selection: Option<&CellSelection>,
-    clock_offset: &[BTreeMap<i64, f64>],
+    clock_offset: &[BTreeMap<i128, f64>],
     selected_s: f64,
 ) -> Option<Option<f64>> {
     match clock_selection {
@@ -2567,8 +2879,8 @@ fn preserved_source_raw_clock_us(
 
 fn precedence_sources_for_satellites(
     sources: &[Sp3],
-    epoch_index: &[BTreeMap<i64, usize>],
-    epoch_keys: &BTreeMap<i64, Instant>,
+    epoch_index: &[BTreeMap<i128, usize>],
+    epoch_keys: &BTreeMap<i128, Instant>,
     systems: Option<&BTreeSet<GnssSystem>>,
 ) -> BTreeMap<GnssSatelliteId, usize> {
     let mut by_sat = BTreeMap::new();
@@ -2642,96 +2954,6 @@ fn validate_merge_options(opts: &MergeOptions) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Resolve the common (output) epoch interval and validate that every input can
-/// contribute to it without interpolation.
-///
-/// The common interval is the caller's `target` if given, otherwise the
-/// **finest** native interval among the inputs. An input is compatible when its
-/// native interval and the output interval are integer-commensurate: a finer
-/// input can be decimated, while a coarser input contributes only at the epochs
-/// it actually contains. No orbit or clock interpolation is introduced.
-fn resolve_common_epoch_interval(sources: &[Sp3], target: Option<f64>) -> Result<f64> {
-    let intervals: Vec<f64> = sources
-        .iter()
-        .enumerate()
-        .map(|(idx, source)| {
-            effective_epoch_interval_s(source)?.ok_or_else(|| {
-                Error::InvalidInput(format!(
-                    "merge input {idx} has no usable positive epoch interval"
-                ))
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let common = match target {
-        Some(t) if t.is_finite() && t > 0.0 => t,
-        Some(t) => {
-            return Err(Error::InvalidInput(format!(
-                "merge target epoch interval must be positive and finite, got {t}"
-            )))
-        }
-        None => intervals.iter().copied().fold(f64::INFINITY, f64::min),
-    };
-
-    // The merge matches and decimates epochs on whole-second J2000 keys, so the
-    // common grid must fall on whole seconds for the decimation lattice to be
-    // exact. SP3 grids are integer-second; reject a fractional common interval
-    // rather than decimate on a mismatched (rounded) lattice.
-    if (common - common.round()).abs() > WHOLE_SECOND_EPS_S || common.round() < 1.0 {
-        return Err(Error::InvalidInput(format!(
-            "merge common epoch interval {common:.6} s must be a positive whole number of seconds"
-        )));
-    }
-
-    for (idx, interval) in intervals.iter().copied().enumerate() {
-        if !divides_evenly(interval, common) && !divides_evenly(common, interval) {
-            return Err(Error::InvalidInput(format!(
-                "merge inputs have mismatched epoch intervals: output {common:.6} s and input {idx} {interval:.6} s are not integer-commensurate (positional interpolation is not performed)"
-            )));
-        }
-    }
-
-    Ok(common)
-}
-
-/// True when `common` is a positive-integer multiple of `interval` (within the
-/// interval tolerance), i.e. `interval`'s grid is a superset of the common grid.
-fn divides_evenly(interval: f64, common: f64) -> bool {
-    if !(interval.is_finite() && interval > 0.0 && common.is_finite() && common > 0.0) {
-        return false;
-    }
-    let k = (common / interval).round();
-    k >= 1.0 && same_interval(k * interval, common)
-}
-
-fn effective_epoch_interval_s(source: &Sp3) -> Result<Option<f64>> {
-    let secs: Vec<f64> = source
-        .epochs
-        .iter()
-        .filter_map(instant_to_j2000_seconds)
-        .collect();
-    validate::require_strictly_increasing(secs.iter().copied(), "merge input epochs").map_err(
-        |error| Error::InvalidInput(format!("{} must be strictly increasing", error.field())),
-    )?;
-    let gaps: Vec<f64> = secs.windows(2).map(|w| w[1] - w[0]).collect();
-
-    if gaps.is_empty() {
-        let header = source.header.epoch_interval_s;
-        return Ok((header.is_finite() && header > 0.0).then_some(header));
-    }
-
-    let interval = gaps[0];
-    if gaps.iter().all(|g| same_interval(*g, interval)) {
-        Ok(Some(interval))
-    } else {
-        Ok(None)
-    }
-}
-
-fn same_interval(a: f64, b: f64) -> bool {
-    (a - b).abs() <= WHOLE_SECOND_EPS_S
 }
 
 /// Indices of the largest subset of `items` whose members are *mutually* within
@@ -2900,19 +3122,24 @@ fn combine_axis(members: &[(usize, f64)], how: MergeCombine) -> f64 {
 /// should consult [`clock_reference_offset`] to see which epochs were aligned.
 /// The returned product interpolates like any other [`Sp3`].
 pub fn align_clock_reference(reference: &Sp3, other: &Sp3, min_common: usize) -> Sp3 {
-    let offsets: BTreeMap<i64, f64> = clock_reference_offset(reference, other, min_common)
-        .into_iter()
-        .filter_map(|o| {
-            instant_to_j2000_seconds(&o.epoch).map(|sec| (sec.floor() as i64, o.offset_s))
-        })
-        .collect();
+    let other_ticks = product_ticks(other);
+    let offsets: BTreeMap<i128, f64> = clock_offsets_by_tick(
+        reference,
+        &product_ticks(reference),
+        other,
+        &other_ticks,
+        min_common,
+    )
+    .into_iter()
+    .map(|(tick, offset)| (tick, offset.offset_s))
+    .collect();
 
     let mut aligned = other.clone();
     for ei in 0..aligned.epochs.len() {
-        let Some(sec) = sp3_epoch_j2000_seconds(&aligned, ei, &aligned.epochs[ei]) else {
+        let Some(tick) = other_ticks.get(ei).copied().flatten() else {
             continue;
         };
-        let Some(&off) = offsets.get(&(sec.floor() as i64)) else {
+        let Some(&off) = offsets.get(&tick) else {
             continue;
         };
         for state in aligned.states[ei].values_mut() {
@@ -3084,10 +3311,10 @@ fn transition_between(
 mod tests {
     use super::super::Sp3;
     use super::{
-        align_clock_reference, clock_reference_offset, merge, CellSelection, MergeCombine,
-        MergeOptions, MergePrecedenceScope, MergeReport, OutlierRejectOptions, ProvenanceMode,
-        Sp3FrameLabelSet, Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions,
-        TransitionReason,
+        align_clock_reference, clock_reference_offset, merge, CellSelection, ClockOmission,
+        ClockOmissionReason, MergeCombine, MergeFlag, MergeOptions, MergePrecedenceScope,
+        MergeReport, OutlierRejectOptions, ProvenanceMode, Sp3FrameLabelSet,
+        Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions, TransitionReason,
     };
     use crate::constants::SECONDS_PER_DAY;
     use crate::error::Error;
@@ -3754,11 +3981,17 @@ mod tests {
             };
 
             let (merged, report) = merge(&[a, b], &opts).expect("merge");
+            // The lone cell is the lone epoch: refusing it leaves the epoch with
+            // nothing to write, so it is omitted and reported.
             assert_eq!(
-                merged.states_at(0).expect("epoch").contains_key(&gps(1)),
+                merged
+                    .states_at(0)
+                    .is_ok_and(|states| states.contains_key(&gps(1))),
                 accepted,
                 "delta {delta_km} km"
             );
+            assert_eq!(merged.epochs.is_empty(), !accepted);
+            assert_eq!(report.omitted_epochs.len(), usize::from(!accepted));
             assert_eq!(report.quarantined.is_empty(), accepted);
         }
 
@@ -4333,10 +4566,10 @@ mod tests {
     }
 
     #[test]
-    fn merge_rejects_non_divisible_epoch_intervals() {
-        // 900 s and 400 s: 900 is not an integer multiple of 400, so no exact
-        // subset of the 400 s grid lands on the 900 s grid -> still rejected
-        // (positional interpolation is never performed).
+    fn merge_unions_non_commensurate_cadences_on_their_common_grid() {
+        // 900 s and 400 s: no input is decimated and nothing is interpolated.
+        // The default grid is the greatest common divisor of the steps and the
+        // offsets, 100 s, so every input epoch has a place on it.
         let a = sp3_two_epochs(
             &[("G01", [15000.0, -20000.0, 5000.0], Some(100.0))],
             &[("G01", [15001.0, -20001.0, 5001.0], Some(101.0))],
@@ -4350,17 +4583,21 @@ mod tests {
             "IGS14",
         );
 
-        let err = merge(&[a, b], &MergeOptions::default()).expect_err("non-divisible intervals");
-        assert!(
-            err.to_string().contains("mismatched epoch intervals"),
-            "{err}"
-        );
+        let (merged, report) =
+            merge(&[a, b], &MergeOptions::default()).expect("non-commensurate cadences");
+        assert_eq!(merged.header.epoch_interval_s, 100.0);
+        assert_eq!(merged.epochs.len(), 3);
+        assert!(report.dropped_input_epochs.is_empty());
+        let seconds = merged.epochs_j2000_seconds();
+        assert_eq!(seconds[1] - seconds[0], 400.0);
+        assert_eq!(seconds[2] - seconds[0], 900.0);
     }
 
     #[test]
-    fn merge_rejects_a_non_whole_second_common_interval() {
-        // The decimation lattice is whole-second J2000 keys, so a fractional
-        // common interval must be rejected rather than silently rounded.
+    fn merge_reports_the_input_epochs_an_explicit_target_grid_drops() {
+        // A 450.5 s target is a whole number of 10 ns ticks, so it is a grid an
+        // SP3 header states. Anchored at the first epoch it holds 00:00 but not
+        // 00:15, and each input's 00:15 epoch is reported as dropped.
         let mk = || {
             sp3_two_epochs(
                 &[("G01", [15000.0, -20000.0, 5000.0], Some(100.0))],
@@ -4373,8 +4610,29 @@ mod tests {
             target_epoch_interval_s: Some(450.5),
             ..MergeOptions::default()
         };
-        let err = merge(&[mk(), mk()], &opts).expect_err("fractional target");
-        assert!(err.to_string().contains("whole number of seconds"), "{err}");
+        let (merged, report) = merge(&[mk(), mk()], &opts).expect("explicit target");
+        assert_eq!(merged.header.epoch_interval_s, 450.5);
+        assert_eq!(merged.epochs.len(), 1);
+        let dropped: Vec<(usize, usize, super::DroppedEpochReason)> = report
+            .dropped_input_epochs
+            .iter()
+            .map(|entry| (entry.source, entry.epoch_index, entry.reason))
+            .collect();
+        assert_eq!(
+            dropped,
+            vec![
+                (0, 1, super::DroppedEpochReason::OffTargetGrid),
+                (1, 1, super::DroppedEpochReason::OffTargetGrid),
+            ]
+        );
+
+        // A target no whole number of ticks states is refused by name.
+        let finer = MergeOptions {
+            target_epoch_interval_s: Some(1.0e-9),
+            ..MergeOptions::default()
+        };
+        let err = merge(&[mk()], &finer).expect_err("sub-tick target");
+        assert!(err.to_string().contains("10-nanosecond ticks"), "{err}");
     }
 
     #[test]
@@ -4497,14 +4755,45 @@ mod tests {
             ..MergeOptions::default()
         };
 
-        let (merged, _report) = merge(&[a, b], &opts).expect("merge");
+        let (merged, report) = merge(&[a, b], &opts).expect("merge");
         let epoch0 = merged.states_at(0).expect("epoch 0");
-        let epoch1 = merged.states_at(1).expect("epoch 1");
 
         assert!(epoch0.contains_key(&gps(1)));
-        assert!(
-            !epoch1.contains_key(&gps(1)),
-            "G01 must not switch from source 0 at epoch 0 to source 1 at epoch 1"
+        // G01 must not switch from source 0 at epoch 0 to source 1 at epoch 1.
+        // That leaves epoch 1 with no cell at all, so it is not written; the
+        // withheld cell and the omitted epoch are both reported.
+        assert_eq!(merged.epochs.len(), 1);
+        assert_eq!(report.omitted_epochs.len(), 1);
+        assert_eq!(
+            report.arc_withheld,
+            vec![MergeFlag {
+                epoch: report.omitted_epochs[0],
+                satellite: gps(1),
+                sources: vec![1],
+            }]
+        );
+        // Source 1's clocks cannot be put on source 0's datum (one common
+        // clock, below `clock_min_common`), so each is reported rather than
+        // lost: at epoch 0, where the cell has source 0's clock, and at epoch 1,
+        // where nothing is written.
+        assert_eq!(
+            report.clock_omissions,
+            vec![
+                ClockOmission {
+                    epoch: merged.epochs[0],
+                    satellite: gps(1),
+                    source: 1,
+                    reason: ClockOmissionReason::DatumNotObservable,
+                    cell_has_clock: true,
+                },
+                ClockOmission {
+                    epoch: report.omitted_epochs[0],
+                    satellite: gps(1),
+                    source: 1,
+                    reason: ClockOmissionReason::DatumNotObservable,
+                    cell_has_clock: false,
+                },
+            ]
         );
         assert_eq!(merged.header.epoch_interval_s, 900.0);
     }
@@ -4926,7 +5215,7 @@ mod tests {
 
         let mut igs_idx: std::collections::BTreeMap<i64, usize> = std::collections::BTreeMap::new();
         for (i, ep) in igs.epochs.iter().enumerate() {
-            if let Some(s) = super::instant_to_j2000_seconds(ep) {
+            if let Some(s) = super::super::interp::instant_to_j2000_seconds(ep) {
                 igs_idx.insert(s.floor() as i64, i);
             }
         }
@@ -4935,7 +5224,7 @@ mod tests {
         let mut max = 0.0_f64;
         let mut n = 0usize;
         for (mi, ep) in merged.epochs.iter().enumerate() {
-            let key = super::instant_to_j2000_seconds(ep)
+            let key = super::super::interp::instant_to_j2000_seconds(ep)
                 .expect("merged epoch key")
                 .floor() as i64;
             let ii = *igs_idx.get(&key).expect("IGS combined covers merged epoch");
