@@ -673,7 +673,12 @@ fn find_passes_match_skyfield() {
     let (mut normal_adapter_checked, mut partial_adapter_checked) = (false, false);
     for w in pass_windows(&fx) {
         let c = case(&fx, &w.sat_name);
-        let window_seconds = w.end.diff_seconds(w.start);
+        let window_seconds = w
+            .end
+            .unix_microseconds()
+            .checked_sub(w.start.unix_microseconds())
+            .expect("fixture window span fits in i64")
+            / 1_000_000;
         let adapter_step_seconds = if !normal_adapter_checked
             && w.sat_name == "25544"
             && w.station_name == "london"
