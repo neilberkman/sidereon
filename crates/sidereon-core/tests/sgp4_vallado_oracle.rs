@@ -25,6 +25,11 @@
 //!   (`fixtures-generators/rust_libm_port.py`). That is the computation this
 //!   crate performs, so every state must match it to the bit and every error
 //!   code must be its code.
+//!
+//! The file's `far_times` hold the same satellites from 1e7 minutes to the
+//! largest finite double either way, where python-sgp4 still propagates or
+//! returns its own error code, and so must this crate; `drag_free_iss` adds
+//! the far times where python-sgp4 returns code 0 with a NaN state.
 
 use sidereon_core::astro::sgp4::{
     propagate_elements, ElementSet, Error, JulianDate, MinutesSinceEpoch, OpsMode, Prediction,
@@ -36,6 +41,15 @@ use sidereon_core::astro::tle::TlePolicy;
 /// Verification states python-sgp4 gives as numbers that this crate
 /// reproduces bit for bit (the rest differ within the libm bound).
 const VERIFICATION_EXACT: usize = 379;
+/// Far states python-sgp4 gives as numbers that carry a bound.
+const FAR_BOUNDED: usize = 31;
+/// Far states python-sgp4 gives as numbers that this crate reproduces bit for
+/// bit.
+const FAR_EXACT: usize = 30;
+/// Drag-free ISS far states, and those python-sgp4 gives as NaN with code 0.
+const DRAG_FREE_STATES: usize = 18;
+const DRAG_FREE_NON_FINITE: usize = 6;
+
 /// Read a verification-set TLE as Vallado's `twoline2rv` does. The set's
 /// element sets 33333, 33334 and 33335 carry checksum digits that disagree
 /// with their lines, which the reference reader ignores, so they are read
@@ -266,6 +280,66 @@ fn verification_set_matches_python_sgp4_and_the_rust_libm_model() {
         (700, 21, 700)
     );
     assert_eq!(agreement.exact, VERIFICATION_EXACT);
+}
+
+/// Far from epoch: python-sgp4 propagates every finite time it can reach, so
+/// this crate must not refuse one either. Every far state matches the
+/// Rust-libm model bit for bit, and every error code is python-sgp4's. Of the
+/// 82 states python-sgp4 gives as numbers, 31 carry a bound; the 48 of
+/// resonant orbits carry none, as the bound summed over thousands of
+/// integrator steps overflows, nor do three near-Earth states (06251 at -1e8
+/// and -1e9 minutes, 28057 at 1e10) where a comparison or an angle reduction
+/// could go either way between the two libms.
+#[test]
+fn far_times_match_python_sgp4_and_the_rust_libm_model() {
+    let data = fixture();
+    let mut agreement = Agreement::default();
+    for sat in data["satellites"].as_array().unwrap() {
+        let satellite = vallado_satellite(
+            sat["line1"].as_str().unwrap(),
+            sat["line2"].as_str().unwrap(),
+            OpsMode::Improved,
+        );
+        check_rows(
+            &mut agreement,
+            &satellite,
+            sat["norad"].as_str().unwrap(),
+            &sat["far_times"],
+        );
+    }
+    agreement.finish("far times");
+    assert_eq!(
+        (agreement.finite, agreement.errors, agreement.bounded),
+        (82, 335, FAR_BOUNDED)
+    );
+    assert_eq!(agreement.exact, FAR_EXACT);
+}
+
+/// The ISS element set with B* = 0: python-sgp4 returns finite states with
+/// code 0 far from epoch up to 1e19 minutes and, from 1e100 minutes, code 0
+/// with a NaN state, which this crate reports as [`Error::NonFiniteOutput`].
+#[test]
+fn drag_free_iss_far_times_match_python_sgp4_and_the_rust_libm_model() {
+    let data = fixture();
+    let set = &data["drag_free_iss"];
+    let satellite = Satellite::from_tle(
+        set["line1"].as_str().unwrap(),
+        set["line2"].as_str().unwrap(),
+    )
+    .unwrap();
+    let mut agreement = Agreement::default();
+    check_rows(
+        &mut agreement,
+        &satellite,
+        "drag-free 25544",
+        &set["far_times"],
+    );
+    agreement.finish("drag-free ISS");
+    assert_eq!(
+        (agreement.finite + agreement.non_finite, agreement.errors),
+        (DRAG_FREE_STATES, 0)
+    );
+    assert_eq!(agreement.non_finite, DRAG_FREE_NON_FINITE);
 }
 
 /// The ISS at split Julian dates, against python-sgp4's `Satrec.sgp4(jd, fr)`.

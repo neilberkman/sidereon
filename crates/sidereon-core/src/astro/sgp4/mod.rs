@@ -146,6 +146,14 @@ pub enum Error {
         /// `code` in `Error::Sgp4` carries the code value used by the enclosing API; its type defines the encoding.
         code: i32,
     },
+    /// The deep-space resonance integrator would take more than the
+    /// 720-minute steps the caller allowed with
+    /// [`Satellite::propagate_with_step_budget`].
+    #[error("SGP4 resonance integrator needs more than {budget} steps")]
+    ResonanceStepBudget {
+        /// The step budget the caller set.
+        budget: u64,
+    },
 }
 
 /// Error from opt-in decay-latched SGP4 propagation.
@@ -171,7 +179,15 @@ pub enum DecayLatchedError {
     Propagation(#[from] Error),
 }
 
-const MAX_MINUTES_SINCE_EPOCH: f64 = 10_000_000.0;
+/// The farthest time, in minutes from epoch either way, the deep-space
+/// resonance integrator reaches. `dspace` steps `atime` by 720 minutes until
+/// it is within 720 minutes of the requested time. From 2^63 minutes on, one
+/// unit in the last place of `atime` is 2048, so `atime + 720` rounds back to
+/// `atime` and the loop never ends; below it every step advances by at most
+/// 1024 minutes and lands within reach of any time. Vallado's C++, and so
+/// python-sgp4, never return for a resonant orbit past this time; every other
+/// orbit, and a resonant one up to it, is propagated at any finite time.
+const RESONANCE_REACH_MINUTES: f64 = 9_223_372_036_854_775_808.0;
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -587,11 +603,46 @@ impl Satellite {
     /// Propagate to a time given as minutes since the TLE epoch.
     ///
     /// Calls the SGP4 step kernel directly with the supplied tsince - no JD
-    /// round-trip, no precision loss.
+    /// round-trip, no precision loss. Any finite time is propagated, as
+    /// python-sgp4 propagates it, with SGP4's own error codes far from epoch,
+    /// except a time more than 2^63 minutes from epoch for a deep-space
+    /// resonant orbit, whose integrator never reaches it (python-sgp4 does not
+    /// return there); that and a non-finite time are refused with
+    /// [`Error::InvalidInput`] for `minutes_since_epoch`.
+    ///
+    /// Cost: a deep-space resonant orbit (12-hour or 24-hour period) is
+    /// integrated from epoch in 720-minute steps on every call, so one call
+    /// at `t` minutes takes about `|t| / 720` steps, as in Vallado's C++ and
+    /// python-sgp4: some 1.4 million steps at 1e9 minutes (1900 years), and
+    /// years of computing near 2^63. Every other orbit costs the same at any
+    /// time. [`Satellite::propagate_with_step_budget`] bounds the work.
+    ///
+    /// Where SGP4 reports no error code but its state is not finite, as
+    /// python-sgp4 does for some element sets far from epoch (it returns code
+    /// 0 with a NaN state, for example for a drag-free ISS element set at
+    /// 1e100 minutes), this returns [`Error::NonFiniteOutput`] instead of the
+    /// NaN state.
     pub fn propagate(&self, t: MinutesSinceEpoch) -> Result<Prediction, Error> {
         // Clone the satrec so propagation doesn't mutate the cached state
         // (sgp4 writes back into the satrec - error code, atime, etc.).
         propagate_satrec((*self.satrec).clone(), t)
+    }
+
+    /// [`Satellite::propagate`], refusing with
+    /// [`Error::ResonanceStepBudget`] a call whose deep-space resonance
+    /// integration would take more than `max_steps` 720-minute steps. The
+    /// integrator stops at the budget, so a refused call costs at most
+    /// `max_steps` steps. Orbits without the resonance integrator take no
+    /// steps and are never refused. A call within the budget returns exactly
+    /// what [`Satellite::propagate`] returns.
+    pub fn propagate_with_step_budget(
+        &self,
+        t: MinutesSinceEpoch,
+        max_steps: u64,
+    ) -> Result<Prediction, Error> {
+        let mut satrec = (*self.satrec).clone();
+        satrec.resonance_step_budget = Some(max_steps);
+        propagate_satrec(satrec, t)
     }
 
     /// Propagate with an opt-in post-decay validity latch.
@@ -879,10 +930,18 @@ fn propagate_satrec(
     t: MinutesSinceEpoch,
 ) -> Result<Prediction, Error> {
     validate_minutes_since_epoch(t)?;
+    if satrec.irez != 0 && t.0.abs() > RESONANCE_REACH_MINUTES {
+        return Err(invalid_domain("minutes_since_epoch"));
+    }
 
     let mut r = [0.0_f64; 3];
     let mut v = [0.0_f64; 3];
     let ok = vallado::sgp4(&mut satrec, t.0, &mut r, &mut v);
+    if satrec.resonance_budget_exhausted {
+        return Err(Error::ResonanceStepBudget {
+            budget: satrec.resonance_step_budget.unwrap_or(0),
+        });
+    }
     if !ok || satrec.error != 0 {
         return Err(Error::Sgp4 { code: satrec.error });
     }
@@ -895,9 +954,6 @@ fn propagate_satrec(
 
 fn validate_minutes_since_epoch(t: MinutesSinceEpoch) -> Result<(), Error> {
     validate::finite(t.0, "minutes_since_epoch").map_err(map_input_error)?;
-    if t.0.abs() > MAX_MINUTES_SINCE_EPOCH {
-        return Err(invalid_domain("minutes_since_epoch"));
-    }
     Ok(())
 }
 
@@ -1306,7 +1362,8 @@ mod tests {
     use super::{
         parse_tle_file, parse_tle_file_with_policy, propagate_batch, propagate_batch_parallel,
         propagate_elements, DecayLatch, DecayLatchedError, ElementSet, Error, JulianDate,
-        MinutesSinceEpoch, Satellite, Sgp4InputErrorKind, TleRecordIssue, MAX_MINUTES_SINCE_EPOCH,
+        MinutesSinceEpoch, OpsMode, Satellite, Sgp4InputErrorKind, TleRecordIssue,
+        RESONANCE_REACH_MINUTES,
     };
     use crate::astro::tle::TlePolicy;
 
@@ -1716,18 +1773,115 @@ mod tests {
     }
 
     #[test]
-    fn propagation_rejects_out_of_domain_time_inputs() {
+    fn a_non_finite_fraction_is_refused() {
         let sat = Satellite::from_tle(ISS_L1, ISS_L2).unwrap();
-        assert_invalid_input(
-            sat.propagate(MinutesSinceEpoch(MAX_MINUTES_SINCE_EPOCH.next_up())),
-            "minutes_since_epoch",
-            Sgp4InputErrorKind::OutOfRange,
-        );
         assert_invalid_input(
             sat.propagate_jd(JulianDate(2_458_304.0, f64::NAN)),
             "julian_date.fraction",
             Sgp4InputErrorKind::NonFinite,
         );
+    }
+
+    // NORAD 09998 from the Vallado verification set, a one-day resonant orbit.
+    const RESONANT_L1: &str =
+        "1 09998U 74033F   05148.79417928 -.00000112  00000-0  00000+0 0  4480";
+    const RESONANT_L2: &str =
+        "2 09998   9.4958 313.1750 0270971 327.5225  30.8097  1.16186785 45878";
+
+    #[test]
+    fn the_resonance_integrator_reaches_2_pow_63_minutes_and_no_further() {
+        // Stepping by 720 from 0, `atime` reaches 2^63 exactly (steps of at most
+        // 1024 minutes in the binade below) and then stays there: one ulp is
+        // 2048, so `atime + 720` rounds back to `atime`.
+        let mut atime = 2.0_f64.powi(63) - 5.0 * 1024.0;
+        for _ in 0..10 {
+            atime += 720.0;
+        }
+        assert_eq!(atime, RESONANCE_REACH_MINUTES);
+        assert_eq!(atime + 720.0, atime);
+        assert!((RESONANCE_REACH_MINUTES.next_up() - atime).abs() >= 720.0);
+
+        let resonant =
+            Satellite::from_tle_with_opsmode(RESONANT_L1, RESONANT_L2, OpsMode::Improved).unwrap();
+        assert_ne!(resonant.satrec().irez, 0);
+        for t in [
+            RESONANCE_REACH_MINUTES.next_up(),
+            -RESONANCE_REACH_MINUTES.next_up(),
+            f64::MAX,
+            f64::MIN,
+        ] {
+            assert_invalid_input(
+                resonant.propagate(MinutesSinceEpoch(t)),
+                "minutes_since_epoch",
+                Sgp4InputErrorKind::OutOfRange,
+            );
+        }
+
+        // An orbit without the integrator is propagated at any finite time.
+        // At the largest double python-sgp4 2.22 returns code 1 for this ISS
+        // element set (mean eccentricity out of range);
+        // `far_times_match_python_sgp4` in `tests/sgp4_vallado_oracle.rs`
+        // checks the verification set far from epoch.
+        let sat = Satellite::from_tle(ISS_L1, ISS_L2).unwrap();
+        assert_eq!(sat.satrec().irez, 0);
+        assert_eq!(
+            sat.propagate(MinutesSinceEpoch(f64::MAX)),
+            Err(Error::Sgp4 { code: 1 })
+        );
+    }
+
+    #[test]
+    fn a_step_budget_refuses_only_what_it_cannot_reach() {
+        let resonant =
+            Satellite::from_tle_with_opsmode(RESONANT_L1, RESONANT_L2, OpsMode::Improved).unwrap();
+        // 7201 minutes takes ten 720-minute steps: atime 7200 is within 720.
+        let t = MinutesSinceEpoch(10.0 * 720.0 + 1.0);
+        let unlimited = resonant.propagate(t).unwrap();
+        assert_eq!(
+            resonant.propagate_with_step_budget(t, 10),
+            Ok(unlimited.clone())
+        );
+        assert_eq!(
+            resonant.propagate_with_step_budget(t, 9),
+            Err(Error::ResonanceStepBudget { budget: 9 })
+        );
+        let back = MinutesSinceEpoch(-(10.0 * 720.0 + 1.0));
+        assert!(resonant.propagate_with_step_budget(back, 10).is_ok());
+        assert_eq!(
+            resonant.propagate_with_step_budget(back, 9),
+            Err(Error::ResonanceStepBudget { budget: 9 })
+        );
+        // Within 720 minutes of epoch no step is taken.
+        assert_eq!(
+            resonant.propagate_with_step_budget(MinutesSinceEpoch(719.0), 0),
+            resonant.propagate(MinutesSinceEpoch(719.0))
+        );
+        // An orbit without the integrator is never refused.
+        let sat = Satellite::from_tle(ISS_L1, ISS_L2).unwrap();
+        assert_eq!(
+            sat.propagate_with_step_budget(MinutesSinceEpoch(1.0e6), 0),
+            sat.propagate(MinutesSinceEpoch(1.0e6))
+        );
+    }
+
+    #[test]
+    fn a_nan_state_with_code_zero_is_a_non_finite_output() {
+        // The ISS element set with B* = 0: python-sgp4 2.22 returns code 0
+        // with a NaN state at 1e100 minutes; this crate reports it.
+        let sat = Satellite::from_tle(
+            "1 25544U 98067A   18184.80969102  .00001614  00000-0  00000-0 0  9999",
+            ISS_L2,
+        )
+        .unwrap();
+        for t in [1.0e100, f64::MAX, -f64::MAX] {
+            assert!(
+                matches!(
+                    sat.propagate(MinutesSinceEpoch(t)),
+                    Err(Error::NonFiniteOutput { .. })
+                ),
+                "{t}"
+            );
+        }
     }
 
     #[test]

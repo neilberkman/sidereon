@@ -39,8 +39,6 @@ use crate::astro::sgp4::{ElementSet, Error as Sgp4Error, JulianDate, OpsMode, Sa
 use crate::astro::time::civil::{civil_from_split_julian_date, day_of_year};
 use crate::astro::tle::{self, TleElements};
 
-use super::MAX_MINUTES_SINCE_EPOCH;
-
 const BSTAR_SCALE: f64 = 1.0e-4;
 const ECC_MAX: f64 = 0.999;
 const PENALTY_KM: f64 = 1.0e6;
@@ -587,15 +585,6 @@ fn validate_and_resolve(
     }
 
     let (epoch, epoch_index) = resolve_epoch(samples, config.epoch)?;
-    for sample in samples {
-        let minutes = seconds_between(sample.epoch, epoch).abs() / 60.0;
-        if minutes > MAX_MINUTES_SINCE_EPOCH {
-            return Err(TleFitError::InvalidInput {
-                field: "arc_span",
-                reason: "outside SGP4 time domain",
-            });
-        }
-    }
 
     Ok(ResolvedFit {
         epoch,

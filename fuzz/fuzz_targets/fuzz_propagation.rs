@@ -104,6 +104,11 @@ fn reduced_elements(input: &Input) -> Elements {
     }
 }
 
+/// Largest |minutes since epoch| given to SGP4 without a step budget.
+const SGP4_UNBUDGETED_MINUTES: f64 = 1.0e7;
+/// Resonance integrator steps allowed for the full fuzzed time.
+const SGP4_FUZZ_STEP_BUDGET: u64 = 20_000;
+
 fuzz_target!(|data: &[u8]| {
     let Some(input) = fuzz_input::<Input>(data) else {
         return;
@@ -169,28 +174,45 @@ fuzz_target!(|data: &[u8]| {
         DP54.propagate(state, input.t_end, &dynamics, &ctx, &opts),
     );
 
+    // A deep-space resonant orbit integrates in 720-minute steps from epoch,
+    // so SGP4's cost grows with |t|; the unbudgeted calls take times within
+    // 1e7 minutes (under 14 000 steps), and the full time goes through the
+    // step-budgeted call.
     let elset = elements(&input);
+    let t_sgp4 = if input.t_end.is_finite() {
+        input
+            .t_end
+            .clamp(-SGP4_UNBUDGETED_MINUTES, SGP4_UNBUDGETED_MINUTES)
+    } else {
+        input.t_end
+    };
     assert_ok_finite_or_err(
         "sgp4::propagate_elements",
-        sidereon_core::astro::sgp4::propagate_elements(&elset, MinutesSinceEpoch(input.t_end)),
+        sidereon_core::astro::sgp4::propagate_elements(&elset, MinutesSinceEpoch(t_sgp4)),
     );
     assert_ok_finite_or_err(
         "sgp4::propagate_elements_with_opsmode",
         sidereon_core::astro::sgp4::propagate_elements_with_opsmode(
             &elset,
-            MinutesSinceEpoch(input.t_end),
+            MinutesSinceEpoch(t_sgp4),
             OpsMode::Afspc,
         ),
     );
     if let Ok(sat) = Satellite::from_elements(&elset) {
         assert_ok_finite_or_err(
             "Satellite::propagate",
-            sat.propagate(MinutesSinceEpoch(input.t_end)),
+            sat.propagate(MinutesSinceEpoch(t_sgp4)),
         );
         assert_ok_finite_or_err(
-            "Satellite::propagate_jd",
-            sat.propagate_jd(JulianDate(input.sgp4[9], input.sgp4[10])),
+            "Satellite::propagate_with_step_budget",
+            sat.propagate_with_step_budget(MinutesSinceEpoch(input.t_end), SGP4_FUZZ_STEP_BUDGET),
         );
+        let JulianDate(epoch_whole, epoch_fraction) = sat.epoch_jd();
+        let jd = JulianDate(input.sgp4[9], input.sgp4[10]);
+        let minutes = (jd.0 - epoch_whole) * 1440.0 + (jd.1 - epoch_fraction) * 1440.0;
+        if !(minutes.abs() > SGP4_UNBUDGETED_MINUTES) {
+            assert_ok_finite_or_err("Satellite::propagate_jd", sat.propagate_jd(jd));
+        }
     }
 
     let reduced = reduced_elements(&input);
