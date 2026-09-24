@@ -18,7 +18,12 @@ fuzz_target!(|data: &[u8]| {
         for message in &stream.messages {
             if let Message::Msm(msm) = message {
                 let cells = tracker.observe(msm);
-                assert_eq!(cells.len(), msm.signals.len());
+                let phase_cells = msm
+                    .signals
+                    .iter()
+                    .filter(|signal| signal.lock_time_indicator.is_some())
+                    .count();
+                assert_eq!(cells.len(), phase_cells);
             }
         }
 

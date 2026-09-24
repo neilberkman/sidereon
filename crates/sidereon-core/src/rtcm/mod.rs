@@ -20,8 +20,7 @@
 //!
 //! | Message            | Numbers                                  | IR type |
 //! |--------------------|------------------------------------------|---------|
-//! | MSM4 observations  | 1074 / 1084 / 1094 / 1104 / 1114 / 1124 / 1134 | [`MsmMessage`] |
-//! | MSM7 observations  | 1077 / 1087 / 1097 / 1107 / 1117 / 1127 / 1137 | [`MsmMessage`] |
+//! | MSM1..MSM7 observations | 1071..1077 GPS, 1081..1087 GLONASS, 1091..1097 Galileo, 1101..1107 SBAS, 1111..1117 QZSS, 1121..1127 BeiDou, 1131..1137 NavIC | [`MsmMessage`] |
 //! | Station coordinates| 1005 / 1006                              | [`StationCoordinates`] |
 //! | Antenna / receiver | 1007 / 1008 / 1033                       | [`AntennaDescriptor`] |
 //! | GPS ephemeris      | 1019                                     | [`GpsEphemeris`] |
@@ -33,7 +32,7 @@
 //!
 //! Any other message number is preserved losslessly as [`Message::Unsupported`]
 //! (its raw body is kept so the frame still round-trips). Deferred message types
-//! include the other MSM variants (MSM1/2/3/5/6), the legacy L1/L1-L2
+//! include the legacy L1/L1-L2
 //! observation messages (1001-1004, 1009-1012), the NavIC ephemeris 1041, the
 //! GLONASS code-phase biases 1230, the IGS SSR messages 4076, the network-RTK
 //! correction families and the SSR messages not listed above. They decode as
@@ -514,7 +513,7 @@ struct DecodeFailure {
 /// caller can both build any variant from scratch and match every case.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
-    /// An MSM4 or MSM7 multi-signal observation message.
+    /// An MSM1 through MSM7 multi-signal observation message.
     Msm(MsmMessage),
     /// A 1005 / 1006 station antenna reference point.
     StationCoordinates(StationCoordinates),
