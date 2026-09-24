@@ -25,8 +25,6 @@ exclude = [
     "tests/cpp/**",
     "tests/sgp4_diagnostic.rs",
     "tests/sgp4_oracle_diff.rs",
-    "tests/sgp4_json_origin.rs",
-    "tests/sgp4_regenerate_fixture.rs",
     # Fixture generators and the RTKLIB oracle harness rebuild committed goldens.
     "fixtures-generators/**",
 ]

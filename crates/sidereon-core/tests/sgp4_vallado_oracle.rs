@@ -1,22 +1,41 @@
-//! Vallado SGP4 verification suite - 33 satellites, 198 propagation points,
-//! 1098 component checks, WGS72, opsmode 'i'. The file's states were first
-//! captured from the Python `sgp4` C extension, which compiles Vallado's C++
-//! (v2020-07-13); 70 of the 183 error-free states were later replaced by this
-//! crate's own results with its portable libm (the file's `reference` field
-//! says so). The compiled extension's states depend on the build: on arm64
-//! macOS, sgp4 2.22 reproduces 180 of the 183 originally captured states and
-//! the sgp4 2.25 wheel 17, and neither the pure-Python model nor either build
-//! reproduces the current file. The pure-Rust port in
-//! `sidereon_core::astro::sgp4` must match the file bit-for-bit (0 ULP) on every
-//! component: a regression lock on the kernel with portable transcendental
-//! functions, not a match to any one python-sgp4 build.
+//! SGP4 against python-sgp4 over Vallado's verification set.
+//!
+//! `sgp4_verification.json` is python-sgp4 2.22's own output (the compiled
+//! extension, Vallado's C++ of 2020-07-13, WGS72, opsmode 'i', built for arm64
+//! macOS without fused multiply-add), written by
+//! `fixtures-generators/generate_sgp4_verification.py`: the 33 element sets of
+//! `SGP4-VER.TLE` at the times Vallado's verification driver prints and at 0,
+//! 120, 360, 720, 1080 and 1440 minutes, 721 states, 21 of them python-sgp4
+//! error codes.
+//!
+//! Each state is checked two ways, neither against this crate's own output:
+//!
+//! * Against python-sgp4. This crate runs the same operations with the
+//!   portable `libm` crate, and python-sgp4 with the platform's libm. The two
+//!   libraries' `sin`, `cos`, `atan2` and `pow` each stay within 1 ulp of the
+//!   true value. Each error-free state carries a per-component bound on how
+//!   far that alone can move it, derived by
+//!   `fixtures-generators/sgp4_libm_bound.py` from SGP4's first-order
+//!   sensitivity to every libm call and to every re-rounding downstream of
+//!   one. Every component must lie within its bound, and every error state
+//!   must be refused with python-sgp4's error code.
+//! * Bit for bit against `rust_libm`: python-sgp4's model rewritten into the
+//!   C++'s operation order (`fixtures-generators/sgp4_vallado_order.py`) and
+//!   run with a statement-for-statement port of the `libm` crate's functions
+//!   (`fixtures-generators/rust_libm_port.py`). That is the computation this
+//!   crate performs, so every state must match it to the bit and every error
+//!   code must be its code.
 
 use sidereon_core::astro::sgp4::{
-    propagate_elements, ElementSet, JulianDate, MinutesSinceEpoch, OpsMode, Satellite,
+    propagate_elements, ElementSet, Error, JulianDate, MinutesSinceEpoch, OpsMode, Prediction,
+    Satellite,
 };
 use sidereon_core::astro::tle;
 use sidereon_core::astro::tle::TlePolicy;
 
+/// Verification states python-sgp4 gives as numbers that this crate
+/// reproduces bit for bit (the rest differ within the libm bound).
+const VERIFICATION_EXACT: usize = 379;
 /// Read a verification-set TLE as Vallado's `twoline2rv` does. The set's
 /// element sets 33333, 33334 and 33335 carry checksum digits that disagree
 /// with their lines, which the reference reader ignores, so they are read
@@ -32,6 +51,12 @@ fn hex_to_f64(s: &str) -> f64 {
         (true, r)
     } else if let Some(r) = s.strip_prefix("0x") {
         (false, r)
+    } else if s == "nan" {
+        return f64::NAN;
+    } else if s == "inf" {
+        return f64::INFINITY;
+    } else if s == "-inf" {
+        return f64::NEG_INFINITY;
     } else {
         panic!("bad hex float: {s}");
     };
@@ -50,70 +75,222 @@ fn hex_to_f64(s: &str) -> f64 {
 }
 
 fn ulp_distance(a: f64, b: f64) -> u64 {
-    let ia = a.to_bits() as i64;
-    let ib = b.to_bits() as i64;
-    (ia - ib).unsigned_abs()
+    // Order the bit patterns monotonically so the distance across zero counts.
+    let key = |x: f64| {
+        let bits = x.to_bits() as i64;
+        if bits < 0 {
+            i64::MIN - bits
+        } else {
+            bits
+        }
+    };
+    (key(a) as i128 - key(b) as i128).unsigned_abs() as u64
 }
 
-#[test]
-fn all_33_vallado_satellites_at_0_ulp() {
-    let data: serde_json::Value =
-        serde_json::from_str(include_str!("sgp4_verification.json")).unwrap();
+const LABELS: [&str; 6] = ["px", "py", "pz", "vx", "vy", "vz"];
 
-    let labels = ["px", "py", "pz", "vx", "vy", "vz"];
-    let mut failures = Vec::new();
+fn components(prediction: &Prediction) -> [f64; 6] {
+    [
+        prediction.position[0],
+        prediction.position[1],
+        prediction.position[2],
+        prediction.velocity[0],
+        prediction.velocity[1],
+        prediction.velocity[2],
+    ]
+}
 
-    for sat in data["satellites"].as_array().unwrap() {
-        let line1 = sat["line1"].as_str().unwrap();
-        let line2 = sat["line2"].as_str().unwrap();
-        let norad = sat["norad"].as_str().unwrap();
+/// Tally of one set of states against python-sgp4 and the Rust-libm model.
+#[derive(Default)]
+struct Agreement {
+    /// Error-free python-sgp4 states checked against their bound.
+    bounded: usize,
+    /// States python-sgp4 gives as numbers, bit-identical to them.
+    exact: usize,
+    /// States python-sgp4 gives as numbers.
+    finite: usize,
+    /// python-sgp4 error codes.
+    errors: usize,
+    /// python-sgp4 code-0 states that are not finite.
+    non_finite: usize,
+    max_ulp: u64,
+    max_fraction_of_bound: f64,
+    failures: Vec<String>,
+}
 
-        let satellite = vallado_satellite(line1, line2, OpsMode::Improved);
-
-        for prop in sat["propagations"].as_array().unwrap() {
-            // Skip rows the C++ reference flagged as errors (decay, etc.)
-            if prop.get("error").is_some() {
-                continue;
-            }
-
-            let tsince = prop["tsince"].as_f64().unwrap();
-            let pred = match satellite.propagate(MinutesSinceEpoch(tsince)) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            let actual = [
-                pred.position[0],
-                pred.position[1],
-                pred.position[2],
-                pred.velocity[0],
-                pred.velocity[1],
-                pred.velocity[2],
-            ];
-
-            for (i, label) in labels.iter().enumerate() {
-                let expected = hex_to_f64(prop[*label].as_str().unwrap());
-                let ulp = ulp_distance(actual[i], expected);
-                if ulp > 0 {
-                    failures.push((norad.to_string(), tsince, label.to_string(), ulp));
+impl Agreement {
+    fn check(&mut self, what: &str, result: Result<Prediction, Error>, row: &serde_json::Value) {
+        let rust = &row["rust_libm"];
+        // The Rust-libm model: this crate's computation, bit for bit.
+        match (&result, rust.get("error")) {
+            (Err(Error::Sgp4 { code }), Some(want))
+                if i64::from(*code) == want.as_i64().unwrap() => {}
+            (Err(Error::NonFiniteOutput { .. }), None) if rust.get("non_finite").is_some() => {}
+            (Ok(prediction), None) if rust.get("non_finite").is_none() => {
+                let actual = components(prediction);
+                for (i, label) in LABELS.iter().enumerate() {
+                    let want = hex_to_f64(rust[*label].as_str().unwrap());
+                    if actual[i].to_bits() != want.to_bits() {
+                        self.failures.push(format!(
+                            "{what} {label}: {:e} vs the Rust-libm model {want:e}, {} ulp",
+                            actual[i],
+                            ulp_distance(actual[i], want)
+                        ));
+                    }
                 }
+            }
+            (other, _) => self.failures.push(format!(
+                "{what}: got {other:?}, the Rust-libm model gives {rust}"
+            )),
+        }
+
+        // python-sgp4.
+        if let Some(code) = row.get("error") {
+            self.errors += 1;
+            let code = code.as_i64().unwrap();
+            if !matches!(&result, Err(Error::Sgp4 { code: ours }) if i64::from(*ours) == code) {
+                self.failures
+                    .push(format!("{what}: python-sgp4 error {code}, got {result:?}"));
+            }
+            return;
+        }
+        if row.get("non_finite").is_some() {
+            // python-sgp4 returns code 0 with a NaN state; this crate reports
+            // the non-finite output as an error instead of returning it.
+            self.non_finite += 1;
+            if !matches!(&result, Err(Error::NonFiniteOutput { .. })) {
+                self.failures.push(format!(
+                    "{what}: python-sgp4 returns a non-finite state, got {result:?}"
+                ));
+            }
+            return;
+        }
+        let Ok(prediction) = &result else {
+            self.failures
+                .push(format!("{what}: python-sgp4 propagates, got {result:?}"));
+            return;
+        };
+        self.finite += 1;
+        let actual = components(prediction);
+        let expected: Vec<f64> = LABELS
+            .iter()
+            .map(|label| hex_to_f64(row[*label].as_str().unwrap()))
+            .collect();
+        if actual
+            .iter()
+            .zip(&expected)
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+        {
+            self.exact += 1;
+        }
+        for (a, b) in actual.iter().zip(&expected) {
+            self.max_ulp = self.max_ulp.max(ulp_distance(*a, *b));
+        }
+        let Some(bounds) = row["bound"].as_array() else {
+            return;
+        };
+        self.bounded += 1;
+        for (i, label) in LABELS.iter().enumerate() {
+            let bound = bounds[i].as_f64().unwrap();
+            let difference = (actual[i] - expected[i]).abs();
+            self.max_fraction_of_bound = self.max_fraction_of_bound.max(difference / bound);
+            if difference.is_nan() || difference > bound {
+                self.failures.push(format!(
+                    "{what} {label}: {} vs python-sgp4 {:e}, difference {difference:e} over bound {bound:e}",
+                    actual[i], expected[i]
+                ));
             }
         }
     }
 
-    if !failures.is_empty() {
-        failures.sort_by_key(|f| std::cmp::Reverse(f.3));
-        let summary: Vec<String> = failures
-            .iter()
-            .take(20)
-            .map(|(norad, tsince, label, ulp)| format!("  {norad} t={tsince} {label}: {ulp} ULP"))
-            .collect();
-        panic!(
-            "{} ULP failures (top 20):\n{}",
-            failures.len(),
-            summary.join("\n")
+    fn finish(&self, label: &str) {
+        eprintln!(
+            "{label}: {} python-sgp4 states, {} bit-identical, largest difference {} ulp; {} within the bound, at most {:.4} of it; {} error codes; {} non-finite",
+            self.finite,
+            self.exact,
+            self.max_ulp,
+            self.bounded,
+            self.max_fraction_of_bound,
+            self.errors,
+            self.non_finite,
+        );
+        assert!(
+            self.failures.is_empty(),
+            "{} disagreements:\n{}",
+            self.failures.len(),
+            self.failures.join("\n")
         );
     }
+}
+
+fn fixture() -> serde_json::Value {
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("sgp4_verification.json")).unwrap();
+    assert_eq!(data["sgp4_version"], "2.22");
+    data
+}
+
+fn check_rows(
+    agreement: &mut Agreement,
+    satellite: &Satellite,
+    norad: &str,
+    rows: &serde_json::Value,
+) {
+    for row in rows.as_array().unwrap() {
+        let tsince = row["tsince"].as_f64().unwrap();
+        let what = format!("{norad} t={tsince:e}");
+        agreement.check(&what, satellite.propagate(MinutesSinceEpoch(tsince)), row);
+    }
+}
+
+#[test]
+fn verification_set_matches_python_sgp4_and_the_rust_libm_model() {
+    let data = fixture();
+    let mut agreement = Agreement::default();
+    for sat in data["satellites"].as_array().unwrap() {
+        let satellite = vallado_satellite(
+            sat["line1"].as_str().unwrap(),
+            sat["line2"].as_str().unwrap(),
+            OpsMode::Improved,
+        );
+        check_rows(
+            &mut agreement,
+            &satellite,
+            sat["norad"].as_str().unwrap(),
+            &sat["propagations"],
+        );
+    }
+    agreement.finish("verification set");
+    assert_eq!(
+        (agreement.finite, agreement.errors, agreement.bounded),
+        (700, 21, 700)
+    );
+    assert_eq!(agreement.exact, VERIFICATION_EXACT);
+}
+
+/// The ISS at split Julian dates, against python-sgp4's `Satrec.sgp4(jd, fr)`.
+#[test]
+fn split_julian_dates_match_python_sgp4_and_the_rust_libm_model() {
+    let data = fixture();
+    let satellite = Satellite::from_tle(
+        "1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9993",
+        "2 25544  51.6414 295.8524 0003435 262.6267 204.2868 15.54005638121106",
+    )
+    .unwrap();
+    let mut agreement = Agreement::default();
+    for row in data["iss_split_jd_tests"].as_array().unwrap() {
+        let jd = JulianDate(
+            row["jd_whole"].as_f64().unwrap(),
+            row["jd_fraction"].as_f64().unwrap(),
+        );
+        agreement.check(
+            row["label"].as_str().unwrap(),
+            satellite.propagate_jd(jd),
+            row,
+        );
+    }
+    agreement.finish("ISS split Julian dates");
+    assert_eq!(agreement.bounded, 4);
 }
 
 #[test]
