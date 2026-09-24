@@ -225,11 +225,12 @@ fn measurement_block_uses_shared_reference_covariance() {
 }
 
 // Reference values below are computed independently from the exact formulas
-// (geocentric up = base/|base|, sin el = LOS·up, clamp at 0.05) at full f64
-// precision - they pin the parity semantics, not Rust self-consistency.
+// (RTKLIB `satazel` elevation above the WGS84 ellipsoid-normal horizon, sin of
+// it, clamp at 0.05) at full f64 precision - they pin the semantics, not Rust
+// self-consistency.
 const VAR_BASE: [f64; 3] = [4_075_580.0, 931_854.0, 4_801_568.0];
-const SAT_HIGH: [f64; 3] = [15_000_000.0, 7_000_000.0, 21_000_000.0]; // sin el ≈ 0.982
-const SAT_LOW: [f64; 3] = [-12_000_000.0, 18_000_000.0, 19_000_000.0]; // sin el ≈ 0.106
+const SAT_HIGH: [f64; 3] = [15_000_000.0, 7_000_000.0, 21_000_000.0]; // sin el ≈ 0.983
+const SAT_LOW: [f64; 3] = [-12_000_000.0, 18_000_000.0, 19_000_000.0]; // sin el ≈ 0.109
 
 fn simple_single_dd_fixture() -> ([f64; 3], Epoch, FilterState, MeasModel, Vec<String>) {
     let base = VAR_BASE;
@@ -548,16 +549,22 @@ fn update_epoch_rejects_invalid_update_options_before_math() {
 }
 
 #[test]
-fn elevation_sin_is_geocentric_and_matches_reference() {
+fn elevation_sin_is_the_geodetic_satazel_elevation() {
+    // sin of the RTKLIB `satazel` elevation above the ellipsoid-normal horizon.
+    // From the geocentric vertical these were 0.9823712838936762 and
+    // 0.10636728642290873.
     let high = elevation_sin(VAR_BASE, SAT_HIGH);
     let low = elevation_sin(VAR_BASE, SAT_LOW);
-    assert!((high - 0.9823712838936762).abs() < 1e-15, "{high}");
-    assert!((low - 0.10636728642290873).abs() < 1e-15, "{low}");
+    assert!((high - 0.982623461546029).abs() < 1e-15, "{high}");
+    assert!((low - 0.10858305263364985).abs() < 1e-15, "{low}");
 
-    // Straight down (sat at base/2): LOS is -up, sin el = -1 (to FP rounding;
-    // the dot of two opposite unit vectors can land an ulp outside [-1, 1]).
+    // Straight down the geocentric vertical (sat at base/2) is 0.19 deg off the
+    // geodetic nadir at this latitude.
     let below = elevation_sin(VAR_BASE, [2_037_790.0, 465_927.0, 2_400_784.0]);
-    assert!((below + 1.0).abs() < 1e-12, "{below}");
+    assert!((below + 0.9999944735150226).abs() < 1e-12, "{below}");
+
+    // A satellite at the base itself has no line of sight.
+    assert_eq!(elevation_sin(VAR_BASE, VAR_BASE), -1.0);
 }
 
 #[test]
@@ -578,15 +585,15 @@ fn variance_models_match_reference_formulas() {
 
     // Elevation-weighted: 2(σ/sin el)².
     let v = single_difference_variance(sigma, elev, VAR_BASE, SAT_HIGH);
-    assert!((v - 0.18651818780129176).abs() < 1e-15, "{v}");
+    assert!((v - 0.18642246510586338).abs() < 1e-15, "{v}");
     let v = single_difference_variance(sigma, elev, VAR_BASE, SAT_LOW);
-    assert!((v - 15.909493196935287).abs() < 1e-12, "{v}");
+    assert!((v - 15.266813883385812).abs() < 1e-12, "{v}");
 
     // RTKLIB: 2(σ² + σ²/sin²el).
     let v = single_difference_variance(sigma, StochasticModel::Rtklib, VAR_BASE, SAT_HIGH);
-    assert!((v - 0.36651818780129175).abs() < 1e-15, "{v}");
+    assert!((v - 0.36642246510586335).abs() < 1e-15, "{v}");
     let v = single_difference_variance(sigma, StochasticModel::Rtklib, VAR_BASE, SAT_LOW);
-    assert!((v - 16.089493196935287).abs() < 1e-12, "{v}");
+    assert!((v - 15.446813883385813).abs() < 1e-12, "{v}");
 
     // Below the horizon, sin el clamps to 0.05: elevation-weighted variance
     // is 2(0.3/0.05)² = 72 and RTKLIB 2(0.09 + 0.09/0.0025) = 72.18 (to FP

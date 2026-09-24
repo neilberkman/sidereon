@@ -176,7 +176,8 @@ pub(crate) fn niell_mapping_function_unchecked(
 /// The two XYZ arrays are in meters. `ecef_to_lla` is called for the receiver and must return
 /// `[longitude_deg, latitude_deg, ellipsoidal_height_m]`; the height is clamped by the profile
 /// before standard-atmosphere Saastamoinen hydrostatic and exponential wet delays are mapped by
-/// the Niell factors. Invalid options, non-finite or degenerate vectors, or an invalid callback
+/// the Niell factors at the satellite's elevation above the geodetic horizon of that latitude
+/// and longitude. Invalid options, non-finite or degenerate vectors, or an invalid callback
 /// result return [`crate::Error::InvalidInput`].
 pub fn tropo_delay_xyz<F>(
     options: ZwdSlantOptions,
@@ -200,13 +201,22 @@ where
     validate_vector(&receiver_sat_vector, "receiver_sat_vector")?;
     validate_nonzero_vector(&receiver_sat_vector, "receiver_sat_vector")?;
 
-    let receiver_up = unit_vector(receiver_xyz);
-    let sat_unit = unit_vector(&receiver_sat_vector);
-    let elevation_rad = libm::asin(dot_three_reference(&sat_unit, &receiver_up));
-
     let lonlatalt = ecef_to_lla(receiver_xyz);
     validate_lonlatalt(lonlatalt)?;
     let latitude = lonlatalt[1];
+
+    // The mapping takes the elevation above the geodetic (ellipsoid-normal)
+    // horizon at the receiver's latitude and longitude, as RTKLIB `satazel`
+    // gives it to `tropmodel` and `tropmapf`.
+    let lat_rad = latitude * PI / DEGREES_PER_SEMICIRCLE;
+    let lon_rad = lonlatalt[0] * PI / DEGREES_PER_SEMICIRCLE;
+    let receiver_up = [
+        libm::cos(lat_rad) * libm::cos(lon_rad),
+        libm::cos(lat_rad) * libm::sin(lon_rad),
+        libm::sin(lat_rad),
+    ];
+    let sat_unit = unit_vector(&receiver_sat_vector);
+    let elevation_rad = libm::asin(dot_three_reference(&sat_unit, &receiver_up).clamp(-1.0, 1.0));
     let altitude = clamp(
         lonlatalt[2],
         options.profile.altitude_clamp.min_m,

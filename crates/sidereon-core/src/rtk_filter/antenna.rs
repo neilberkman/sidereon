@@ -1,5 +1,5 @@
 //! Receiver-antenna calibration and local-frame geometry for the RTK baseline
-//! filter: NEU basis construction, line-of-sight zenith/azimuth, and PCO/PCV
+//! filter: the geodetic NEU basis, the `satazel` zenith/azimuth, and the PCO/PCV
 //! projection used by the double-difference row builders.
 
 use crate::astro::angles::rad_to_deg_ref;
@@ -18,7 +18,8 @@ pub struct ReceiverAntennaCalibration {
     /// Local north/east/up phase-center offset, in meters. When mapped from
     /// ANTEX, this is copied from [`crate::antex::Frequency::pco_m`], whose
     /// parser converts the `NORTH / EAST / UP` millimeter record to meters;
-    /// RTK projects the components onto the local NEU basis and line of sight.
+    /// RTK projects the components onto the geodetic (ellipsoid-normal) NEU
+    /// basis of the receiver and the line of sight.
     /// The row boundary rejects non-finite components before projection.
     pub pco_neu_m: [f64; 3],
     /// Phase-center variation samples for a grid without azimuth dependence,
@@ -95,25 +96,12 @@ fn los_projection(
     Ok(dot3(pco_ecef, los))
 }
 
-fn los_zenith_azimuth_deg(
-    los: [f64; 3],
-    up: [f64; 3],
-    north: [f64; 3],
-    east: [f64; 3],
-) -> (f64, f64) {
-    let elevation_sin = dot3(los, up);
-    let elevation_sin = (-1.0_f64).max(1.0_f64.min(elevation_sin));
-    let zenith_deg = rad_to_deg_ref(libm::acos(elevation_sin));
-
-    let azimuth_rad = libm::atan2(dot3(los, east), dot3(los, north));
-    let azimuth_deg = rad_to_deg_ref(azimuth_rad);
-    let azimuth_deg = if azimuth_deg < 0.0 {
-        azimuth_deg + 360.0
-    } else {
-        azimuth_deg
-    };
-
-    (zenith_deg, azimuth_deg)
+/// Zenith and azimuth (degrees) of the line of sight for the PCV lookup: RTKLIB
+/// `antmodel` takes the zenith as `90 - el` of the `satazel` elevation, and the
+/// azimuth is `satazel`'s, in `[0, 360)`.
+fn satazel_zenith_azimuth_deg(receiver_pos: [f64; 3], sat_pos: [f64; 3]) -> (f64, f64) {
+    let (az_rad, el_rad) = crate::estimation::substrate::frames::satazel(receiver_pos, sat_pos);
+    (90.0 - rad_to_deg_ref(el_rad), rad_to_deg_ref(az_rad))
 }
 
 fn sorted_zenith_samples(samples: &[(f64, f64)], out: &mut Vec<(f64, f64)>) {
@@ -221,12 +209,12 @@ pub(super) fn receiver_antenna_correction(
     let Some(los) = unit3(sub3(sat_pos, receiver_pos)) else {
         return Err(ReceiverAntennaError::InvalidGeometry);
     };
-    let (north, east, up) = crate::estimation::substrate::frames::local_neu_basis(
-        crate::estimation::recipe::FrameRecipe::GeocentricUpRtkReference,
-        receiver_pos,
-    );
+    // The PCO is projected, and the PCV looked up, in the geodetic
+    // (ellipsoid-normal) frame of the receiver, as RTKLIB `antmodel` takes both
+    // from the `satazel` azimuth and elevation.
+    let (north, east, up) = crate::estimation::substrate::frames::geodetic_neu_basis(receiver_pos);
     let pco_projection = los_projection(calibration.pco_neu_m, north, east, up, los)?;
-    let (zenith_deg, azimuth_deg) = los_zenith_azimuth_deg(los, up, north, east);
+    let (zenith_deg, azimuth_deg) = satazel_zenith_azimuth_deg(receiver_pos, sat_pos);
     let pcv = pcv_m(calibration, zenith_deg, azimuth_deg, scratch)?;
     Ok(pco_projection + pcv)
 }

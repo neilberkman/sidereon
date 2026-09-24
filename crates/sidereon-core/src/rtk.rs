@@ -5,7 +5,7 @@
 
 use crate::astro::angles::normalize_geodetic_lon_rad;
 use crate::astro::frames::transforms::itrs_to_geodetic_compute;
-use crate::astro::math::vec3::{dot3, norm3, sub3};
+use crate::astro::math::vec3::{norm3, sub3};
 use crate::astro::time::model::{Instant, JulianDateSplit, TimeScale};
 use crate::astro::time::ExactEpoch;
 
@@ -825,8 +825,12 @@ pub fn prepare_dual_cycle_slip_baseline_epochs(
 ///
 /// This is the baseline-solver rule: automatic references are the
 /// highest-average-elevation satellites within each constellation's per-system
-/// common set. It is intentionally separate from [`double_differences`], whose
-/// public helper keeps the older lexicographic default.
+/// common set, the elevation being RTKLIB `satazel`'s at the base, above its
+/// geodetic (ellipsoid-normal) horizon, averaged over the epochs as an angle;
+/// ties go to the lower satellite id. RTKLIB `ddres` takes the highest
+/// `satazel` elevation too, per epoch. It is intentionally separate from
+/// [`double_differences`], whose public helper keeps the older lexicographic
+/// default.
 pub fn baseline_reference_satellites(
     base_m: [f64; 3],
     epochs: &[BaselineReferenceEpoch],
@@ -966,14 +970,13 @@ pub fn apply_elevation_mask(
     let mask_deg = validate::finite_in_range(mask_deg, -90.0, 90.0, "rtk elevation mask_deg")
         .map_err(double_difference_invalid_input)?;
     let mask_rad = mask_deg * DEG_TO_RAD;
-    let base_at_zenith = crate::spp::rtklib_sees_every_satellite_overhead(base_m);
     let mut masked = BTreeSet::new();
     let mut results = Vec::with_capacity(epochs.len());
 
     for epoch in epochs {
         let mut kept = Vec::new();
         for (sat, sat_pos) in &epoch.satellite_positions_m {
-            if base_elevation_rad(base_m, *sat_pos, base_at_zenith)? >= mask_rad {
+            if base_elevation_rad(base_m, *sat_pos)? >= mask_rad {
                 kept.push(sat.clone());
             } else {
                 masked.insert(sat.clone());
@@ -990,23 +993,10 @@ pub fn apply_elevation_mask(
     })
 }
 
-/// RTKLIB `satazel` elevation of `sat_pos_m` seen from the base, through the
-/// geodetic ENU frame the SPP selection uses.
-fn base_elevation_rad(
-    base_m: [f64; 3],
-    sat_pos_m: [f64; 3],
-    base_at_zenith: bool,
-) -> Result<f64, DoubleDifferenceError> {
+/// RTKLIB `satazel` elevation of `sat_pos_m` seen from the base.
+fn base_elevation_rad(base_m: [f64; 3], sat_pos_m: [f64; 3]) -> Result<f64, DoubleDifferenceError> {
     rtk_line_of_sight(base_m, sat_pos_m)?;
-    if base_at_zenith {
-        return Ok(core::f64::consts::FRAC_PI_2);
-    }
-    let el_rad = crate::estimation::substrate::frames::az_el_from_ecef(
-        crate::estimation::recipe::FrameRecipe::SppSkyfieldAuThreeIter,
-        base_m,
-        sat_pos_m,
-    )
-    .el_rad;
+    let (_az_rad, el_rad) = crate::estimation::substrate::frames::satazel(base_m, sat_pos_m);
     validate::finite(el_rad, "rtk satellite elevation").map_err(double_difference_invalid_input)
 }
 
@@ -1371,28 +1361,14 @@ fn average_elevation_score(
     epochs: &[&BaselineReferenceEpoch],
     sat: &str,
 ) -> Result<f64, DoubleDifferenceError> {
-    let up = local_up(base_m);
     let mut sum = 0.0;
 
     for epoch in epochs {
         let sat_pos = *baseline_satellite_position(epoch, sat)?;
-        sum += elevation_score_with_up(base_m, up, sat_pos)?;
+        sum += base_elevation_rad(base_m, sat_pos)?;
     }
 
     Ok(sum / epochs.len() as f64)
-}
-
-fn elevation_score_with_up(
-    base_m: [f64; 3],
-    up: [f64; 3],
-    sat_pos_m: [f64; 3],
-) -> Result<f64, DoubleDifferenceError> {
-    validate::finite_vec3(up, "rtk local up").map_err(double_difference_invalid_input)?;
-    let (los, n) = rtk_line_of_sight(base_m, sat_pos_m)?;
-    let inv = 1.0 / n;
-    let los = [los[0] * inv, los[1] * inv, los[2] * inv];
-    let score = dot3(los, up);
-    validate_elevation_score(score)
 }
 
 fn rtk_line_of_sight(
@@ -1419,24 +1395,6 @@ fn rtk_line_of_sight(
         ));
     }
     Ok((los, n))
-}
-
-fn validate_elevation_score(score: f64) -> Result<f64, DoubleDifferenceError> {
-    validate::finite(score, "rtk elevation score").map_err(double_difference_invalid_input)?;
-    if !(-1.0 - 1.0e-12..=1.0 + 1.0e-12).contains(&score) {
-        return Err(invalid_double_difference_input(
-            "rtk elevation score",
-            "out of range",
-        ));
-    }
-    Ok(score.clamp(-1.0, 1.0))
-}
-
-fn local_up(base_m: [f64; 3]) -> [f64; 3] {
-    crate::estimation::substrate::frames::local_up(
-        crate::estimation::recipe::FrameRecipe::GeocentricUpRtkReference,
-        base_m,
-    )
 }
 
 fn validate_wide_lane_options(options: WideLaneOptions) -> Result<(), WideLaneError> {
@@ -3441,19 +3399,63 @@ mod tests {
             ])
         );
 
+        // The score is the mean `satazel` elevation angle over the epochs.
         let g_epochs = baseline_epochs_for_system(&epochs, "G");
         assert_eq!(
             average_elevation_score(base, &g_epochs, "G01")
                 .unwrap()
                 .to_bits(),
-            0x3fe0_0000_0000_0000
+            core::f64::consts::FRAC_PI_4.to_bits()
         );
         assert_eq!(
             average_elevation_score(base, &g_epochs, "G03")
                 .unwrap()
                 .to_bits(),
-            0x3ff0_0000_0000_0000
+            core::f64::consts::FRAC_PI_2.to_bits()
         );
+    }
+
+    #[test]
+    fn baseline_auto_reference_uses_geodetic_elevation_when_radial_ranking_differs() {
+        let a = 6_378_137.0_f64;
+        let f = 1.0 / 298.257_223_563;
+        let e2 = f * (2.0 - f);
+        let (lat, lon) = (49.0_f64.to_radians(), 12.9_f64.to_radians());
+        let (sin_lat, cos_lat) = (libm::sin(lat), libm::cos(lat));
+        let (sin_lon, cos_lon) = (libm::sin(lon), libm::cos(lon));
+        let prime_vertical = a / (1.0 - e2 * sin_lat * sin_lat).sqrt();
+        let base = [
+            prime_vertical * cos_lat * cos_lon,
+            prime_vertical * cos_lat * sin_lon,
+            prime_vertical * (1.0 - e2) * sin_lat,
+        ];
+        let up = [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat];
+        let north = [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat];
+        let satellite_at = |elevation_deg: f64, toward_north: f64| {
+            let elevation = elevation_deg.to_radians();
+            let range = 2.0e7;
+            std::array::from_fn(|axis| {
+                base[axis]
+                    + range
+                        * (libm::sin(elevation) * up[axis]
+                            + toward_north * libm::cos(elevation) * north[axis])
+            })
+        };
+        let epochs = vec![baseline_reference_epoch(&[
+            ("G01", satellite_at(10.1, 1.0)),
+            ("G02", satellite_at(9.9, -1.0)),
+        ])];
+
+        let geocentric_up = crate::frame::geocentric_up(base);
+        let radial_sine = |position: [f64; 3]| {
+            let los = sub3(position, base);
+            crate::astro::math::vec3::dot3(los, geocentric_up) / norm3(los)
+        };
+        assert!(radial_sine(satellite_at(10.1, 1.0)) < radial_sine(satellite_at(9.9, -1.0)));
+
+        let refs =
+            baseline_reference_satellites(base, &epochs, BaselineReferenceSelection::Auto).unwrap();
+        assert_eq!(refs, BTreeMap::from([("G".to_string(), "G01".to_string())]));
     }
 
     #[test]
@@ -3528,10 +3530,16 @@ mod tests {
                 ("G02".to_string(), at(9.9, -1.0)),
             ]),
         }];
-        let geocentric_up = local_up(base);
+        // Measured from the geocentric vertical, the two would be classified the
+        // other way round.
+        let geocentric_up = crate::frame::geocentric_up(base);
+        let geocentric_sin_el = |sat: [f64; 3]| {
+            let los = sub3(sat, base);
+            crate::astro::math::vec3::dot3(los, geocentric_up) / norm3(los)
+        };
         let sin_mask = libm::sin(10.0_f64.to_radians());
-        assert!(elevation_score_with_up(base, geocentric_up, at(10.1, 1.0)).unwrap() < sin_mask);
-        assert!(elevation_score_with_up(base, geocentric_up, at(9.9, -1.0)).unwrap() > sin_mask);
+        assert!(geocentric_sin_el(at(10.1, 1.0)) < sin_mask);
+        assert!(geocentric_sin_el(at(9.9, -1.0)) > sin_mask);
 
         let result = apply_elevation_mask(base, &epochs, 10.0).unwrap();
         assert_eq!(
@@ -3545,26 +3553,24 @@ mod tests {
 
     #[test]
     fn elevation_mask_keeps_epoch_satellites_above_threshold() {
+        // On the equator at longitude 0 the geodetic vertical is +X.
         let base = [10.0, 0.0, 0.0];
-        let up = local_up(base);
 
         assert_eq!(
-            elevation_score_with_up(base, up, [20.0, 0.0, 0.0])
+            base_elevation_rad(base, [20.0, 0.0, 0.0])
                 .unwrap()
                 .to_bits(),
-            0x3ff0_0000_0000_0000
+            core::f64::consts::FRAC_PI_2.to_bits()
         );
         assert_eq!(
-            elevation_score_with_up(base, up, [10.0, 10.0, 0.0])
+            base_elevation_rad(base, [10.0, 10.0, 0.0])
                 .unwrap()
                 .to_bits(),
-            0x0000_0000_0000_0000
+            0.0_f64.to_bits()
         );
         assert_eq!(
-            elevation_score_with_up(base, up, [0.0, 0.0, 0.0])
-                .unwrap()
-                .to_bits(),
-            0xbff0_0000_0000_0000
+            base_elevation_rad(base, [0.0, 0.0, 0.0]).unwrap().to_bits(),
+            (-core::f64::consts::FRAC_PI_2).to_bits()
         );
 
         let epochs = vec![

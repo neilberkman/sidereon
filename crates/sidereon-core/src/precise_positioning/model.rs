@@ -8,10 +8,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::astro::angles::{normalize_geodetic_lon_rad, rad_to_deg_ref};
+use crate::astro::angles::normalize_geodetic_lon_rad;
 use crate::astro::frames::transforms::itrs_to_geodetic_compute;
 use crate::astro::math::interp::lerp_ratio;
-use crate::astro::math::vec3::{add3, dot3, scale3, sub3, unit3};
+use crate::astro::math::vec3::{dot3, sub3, unit3};
 use crate::astro::time::civil::mjd_from_jd;
 use crate::astro::time::model::{Instant, JulianDateSplit, TimeModelError, TimeScale};
 
@@ -460,18 +460,21 @@ fn single_freq_receiver_antenna_m(
             MissingCorrection::ReceiverAntennaFrequency(frequency.to_string()),
         ));
     };
-    let Some(los) = unit3(sub3(pred.sat_pos_ecef_m, rx_pos)) else {
+    if unit3(sub3(pred.sat_pos_ecef_m, rx_pos)).is_none() {
         return Err(missing_correction(
             obs,
             MissingCorrection::ReceiverAntennaGeometry,
         ));
-    };
-    let (north, east, up) = crate::estimation::substrate::frames::local_neu_basis(
-        crate::estimation::recipe::FrameRecipe::GeodeticNeuCrossProduct,
-        rx_pos,
-    );
-    let pco_projection = los_projection(freq.pco_m, north, east, up, los);
-    let (zenith_deg, azimuth_deg) = los_zenith_azimuth_deg(los, up, north, east);
+    }
+    // The PCO is projected, and the PCV looked up, at the geodetic
+    // (ellipsoid-normal) azimuth and elevation of the line of sight, the ones
+    // the elevation cutoff, the weights and the troposphere mapping take, as
+    // RTKLIB `antmodel` takes both from `satazel`: the offset is projected on
+    // the ENU line of sight `(sin az cos el, cos az cos el, sin el)` and the
+    // PCV read at zenith `90 - el`.
+    let pco_projection = enu_los_projection(freq.pco_m, pred.azimuth_deg, pred.elevation_deg);
+    let zenith_deg = 90.0 - pred.elevation_deg;
+    let azimuth_deg = pred.azimuth_deg;
     let pcv_m = pcv(freq, zenith_deg, Some(azimuth_deg)).ok_or_else(|| {
         missing_correction(
             obs,
@@ -569,33 +572,13 @@ fn elevation_weight_scale(elevation_deg: f64) -> f64 {
     }
 }
 
-fn los_projection(
-    neu_offset: [f64; 3],
-    north: [f64; 3],
-    east: [f64; 3],
-    up: [f64; 3],
-    los: [f64; 3],
-) -> f64 {
-    let pco_ecef = add3(
-        add3(scale3(north, neu_offset[0]), scale3(east, neu_offset[1])),
-        scale3(up, neu_offset[2]),
-    );
-    dot3(pco_ecef, los)
-}
-
-fn los_zenith_azimuth_deg(
-    los: [f64; 3],
-    up: [f64; 3],
-    north: [f64; 3],
-    east: [f64; 3],
-) -> (f64, f64) {
-    let elevation_sin = dot3(los, up).clamp(-1.0, 1.0);
-    let zenith_deg = rad_to_deg_ref(libm::acos(elevation_sin));
-    let mut azimuth_deg = rad_to_deg_ref(libm::atan2(dot3(los, east), dot3(los, north)));
-    if azimuth_deg < 0.0 {
-        azimuth_deg += 360.0;
-    }
-    (zenith_deg, azimuth_deg)
+/// A north/east/up offset projected on the line of sight at azimuth `az_deg`
+/// and elevation `el_deg`, summed east, north, up as RTKLIB `antmodel` sums
+/// `dot3(off, e)`.
+fn enu_los_projection(neu_offset: [f64; 3], az_deg: f64, el_deg: f64) -> f64 {
+    let (sin_az, cos_az) = libm::sincos(az_deg * DEG_TO_RAD);
+    let (sin_el, cos_el) = libm::sincos(el_deg * DEG_TO_RAD);
+    neu_offset[1] * (sin_az * cos_el) + neu_offset[0] * (cos_az * cos_el) + neu_offset[2] * sin_el
 }
 
 #[cfg(test)]

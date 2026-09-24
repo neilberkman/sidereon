@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate ZWD troposphere fixtures from public formulas."""
+"""Generate ZWD troposphere fixtures with PROJ geodetic elevations."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import struct
 from pathlib import Path
 
 import pyproj
+
+import rust_libm_port
 
 
 EARTH_RADIUS_M = 6_371_000.0
@@ -29,10 +31,6 @@ def ecef(lon: float, lat: float, alt: float) -> tuple[float, float, float]:
     return float(x), float(y), float(z)
 
 
-def dot_three(a, b) -> float:
-    return a[2] * b[2] + (a[1] * b[1] + a[0] * b[0])
-
-
 def unit(v):
     n = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
     return (v[0] / n, v[1] / n, v[2] / n)
@@ -45,24 +43,24 @@ def mapping_fraction(a: float, b: float, c: float, sin_e: float) -> float:
 
 
 def niell(elevation_rad: float, latitude_deg: float, day_of_year: int, height_m: float):
-    sin_e = max(elevation_rad.sin() if hasattr(elevation_rad, "sin") else math.sin(elevation_rad), 0.01)
+    sin_e = max(rust_libm_port.sin(elevation_rad), 0.01)
     lat_rad = latitude_deg * math.pi / 180.0
-    sin_lat = math.sin(lat_rad)
+    sin_lat = rust_libm_port.sin(lat_rad)
     phi = 2.0 * math.pi * (day_of_year - 1.0) / 365.25
 
     a_h = 2.65e-3 * (1.0 - 0.0025 * sin_lat * sin_lat)
     b_h = 2.3e-4 * (1.0 - 0.0025 * sin_lat * sin_lat)
     c_h = 1.2e-4 * (1.0 - 0.0025 * sin_lat * sin_lat)
-    a_h += 0.0005 * math.cos(phi) * (1.0 - 0.5 * sin_lat * sin_lat)
-    b_h += 0.0001 * math.cos(phi) * (1.0 - 0.5 * sin_lat * sin_lat)
-    c_h += 0.00005 * math.cos(phi) * (1.0 - 0.5 * sin_lat * sin_lat)
+    a_h += 0.0005 * rust_libm_port.cos(phi) * (1.0 - 0.5 * sin_lat * sin_lat)
+    b_h += 0.0001 * rust_libm_port.cos(phi) * (1.0 - 0.5 * sin_lat * sin_lat)
+    c_h += 0.00005 * rust_libm_port.cos(phi) * (1.0 - 0.5 * sin_lat * sin_lat)
 
     a_w = 1.5e-2 * (1.0 - 0.01 * abs(sin_lat))
     b_w = 8.3e-3 * (1.0 - 0.01 * abs(sin_lat))
     c_w = 1.0e-3 * (1.0 - 0.01 * abs(sin_lat))
-    a_w += 0.005 * math.cos(phi) * (1.0 - abs(sin_lat))
-    b_w += 0.003 * math.cos(phi) * (1.0 - abs(sin_lat))
-    c_w += 0.0005 * math.cos(phi) * (1.0 - abs(sin_lat))
+    a_w += 0.005 * rust_libm_port.cos(phi) * (1.0 - abs(sin_lat))
+    b_w += 0.003 * rust_libm_port.cos(phi) * (1.0 - abs(sin_lat))
+    c_w += 0.0005 * rust_libm_port.cos(phi) * (1.0 - abs(sin_lat))
 
     if height_m > 0.0:
         height_factor = math.exp(-height_m / 8000.0)
@@ -73,14 +71,19 @@ def niell(elevation_rad: float, latitude_deg: float, day_of_year: int, height_m:
     return mapping_fraction(a_h, b_h, c_h, sin_e), mapping_fraction(a_w, b_w, c_w, sin_e)
 
 
-def delay(day_of_year: int, sat_xyz, receiver_xyz, receiver_lla) -> float:
-    vec = tuple(sat_xyz[i] - receiver_xyz[i] for i in range(3))
-    elevation_rad = math.asin(dot_three(unit(vec), unit(receiver_xyz)))
+def delay(day_of_year: int, sat_xyz, receiver_lla) -> float:
+    lon, lat, altitude = receiver_lla
+    topocentric = pyproj.Transformer.from_pipeline(
+        f"+proj=topocentric +ellps=WGS84 +lat_0={lat:.17g} "
+        f"+lon_0={lon:.17g} +h_0={altitude:.17g}"
+    )
+    east, north, up = topocentric.transform(*sat_xyz)
+    elevation_rad = math.atan2(up, math.hypot(east, north))
     latitude = receiver_lla[1]
     altitude = min(max(receiver_lla[2], -500.0), 9000.0)
     pressure = 1013.25 * (1.0 - 2.25577e-5 * altitude) ** 5.2559
     lat_rad = latitude * math.pi / 180.0
-    zhd = 0.0022768 * pressure / (1.0 - 0.00266 * math.cos(2.0 * lat_rad) - 2.8e-7 * altitude)
+    zhd = 0.0022768 * pressure / (1.0 - 0.00266 * rust_libm_port.cos(2.0 * lat_rad) - 2.8e-7 * altitude)
     zwd = 0.25 * math.exp(-altitude / 2000.0)
     map_h, map_w = niell(elevation_rad, latitude, day_of_year, altitude)
     return zhd * map_h + zwd * map_w
@@ -116,14 +119,16 @@ def main() -> None:
                 "sat_xyz_bits": bits_array(sat_xyz),
                 "receiver_xyz_bits": bits_array(receiver_xyz),
                 "receiver_lonlatalt_bits": bits_array((lon, lat, alt)),
-                "delay_bits": f64_bits(delay(day, sat_xyz, receiver_xyz, (lon, lat, alt))),
+                "delay_bits": f64_bits(delay(day, sat_xyz, (lon, lat, alt))),
             }
         )
 
     payload = {
         "schema": "gnss-tropo-zwd-v1",
-        "reference": "Davis-Bevis-style ZWD with Niell mapping",
+        "reference": "Davis-Bevis-style ZWD with Niell mapping and PROJ topocentric elevation",
+        "elevation_reference": "PROJ topocentric transform from WGS84 ECEF to receiver ENU",
         "pyproj_version": pyproj.__version__,
+        "proj_version": pyproj.proj_version_str,
         "cases": cases,
     }
     out = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "tropo_zwd" / "tropo_zwd.json"

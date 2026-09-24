@@ -31,15 +31,13 @@ const fn invalid_input(field: &'static str, reason: &'static str) -> FrameValueE
 /// Geocentric local vertical at a receiver ECEF position: the position vector
 /// normalized (the spherical radial direction, out from the geocenter).
 ///
-/// PARITY / FRAME: this is the GEOCENTRIC up (`position / |position|`), **not**
-/// the geodetic ellipsoid normal. The two differ by up to ~0.19 deg, which
-/// shifts low-elevation variance weighting and antenna projections; the GNSS
-/// baseline/PPP code paths were captured against the geocentric definition
-/// (Elixir `local_up/1`), so this is deliberately the geocentric variant. A
-/// geodetic ENU rotation (built from geodetic latitude/longitude) is a separate
-/// construction and stays with its caller. Normalization is reciprocal-multiply
-/// (`scale3(v, 1/n)` via [`unit3`]) to preserve the callers' 0-ULP goldens; a
-/// zero-length position degenerates to `+Z`.
+/// This is the GEOCENTRIC up (`position / |position|`), not the geodetic
+/// ellipsoid normal; the two differ by up to ~0.19 deg. The GNSS receiver models
+/// (SPP, RTK, PPP) take elevation, azimuth and the receiver's local frame from
+/// the geodetic normal, as RTKLIB `satazel` and `xyz2enu` do; this helper serves
+/// the caller-selected geocentric DOP convention. Normalization is
+/// reciprocal-multiply (`scale3(v, 1/n)` via [`unit3`]); a zero-length position
+/// degenerates to `+Z`.
 pub fn geocentric_up(position_ecef_m: [f64; 3]) -> [f64; 3] {
     unit3(position_ecef_m).unwrap_or([0.0, 0.0, 1.0])
 }
@@ -54,11 +52,8 @@ pub fn geocentric_east(up: [f64; 3]) -> [f64; 3] {
 /// `(north, east, up)`.
 ///
 /// `up` is [`geocentric_up`], `east` is [`geocentric_east`], and
-/// `north = normalize(up x east)`. This is the single shared geocentric basis
-/// builder: the PPP correction tables, the static PPP solver, and the RTK
-/// baseline-filter antenna model all consume it (each previously kept a
-/// byte-identical copy). See [`geocentric_up`] for the geocentric-vs-geodetic
-/// distinction.
+/// `north = normalize(up x east)`. See [`geocentric_up`] for the
+/// geocentric-vs-geodetic distinction.
 pub fn geocentric_neu_basis(position_ecef_m: [f64; 3]) -> ([f64; 3], [f64; 3], [f64; 3]) {
     let up = geocentric_up(position_ecef_m);
     let east = geocentric_east(up);

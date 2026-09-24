@@ -6,7 +6,7 @@
 use crate::astro::math::vec3::{norm3, sub3};
 
 use crate::constants::{C_M_S, OMEGA_E_DOT_RAD_S};
-use crate::estimation::recipe::{FrameRecipe, SagnacRecipe};
+use crate::estimation::recipe::SagnacRecipe;
 use crate::id::GnssSystem;
 
 /// Code vs carrier-phase double-difference row. The `Ord` is the covariance
@@ -166,27 +166,14 @@ pub struct MeasModel {
     pub stochastic: StochasticModel,
 }
 
-/// Sine of the satellite elevation seen from `base`.
-///
-/// PARITY: the local-up here is GEOCENTRIC (`base/|base|`), exactly as the
-/// Elixir `local_up/1` - NOT the geodetic ellipsoid normal. The two differ by
-/// up to ~0.19°, which shifts low-elevation variances; do not "fix" this to the
-/// geodetic frame (`substrate::frames::geodetic_from_ecef` under the SPP recipe)
-/// without changing the Elixir reference in lockstep.
+/// Sine of the satellite elevation seen from `base`: `sin(el)` of the RTKLIB
+/// `satazel` elevation above the geodetic (ellipsoid-normal) horizon, as RTKLIB
+/// `varerr` takes `sin` of the `satazel` elevation. A satellite at the base's
+/// own position has no line of sight and gives `-1`.
 pub(super) fn elevation_sin(base: [f64; 3], sat_pos: [f64; 3]) -> f64 {
-    // Geocentric local-up (`base / |base|`, reciprocal-multiply), shared with the
-    // PPP/RTK antenna code; see [`crate::frame::geocentric_up`] for the
-    // geocentric-vs-geodetic distinction this parity note used to document inline.
-    let up =
-        crate::estimation::substrate::frames::local_up(FrameRecipe::GeocentricUpRtkReference, base);
-    let d = sub3(sat_pos, base);
-    let dn = norm3(d);
-    if dn > 0.0 {
-        // Elixir op order: normalize the LOS first, THEN dot with up
-        // (`unit3(sub3(sat, base))` = `scale3(_, 1.0 / n)`, then `dot3`).
-        let inv = 1.0 / dn;
-        let los = [d[0] * inv, d[1] * inv, d[2] * inv];
-        los[0] * up[0] + los[1] * up[1] + los[2] * up[2]
+    if norm3(sub3(sat_pos, base)) > 0.0 {
+        let (_az_rad, el_rad) = crate::estimation::substrate::frames::satazel(base, sat_pos);
+        libm::sin(el_rad)
     } else {
         -1.0
     }

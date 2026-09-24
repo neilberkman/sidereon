@@ -490,8 +490,11 @@ pub fn build_with_validity_and_tide_constants(
         receiver_ecef_m,
         options,
         &gate,
-        tide_constants,
-        predict,
+        BuildPolicy {
+            tide_constants,
+            predictor: predict,
+            receiver_neu_basis: crate::estimation::substrate::frames::geodetic_neu_basis,
+        },
     )?;
     Ok(Validated {
         value: corrections,
@@ -513,6 +516,20 @@ type Predictor = fn(
     PredictOptions,
 ) -> Result<PredictedObservables, ObservablesError>;
 
+/// The receiver's local `(north, east, up)` basis the wind-up takes the receiver
+/// dipole from: the geodetic one, or in this repository's tests the replay of the
+/// external reference's geocentric one.
+type ReceiverNeuBasis = fn([f64; 3]) -> ([f64; 3], [f64; 3], [f64; 3]);
+
+#[derive(Clone, Copy)]
+struct BuildPolicy {
+    tide_constants: StationTideConstants,
+    predictor: Predictor,
+    receiver_neu_basis: ReceiverNeuBasis,
+}
+
+/// [`build`] with the transmission epoch rounded to whole microseconds and the receiver
+/// dipole in the geocentric frame, as the external reference fixture computed it.
 #[cfg(all(test, feature = "test-replays"))]
 fn build_rounded_microsecond_replay_with_tide_constants(
     sp3: &Sp3,
@@ -528,8 +545,35 @@ fn build_rounded_microsecond_replay_with_tide_constants(
         receiver_ecef_m,
         options,
         &gate,
-        tide_constants,
-        crate::observables::rounded_microsecond_replay::predict,
+        BuildPolicy {
+            tide_constants,
+            predictor: crate::observables::rounded_microsecond_replay::predict,
+            receiver_neu_basis: crate::frame::geocentric_neu_basis,
+        },
+    )
+}
+
+/// [`build`] with the receiver dipole in the geocentric frame the external reference
+/// fixture used, and every other term live.
+#[cfg(all(test, feature = "test-replays"))]
+fn build_geocentric_dipole_replay(
+    sp3: &Sp3,
+    epochs: &[PppCorrectionEpoch],
+    receiver_ecef_m: [f64; 3],
+    options: &PppCorrectionsOptions,
+) -> Result<PppCorrections, PppCorrectionsError> {
+    let gate = Ut1Gate::new(ValidityMode::Strict);
+    build_gated(
+        sp3,
+        epochs,
+        receiver_ecef_m,
+        options,
+        &gate,
+        BuildPolicy {
+            tide_constants: StationTideConstants::IersRoutine,
+            predictor: predict,
+            receiver_neu_basis: crate::frame::geocentric_neu_basis,
+        },
     )
 }
 
@@ -539,8 +583,7 @@ fn build_gated(
     receiver_ecef_m: [f64; 3],
     options: &PppCorrectionsOptions,
     gate: &Ut1Gate,
-    tide_constants: StationTideConstants,
-    predictor: Predictor,
+    policy: BuildPolicy,
 ) -> Result<PppCorrections, PppCorrectionsError> {
     validate_receiver_state(receiver_ecef_m)?;
 
@@ -592,7 +635,7 @@ fn build_gated(
                 epoch_row.epoch,
                 sun_moon.sun,
                 sun_moon.moon,
-                tide_constants,
+                policy.tide_constants,
             )
             .map_err(|source| PppCorrectionsError::Tide {
                 epoch_index,
@@ -677,7 +720,7 @@ fn build_gated(
         let sun_moon = sun_moon.expect("Sun/Moon computed when the observation loop runs");
 
         for observation in &epoch_row.observations {
-            let obs = match predictor(
+            let obs = match (policy.predictor)(
                 sp3,
                 observation.sat,
                 receiver_ecef_m,
@@ -706,7 +749,13 @@ fn build_gated(
 
             if options.phase_windup {
                 let prev = previous_windup_cycles.get(&observation.sat).copied();
-                if let Some(phw) = windup_cycles(&obs, receiver_ecef_m, sun_moon.sun, prev) {
+                if let Some(phw) = windup_cycles(
+                    &obs,
+                    receiver_ecef_m,
+                    (policy.receiver_neu_basis)(receiver_ecef_m),
+                    sun_moon.sun,
+                    prev,
+                ) {
                     let (f1, f2) = windup_frequency_pair(options, observation, epoch_index)?;
                     corrections.windup_m.push(SatScalarCorrection {
                         sat: observation.sat,
@@ -1156,9 +1205,14 @@ fn windup_metres(phw_cycles: f64, f1_hz: f64, f2_hz: f64) -> f64 {
     (gamma * lam1 - (gamma - 1.0) * lam2) * phw_cycles
 }
 
+/// Phase wind-up in cycles, as RTKLIB `windupcorr` forms it. The receiver dipole
+/// is `x` north and `y` west in `receiver_neu`, the receiver's local basis:
+/// geodetic (ellipsoid-normal), as `windupcorr` takes it from `xyz2enu` at the
+/// `ecef2pos` position.
 fn windup_cycles(
     pred: &PredictedObservables,
     receiver_ecef_m: [f64; 3],
+    receiver_neu: ([f64; 3], [f64; 3], [f64; 3]),
     sun_ecef_m: [f64; 3],
     prev_phw: Option<f64>,
 ) -> Option<f64> {
@@ -1167,10 +1221,7 @@ fn windup_cycles(
     let (exs, eys) = sat_yaw(rs, vs, sun_ecef_m)?;
     let ek = unit3(sub3(receiver_ecef_m, rs))?;
 
-    let (n, e, _u) = crate::estimation::substrate::frames::local_neu_basis(
-        crate::estimation::recipe::FrameRecipe::GeodeticNeuCrossProduct,
-        receiver_ecef_m,
-    );
+    let (n, e, _u) = receiver_neu;
     let exr = n;
     let eyr = neg3(e);
 
@@ -1482,11 +1533,12 @@ mod tests {
     }
 
     /// The reference fixture was computed with the transmission epoch rounded to whole
-    /// microseconds. Replayed through that rounding it agrees to the bit; the live build,
-    /// which keeps every bit of the flight time, differs from it only through the
-    /// transmission epoch: the station tide not at all, and the wind-up and satellite
-    /// antenna terms by at most what the satellite's turn over that epoch difference moves
-    /// them.
+    /// microseconds and the receiver dipole in the geocentric frame. Replayed through
+    /// both it agrees to the bit. With the live transmission epoch, which keeps every bit
+    /// of the flight time, it differs only through that epoch: the station tide not at
+    /// all, and the wind-up and satellite antenna terms by at most what the satellite's
+    /// turn over that epoch difference moves them. The live build then differs from that
+    /// in the wind-up alone, through the receiver dipole's geodetic frame.
     #[test]
     fn ppp_corrections_match_elixir_reference_fixture() {
         let sp3 = sp3_fixture();
@@ -1561,18 +1613,10 @@ mod tests {
             .zip(got.tide[0].vector_m)
             .all(|(conventions, routine)| (conventions - routine).abs() <= 0.18e-3));
 
-        let live = build_with_validity_and_tide_constants(
-            &sp3,
-            &epochs,
-            receiver,
-            &options,
-            ValidityMode::Strict,
-            StationTideConstants::IersRoutine,
-        )
-        .expect("valid PPP corrections")
-        .value;
+        let live_geocentric = build_geocentric_dipole_replay(&sp3, &epochs, receiver, &options)
+            .expect("valid PPP corrections");
         assert_eq!(
-            live.tide[0].vector_m.map(f64::to_bits),
+            live_geocentric.tide[0].vector_m.map(f64::to_bits),
             got.tide[0].vector_m.map(f64::to_bits),
             "the station tide does not read the satellite"
         );
@@ -1593,9 +1637,6 @@ mod tests {
             dt.abs() <= 0.5e-6 + 1.0e-12,
             "the epochs differ by the rounding alone: {dt} s"
         );
-        // The satellite turns, as seen from the receiver and in its own body frame, by at
-        // most its speed over the range and over its orbit radius, plus the Earth's
-        // rotation, each over the epoch difference; twice that bounds the angle.
         let position = |t: f64| {
             sp3.position_at_j2000_seconds(sat, t)
                 .expect("SP3 state")
@@ -1613,22 +1654,260 @@ mod tests {
             * (speed / exact.geometric_range_m
                 + speed / norm3(at)
                 + crate::constants::OMEGA_E_DOT_RAD_S);
-        // Metres per radian of turn, above each term's scale here: the wind-up's
-        // ionosphere-free wavelength over 2 pi (about 0.017 m), the ionosphere-free
-        // offset's length (about 3.5 m) and the variation's slope (about 0.1 m).
         let metres_per_rad = 10.0;
         let bound_m = metres_per_rad * turn_rad + 1.0e-15;
-        let windup_moved = live.windup_m[0].value_m - got.windup_m[0].value_m;
-        assert!(
-            windup_moved.abs() <= bound_m,
-            "wind-up moved {windup_moved} m"
-        );
         for axis in 0..3 {
-            let moved = live.sat_pco_ecef[0].vector_m[axis] - got.sat_pco_ecef[0].vector_m[axis];
+            let moved =
+                live_geocentric.sat_pco_ecef[0].vector_m[axis] - got.sat_pco_ecef[0].vector_m[axis];
             assert!(moved.abs() <= bound_m, "PCO axis {axis} moved {moved} m");
         }
-        let pcv_moved = live.sat_pcv_m[0].value_m - got.sat_pcv_m[0].value_m;
+        let pcv_moved = live_geocentric.sat_pcv_m[0].value_m - got.sat_pcv_m[0].value_m;
         assert!(pcv_moved.abs() <= bound_m, "PCV moved {pcv_moved} m");
+
+        let receiver_neu = crate::frame::geocentric_neu_basis(receiver);
+        let sun_ecef_m = sun_moon_at(epoch, &Ut1Gate::new(ValidityMode::Strict))
+            .expect("valid Sun position")
+            .sun;
+        let projected_dipoles = |prediction: &PredictedObservables| {
+            let line_of_sight = unit3(sub3(receiver, prediction.sat_pos_ecef_m))
+                .expect("nonzero receiver-satellite vector");
+            let (satellite_x, satellite_y) = sat_yaw(
+                prediction.sat_pos_ecef_m,
+                prediction.sat_velocity_m_s,
+                sun_ecef_m,
+            )
+            .expect("valid satellite yaw frame");
+            let satellite_cross = cross3(line_of_sight, satellite_y);
+            let receiver_x = receiver_neu.0;
+            let receiver_y = neg3(receiver_neu.1);
+            let receiver_cross = cross3(line_of_sight, receiver_y);
+            let satellite_dipole = sub3(
+                satellite_x,
+                add3(
+                    scale3(line_of_sight, dot3(line_of_sight, satellite_x)),
+                    satellite_cross,
+                ),
+            );
+            let receiver_dipole = sub3(
+                receiver_x,
+                sub3(
+                    scale3(line_of_sight, dot3(line_of_sight, receiver_x)),
+                    receiver_cross,
+                ),
+            );
+            (line_of_sight, satellite_dipole, receiver_dipole)
+        };
+        let (exact_los, exact_satellite_dipole, exact_receiver_dipole) = projected_dipoles(&exact);
+        let (rounded_los, rounded_satellite_dipole, rounded_receiver_dipole) =
+            projected_dipoles(&rounded);
+        let asin_angle_upper = |argument: f64| {
+            let argument_upper = libm::nextafter(argument, f64::INFINITY).min(1.0);
+            let asin_upper = libm::nextafter(
+                libm::asin(argument_upper) + 4.0 * f64::EPSILON,
+                f64::INFINITY,
+            );
+            libm::nextafter(2.0 * asin_upper, f64::INFINITY)
+        };
+        let conditioned_direction_change = |first: [f64; 3], second: [f64; 3]| {
+            let minimum_norm = norm3(first).min(norm3(second));
+            assert!(minimum_norm > 0.0, "projected dipole is conditioned");
+            let chord = norm3(sub3(first, second));
+            asin_angle_upper((chord / minimum_norm).min(1.0))
+        };
+        let acos_roundoff_bound_rad = |first: [f64; 3], second: [f64; 3]| {
+            let product_is_normal_or_exact_zero = |left: f64, right: f64| {
+                let product = left * right;
+                product.is_normal() || (product == 0.0 && (left == 0.0 || right == 0.0))
+            };
+            assert!(first.into_iter().all(f64::is_finite));
+            assert!(second.into_iter().all(f64::is_finite));
+            assert!(first
+                .into_iter()
+                .all(|value| product_is_normal_or_exact_zero(value, value)));
+            assert!(second
+                .into_iter()
+                .all(|value| product_is_normal_or_exact_zero(value, value)));
+            assert!(first
+                .into_iter()
+                .zip(second)
+                .all(|(left, right)| product_is_normal_or_exact_zero(left, right)));
+            assert!(norm3(first).is_normal() && norm3(second).is_normal());
+            let unit_roundoff = 0.5 * f64::EPSILON;
+            let gamma =
+                |operations: f64| operations * unit_roundoff / (1.0 - operations * unit_roundoff);
+            let dot_error = gamma(5.0);
+            let norm_error = gamma(5.0);
+            let norm_relative_error = ((1.0 + norm_error).sqrt() * (1.0 + unit_roundoff) - 1.0)
+                .max(1.0 - (1.0 - norm_error).sqrt() * (1.0 - unit_roundoff));
+            let division_lower =
+                (1.0 - norm_relative_error).powi(2) * (1.0 - unit_roundoff).powi(2);
+            let cosine_error = dot_error / division_lower + division_lower.recip() - 1.0;
+            let cosine_error = cosine_error.min(1.0);
+            asin_angle_upper((0.5 * cosine_error).sqrt()) + 4.0 * f64::EPSILON * PI
+        };
+        let orientation_roundoff_bound =
+            |los: [f64; 3], satellite: [f64; 3], receiver: [f64; 3]| {
+                let unit_roundoff = 0.5 * f64::EPSILON;
+                let gamma = |operations: f64| {
+                    operations * unit_roundoff / (1.0 - operations * unit_roundoff)
+                };
+                let underflow_allowance = 3.0 * f64::from_bits(1);
+                let cross_error = [
+                    gamma(3.0)
+                        * (satellite[1].abs() * receiver[2].abs()
+                            + satellite[2].abs() * receiver[1].abs()),
+                    gamma(3.0)
+                        * (satellite[2].abs() * receiver[0].abs()
+                            + satellite[0].abs() * receiver[2].abs()),
+                    gamma(3.0)
+                        * (satellite[0].abs() * receiver[1].abs()
+                            + satellite[1].abs() * receiver[0].abs()),
+                ];
+                let cross_error = cross_error.map(|error| error + underflow_allowance);
+                let cross = cross3(satellite, receiver);
+                gamma(5.0)
+                    * (los[0].abs() * cross[0].abs()
+                        + los[1].abs() * cross[1].abs()
+                        + los[2].abs() * cross[2].abs())
+                    + los[0].abs() * cross_error[0]
+                    + los[1].abs() * cross_error[1]
+                    + los[2].abs() * cross_error[2]
+                    + 5.0 * f64::from_bits(1)
+            };
+        let dipole_phase_bound_rad =
+            conditioned_direction_change(exact_satellite_dipole, rounded_satellite_dipole)
+                + conditioned_direction_change(exact_receiver_dipole, rounded_receiver_dipole)
+                + 2.0 * conditioned_direction_change(exact_los, rounded_los)
+                + acos_roundoff_bound_rad(exact_satellite_dipole, exact_receiver_dipole)
+                + acos_roundoff_bound_rad(rounded_satellite_dipole, rounded_receiver_dipole);
+        let projected_phase = |los: [f64; 3], satellite: [f64; 3], receiver: [f64; 3]| {
+            let cosp = clamp(dot3(satellite, receiver) / norm3(satellite) / norm3(receiver));
+            let mut phase = libm::acos(cosp);
+            if dot3(los, cross3(satellite, receiver)) < 0.0 {
+                phase = -phase;
+            }
+            phase
+        };
+        let exact_phase = projected_phase(exact_los, exact_satellite_dipole, exact_receiver_dipole);
+        let rounded_phase = projected_phase(
+            rounded_los,
+            rounded_satellite_dipole,
+            rounded_receiver_dipole,
+        );
+        let signed_phase_uncertainty =
+            |los: [f64; 3], satellite: [f64; 3], receiver: [f64; 3], phase: f64| {
+                let orientation = dot3(los, cross3(satellite, receiver));
+                if orientation.abs() <= orientation_roundoff_bound(los, satellite, receiver) {
+                    2.0 * (phase.abs() + acos_roundoff_bound_rad(satellite, receiver))
+                } else {
+                    0.0
+                }
+            };
+        let dipole_phase_bound_rad = dipole_phase_bound_rad
+            + signed_phase_uncertainty(
+                exact_los,
+                exact_satellite_dipole,
+                exact_receiver_dipole,
+                exact_phase,
+            )
+            + signed_phase_uncertainty(
+                rounded_los,
+                rounded_satellite_dipole,
+                rounded_receiver_dipole,
+                rounded_phase,
+            );
+        assert!(
+            dipole_phase_bound_rad < PI - exact_phase.abs()
+                && dipole_phase_bound_rad < PI - rounded_phase.abs(),
+            "wind-up phase remains on one principal branch"
+        );
+        let metres_per_cycle = windup_metres(1.0, F_L1_HZ, F_L2_HZ).abs();
+        let conversion_roundoff_bound_m = |first_phase: f64, second_phase: f64| {
+            let unit_roundoff = 0.5 * f64::EPSILON;
+            let gamma_three = 3.0 * unit_roundoff / (1.0 - 3.0 * unit_roundoff);
+            gamma_three * metres_per_cycle * (first_phase.abs() + second_phase.abs())
+                / std::f64::consts::TAU
+        };
+        let windup_moved = live_geocentric.windup_m[0].value_m - got.windup_m[0].value_m;
+        let windup_bound_m = metres_per_cycle * dipole_phase_bound_rad / std::f64::consts::TAU
+            + conversion_roundoff_bound_m(exact_phase, rounded_phase);
+        assert!(
+            windup_moved.abs() <= windup_bound_m,
+            "wind-up moved {windup_moved} m, above conditioned projected-dipole bound {windup_bound_m} m"
+        );
+
+        let live = build(&sp3, &epochs, receiver, &options).expect("valid PPP corrections");
+        assert_eq!(
+            live.tide[0].vector_m.map(f64::to_bits),
+            conventions_replay.tide[0].vector_m.map(f64::to_bits)
+        );
+        assert_eq!(
+            live.sat_pco_ecef[0].vector_m.map(f64::to_bits),
+            live_geocentric.sat_pco_ecef[0].vector_m.map(f64::to_bits)
+        );
+        assert_eq!(
+            live.sat_pcv_m[0].value_m.to_bits(),
+            live_geocentric.sat_pcv_m[0].value_m.to_bits()
+        );
+        let (_, _, geodetic_up) =
+            crate::estimation::substrate::frames::geodetic_neu_basis(receiver);
+        let geocentric_up = crate::frame::geocentric_up(receiver);
+        let vertical_angle_rad = libm::atan2(
+            norm3(cross3(geodetic_up, geocentric_up)),
+            dot3(geodetic_up, geocentric_up),
+        );
+        assert!(vertical_angle_rad > 1.0e-3 && vertical_angle_rad < 3.4e-3);
+        let frame_moved = live.windup_m[0].value_m - live_geocentric.windup_m[0].value_m;
+        assert!(frame_moved != 0.0, "the dipole frame moves the wind-up");
+        let line_of_sight = unit3(sub3(receiver, exact.sat_pos_ecef_m)).expect("line of sight");
+        let geodetic_neu = crate::estimation::substrate::frames::geodetic_neu_basis(receiver);
+        let geocentric_neu = crate::frame::geocentric_neu_basis(receiver);
+        let receiver_dipole = |neu: ([f64; 3], [f64; 3], [f64; 3])| {
+            let (north, east, _) = neu;
+            add3(
+                sub3(north, scale3(line_of_sight, dot3(line_of_sight, north))),
+                cross3(line_of_sight, neg3(east)),
+            )
+        };
+        let geodetic_dipole = receiver_dipole(geodetic_neu);
+        let geocentric_dipole = receiver_dipole(geocentric_neu);
+        let conditioning = norm3(geodetic_dipole).min(norm3(geocentric_dipole));
+        let dipole_delta_bound = 4.0 * libm::sin(0.5 * vertical_angle_rad);
+        let projected_angle_bound = if conditioning > dipole_delta_bound {
+            asin_angle_upper((dipole_delta_bound / conditioning).min(1.0))
+        } else {
+            std::f64::consts::PI
+        };
+        let geodetic_frame_phase =
+            projected_phase(line_of_sight, exact_satellite_dipole, geodetic_dipole);
+        let geocentric_frame_phase =
+            projected_phase(line_of_sight, exact_satellite_dipole, geocentric_dipole);
+        let frame_phase_bound = projected_angle_bound
+            + acos_roundoff_bound_rad(exact_satellite_dipole, geodetic_dipole)
+            + acos_roundoff_bound_rad(exact_satellite_dipole, geocentric_dipole)
+            + signed_phase_uncertainty(
+                line_of_sight,
+                exact_satellite_dipole,
+                geodetic_dipole,
+                geodetic_frame_phase,
+            )
+            + signed_phase_uncertainty(
+                line_of_sight,
+                exact_satellite_dipole,
+                geocentric_dipole,
+                geocentric_frame_phase,
+            );
+        assert!(
+            frame_phase_bound < PI - geodetic_frame_phase.abs()
+                && frame_phase_bound < PI - geocentric_frame_phase.abs(),
+            "receiver-frame wind-up remains on one principal branch"
+        );
+        let frame_bound_m = metres_per_cycle * frame_phase_bound / std::f64::consts::TAU
+            + conversion_roundoff_bound_m(geodetic_frame_phase, geocentric_frame_phase);
+        assert!(
+            frame_moved.abs() <= frame_bound_m,
+            "wind-up moved {frame_moved} m, above conditioned dipole bound {frame_bound_m} m"
+        );
     }
 
     #[test]
