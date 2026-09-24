@@ -23,6 +23,8 @@
 //! | MSM1..MSM7 observations | 1071..1077 GPS, 1081..1087 GLONASS, 1091..1097 Galileo, 1101..1107 SBAS, 1111..1117 QZSS, 1121..1127 BeiDou, 1131..1137 NavIC | [`MsmMessage`] |
 //! | Legacy RTK observations | 1001..1004 GPS, 1009..1012 GLONASS          | [`LegacyObservations`] |
 //! | Station coordinates| 1005 / 1006                              | [`StationCoordinates`] |
+//! | System parameters  | 1013                                     | [`SystemParameters`] |
+//! | Text string        | 1029                                     | [`TextMessage`] |
 //! | Network auxiliary station | 1014                              | [`NetworkAuxiliaryStation`] |
 //! | Network correction differences | 1015-1017 GPS, 1037-1039 GLONASS | [`NetworkCorrectionDifferences`] |
 //! | Transformation parameters | 1021 / 1022                       | [`HelmertTransformation`] |
@@ -46,8 +48,8 @@
 //! Any other message number is preserved losslessly as [`Message::Unsupported`]
 //! (its raw body is kept so the frame still round-trips), and so is a 4076
 //! message whose IGS SSR message number is none of the above. Message types
-//! kept this way include the system parameters 1013, the text message 1029,
-//! the SSR messages not listed above, and proprietary messages. They decode as
+//! kept this way include the SSR messages not listed above and proprietary
+//! messages. They decode as
 //! `Unsupported` rather than erroring.
 //!
 //! ## Departures and policy
@@ -115,6 +117,7 @@ mod msm;
 mod network;
 mod ssr;
 mod station;
+mod system;
 mod transformation;
 mod vtec;
 
@@ -164,6 +167,7 @@ pub use ssr::{
     SsrPhaseBiasRecord, SsrPhaseBiasSignal, IGS_SSR_MESSAGE_NUMBER,
 };
 pub use station::StationCoordinates;
+pub use system::{MessageAnnouncement, SystemParameters, TextMessage};
 pub use transformation::{
     GridResidual, HelmertTransformation, Projection, ProjectionParameters, ResidualGrid,
     RotationPoint, RESIDUAL_GRID_POINTS,
@@ -574,6 +578,10 @@ pub enum Message {
     StationCoordinates(StationCoordinates),
     /// A 1007 / 1008 / 1033 antenna or receiver descriptor.
     AntennaDescriptor(AntennaDescriptor),
+    /// A 1013 system parameters message.
+    SystemParameters(SystemParameters),
+    /// A 1029 Unicode text string message.
+    Text(TextMessage),
     /// A 1014 network auxiliary station data message.
     NetworkAuxiliaryStation(NetworkAuxiliaryStation),
     /// A 1015-1017 or 1037-1039 network RTK correction-difference message.
@@ -658,6 +666,8 @@ impl Message {
             1007 | 1008 | 1033 => Message::AntennaDescriptor(decode_body(body, ctx, |r, _| {
                 AntennaDescriptor::read(r)
             })?),
+            1013 => Message::SystemParameters(SystemParameters::decode_inner(body, ctx)?),
+            1029 => Message::Text(decode_body(body, ctx, |r, _| TextMessage::read(r))?),
             1014 => Message::NetworkAuxiliaryStation(decode_body(body, ctx, |r, _| {
                 NetworkAuxiliaryStation::read(r)
             })?),
@@ -772,6 +782,8 @@ impl Message {
             Message::LegacyObservations(o) => o.encode_with_policy(policy),
             Message::StationCoordinates(s) => s.encode_with_policy(policy),
             Message::AntennaDescriptor(a) => a.encode_with_policy(policy),
+            Message::SystemParameters(m) => m.encode_with_policy(policy),
+            Message::Text(m) => m.encode_with_policy(policy),
             Message::NetworkAuxiliaryStation(m) => m.encode_with_policy(policy),
             Message::NetworkCorrectionDifferences(m) => m.encode_with_policy(policy),
             Message::HelmertTransformation(m) => m.encode_with_policy(policy),
@@ -801,6 +813,8 @@ impl Message {
             Message::LegacyObservations(o) => o.message_number,
             Message::StationCoordinates(s) => s.message_number,
             Message::AntennaDescriptor(a) => a.message_number,
+            Message::SystemParameters(_) => 1013,
+            Message::Text(_) => 1029,
             Message::NetworkAuxiliaryStation(_) => 1014,
             Message::NetworkCorrectionDifferences(m) => m.message_number,
             Message::HelmertTransformation(m) => m.message_number,
@@ -885,7 +899,8 @@ fn is_decoded_number(number: u16) -> bool {
     matches!(
         number,
         1005..=1008
-            | 1014..=1017
+            | 1013..=1017
+            | 1029
             | 1021..=1027
             | 1030..=1035
             | 1037..=1039
