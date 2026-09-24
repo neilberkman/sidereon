@@ -52,7 +52,8 @@ use std::collections::BTreeMap;
 use crate::astro::time::civil::{days_from_seconds, j2000_seconds, split_julian_date};
 use crate::astro::time::model::{Instant, InstantRepr, JulianDateSplit, TimeScale};
 
-use crate::constants::{KM_TO_M, US_TO_S};
+use crate::astro::time::scales::julian_day_number;
+use crate::constants::{KM_TO_M, SECONDS_PER_DAY, SECONDS_PER_HOUR, SECONDS_PER_MINUTE, US_TO_S};
 use crate::format::columns::{
     char_at, fixed_record, raw_field as field, raw_field_from as field_from, strict_f64,
 };
@@ -737,6 +738,26 @@ fn civil_to_julian_split(civil: validate::ValidCivil) -> Result<JulianDateSplit>
     };
     JulianDateSplit::new(jd_whole, fraction)
         .map_err(|error| Error::Parse(format!("invalid SP3 epoch Julian date: {error}")))
+}
+
+/// The split Julian date the reader built for an epoch line before 3.0.0: the
+/// clock fields summed in `f64` and divided by the day, which rounds twice, so
+/// an epoch with a fractional second could land a unit in the last place of
+/// the fraction from [`civil_to_julian_split`]'s. Kept only so the writer can
+/// restate an instant a 2.x reader produced from the same line.
+fn civil_to_julian_split_2x(civil: validate::ValidCivil) -> Option<JulianDateSplit> {
+    let mut jd_whole =
+        julian_day_number(civil.year as i32, civil.month as i32, civil.day as i32) as f64 - 0.5;
+    let day_seconds = civil.hour as f64 * SECONDS_PER_HOUR
+        + civil.minute as f64 * SECONDS_PER_MINUTE
+        + civil.second;
+    let mut fraction = day_seconds / SECONDS_PER_DAY;
+    if fraction > 1.0 {
+        let carry = fraction.floor();
+        jd_whole += carry;
+        fraction -= carry;
+    }
+    JulianDateSplit::new(jd_whole, fraction).ok()
 }
 
 /// Conservative maximum for one logical SP3 record.
