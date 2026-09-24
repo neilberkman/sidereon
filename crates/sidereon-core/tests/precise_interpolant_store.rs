@@ -238,12 +238,147 @@ fn precise_interpolant_store_rejects_corrupt_and_truncated_artifacts() {
         .expect_err("corrupt artifact must fail");
     assert!(matches!(err, PreciseInterpolantStoreError::Checksum { .. }));
 
+    // A short store is truncated, with both lengths, not a checksum mismatch.
     let truncated = &bytes[..bytes.len() - 1];
     let err = MmapPreciseEphemerisInterpolant::from_bytes(truncated)
         .expect_err("truncated artifact must fail");
-    assert!(matches!(
+    assert_eq!(
         err,
-        PreciseInterpolantStoreError::Checksum { .. } | PreciseInterpolantStoreError::Parse { .. }
+        PreciseInterpolantStoreError::Truncated {
+            declared: bytes.len() as u64,
+            available: bytes.len() as u64 - 1,
+        }
+    );
+}
+
+fn header_checksum(bytes: &[u8]) -> u64 {
+    u64::from_le_bytes(
+        bytes[HEADER_CHECKSUM_OFFSET..HEADER_CHECKSUM_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    )
+}
+
+/// Open `bytes` on the verified path and on the attested path, the attested
+/// claim being the checksum the header declares.
+fn open_both_ways(
+    bytes: &[u8],
+) -> [Result<MmapPreciseEphemerisInterpolant<'static>, PreciseInterpolantStoreError>; 2] {
+    let claimed = if bytes.len() >= HEADER_CHECKSUM_OFFSET + 8 {
+        header_checksum(bytes)
+    } else {
+        0
+    };
+    [
+        MmapPreciseEphemerisInterpolant::from_vec(bytes.to_vec()),
+        MmapPreciseEphemerisInterpolant::from_vec_attested(bytes.to_vec(), claimed),
+    ]
+}
+
+#[test]
+fn precise_interpolant_store_reports_framing_by_cause_on_both_paths() {
+    let bytes = fixture_sp3()
+        .precise_interpolant_store_bytes()
+        .expect("build precise interpolant artifact");
+    let len = bytes.len() as u64;
+
+    for cut in [bytes.len() - 1, bytes.len() - 4096, STORE_HEADER_LEN] {
+        for result in open_both_ways(&bytes[..cut]) {
+            assert_eq!(
+                result.err(),
+                Some(PreciseInterpolantStoreError::Truncated {
+                    declared: len,
+                    available: cut as u64,
+                }),
+                "cut at {cut}"
+            );
+        }
+    }
+    for cut in [0, 7, 8, 40, STORE_HEADER_LEN - 1] {
+        for result in open_both_ways(&bytes[..cut]) {
+            assert_eq!(
+                result.err(),
+                Some(PreciseInterpolantStoreError::HeaderTruncated {
+                    available: cut as u64,
+                }),
+                "cut at {cut}"
+            );
+        }
+    }
+
+    let mut longer = bytes.clone();
+    longer.push(0);
+    for result in open_both_ways(&longer) {
+        assert_eq!(
+            result.err(),
+            Some(PreciseInterpolantStoreError::TrailingBytes {
+                declared: len,
+                available: len + 1,
+            })
+        );
+    }
+
+    let mut foreign = bytes.clone();
+    foreign[..8].copy_from_slice(b"NOTASTOR");
+    for result in open_both_ways(&foreign) {
+        assert_eq!(
+            result.err(),
+            Some(PreciseInterpolantStoreError::BadMagic {
+                found: *b"NOTASTOR"
+            })
+        );
+    }
+}
+
+#[test]
+fn precise_interpolant_store_reports_a_corrupt_span_by_cause_on_both_paths() {
+    let bytes = fixture_sp3()
+        .precise_interpolant_store_bytes()
+        .expect("build precise interpolant artifact");
+    let first_sat = MmapPreciseEphemerisInterpolant::from_vec(bytes.clone())
+        .expect("pristine store opens")
+        .satellites()[0];
+
+    // The first index record's payload length, grown past the store. The
+    // store keeps its length, so this is corruption, not truncation.
+    let data_offset_at = STORE_HEADER_LEN + SAT_DATA_OFFSET_OFFSET;
+    let data_len_at = STORE_HEADER_LEN + SAT_DATA_LEN_OFFSET;
+    let data_offset = u64::from_le_bytes(
+        bytes[data_offset_at..data_offset_at + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let mut corrupt = bytes.clone();
+    corrupt[data_len_at..data_len_at + 8].copy_from_slice(&(1u64 << 40).to_le_bytes());
+
+    let [verified, attested] = open_both_ways(&corrupt);
+    assert!(
+        matches!(
+            verified.err(),
+            Some(PreciseInterpolantStoreError::Checksum { .. })
+        ),
+        "the verified path hashes the store first"
+    );
+    assert_eq!(
+        attested.err(),
+        Some(PreciseInterpolantStoreError::RangeOutOfBounds {
+            region: "satellite data",
+            sat: Some(first_sat),
+            offset: data_offset,
+            len: 1 << 40,
+            available: bytes.len() as u64,
+        })
+    );
+
+    // A payload byte flipped in place keeps every length: the verified path
+    // names the checksum.
+    let mut flipped = bytes.clone();
+    let last = flipped.len() - 1;
+    flipped[last] ^= 0x80;
+    let [verified, _] = open_both_ways(&flipped);
+    assert!(matches!(
+        verified.err(),
+        Some(PreciseInterpolantStoreError::Checksum { .. })
     ));
 }
 
@@ -253,6 +388,10 @@ const GAP_MID_HOLE_J2000_S: f64 = 646_260_300.0;
 const HEADER_GAP_THRESHOLD_FACTOR_OFFSET: usize = 48;
 const HEADER_CHECKSUM_OFFSET: usize = 40;
 const STORE_HEADER_LEN: usize = 64;
+/// Byte offsets of a satellite's payload offset and length in its 96-byte
+/// index record.
+const SAT_DATA_OFFSET_OFFSET: usize = 64;
+const SAT_DATA_LEN_OFFSET: usize = 72;
 
 fn gapped_sp3() -> Sp3 {
     let bytes = fs::read(fixture_path(GAP_15M_FIXTURE)).expect("read gapped SP3 fixture");

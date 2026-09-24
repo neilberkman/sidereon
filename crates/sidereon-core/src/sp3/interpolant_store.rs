@@ -83,7 +83,14 @@ const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// Errors from precise-interpolant store conversion, serialization, and open.
+///
+/// Opening checks the store's framing first: the magic, the version and the
+/// total length the header declares against the bytes present. Only a store
+/// whose length is the declared one is checksummed, so a short store is
+/// reported as [`Truncated`](Self::Truncated) with both lengths on the
+/// verified and the attested path alike, never as a checksum mismatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PreciseInterpolantStoreError {
     /// File I/O failed.
     Io {
@@ -92,10 +99,53 @@ pub enum PreciseInterpolantStoreError {
         /// I/O error text.
         message: String,
     },
-    /// Store bytes could not be parsed.
+    /// Store bytes could not be parsed for a reason no other variant names.
     Parse {
         /// Human-readable parse reason.
         reason: String,
+    },
+    /// The bytes do not begin with the store magic `PEMAP001`.
+    BadMagic {
+        /// The first eight bytes found.
+        found: [u8; 8],
+    },
+    /// Fewer bytes than the fixed 64-byte header, so no declared length can
+    /// be read. Bytes that do not start with the magic are reported as
+    /// [`BadMagic`](Self::BadMagic) instead, once eight bytes are present.
+    HeaderTruncated {
+        /// Bytes present.
+        available: u64,
+    },
+    /// The header declares more bytes than are present: the store was cut
+    /// short (or its length field is corrupt).
+    Truncated {
+        /// Total length the header declares.
+        declared: u64,
+        /// Bytes present.
+        available: u64,
+    },
+    /// More bytes are present than the header declares.
+    TrailingBytes {
+        /// Total length the header declares.
+        declared: u64,
+        /// Bytes present.
+        available: u64,
+    },
+    /// A region the header or an index record places lies, wholly or in
+    /// part, past the end of a store whose length is the declared one. The
+    /// index is inconsistent with the bytes.
+    RangeOutOfBounds {
+        /// The region, for example `"satellite index"`, `"satellite data"`,
+        /// `"clock node"` or an array such as `"position kx"`.
+        region: &'static str,
+        /// The satellite whose payload the region belongs to, if any.
+        sat: Option<GnssSatelliteId>,
+        /// Byte offset the region starts at.
+        offset: u64,
+        /// Byte length of the region.
+        len: u64,
+        /// Bytes present.
+        available: u64,
     },
     /// The store version is not supported.
     UnsupportedVersion {
@@ -147,6 +197,48 @@ impl core::fmt::Display for PreciseInterpolantStoreError {
         match self {
             Self::Io { path, message } => write!(f, "{} failed: {message}", path.display()),
             Self::Parse { reason } => write!(f, "precise interpolant store parse error: {reason}"),
+            Self::BadMagic { found } => write!(
+                f,
+                "precise interpolant store parse error: missing store magic, found {found:02x?}"
+            ),
+            Self::HeaderTruncated { available } => write!(
+                f,
+                "precise interpolant store truncated: {available} bytes, shorter than the \
+                 {STORE_HEADER_LEN}-byte header"
+            ),
+            Self::Truncated {
+                declared,
+                available,
+            } => write!(
+                f,
+                "precise interpolant store truncated: header declares {declared} bytes but \
+                 {available} are present"
+            ),
+            Self::TrailingBytes {
+                declared,
+                available,
+            } => write!(
+                f,
+                "precise interpolant store has trailing bytes: header declares {declared} bytes \
+                 but {available} are present"
+            ),
+            Self::RangeOutOfBounds {
+                region,
+                sat,
+                offset,
+                len,
+                available,
+            } => {
+                write!(f, "precise interpolant store ")?;
+                if let Some(sat) = sat {
+                    write!(f, "satellite {sat} ")?;
+                }
+                write!(
+                    f,
+                    "{region} at byte {offset} with length {len} extends past the {available} \
+                     bytes present"
+                )
+            }
             Self::UnsupportedVersion { version } => {
                 write!(
                     f,
@@ -1001,18 +1093,33 @@ fn parse_store<'a>(
     backing: ArrayBacking<'a>,
     checksum_validation: ChecksumValidation,
 ) -> core::result::Result<ParsedStore<'a>, PreciseInterpolantStoreError> {
-    if bytes.len() < STORE_HEADER_LEN {
-        return Err(parse_error(format!(
-            "store has {} bytes but needs at least {STORE_HEADER_LEN}",
-            bytes.len()
-        )));
+    let available = bytes.len() as u64;
+    if let Some(found) = bytes.first_chunk::<8>() {
+        if found != STORE_MAGIC {
+            return Err(PreciseInterpolantStoreError::BadMagic { found: *found });
+        }
     }
-    if &bytes[..STORE_MAGIC.len()] != STORE_MAGIC {
-        return Err(parse_error("missing precise interpolant store magic"));
+    if bytes.len() < STORE_HEADER_LEN {
+        return Err(PreciseInterpolantStoreError::HeaderTruncated { available });
     }
     let version = read_u16(bytes, HEADER_VERSION_OFFSET)?;
     if version != STORE_VERSION {
         return Err(PreciseInterpolantStoreError::UnsupportedVersion { version });
+    }
+    // The framing is checked before the checksum: a store cut short fails its
+    // checksum too, and would otherwise be reported as corrupt.
+    let declared = read_u64(bytes, HEADER_TOTAL_LEN_OFFSET)?;
+    if declared > available {
+        return Err(PreciseInterpolantStoreError::Truncated {
+            declared,
+            available,
+        });
+    }
+    if declared < available {
+        return Err(PreciseInterpolantStoreError::TrailingBytes {
+            declared,
+            available,
+        });
     }
 
     let expected_checksum = read_u64(bytes, HEADER_CHECKSUM_OFFSET)?;
@@ -1045,15 +1152,8 @@ fn parse_store<'a>(
     )?;
     let time_scale = time_scale_from_tag(bytes[HEADER_TIME_SCALE_OFFSET])?;
     let sat_count = read_u32(bytes, HEADER_SAT_COUNT_OFFSET)? as usize;
-    let index_offset = read_u64(bytes, HEADER_INDEX_OFFSET_OFFSET)? as usize;
-    let data_offset = read_u64(bytes, HEADER_DATA_OFFSET_OFFSET)? as usize;
-    let total_len = read_u64(bytes, HEADER_TOTAL_LEN_OFFSET)? as usize;
-    if total_len != bytes.len() {
-        return Err(parse_error(format!(
-            "header total length {total_len} does not match {}",
-            bytes.len()
-        )));
-    }
+    let index_offset = read_usize(bytes, HEADER_INDEX_OFFSET_OFFSET)?;
+    let data_offset = read_usize(bytes, HEADER_DATA_OFFSET_OFFSET)?;
     if index_offset != STORE_HEADER_LEN {
         return Err(parse_error(format!(
             "index offset must be {STORE_HEADER_LEN}, got {index_offset}"
@@ -1067,7 +1167,13 @@ fn parse_store<'a>(
         .checked_add(index_len)
         .ok_or_else(|| parse_error("satellite index end overflows usize"))?;
     if index_end > bytes.len() {
-        return Err(parse_error("satellite index extends past store length"));
+        return Err(out_of_bounds(
+            "satellite index",
+            None,
+            index_offset,
+            index_len,
+            bytes,
+        ));
     }
     let expected_data_offset = align_up(index_end, STORE_ALIGNMENT)?;
     if data_offset != expected_data_offset {
@@ -1110,14 +1216,14 @@ fn parse_store<'a>(
             )));
         }
 
-        let pos_x_offset = read_u64(record, SAT_POS_X_OFFSET_OFFSET)? as usize;
-        let pos_kx_offset = read_u64(record, SAT_POS_KX_OFFSET_OFFSET)? as usize;
-        let pos_ky_offset = read_u64(record, SAT_POS_KY_OFFSET_OFFSET)? as usize;
-        let pos_kz_offset = read_u64(record, SAT_POS_KZ_OFFSET_OFFSET)? as usize;
-        let clock_node_offset = read_u64(record, SAT_CLOCK_NODE_OFFSET_OFFSET)? as usize;
-        let clock_arc_offset = read_u64(record, SAT_CLOCK_ARC_OFFSET_OFFSET)? as usize;
-        let sat_data_offset = read_u64(record, SAT_DATA_OFFSET_OFFSET)? as usize;
-        let sat_data_len = read_u64(record, SAT_DATA_LEN_OFFSET)? as usize;
+        let pos_x_offset = read_usize(record, SAT_POS_X_OFFSET_OFFSET)?;
+        let pos_kx_offset = read_usize(record, SAT_POS_KX_OFFSET_OFFSET)?;
+        let pos_ky_offset = read_usize(record, SAT_POS_KY_OFFSET_OFFSET)?;
+        let pos_kz_offset = read_usize(record, SAT_POS_KZ_OFFSET_OFFSET)?;
+        let clock_node_offset = read_usize(record, SAT_CLOCK_NODE_OFFSET_OFFSET)?;
+        let clock_arc_offset = read_usize(record, SAT_CLOCK_ARC_OFFSET_OFFSET)?;
+        let sat_data_offset = read_usize(record, SAT_DATA_OFFSET_OFFSET)?;
+        let sat_data_len = read_usize(record, SAT_DATA_LEN_OFFSET)?;
         let expected_sat_data_offset = align_up(expected_next, STORE_ALIGNMENT)?;
         ensure_zero(
             bytes,
@@ -1134,9 +1240,13 @@ fn parse_store<'a>(
             .checked_add(sat_data_len)
             .ok_or_else(|| parse_error(format!("satellite {sat} data end overflows usize")))?;
         if sat_data_end > bytes.len() {
-            return Err(parse_error(format!(
-                "satellite {sat} data extends past store length"
-            )));
+            return Err(out_of_bounds(
+                "satellite data",
+                Some(sat),
+                sat_data_offset,
+                sat_data_len,
+                bytes,
+            ));
         }
 
         let sat_checksum = read_u64(record, SAT_CHECKSUM_OFFSET)?;
@@ -1167,11 +1277,23 @@ fn parse_store<'a>(
         cursor = add_len(cursor, pos_count, 8)?;
 
         require_offset(sat, "clock nodes", clock_node_offset, cursor)?;
+        checked_range(
+            bytes,
+            clock_node_offset,
+            clock_node_count,
+            CLOCK_NODE_RECORD_LEN,
+            "clock nodes",
+            sat,
+        )?;
         for node_idx in 0..clock_node_count {
             let node_offset = clock_node_offset + node_idx * CLOCK_NODE_RECORD_LEN;
-            let node = bytes
-                .get(node_offset..node_offset + CLOCK_NODE_RECORD_LEN)
-                .ok_or_else(|| parse_error(format!("satellite {sat} clock node out of bounds")))?;
+            let node = checked_slice(
+                bytes,
+                node_offset,
+                CLOCK_NODE_RECORD_LEN,
+                "clock node",
+                Some(sat),
+            )?;
             let x = read_f64(node, CLOCK_NODE_X_OFFSET)?;
             let clock_us = read_f64(node, CLOCK_NODE_US_OFFSET)?;
             if !x.is_finite() || !clock_us.is_finite() {
@@ -1197,12 +1319,26 @@ fn parse_store<'a>(
         cursor = add_len(cursor, clock_node_count, CLOCK_NODE_RECORD_LEN)?;
 
         require_offset(sat, "clock arc index", clock_arc_offset, cursor)?;
+        checked_range(
+            bytes,
+            clock_arc_offset,
+            clock_arc_count,
+            CLOCK_ARC_RECORD_LEN,
+            "clock arc index",
+            sat,
+        )?;
         let clock_arc_index_end = add_len(cursor, clock_arc_count, CLOCK_ARC_RECORD_LEN)?;
         let mut arc_cursor = clock_arc_index_end;
         let mut arcs = Vec::with_capacity(clock_arc_count);
         for arc_idx in 0..clock_arc_count {
             let arc_offset = clock_arc_offset + arc_idx * CLOCK_ARC_RECORD_LEN;
-            let arc_record = &bytes[arc_offset..arc_offset + CLOCK_ARC_RECORD_LEN];
+            let arc_record = checked_slice(
+                bytes,
+                arc_offset,
+                CLOCK_ARC_RECORD_LEN,
+                "clock arc record",
+                Some(sat),
+            )?;
             let node_count = read_u32(arc_record, CLOCK_ARC_NODE_COUNT_OFFSET)? as usize;
             let coeff_count = read_u32(arc_record, CLOCK_ARC_COEFF_COUNT_OFFSET)? as usize;
             if node_count == 0 {
@@ -1215,11 +1351,11 @@ fn parse_store<'a>(
                     "satellite {sat} clock arc {arc_idx} coefficient count {coeff_count} does not match node count {node_count}"
                 )));
             }
-            let x_offset = read_u64(arc_record, CLOCK_ARC_X_OFFSET_OFFSET)? as usize;
-            let c0_offset = read_u64(arc_record, CLOCK_ARC_C0_OFFSET_OFFSET)? as usize;
-            let c1_offset = read_u64(arc_record, CLOCK_ARC_C1_OFFSET_OFFSET)? as usize;
-            let c2_offset = read_u64(arc_record, CLOCK_ARC_C2_OFFSET_OFFSET)? as usize;
-            let c3_offset = read_u64(arc_record, CLOCK_ARC_C3_OFFSET_OFFSET)? as usize;
+            let x_offset = read_usize(arc_record, CLOCK_ARC_X_OFFSET_OFFSET)?;
+            let c0_offset = read_usize(arc_record, CLOCK_ARC_C0_OFFSET_OFFSET)?;
+            let c1_offset = read_usize(arc_record, CLOCK_ARC_C1_OFFSET_OFFSET)?;
+            let c2_offset = read_usize(arc_record, CLOCK_ARC_C2_OFFSET_OFFSET)?;
+            let c3_offset = read_usize(arc_record, CLOCK_ARC_C3_OFFSET_OFFSET)?;
             ensure_zero(
                 arc_record,
                 CLOCK_ARC_C3_OFFSET_OFFSET + 8,
@@ -1275,7 +1411,7 @@ fn parse_store<'a>(
 
     if expected_next != bytes.len() {
         return Err(parse_error(format!(
-            "store has trailing bytes: expected length {expected_next}, got {}",
+            "satellite payloads end at byte {expected_next} but the store has {} bytes",
             bytes.len()
         )));
     }
@@ -1618,10 +1754,10 @@ fn parse_f64_array<'a>(
     offset: usize,
     count: usize,
     sat: GnssSatelliteId,
-    field: &str,
+    field: &'static str,
     backing: ArrayBacking<'a>,
 ) -> core::result::Result<F64Array<'a>, PreciseInterpolantStoreError> {
-    checked_range(bytes, offset, count, 8)?;
+    checked_range(bytes, offset, count, 8, field, sat)?;
     let array = match backing {
         ArrayBacking::Borrowed(borrowed_bytes) => {
             F64Array::Borrowed(borrow_f64_slice(borrowed_bytes, offset, count, sat, field)?)
@@ -1660,7 +1796,7 @@ fn borrow_f64_slice<'a>(
     offset: usize,
     count: usize,
     sat: GnssSatelliteId,
-    field: &str,
+    field: &'static str,
 ) -> core::result::Result<&'a [f64], PreciseInterpolantStoreError> {
     let len = count
         .checked_mul(8)
@@ -1670,7 +1806,7 @@ fn borrow_f64_slice<'a>(
         .ok_or_else(|| parse_error("byte range end overflows usize"))?;
     let slice = bytes
         .get(offset..end)
-        .ok_or_else(|| parse_error("byte range extends past store length"))?;
+        .ok_or_else(|| out_of_bounds(field, Some(sat), offset, len, bytes))?;
     if !cfg!(target_endian = "little") {
         return Err(parse_error(
             "zero-copy precise interpolant f64 arrays require a little-endian target",
@@ -1697,17 +1833,43 @@ fn checked_range(
     offset: usize,
     count: usize,
     item_len: usize,
+    region: &'static str,
+    sat: GnssSatelliteId,
 ) -> core::result::Result<(), PreciseInterpolantStoreError> {
     let len = count
         .checked_mul(item_len)
         .ok_or_else(|| parse_error("byte range length overflows usize"))?;
-    let end = offset
+    checked_slice(bytes, offset, len, region, Some(sat)).map(|_| ())
+}
+
+/// The `len` bytes at `offset`, or the region named as out of bounds.
+fn checked_slice<'b>(
+    bytes: &'b [u8],
+    offset: usize,
+    len: usize,
+    region: &'static str,
+    sat: Option<GnssSatelliteId>,
+) -> core::result::Result<&'b [u8], PreciseInterpolantStoreError> {
+    offset
         .checked_add(len)
-        .ok_or_else(|| parse_error("byte range end overflows usize"))?;
-    if end > bytes.len() {
-        return Err(parse_error("byte range extends past store length"));
+        .and_then(|end| bytes.get(offset..end))
+        .ok_or_else(|| out_of_bounds(region, sat, offset, len, bytes))
+}
+
+fn out_of_bounds(
+    region: &'static str,
+    sat: Option<GnssSatelliteId>,
+    offset: usize,
+    len: usize,
+    bytes: &[u8],
+) -> PreciseInterpolantStoreError {
+    PreciseInterpolantStoreError::RangeOutOfBounds {
+        region,
+        sat,
+        offset: offset as u64,
+        len: len as u64,
+        available: bytes.len() as u64,
     }
-    Ok(())
 }
 
 fn add_len(
@@ -1741,10 +1903,15 @@ fn ensure_zero(
     bytes: &[u8],
     start: usize,
     end: usize,
-    context: &str,
+    context: &'static str,
 ) -> core::result::Result<(), PreciseInterpolantStoreError> {
-    if start > end || end > bytes.len() {
-        return Err(parse_error(format!("{context} range is out of bounds")));
+    if start > end {
+        return Err(parse_error(format!(
+            "{context} range ends before it starts"
+        )));
+    }
+    if end > bytes.len() {
+        return Err(out_of_bounds(context, None, start, end - start, bytes));
     }
     if bytes[start..end].iter().any(|&byte| byte != 0) {
         return Err(parse_error(format!("{context} must be zero-filled")));
@@ -1800,6 +1967,20 @@ fn read_u32(
     offset: usize,
 ) -> core::result::Result<u32, PreciseInterpolantStoreError> {
     Ok(u32::from_le_bytes(read_array(bytes, offset)?))
+}
+
+/// A `u64` offset or length as a `usize`, refused where this target's
+/// address width cannot hold it rather than truncated onto another value.
+fn read_usize(
+    bytes: &[u8],
+    offset: usize,
+) -> core::result::Result<usize, PreciseInterpolantStoreError> {
+    let value = read_u64(bytes, offset)?;
+    usize::try_from(value).map_err(|_| {
+        parse_error(format!(
+            "offset or length {value} does not fit this target's address width"
+        ))
+    })
 }
 
 fn read_u64(
