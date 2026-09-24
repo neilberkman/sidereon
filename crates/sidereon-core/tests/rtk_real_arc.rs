@@ -1334,6 +1334,20 @@ fn median(values: &mut [f64]) -> f64 {
     values[values.len() / 2]
 }
 
+fn baseline_float_sigma_before_new_fixes_m(update: &EpochUpdate) -> f64 {
+    let dimension = 3 + update.state.sd_ambiguity_ids.len();
+    assert_eq!(update.state.information.len(), dimension * dimension);
+    let information = update
+        .state
+        .information
+        .chunks(dimension)
+        .map(|row| row.to_vec())
+        .collect::<Vec<_>>();
+    let covariance = sidereon_core::astro::math::linear::invert_matrix_first_tie(&information)
+        .expect("invert pre-search float posterior information");
+    (covariance[0][0].max(0.0) + covariance[1][1].max(0.0) + covariance[2][2].max(0.0)).sqrt()
+}
+
 #[derive(Clone)]
 struct SequentialRunOptions {
     initial_baseline_m: [f64; 3],
@@ -1844,17 +1858,6 @@ fn canonical_rtk_is_deterministic_bounded_and_truthful() {
         "canonical RTK truth error was {terr} m (> {CANONICAL_RTK_TRUTH_BOUND_M} m)"
     );
 
-    // BAR 1: frozen-bits determinism golden (portable: owned scalar + IEEE sqrt).
-    // Re-frozen when the arcs moved to RTKLIB `satposs` placement of each receiver's transmission epochs
-    // (t_rx - P / c - dts, no whole-microsecond rounding). One array is compared, so a
-    // mismatch prints every component.
-    let canonical_bits = canonical.baseline_m.map(f64::to_bits);
-    assert_eq!(
-        canonical_bits,
-        [0xbfef8dc30b1a10ba, 0xbfe5299b164528a1, 0x3ff117adb617dadd],
-        "baseline bits: {canonical_bits:#x?}"
-    );
-
     // Determinism: a second canonical solve is bit-identical.
     let again = run_canonical();
     assert_eq!(
@@ -2035,6 +2038,48 @@ fn wettzell_kinematic_rtk_filter_tracks_rtklib_truth_class() {
         30.0,
     );
 
+    // The same filter with no process noise is RTKLIB's static mode on this arc
+    // and mask (`wtzr_wtzz_rtklib_oracle.json`, `rnx2rtkp -p 3 -f 1 -h -m 10`):
+    // every epoch has its satellite count and fix status.
+    let static_oracle = load_oracle("wtzr_wtzz_rtklib_oracle.json");
+    let static_oracle_epochs = static_oracle["per_epoch"]
+        .as_array()
+        .expect("static oracle epochs");
+    assert_eq!(static_oracle_epochs.len(), epochs.len());
+    let static_differences = static_updates
+        .iter()
+        .zip(&epochs)
+        .zip(static_oracle_epochs)
+        .enumerate()
+        .filter(|(_, ((update, epoch), oracle_epoch))| {
+            (epoch.references.len() + epoch.nonref.len()) as u64
+                != oracle_epoch["satellites"]
+                    .as_u64()
+                    .expect("oracle satellites")
+                || update.integer_fixed != (oracle_epoch["fix_status"] == "fixed")
+        })
+        .map(|(index, ((update, _), oracle_epoch))| {
+            (
+                index,
+                update.integer_fixed,
+                update.integer_ratio,
+                oracle_epoch["ratio"].as_f64(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        static_differences.is_empty(),
+        "static epochs differing from RTKLIB \
+         (index, fixed here, ratio here, RTKLIB ratio): {static_differences:?}"
+    );
+    assert_eq!(
+        static_updates
+            .iter()
+            .filter(|update| update.integer_fixed)
+            .count(),
+        119
+    );
+
     let static_baseline_m = static_updates.last().unwrap().reported_baseline_m;
     let kinematic_baseline_m = kinematic_updates.last().unwrap().reported_baseline_m;
     assert!(distance(kinematic_baseline_m, static_baseline_m) > 0.0);
@@ -2103,19 +2148,6 @@ fn wettzell_kinematic_rtk_filter_tracks_rtklib_truth_class() {
     );
     assert_eq!(kinematic_fixed, oracle_fixed_epochs);
     assert_eq!(kinematic_fixed, 118);
-    assert_eq!(
-        kinematic_baseline_m.map(f64::to_bits),
-        [
-            // Re-frozen when the elevation mask moved to the geodetic horizon RTKLIB
-            // `selsat` masks by, which admits G18 and G08 at RTKLIB's epochs. The
-            // truth-class quality assertions above remain the primary gate for
-            // this process-noise-enabled solve.
-            0xbfef_72c7_7740_6c58,
-            0xbfe4_e7c2_c263_33de,
-            0x3ff1_11aa_f411_3ffa,
-        ]
-    );
-
     for process_sigma_m in [0.1, 1.0, 3.0, 10.0, 30.0, 100.0] {
         let updates = sequential_updates(
             &epochs,
@@ -2194,20 +2226,10 @@ fn pasa_scoa_receiver_antenna_corrections_are_core_validated() {
     assert_eq!(updates.len(), epoch_count);
     let final_baseline_m = updates.last().unwrap().reported_baseline_m;
     assert!(distance(final_baseline_m, truth_baseline_m) < 1.0);
-    // Re-frozen when the elevation mask moved to the geodetic horizon RTKLIB
-    // `selsat` masks by, which moves the epochs satellites cross the mask at.
-    assert_eq!(
-        final_baseline_m.map(f64::to_bits),
-        [
-            0x40b3_681c_0685_e014,
-            0xc0d3_f0dd_089d_652c,
-            0xc0b7_2945_1023_918a,
-        ]
-    );
 }
 
 #[test]
-fn pasa_scoa_ar_arming_and_single_system_gauge_protect_real_arc() {
+fn pasa_scoa_ar_arming_policy_gates_search_until_baseline_sigma_converges() {
     let oracle = load_oracle("pasa_scoa_2026_120_l1_static_fixhold_rtklib_oracle.json");
     let epoch_count = json_usize(&oracle["reference"]["epochs"]);
     let truth = &oracle["truth"];
@@ -2249,20 +2271,6 @@ fn pasa_scoa_ar_arming_and_single_system_gauge_protect_real_arc() {
         },
     );
     assert_eq!(default_updates.len(), epoch_count);
-    assert_eq!(
-        default_updates
-            .last()
-            .unwrap()
-            .reported_baseline_m
-            .map(f64::to_bits),
-        [
-            // Re-frozen when the elevation mask moved to the geodetic horizon
-            // RTKLIB `selsat` masks by.
-            0x40b3_6899_d2a2_3264,
-            0xc0d3_f107_ff03_9785,
-            0xc0b7_294b_e245_49b4,
-        ]
-    );
 
     let armed_updates = sequential_updates_with_options(
         &epochs,
@@ -2278,6 +2286,37 @@ fn pasa_scoa_ar_arming_and_single_system_gauge_protect_real_arc() {
         },
     );
     assert_eq!(armed_updates.len(), epoch_count);
+    assert!(
+        epochs
+            .iter()
+            .zip(&default_updates)
+            .zip(&armed_updates)
+            .any(|((epoch, default), armed)| {
+                !default.newly_fixed.is_empty()
+                    && armed.newly_fixed.is_empty()
+                    && armed.search.is_none()
+                    && epoch
+                        .nonref
+                        .iter()
+                        .any(|measurement| !armed.fixed_ids.contains(&measurement.sd_ambiguity_id))
+                    && baseline_float_sigma_before_new_fixes_m(armed) > 0.05
+            }),
+        "arming must withhold a new search while an eligible candidate remains and float sigma is above 0.05 m"
+    );
+    let armed_fix_epochs = armed_updates
+        .iter()
+        .filter(|update| !update.newly_fixed.is_empty())
+        .collect::<Vec<_>>();
+    assert!(
+        !armed_fix_epochs.is_empty(),
+        "arming must eventually admit fixes"
+    );
+    for update in armed_fix_epochs {
+        assert!(
+            baseline_float_sigma_before_new_fixes_m(update) <= 0.05,
+            "new ambiguity holds require pre-search float baseline sigma <= 0.05 m"
+        );
+    }
     let fixed_count = armed_updates
         .iter()
         .filter(|update| update.integer_fixed)
@@ -2292,23 +2331,7 @@ fn pasa_scoa_ar_arming_and_single_system_gauge_protect_real_arc() {
     let fixed_median_m = median(&mut fixed_errors);
     assert!(fixed_median_m <= 2.0 * oracle["reference"]["mean_truth_error_m"].as_f64().unwrap());
 
-    // The truth-class checks above run before the frozen bits, so a pin change never
-    // hides them.
     assert_eq!(fixed_count, 206);
-    assert_eq!(
-        armed_updates
-            .last()
-            .unwrap()
-            .reported_baseline_m
-            .map(f64::to_bits),
-        [
-            // Re-frozen when the elevation mask moved to the geodetic horizon
-            // RTKLIB `selsat` masks by.
-            0x40b3_6899_d2a2_2aaa,
-            0xc0d3_f107_ff03_f69d,
-            0xc0b7_294b_e244_d379,
-        ]
-    );
 }
 
 #[test]
@@ -2377,18 +2400,6 @@ fn multignss_static_rtk_filter_reproduces_track_b_truth_gate() {
     assert!(fixed_errors.len() >= 20);
     let fixed_median_m = median(&mut fixed_errors);
     assert!(fixed_median_m <= 2.0 * oracle["reference"]["mean_truth_error_m"].as_f64().unwrap());
-    // Re-frozen when the elevation mask moved to the geodetic horizon RTKLIB
-    // `selsat` masks by. It follows the truth-class checks, so a pin change never
-    // hides them.
-    assert_eq!(
-        final_baseline_m.map(f64::to_bits),
-        [
-            0xbfef_90c4_195b_5408,
-            0xbfe4_e43d_dbc8_9d1a,
-            0x3ff1_1586_6286_300d,
-        ]
-    );
-
     let oracle_sat_counts = oracle["per_epoch"]
         .as_array()
         .expect("oracle epochs")

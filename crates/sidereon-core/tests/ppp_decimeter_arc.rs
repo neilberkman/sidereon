@@ -888,14 +888,12 @@ fn zim2_ppp_static_with_code_bias_matches_no_bias_on_matched_datum() {
 
     assert_eq!(residual.satellite_id, "G05");
     assert_eq!(residual.epoch_index, 0);
-    // Re-frozen when the PPP rows moved to RTKLIB `satposs` placement and `geodist`: the
-    // transmission epoch carries the receiver clock and the range the first-order Sagnac
-    // term with the unrotated line of sight. The code residual moved by 0.34 mm and the
-    // phase residual by 0.22 mm; both are printed on a mismatch.
+    // Re-frozen when the receiver-antenna model and the wind-up moved to the geodetic
+    // frame RTKLIB `antmodel` and `windupcorr` use; both are printed on a mismatch.
     let residual_bits = [residual.code_m.to_bits(), residual.phase_m.to_bits()];
     assert_eq!(
         residual_bits,
-        [0x4004107f05800000, 0xbfa18fcb40000000],
+        [0x400410abfa000000, 0xbfa192ba40000000],
         "code, phase residual bits: {residual_bits:#x?}"
     );
     assert!(truth_err < DECIMETER_TRUTH_BOUND_M);

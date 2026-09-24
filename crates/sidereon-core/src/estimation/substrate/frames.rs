@@ -4,14 +4,6 @@
 //! [`FrameRecipe`] so a strategy selects the floating-point operation order it
 //! needs by enum value instead of owning a private copy of the helper:
 //!
-//! - The GEOCENTRIC local frame ([`local_up`] / [`local_neu_basis`],
-//!   position-normalized up, `Z x up` east, `up x east` north). That single
-//!   op-order is pinned in [`crate::frame`]. RTK selects it as
-//!   [`FrameRecipe::GeocentricUpRtkReference`] and PPP as
-//!   [`FrameRecipe::GeodeticNeuCrossProduct`]; today both resolve to the same
-//!   geocentric construction, byte-for-byte, and are kept as distinct named
-//!   variants only so the canonical frame (P6) can diverge without disturbing
-//!   the reference goldens.
 //! - The SPP Skyfield GEODETIC frame ([`geodetic_from_ecef`] /
 //!   [`az_el_from_ecef`]), selected by [`FrameRecipe::SppSkyfieldAuThreeIter`]:
 //!   the ECEF->geodetic conversion replicating the core
@@ -33,53 +25,21 @@
 //!   a microarcsecond and the topocentric az/el to far below the elevation mask
 //!   resolution.
 //!
-//! The geocentric basis and the geodetic ENU rotation are DIFFERENT
-//! constructions (geocentric up vs the geodetic ellipsoid normal differ by up to
-//! ~0.19 deg), so each frame recipe routes to exactly the helper its reference
-//! was captured against; a recipe never reaches the helper for the other
-//! construction.
+//! RTK and PPP take their elevations, azimuths and receiver local frames from
+//! the SPP geodetic frame too, through [`satazel`] and [`geodetic_neu_basis`],
+//! as RTKLIB takes them from `satazel` and `xyz2enu`. No receiver model uses the
+//! geocentric vertical (`position / |position|`), which leans up to ~0.19 deg
+//! from the ellipsoid normal; [`crate::frame::geocentric_up`] remains for the
+//! caller-selected geocentric DOP convention.
 
 use crate::astro::frames::transforms::geodetic_from_ecef_proj;
 
 use crate::constants::{AU_KM, KM_TO_M, WGS84_A_KM, WGS84_E2};
 use crate::estimation::recipe::FrameRecipe;
-use crate::frame::{geocentric_neu_basis, geocentric_up, Wgs84Geodetic};
+use crate::frame::Wgs84Geodetic;
 
 const PI: f64 = std::f64::consts::PI;
 const TAU: f64 = std::f64::consts::TAU;
-
-/// Geocentric local up (`position / |position|`) at an ECEF position, selected
-/// by frame recipe. Both geocentric recipes share this op-order; a zero-length
-/// position degenerates to `+Z`. The non-geocentric recipes build their frames
-/// elsewhere (SPP via [`geodetic_from_ecef`], DOP/canonical in their own
-/// callers) and never reach this geocentric helper.
-#[inline]
-pub(crate) fn local_up(frame: FrameRecipe, position_ecef_m: [f64; 3]) -> [f64; 3] {
-    match frame {
-        FrameRecipe::GeocentricUpRtkReference | FrameRecipe::GeodeticNeuCrossProduct => {
-            geocentric_up(position_ecef_m)
-        }
-        _ => unreachable!("geocentric local up is selected only by the RTK/PPP geocentric recipes"),
-    }
-}
-
-/// Geocentric local North-East-Up basis `(north, east, up)` at an ECEF position,
-/// selected by frame recipe. Both geocentric recipes share this op-order; the
-/// non-geocentric recipes never reach this helper.
-#[inline]
-pub(crate) fn local_neu_basis(
-    frame: FrameRecipe,
-    position_ecef_m: [f64; 3],
-) -> ([f64; 3], [f64; 3], [f64; 3]) {
-    match frame {
-        FrameRecipe::GeocentricUpRtkReference | FrameRecipe::GeodeticNeuCrossProduct => {
-            geocentric_neu_basis(position_ecef_m)
-        }
-        _ => unreachable!(
-            "geocentric local NEU basis is selected only by the RTK/PPP geocentric recipes"
-        ),
-    }
-}
 
 /// Receiver geodetic position (geodetic latitude/longitude in radians, height in
 /// meters) from an ECEF position in meters, selected by frame recipe.
@@ -173,9 +133,8 @@ pub(crate) struct AzEl {
 /// [`FrameRecipe::SppSkyfieldAuThreeIter`] builds the geodetic ENU topocentric
 /// rotation from the receiver geodetic latitude/longitude (itself the Skyfield
 /// AU geodetic of [`geodetic_from_ecef`]); this is the SPP measurement model's
-/// az/el. The geodetic ENU rotation is a separate construction from the shared
-/// geocentric NEU basis (see the module note), so it stays keyed to the SPP
-/// recipe and the other recipes never reach this helper.
+/// az/el, and through [`satazel`] the RTK one. [`FrameRecipe::CanonicalWgs84`]
+/// builds it from the canonical WGS84 geodetic.
 pub(crate) fn az_el_from_ecef(
     frame: FrameRecipe,
     rx_ecef_m: [f64; 3],
@@ -189,6 +148,66 @@ pub(crate) fn az_el_from_ecef(
         ),
     };
     geodetic_enu_az_el(geo, rx_ecef_m, sat_ecef_m)
+}
+
+/// RTKLIB `satazel`: the azimuth and elevation (radians) of the line of sight
+/// from `rx_ecef_m` to `sat_ecef_m` in the geodetic (ellipsoid-normal) ENU frame
+/// of the receiver, through the geodetic conversion the SPP selection uses. A
+/// receiver RTKLIB `ecef2pos` places at or below `-RE_WGS84` in height, which is
+/// only the geocentre, sees every satellite at the zenith (azimuth 0, elevation
+/// `pi / 2`), as `satazel` has it. The RTK elevation mask, reference choice,
+/// measurement variances and receiver-antenna model all take elevation from
+/// here, as RTKLIB takes it from `satazel` for `selsat`, `ddres`, `varerr` and
+/// `antmodel`.
+pub(crate) fn satazel(rx_ecef_m: [f64; 3], sat_ecef_m: [f64; 3]) -> (f64, f64) {
+    if crate::spp::rtklib_sees_every_satellite_overhead(rx_ecef_m) {
+        return (0.0, core::f64::consts::FRAC_PI_2);
+    }
+    let geo = skyfield_au_geodetic(rx_ecef_m);
+    let dx = sat_ecef_m[0] - rx_ecef_m[0];
+    let dy = sat_ecef_m[1] - rx_ecef_m[1];
+    let dz = sat_ecef_m[2] - rx_ecef_m[2];
+    let range = libm::sqrt(dx * dx + dy * dy + dz * dz);
+    let dx = dx / range;
+    let dy = dy / range;
+    let dz = dz / range;
+
+    let sin_lat = libm::sin(geo.lat_rad);
+    let cos_lat = libm::cos(geo.lat_rad);
+    let sin_lon = libm::sin(geo.lon_rad);
+    let cos_lon = libm::cos(geo.lon_rad);
+    let east = -sin_lon * dx + cos_lon * dy;
+    let north = -sin_lat * cos_lon * dx - sin_lat * sin_lon * dy + cos_lat * dz;
+    let up = cos_lat * cos_lon * dx + cos_lat * sin_lon * dy + sin_lat * dz;
+    let horizontal_squared = east * east + north * north;
+    let azimuth = if horizontal_squared < 1.0e-12 {
+        0.0
+    } else {
+        let azimuth = libm::atan2(east, north);
+        if azimuth < 0.0 {
+            azimuth + TAU
+        } else {
+            azimuth
+        }
+    };
+    (azimuth, libm::asin(up.clamp(-1.0, 1.0)))
+}
+
+/// The geodetic (ellipsoid-normal) local North-East-Up basis at a receiver,
+/// returned as `(north, east, up)` unit vectors in ECEF, from the latitude and
+/// longitude of the geodetic conversion [`satazel`] uses: the rows of RTKLIB
+/// `xyz2enu` at the `ecef2pos` position.
+pub(crate) fn geodetic_neu_basis(rx_ecef_m: [f64; 3]) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    let geo = skyfield_au_geodetic(rx_ecef_m);
+    let sin_lat = libm::sin(geo.lat_rad);
+    let cos_lat = libm::cos(geo.lat_rad);
+    let sin_lon = libm::sin(geo.lon_rad);
+    let cos_lon = libm::cos(geo.lon_rad);
+    (
+        [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat],
+        [-sin_lon, cos_lon, 0.0],
+        [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat],
+    )
 }
 
 /// The geodetic ENU topocentric azimuth/elevation of a satellite seen from a
@@ -230,29 +249,56 @@ fn geodetic_enu_az_el(geo: Wgs84Geodetic, rx_ecef_m: [f64; 3], sat_ecef_m: [f64;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::f64::consts::FRAC_PI_2;
 
     const POSITION: [f64; 3] = [4_027_894.0, 307_045.0, 4_919_474.0];
 
-    fn bits3(v: [f64; 3]) -> [u64; 3] {
-        [v[0].to_bits(), v[1].to_bits(), v[2].to_bits()]
+    #[test]
+    fn satazel_and_the_neu_basis_share_the_geodetic_vertical() {
+        let (north, east, up) = geodetic_neu_basis(POSITION);
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        for (a, b) in [(north, east), (east, up), (up, north)] {
+            assert!(dot(a, b).abs() < 1e-15);
+        }
+        for v in [north, east, up] {
+            assert!((dot(v, v) - 1.0).abs() < 1e-15);
+        }
+        // A satellite straight up the basis's vertical is at the `satazel` zenith,
+        // and one along its north is on the horizon at azimuth 0.
+        let along = |v: [f64; 3]| std::array::from_fn(|i| POSITION[i] + 2.0e7 * v[i]);
+        let (_az, el) = satazel(POSITION, along(up));
+        assert!((el - FRAC_PI_2).abs() < 1e-7, "{el}");
+        let (az, el) = satazel(POSITION, along(north));
+        assert!(el.abs() < 1e-12, "{el}");
+        assert!(az.abs() < 1e-12 || (az - TAU).abs() < 1e-12, "{az}");
+        // The geodetic vertical leans from the geocentric one by about 0.19 deg at
+        // this 50 deg latitude.
+        let geocentric = crate::frame::geocentric_up(POSITION);
+        let lean_deg = libm::acos(dot(up, geocentric)) * 180.0 / PI;
+        assert!(lean_deg > 0.18 && lean_deg < 0.2, "{lean_deg}");
     }
 
     #[test]
-    fn geocentric_recipes_match_frame_helper_bits() {
-        for frame in [
-            FrameRecipe::GeocentricUpRtkReference,
-            FrameRecipe::GeodeticNeuCrossProduct,
-        ] {
-            assert_eq!(
-                bits3(local_up(frame, POSITION)),
-                bits3(geocentric_up(POSITION))
-            );
-            let (n, e, u) = local_neu_basis(frame, POSITION);
-            let (rn, re, ru) = geocentric_neu_basis(POSITION);
-            assert_eq!(bits3(n), bits3(rn));
-            assert_eq!(bits3(e), bits3(re));
-            assert_eq!(bits3(u), bits3(ru));
-        }
+    fn satazel_puts_every_satellite_at_the_zenith_for_a_receiver_at_the_geocentre() {
+        assert_eq!(satazel([0.0; 3], [2.0e7, 1.0e7, -5.0e6]), (0.0, FRAC_PI_2));
+    }
+
+    #[test]
+    fn satazel_matches_rtklib_local_angles_and_degenerate_azimuth() {
+        let (azimuth, elevation) = satazel([10.0, 0.0, 0.0], [10.0, 10.0, 0.0]);
+        assert!((azimuth - FRAC_PI_2).abs() < 1.0e-15, "{azimuth}");
+        assert!(elevation.abs() < 1.0e-15, "{elevation}");
+
+        let (azimuth, elevation) = satazel(
+            POSITION,
+            [
+                POSITION[0] + 2.0e7 * geodetic_neu_basis(POSITION).2[0],
+                POSITION[1] + 2.0e7 * geodetic_neu_basis(POSITION).2[1],
+                POSITION[2] + 2.0e7 * geodetic_neu_basis(POSITION).2[2],
+            ],
+        );
+        assert_eq!(azimuth, 0.0);
+        assert!((elevation - FRAC_PI_2).abs() < 1.0e-7, "{elevation}");
     }
 
     #[test]

@@ -2,7 +2,7 @@
   "cases": [
     {
       "day_of_year": 1,
-      "delay_bits": "0x40312b64eb51a6c1",
+      "delay_bits": "0x4030d9856794d47a",
       "name": "zwd_00",
       "receiver_lonlatalt_bits": [
         "0x4042c56907c44a8c",
@@ -12,7 +12,7 @@
       "receiver_xyz_bits": [
         "0x41441e4a4814d1c7",
         "0x413eebfe3c9ed3d2",
-        "0x4154b339aa4c3c59"
+        "0x4154b339aa4c3c5a"
       ],
       "sat_xyz_bits": [
         "0xc16b558990080524",
@@ -22,7 +22,7 @@
     },
     {
       "day_of_year": 18,
-      "delay_bits": "0x4018752363a62c34",
+      "delay_bits": "0x4018aad8fcd1dede",
       "name": "zwd_01",
       "receiver_lonlatalt_bits": [
         "0x4064e2ee775ae0f6",
@@ -42,7 +42,7 @@
     },
     {
       "day_of_year": 35,
-      "delay_bits": "0x400b2b2ad254800e",
+      "delay_bits": "0x400b200bf3a1ca4a",
       "name": "zwd_02",
       "receiver_lonlatalt_bits": [
         "0xc05a04abf019f757",
@@ -62,7 +62,7 @@
     },
     {
       "day_of_year": 52,
-      "delay_bits": "0x4005fe720d136bb5",
+      "delay_bits": "0x4005f8176b44f5f6",
       "name": "zwd_03",
       "receiver_lonlatalt_bits": [
         "0x405bf6ee9ae929ec",
@@ -82,7 +82,7 @@
     },
     {
       "day_of_year": 69,
-      "delay_bits": "0x3ffe80141802a9c4",
+      "delay_bits": "0x3ffe76fd0885521f",
       "name": "zwd_04",
       "receiver_lonlatalt_bits": [
         "0xc0582bea0cac2975",
@@ -102,7 +102,7 @@
     },
     {
       "day_of_year": 86,
-      "delay_bits": "0x4005e942964880d8",
+      "delay_bits": "0x4005dfb5922b98dc",
       "name": "zwd_05",
       "receiver_lonlatalt_bits": [
         "0x40543988043e7fe0",
@@ -122,7 +122,7 @@
     },
     {
       "day_of_year": 103,
-      "delay_bits": "0x3ff9ae15f19fbea6",
+      "delay_bits": "0x3ff9acd7d7074e4e",
       "name": "zwd_06",
       "receiver_lonlatalt_bits": [
         "0xc0410f9d8cc971e0",
@@ -142,7 +142,7 @@
     },
     {
       "day_of_year": 120,
-      "delay_bits": "0x3fff5cbb001e2e33",
+      "delay_bits": "0x3fff5c117ddb6e80",
       "name": "zwd_07",
       "receiver_lonlatalt_bits": [
         "0x4063297aec6676ae",
@@ -162,7 +162,7 @@
     },
     {
       "day_of_year": 137,
-      "delay_bits": "0x4023efb66f230ada",
+      "delay_bits": "0x402405c28d9f424e",
       "name": "zwd_08",
       "receiver_lonlatalt_bits": [
         "0x404d1ec32df732b8",
@@ -182,7 +182,7 @@
     },
     {
       "day_of_year": 154,
-      "delay_bits": "0x40151a5a6b136873",
+      "delay_bits": "0x40153d30df063384",
       "name": "zwd_09",
       "receiver_lonlatalt_bits": [
         "0xc0440db2e5bef51c",
@@ -202,7 +202,7 @@
     },
     {
       "day_of_year": 171,
-      "delay_bits": "0x400581f9b53255a9",
+      "delay_bits": "0x40056b78c61ce1fc",
       "name": "zwd_10",
       "receiver_lonlatalt_bits": [
         "0xc04dda5a8e40c064",
@@ -212,17 +212,17 @@
       "receiver_xyz_bits": [
         "0x413901af900c311f",
         "0xc14566e0f2d67e84",
-        "0x4154e208f7e63ee2"
+        "0x4154e208f7e63ee3"
       ],
       "sat_xyz_bits": [
         "0xc11dd5b16fc7451c",
         "0x415fc61b86f780f8",
-        "0x417c19cec1f5e412"
+        "0x417c19cec1f5e413"
       ]
     },
     {
       "day_of_year": 188,
-      "delay_bits": "0x400c94276838dafb",
+      "delay_bits": "0x400c885d3b7b2f7a",
       "name": "zwd_11",
       "receiver_lonlatalt_bits": [
         "0x403841437a5c0240",
@@ -242,7 +242,7 @@
     },
     {
       "day_of_year": 205,
-      "delay_bits": "0x4003a66d843d4df6",
+      "delay_bits": "0x4003a58618cc96c4",
       "name": "zwd_12",
       "receiver_lonlatalt_bits": [
         "0x402e6ad3b8f63380",
@@ -262,7 +262,7 @@
     },
     {
       "day_of_year": 222,
-      "delay_bits": "0x3ffb2d34f9d9407f",
+      "delay_bits": "0x3ffb30a4ecc5f49b",
       "name": "zwd_13",
       "receiver_lonlatalt_bits": [
         "0x4051e4b99d3eb1f2",
@@ -272,17 +272,17 @@
       "receiver_xyz_bits": [
         "0x413c71272abb488d",
         "0x415557a79d47774c",
-        "0x41428b3978d543b7"
+        "0x41428b3978d543b8"
       ],
       "sat_xyz_bits": [
-        "0x413842decd4ad8d4",
-        "0x417e4b2e88ec9a8a",
-        "0x415b057e26c283f2"
+        "0x413842decd4ad8ce",
+        "0x417e4b2e88ec9a88",
+        "0x415b057e26c283f4"
       ]
     },
     {
       "day_of_year": 239,
-      "delay_bits": "0x40007f81bfdfa4f1",
+      "delay_bits": "0x4000813de901dfec",
       "name": "zwd_14",
       "receiver_lonlatalt_bits": [
         "0x404eedb9963ea2dc",
@@ -302,7 +302,7 @@
     },
     {
       "day_of_year": 256,
-      "delay_bits": "0x40298e7643c00918",
+      "delay_bits": "0x40292a2e0cbd5f3b",
       "name": "zwd_15",
       "receiver_lonlatalt_bits": [
         "0x405281e0566d2eee",
@@ -322,7 +322,7 @@
     },
     {
       "day_of_year": 273,
-      "delay_bits": "0x4018df200b01ffb5",
+      "delay_bits": "0x4018c82ffa560e13",
       "name": "zwd_16",
       "receiver_lonlatalt_bits": [
         "0xc048ca6641a69ef4",
@@ -342,7 +342,7 @@
     },
     {
       "day_of_year": 290,
-      "delay_bits": "0x4010df2593d51f84",
+      "delay_bits": "0x4010decac8656d72",
       "name": "zwd_17",
       "receiver_lonlatalt_bits": [
         "0x403066e72e86dd80",
@@ -362,7 +362,7 @@
     },
     {
       "day_of_year": 307,
-      "delay_bits": "0x4001d550c3a32dac",
+      "delay_bits": "0x4001dc4aece72660",
       "name": "zwd_18",
       "receiver_lonlatalt_bits": [
         "0xc04d077ac97d8396",
@@ -382,7 +382,7 @@
     },
     {
       "day_of_year": 324,
-      "delay_bits": "0x400927e7bdfbbc78",
+      "delay_bits": "0x400919bb42c1161b",
       "name": "zwd_19",
       "receiver_lonlatalt_bits": [
         "0xc03ee5e504284080",
@@ -402,7 +402,7 @@
     },
     {
       "day_of_year": 341,
-      "delay_bits": "0x4003eb848a39dc8b",
+      "delay_bits": "0x4003e4333f29de01",
       "name": "zwd_20",
       "receiver_lonlatalt_bits": [
         "0x4064cf0822a259f0",
@@ -412,17 +412,17 @@
       "receiver_xyz_bits": [
         "0xc14eb6b4d826a1a9",
         "0x412d903e4d0b7827",
-        "0x415272d660c5cb03"
+        "0x415272d660c5cb04"
       ],
       "sat_xyz_bits": [
         "0xc167878475026dcb",
         "0xc12df6158336deaf",
-        "0x417c93b56b2a31ac"
+        "0x417c93b56b2a31ae"
       ]
     },
     {
       "day_of_year": 358,
-      "delay_bits": "0x40032823235abcda",
+      "delay_bits": "0x4003261120b5c4bc",
       "name": "zwd_21",
       "receiver_lonlatalt_bits": [
         "0x404088070a2fcdd8",
@@ -432,7 +432,7 @@
       "receiver_xyz_bits": [
         "0x41509ee84d76fee2",
         "0x4145a3973cd6d18f",
-        "0x414c1a982fe2bcf9"
+        "0x414c1a982fe2bcf8"
       ],
       "sat_xyz_bits": [
         "0x417089e77f2b9fc2",
@@ -442,7 +442,7 @@
     },
     {
       "day_of_year": 10,
-      "delay_bits": "0x402543c7160dcb1e",
+      "delay_bits": "0x4025489ae4c4b112",
       "name": "zwd_22",
       "receiver_lonlatalt_bits": [
         "0xc053761bc3fc5ec3",
@@ -462,7 +462,7 @@
     },
     {
       "day_of_year": 27,
-      "delay_bits": "0x40142e6b3e8ec5ef",
+      "delay_bits": "0x40140d15fb0a683c",
       "name": "zwd_23",
       "receiver_lonlatalt_bits": [
         "0x40473cb74c926fa8",
@@ -482,7 +482,7 @@
     },
     {
       "day_of_year": 44,
-      "delay_bits": "0x4007b4c054694a08",
+      "delay_bits": "0x4007d3c797a56242",
       "name": "zwd_24",
       "receiver_lonlatalt_bits": [
         "0x4051cfeb11c6075a",
@@ -502,7 +502,7 @@
     },
     {
       "day_of_year": 61,
-      "delay_bits": "0x4008148555d96b06",
+      "delay_bits": "0x40081e6e4a20d531",
       "name": "zwd_25",
       "receiver_lonlatalt_bits": [
         "0xc04a69c1bdd5047e",
@@ -512,17 +512,17 @@
       "receiver_xyz_bits": [
         "0x414c9dcb1c1032cd",
         "0xc152de47085c8fa1",
-        "0x41366830314cc5ea"
+        "0x41366830314cc5eb"
       ],
       "sat_xyz_bits": [
         "0x4162294bc0636e90",
         "0xc1798d3e099f6f3f",
-        "0xc167eda2710a4718"
+        "0xc167eda2710a4717"
       ]
     },
     {
       "day_of_year": 78,
-      "delay_bits": "0x400a553182a62b0f",
+      "delay_bits": "0x400a4ce4cac3a8f5",
       "name": "zwd_26",
       "receiver_lonlatalt_bits": [
         "0x405d88bf92773ce0",
@@ -542,7 +542,7 @@
     },
     {
       "day_of_year": 95,
-      "delay_bits": "0x3ffa5ae9443b02ab",
+      "delay_bits": "0x3ffa592487bc4ea6",
       "name": "zwd_27",
       "receiver_lonlatalt_bits": [
         "0x40586a44bce7fa60",
@@ -562,7 +562,7 @@
     },
     {
       "day_of_year": 112,
-      "delay_bits": "0x3ffaf14f5a20ebcc",
+      "delay_bits": "0x3ffaf62c38637096",
       "name": "zwd_28",
       "receiver_lonlatalt_bits": [
         "0xc047811ecd13275c",
@@ -572,17 +572,17 @@
       "receiver_xyz_bits": [
         "0x414393508e59e5ad",
         "0xc144ff9f88d07477",
-        "0xc153983cdbe542d0"
+        "0xc153983cdbe542cf"
       ],
       "sat_xyz_bits": [
-        "0x4166c583e8607e7d",
+        "0x4166c583e8607e7e",
         "0xc173c2cf29517b6c",
         "0xc1754fd9d8d239da"
       ]
     },
     {
       "day_of_year": 129,
-      "delay_bits": "0x400213a875c146d9",
+      "delay_bits": "0x400214b7957f90f3",
       "name": "zwd_29",
       "receiver_lonlatalt_bits": [
         "0xc04f0da2c9ac1c0a",
@@ -602,7 +602,7 @@
     },
     {
       "day_of_year": 146,
-      "delay_bits": "0x4023b5bf590fd389",
+      "delay_bits": "0x4023c2149a50f807",
       "name": "zwd_30",
       "receiver_lonlatalt_bits": [
         "0x4050ecbf11960e16",
@@ -612,7 +612,7 @@
       "receiver_xyz_bits": [
         "0x414252b63d682838",
         "0x41565654964bd293",
-        "0xc127fc3994438fbf"
+        "0xc127fc3994438fbe"
       ],
       "sat_xyz_bits": [
         "0xc1564278a006b3b6",
@@ -622,7 +622,7 @@
     },
     {
       "day_of_year": 163,
-      "delay_bits": "0x400bcde5e1ec17ba",
+      "delay_bits": "0x400bbb703bbb2261",
       "name": "zwd_31",
       "receiver_lonlatalt_bits": [
         "0x4062e09aeb79d526",
@@ -642,7 +642,7 @@
     },
     {
       "day_of_year": 180,
-      "delay_bits": "0x4007266eac849657",
+      "delay_bits": "0x40072903606070ff",
       "name": "zwd_32",
       "receiver_lonlatalt_bits": [
         "0xc0360f10e2904f70",
@@ -662,7 +662,7 @@
     },
     {
       "day_of_year": 197,
-      "delay_bits": "0x40033fa57bf7c655",
+      "delay_bits": "0x4003371963229f60",
       "name": "zwd_33",
       "receiver_lonlatalt_bits": [
         "0x401c50bcf0ab91a0",
@@ -672,17 +672,17 @@
       "receiver_xyz_bits": [
         "0x4143bbcea1afa6fc",
         "0x41139abc06a59483",
-        "0xc156246068f35967"
+        "0xc156246068f35968"
       ],
       "sat_xyz_bits": [
         "0xc14916048a929d94",
-        "0x4164b9f5e8ebf599",
+        "0x4164b9f5e8ebf598",
         "0xc17c15058d0798eb"
       ]
     },
     {
       "day_of_year": 214,
-      "delay_bits": "0x4004cdb503eefbe0",
+      "delay_bits": "0x4004c380d6eb9880",
       "name": "zwd_34",
       "receiver_lonlatalt_bits": [
         "0xc0622d83ca0d22fe",
@@ -692,17 +692,17 @@
       "receiver_xyz_bits": [
         "0xc1500736a06b5d3a",
         "0xc14618839056dd19",
-        "0xc14d1ab0f7232270"
+        "0xc14d1ab0f7232271"
       ],
       "sat_xyz_bits": [
         "0xc1673adeddb9f22c",
         "0xc1611e4933e0919f",
-        "0xc17b108b059fc916"
+        "0xc17b108b059fc918"
       ]
     },
     {
       "day_of_year": 231,
-      "delay_bits": "0x3ff9e3f0407ca08d",
+      "delay_bits": "0x3ff9de227acfc03b",
       "name": "zwd_35",
       "receiver_lonlatalt_bits": [
         "0x405f9483078d48bc",
@@ -722,7 +722,7 @@
     },
     {
       "day_of_year": 248,
-      "delay_bits": "0x3ffae4fd0f727a76",
+      "delay_bits": "0x3ffae3f7ac352a73",
       "name": "zwd_36",
       "receiver_lonlatalt_bits": [
         "0x406198eedeaff63c",
@@ -742,7 +742,7 @@
     },
     {
       "day_of_year": 265,
-      "delay_bits": "0x402185a891634cb1",
+      "delay_bits": "0x40217112b7217fa1",
       "name": "zwd_37",
       "receiver_lonlatalt_bits": [
         "0xc0557d5524c8e592",
@@ -762,7 +762,7 @@
     },
     {
       "day_of_year": 282,
-      "delay_bits": "0x400bd86184e23a04",
+      "delay_bits": "0x400bfedd7471389e",
       "name": "zwd_38",
       "receiver_lonlatalt_bits": [
         "0x4052cfbe0ca1203e",
@@ -782,7 +782,7 @@
     },
     {
       "day_of_year": 299,
-      "delay_bits": "0x4005cfa86b8c44f8",
+      "delay_bits": "0x4005e284ca955b5a",
       "name": "zwd_39",
       "receiver_lonlatalt_bits": [
         "0x405d2fdb5c5df11c",
@@ -802,7 +802,7 @@
     },
     {
       "day_of_year": 316,
-      "delay_bits": "0x400440796303faf6",
+      "delay_bits": "0x4004394377ff1f18",
       "name": "zwd_40",
       "receiver_lonlatalt_bits": [
         "0x403c3de7f265d020",
@@ -822,7 +822,7 @@
     },
     {
       "day_of_year": 333,
-      "delay_bits": "0x40057b8dea1d882a",
+      "delay_bits": "0x4005793aa13e3495",
       "name": "zwd_41",
       "receiver_lonlatalt_bits": [
         "0x4052ab2dc248c71c",
@@ -842,7 +842,7 @@
     },
     {
       "day_of_year": 350,
-      "delay_bits": "0x4000e5c305ce606c",
+      "delay_bits": "0x4000e78b4094cd9d",
       "name": "zwd_42",
       "receiver_lonlatalt_bits": [
         "0x4062d191623f3a24",
@@ -862,7 +862,7 @@
     },
     {
       "day_of_year": 2,
-      "delay_bits": "0x4001a766bbdfdf2c",
+      "delay_bits": "0x4001a4ca08472f39",
       "name": "zwd_43",
       "receiver_lonlatalt_bits": [
         "0xc05fe4ac090c6bf8",
@@ -882,7 +882,7 @@
     },
     {
       "day_of_year": 19,
-      "delay_bits": "0x402a16c4dec5d7d7",
+      "delay_bits": "0x402a2a44c7659f46",
       "name": "zwd_44",
       "receiver_lonlatalt_bits": [
         "0x4060096cdd9eee62",
@@ -902,7 +902,7 @@
     },
     {
       "day_of_year": 36,
-      "delay_bits": "0x40166b1e3a572d18",
+      "delay_bits": "0x40164c4e1d1dcdca",
       "name": "zwd_45",
       "receiver_lonlatalt_bits": [
         "0x4058de4c1926d0d0",
@@ -922,7 +922,7 @@
     },
     {
       "day_of_year": 53,
-      "delay_bits": "0x4009d1c8eea8eced",
+      "delay_bits": "0x4009d655b1029400",
       "name": "zwd_46",
       "receiver_lonlatalt_bits": [
         "0xc00daf26af017cc0",
@@ -932,17 +932,17 @@
       "receiver_xyz_bits": [
         "0x4149972485eeb2b1",
         "0xc10a8da044da4db6",
-        "0x41549f1feeab2586"
+        "0x41549f1feeab2587"
       ],
       "sat_xyz_bits": [
         "0x41668027a2b669a6",
         "0xc17648b9eb196c02",
-        "0x416d4cecc61bccd5"
+        "0x416d4cecc61bccd6"
       ]
     },
     {
       "day_of_year": 70,
-      "delay_bits": "0x4003aee013ba4efe",
+      "delay_bits": "0x4003b2a196c21d6a",
       "name": "zwd_47",
       "receiver_lonlatalt_bits": [
         "0xc044dd8b0dc7adf0",
@@ -962,7 +962,7 @@
     },
     {
       "day_of_year": 87,
-      "delay_bits": "0x4003e75b9ddb434c",
+      "delay_bits": "0x4003dc8c09044054",
       "name": "zwd_48",
       "receiver_lonlatalt_bits": [
         "0xc036abd7cff2b4c0",
@@ -982,7 +982,7 @@
     },
     {
       "day_of_year": 104,
-      "delay_bits": "0x3ff8ffe47daccbcf",
+      "delay_bits": "0x3ff8f74854af76d2",
       "name": "zwd_49",
       "receiver_lonlatalt_bits": [
         "0xc043637a88ed02a0",
@@ -1002,7 +1002,7 @@
     },
     {
       "day_of_year": 121,
-      "delay_bits": "0x3ffaebe1da07f864",
+      "delay_bits": "0x3ffaefe0e51ba577",
       "name": "zwd_50",
       "receiver_lonlatalt_bits": [
         "0xc05ea50d6c0a3f7c",
@@ -1022,7 +1022,7 @@
     },
     {
       "day_of_year": 138,
-      "delay_bits": "0x40306bcfa401167c",
+      "delay_bits": "0x403067972240e28e",
       "name": "zwd_51",
       "receiver_lonlatalt_bits": [
         "0x404cbc504d4e98a0",
@@ -1042,7 +1042,7 @@
     },
     {
       "day_of_year": 155,
-      "delay_bits": "0x40190ee9f59f9d41",
+      "delay_bits": "0x40192d3f536ce4b7",
       "name": "zwd_52",
       "receiver_lonlatalt_bits": [
         "0xc040643e73a11950",
@@ -1062,7 +1062,7 @@
     },
     {
       "day_of_year": 172,
-      "delay_bits": "0x40087b599ad276ba",
+      "delay_bits": "0x40089f40cc9ca781",
       "name": "zwd_53",
       "receiver_lonlatalt_bits": [
         "0xc04d8c4344427d84",
@@ -1082,7 +1082,7 @@
     },
     {
       "day_of_year": 189,
-      "delay_bits": "0x4002d9fed808d6ed",
+      "delay_bits": "0x4002dd91a6c62045",
       "name": "zwd_54",
       "receiver_lonlatalt_bits": [
         "0xc06222a33158e4e6",
@@ -1102,7 +1102,7 @@
     },
     {
       "day_of_year": 206,
-      "delay_bits": "0x400b4b6be85c8f62",
+      "delay_bits": "0x400b5695e4b59a0f",
       "name": "zwd_55",
       "receiver_lonlatalt_bits": [
         "0xc02d5de0689e6560",
@@ -1122,7 +1122,7 @@
     },
     {
       "day_of_year": 223,
-      "delay_bits": "0x400414fa6c7bb54b",
+      "delay_bits": "0x400414c2558c2362",
       "name": "zwd_56",
       "receiver_lonlatalt_bits": [
         "0xc057e7c3fbb43b93",
@@ -1142,7 +1142,7 @@
     },
     {
       "day_of_year": 240,
-      "delay_bits": "0x4003b7dd74733cf8",
+      "delay_bits": "0x4003b4d40aba6a60",
       "name": "zwd_57",
       "receiver_lonlatalt_bits": [
         "0x4061e307b89263dc",
@@ -1152,17 +1152,17 @@
       "receiver_xyz_bits": [
         "0xc1509dc8aa8e299f",
         "0x4148f4e51bcaebb5",
-        "0x41493c35939c2c80"
+        "0x41493c35939c2c81"
       ],
       "sat_xyz_bits": [
         "0xc16dd5619d6b2214",
         "0x4172cff4ac156d26",
-        "0x4173ddf82c312695"
+        "0x4173ddf82c312697"
       ]
     },
     {
       "day_of_year": 257,
-      "delay_bits": "0x3ff98f5ae9fa1502",
+      "delay_bits": "0x3ff99153ce24c890",
       "name": "zwd_58",
       "receiver_lonlatalt_bits": [
         "0x404614cc447a8a30",
@@ -1182,7 +1182,7 @@
     },
     {
       "day_of_year": 274,
-      "delay_bits": "0x401ad60ad8945131",
+      "delay_bits": "0x401af11384f55b96",
       "name": "zwd_59",
       "receiver_lonlatalt_bits": [
         "0x4038bc90cf7c9c48",
@@ -1202,7 +1202,7 @@
     },
     {
       "day_of_year": 291,
-      "delay_bits": "0x4015181d72a3ba9b",
+      "delay_bits": "0x4015057b8da9f6f5",
       "name": "zwd_60",
       "receiver_lonlatalt_bits": [
         "0x403e4f9171a87a70",
@@ -1222,7 +1222,7 @@
     },
     {
       "day_of_year": 308,
-      "delay_bits": "0x4007a7c09ebd505e",
+      "delay_bits": "0x4007a498934043e6",
       "name": "zwd_61",
       "receiver_lonlatalt_bits": [
         "0x405690cfa202f1bc",
@@ -1242,7 +1242,7 @@
     },
     {
       "day_of_year": 325,
-      "delay_bits": "0x400059c765d2aba4",
+      "delay_bits": "0x400050df728a30f4",
       "name": "zwd_62",
       "receiver_lonlatalt_bits": [
         "0x40326484a6a7fc50",
@@ -1252,7 +1252,7 @@
       "receiver_xyz_bits": [
         "0x41517e2397d6a527",
         "0x4137442978c57f13",
-        "0xc14fb21134b8a75a"
+        "0xc14fb21134b8a759"
       ],
       "sat_xyz_bits": [
         "0x4159531b7b0431a0",
@@ -1262,7 +1262,7 @@
     },
     {
       "day_of_year": 342,
-      "delay_bits": "0x3fffc63cf80ba854",
+      "delay_bits": "0x3fffbaaf1bf8d568",
       "name": "zwd_63",
       "receiver_lonlatalt_bits": [
         "0xbfc3bf1b7f295400",
@@ -1282,7 +1282,7 @@
     },
     {
       "day_of_year": 359,
-      "delay_bits": "0x40012e3a2efea355",
+      "delay_bits": "0x400129650b09db8a",
       "name": "zwd_64",
       "receiver_lonlatalt_bits": [
         "0x404ee647cf172e74",
@@ -1292,17 +1292,17 @@
       "receiver_xyz_bits": [
         "0x4141e67372026d75",
         "0x4150b0f345b20087",
-        "0xc14e76e5f7fc7aea"
+        "0xc14e76e5f7fc7ae9"
       ],
       "sat_xyz_bits": [
-        "0x4168a4d85a517c07",
-        "0x416bea6a034eee8a",
+        "0x4168a4d85a517c09",
+        "0x416bea6a034eee8c",
         "0xc178ddaa141c6ab0"
       ]
     },
     {
       "day_of_year": 11,
-      "delay_bits": "0x40008444739ad4f7",
+      "delay_bits": "0x4000854e0908f94e",
       "name": "zwd_65",
       "receiver_lonlatalt_bits": [
         "0x4059bb5a3b6f32dc",
@@ -1322,7 +1322,7 @@
     },
     {
       "day_of_year": 28,
-      "delay_bits": "0x401ac34904680ec7",
+      "delay_bits": "0x401ad8ded905aaec",
       "name": "zwd_66",
       "receiver_lonlatalt_bits": [
         "0x4038f0127cebaf40",
@@ -1342,7 +1342,7 @@
     },
     {
       "day_of_year": 45,
-      "delay_bits": "0x400e2ae9456eddc1",
+      "delay_bits": "0x400e384c718a3f73",
       "name": "zwd_67",
       "receiver_lonlatalt_bits": [
         "0x4044a28261ae166c",
@@ -1352,7 +1352,7 @@
       "receiver_xyz_bits": [
         "0x41521bc8aab435ed",
         "0x414fc88f770f0d4e",
-        "0xc12bece916be877b"
+        "0xc12bece916be877a"
       ],
       "sat_xyz_bits": [
         "0x4177adcc7fd56c4b",
@@ -1362,7 +1362,7 @@
     },
     {
       "day_of_year": 62,
-      "delay_bits": "0x401014a4e2b87a4d",
+      "delay_bits": "0x4010004175605a52",
       "name": "zwd_68",
       "receiver_lonlatalt_bits": [
         "0x404a1f1f77820880",
@@ -1382,7 +1382,7 @@
     },
     {
       "day_of_year": 79,
-      "delay_bits": "0x4004312c039f86c3",
+      "delay_bits": "0x4004401da549be03",
       "name": "zwd_69",
       "receiver_lonlatalt_bits": [
         "0x4061234c75b7a090",
@@ -1402,7 +1402,7 @@
     },
     {
       "day_of_year": 96,
-      "delay_bits": "0x4008d9f79ca6a447",
+      "delay_bits": "0x4008d5b1973bcf4e",
       "name": "zwd_70",
       "receiver_lonlatalt_bits": [
         "0x4055df47cc29293c",
@@ -1422,7 +1422,7 @@
     },
     {
       "day_of_year": 113,
-      "delay_bits": "0x4004fa12dc1f7c6a",
+      "delay_bits": "0x4004f7f3a71ab57f",
       "name": "zwd_71",
       "receiver_lonlatalt_bits": [
         "0x404a2a9484edcdc0",
@@ -1442,7 +1442,7 @@
     },
     {
       "day_of_year": 130,
-      "delay_bits": "0x3ff6dbaa0ebb959e",
+      "delay_bits": "0x3ff6ddd6aec743af",
       "name": "zwd_72",
       "receiver_lonlatalt_bits": [
         "0xc06527f2528dd0db",
@@ -1462,7 +1462,7 @@
     },
     {
       "day_of_year": 147,
-      "delay_bits": "0x402f1c977d4ec045",
+      "delay_bits": "0x402fa6ba7e1735d9",
       "name": "zwd_73",
       "receiver_lonlatalt_bits": [
         "0x40515da81f4f4b18",
@@ -1472,7 +1472,7 @@
       "receiver_xyz_bits": [
         "0x413c0cde5621812b",
         "0x4152b83041a6bc61",
-        "0x414ba637f62bcac9"
+        "0x414ba637f62bcac8"
       ],
       "sat_xyz_bits": [
         "0x41606b7ded19c08c",
@@ -1482,7 +1482,7 @@
     },
     {
       "day_of_year": 164,
-      "delay_bits": "0x4012849cdca77725",
+      "delay_bits": "0x4012692c9e502049",
       "name": "zwd_74",
       "receiver_lonlatalt_bits": [
         "0x4063ef77dfdba87c",
@@ -1502,7 +1502,7 @@
     },
     {
       "day_of_year": 181,
-      "delay_bits": "0x40129cca6e9ca539",
+      "delay_bits": "0x401296d0324dcaa9",
       "name": "zwd_75",
       "receiver_lonlatalt_bits": [
         "0x405358d89a345282",
@@ -1522,7 +1522,7 @@
     },
     {
       "day_of_year": 198,
-      "delay_bits": "0x400de2fadffb3413",
+      "delay_bits": "0x400ddb16665f155c",
       "name": "zwd_76",
       "receiver_lonlatalt_bits": [
         "0x4041db2a4bdd47d8",
@@ -1542,7 +1542,7 @@
     },
     {
       "day_of_year": 215,
-      "delay_bits": "0x4008250b907b2d74",
+      "delay_bits": "0x40082fb6501b36d6",
       "name": "zwd_77",
       "receiver_lonlatalt_bits": [
         "0xc05cf999abc83d90",
@@ -1562,7 +1562,7 @@
     },
     {
       "day_of_year": 232,
-      "delay_bits": "0x3ffbe7f324694427",
+      "delay_bits": "0x3ffbdc1c30028577",
       "name": "zwd_78",
       "receiver_lonlatalt_bits": [
         "0xc04e79726d0bc0bc",
@@ -1582,7 +1582,7 @@
     },
     {
       "day_of_year": 249,
-      "delay_bits": "0x3ff8307ad34189c3",
+      "delay_bits": "0x3ff82c9c8e0e11d8",
       "name": "zwd_79",
       "receiver_lonlatalt_bits": [
         "0xc0552e79a0db4b36",
@@ -1601,7 +1601,9 @@
       ]
     }
   ],
-  "pyproj_version": "3.6.1",
-  "reference": "Davis-Bevis-style ZWD with Niell mapping",
+  "elevation_reference": "PROJ topocentric transform from WGS84 ECEF to receiver ENU",
+  "proj_version": "9.5.1",
+  "pyproj_version": "3.7.2",
+  "reference": "Davis-Bevis-style ZWD with Niell mapping and PROJ topocentric elevation",
   "schema": "gnss-tropo-zwd-v1"
 }

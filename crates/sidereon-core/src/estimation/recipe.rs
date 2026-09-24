@@ -207,15 +207,12 @@ pub enum SagnacRecipe {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum FrameRecipe {
     /// SPP Skyfield-parity ECEF->geodetic with the three-iteration AU-scaled
-    /// latitude solve (`spp` geodetic conversion).
+    /// latitude solve (`spp` geodetic conversion). RTK and PPP take every
+    /// elevation, azimuth and receiver local frame (mask, reference choice,
+    /// weights, antenna, wind-up) from the geodetic ENU frame this conversion
+    /// gives, as RTKLIB takes them from `satazel` and `xyz2enu`.
     #[default]
     SppSkyfieldAuThreeIter,
-    /// Geocentric-up local frame used by the RTK elevation reference
-    /// (`rtk_filter` elevation mask / antenna projection).
-    GeocentricUpRtkReference,
-    /// Geodetic NEU basis built from the cross-product convention
-    /// (`precise_positioning::model` troposphere geometry).
-    GeodeticNeuCrossProduct,
     /// DOP ENU rotation basis (`dop`).
     DopEnuRotation,
     /// Canonical: one consistent meters-native WGS84/ITRF geodetic basis under
@@ -346,7 +343,7 @@ impl EstimationRecipe {
         Self {
             range: RangeRecipe::RtkProvidedTxFirstOrderSagnac,
             sagnac: SagnacRecipe::RtklibFirstOrderScalar,
-            frame: FrameRecipe::GeocentricUpRtkReference,
+            frame: FrameRecipe::SppSkyfieldAuThreeIter,
             normal: NormalRecipe::RtkDoubleDifferenceBlockFirstTie,
             solver: SolverRecipe::FlatGaussianFirstTie,
         }
@@ -358,7 +355,7 @@ impl EstimationRecipe {
         Self {
             range: RangeRecipe::RtklibSatpossPseudorange,
             sagnac: SagnacRecipe::RtklibFirstOrderScalar,
-            frame: FrameRecipe::GeodeticNeuCrossProduct,
+            frame: FrameRecipe::SppSkyfieldAuThreeIter,
             normal: NormalRecipe::PppDenseLastTie,
             solver: SolverRecipe::DenseGaussianLastTie,
         }
@@ -407,7 +404,7 @@ impl EstimationRecipe {
     /// The canonical RTK recipe: the double-difference baseline under the
     /// numerically rigorous square-root-information solve. It keeps the RTK
     /// reference's double-difference measurement physics (the provided-transmit
-    /// range with the RTKLIB first-order Sagnac scalar, the geocentric-up
+    /// range with the RTKLIB first-order Sagnac scalar, the geodetic `satazel`
     /// elevation frame), because the canonical RTK divergence the physics calls
     /// for is in the linear algebra, not the observation model: the same SPD
     /// information system the reference assembles is solved by the owned
@@ -422,7 +419,7 @@ impl EstimationRecipe {
         Self {
             range: RangeRecipe::RtkProvidedTxFirstOrderSagnac,
             sagnac: SagnacRecipe::RtklibFirstOrderScalar,
-            frame: FrameRecipe::GeocentricUpRtkReference,
+            frame: FrameRecipe::SppSkyfieldAuThreeIter,
             normal: NormalRecipe::CanonicalSquareRoot,
             solver: SolverRecipe::OwnedDeterministicCholesky,
         }
@@ -432,7 +429,7 @@ impl EstimationRecipe {
     /// the numerically rigorous square-root-information solve. Like
     /// [`Self::canonical_rtk`] it keeps the PPP reference's measurement physics
     /// (the RTKLIB `satposs` transmit-time placement and `geodist` range, and the
-    /// geodetic NEU antenna frame), because
+    /// geodetic ENU antenna and wind-up frame), because
     /// the canonical PPP divergence the physics calls for is in the linear
     /// algebra, not the observation model: the same weighted normal equations
     /// the reference assembles from the undifferenced rows are reduced by
@@ -454,7 +451,7 @@ impl EstimationRecipe {
         Self {
             range: RangeRecipe::RtklibSatpossPseudorange,
             sagnac: SagnacRecipe::RtklibFirstOrderScalar,
-            frame: FrameRecipe::GeodeticNeuCrossProduct,
+            frame: FrameRecipe::SppSkyfieldAuThreeIter,
             normal: NormalRecipe::CanonicalSquareRoot,
             solver: SolverRecipe::OwnedDeterministicCholesky,
         }
