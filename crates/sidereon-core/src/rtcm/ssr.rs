@@ -1,8 +1,20 @@
-//! RTCM SSR orbit, clock, URA, and high-rate clock messages.
+//! RTCM SSR and IGS SSR orbit, clock, bias, URA, and high-rate clock messages.
 //!
-//! This module is the wire-level IR for the RTCM SSR Phase A messages. Values
+//! This module is the wire-level IR for the RTCM SSR Phase A messages and for
+//! the satellite messages of the IGS SSR format (RTCM message 4076, IGS SSR
+//! v1.00, subtypes 21..27, 41..47, 61..67, 81..87, 101..107 and 121..127). Values
 //! are stored as the raw transmitted integers. Scaling to meters and seconds is
 //! handled by the crate-level `ssr` correction store.
+//!
+//! The IGS SSR layout differs from the RTCM one: every system has a 20-bit GPS
+//! time of week (IDF003), a six-bit satellite ID (IDF011) and an eight-bit GNSS
+//! IOD (IDF012), and the orbit and combined messages put the CRS indicator
+//! (IDF006) after the solution ID. For Galileo, IDF012 carries the eight least
+//! significant bits of IODnav (IGS SSR v1.00, IDF012 notes): that is all the
+//! message transmits, and [`SsrOrbitRecord::iode`] holds exactly it.
+
+/// RTCM message number of the IGS SSR messages.
+pub const IGS_SSR_MESSAGE_NUMBER: u16 = 4076;
 
 use crate::error::{Error, Result};
 use crate::id::GnssSystem;
@@ -30,15 +42,14 @@ pub enum SsrKind {
     Ura,
     /// High-rate clock correction.
     HighRateClock,
-    /// VTEC ionosphere correction.
-    Vtec,
 }
 
 /// Common header for RTCM SSR messages.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SsrHeader {
     /// SSR epoch time. GPS, Galileo, and BeiDou use seconds of week; GLONASS
-    /// uses its RTCM 17-bit day time field.
+    /// uses its RTCM 17-bit day time field. Every IGS SSR (4076) message uses
+    /// the 20-bit GPS time of week (IDF003).
     pub epoch_time_s: u32,
     /// SSR update interval index.
     pub update_interval: u8,
@@ -50,7 +61,8 @@ pub struct SsrHeader {
     pub provider_id: u16,
     /// SSR solution identifier.
     pub solution_id: u8,
-    /// Satellite reference datum bit for orbit and combined messages.
+    /// Satellite reference datum bit for orbit and combined messages (the
+    /// IGS SSR global/regional CRS indicator, IDF006).
     pub satellite_reference_datum: Option<bool>,
     /// Phase-bias dispersive-bias consistency flag.
     pub dispersive_bias_consistency: Option<bool>,
@@ -65,7 +77,12 @@ pub struct SsrHeader {
 pub struct SsrOrbitRecord {
     /// Constellation-native satellite id.
     pub satellite_id: u8,
-    /// Referenced broadcast issue, with constellation-specific bit width.
+    /// Referenced broadcast issue as transmitted. RTCM SSR: eight bits for
+    /// GPS, GLONASS and QZSS, ten (IODnav) for Galileo, and for BeiDou ten bits
+    /// of issue then the eight-bit IOD (`mod(toe/720, 240)`) held together.
+    /// IGS SSR (4076): the eight-bit GNSS IOD (IDF012) for every system; for
+    /// Galileo it is the eight least significant bits of IODnav, for GLONASS
+    /// `tb` in its low seven bits, for BeiDou `mod(toe/720, 240)`.
     pub iode: u32,
     /// Radial delta, int22, scale 0.1 mm.
     pub delta_radial: i32,
@@ -131,11 +148,19 @@ pub struct SsrPhaseBiasRecord {
     pub biases: Vec<SsrPhaseBiasSignal>,
 }
 
-/// A decoded RTCM SSR message body.
+/// A decoded RTCM SSR or IGS SSR message body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SsrMessage {
-    /// RTCM message number.
+    /// RTCM message number: an RTCM SSR number, or [`IGS_SSR_MESSAGE_NUMBER`]
+    /// (4076) for an IGS SSR message.
     pub message_number: u16,
+    /// IGS SSR version (IDF001, 3 bits) of a 4076 message, `None` for an RTCM
+    /// SSR message. The IGS message number (IDF002) is not held: it is the
+    /// system's offset (GPS 20, GLONASS 40, Galileo 60, QZSS 80, BeiDou 100,
+    /// SBAS 120) plus the group's digit (orbit 1, clock 2, combined 3,
+    /// high-rate clock 4, code bias 5, phase bias 6, URA 7), from
+    /// [`Self::system`] and [`Self::kind`]; see [`Self::igs_ssr_subtype`].
+    pub igs_ssr_version: Option<u8>,
     /// Constellation derived from the message number.
     pub system: GnssSystem,
     /// SSR message group.
@@ -201,15 +226,67 @@ pub(crate) fn ssr_kind(message_number: u16) -> Option<(GnssSystem, SsrKind)> {
     }
 }
 
-/// True when this module decodes `message_number`.
+/// True when this module decodes `message_number` as an RTCM SSR message.
 pub(crate) fn is_supported_ssr(message_number: u16) -> bool {
     ssr_kind(message_number).is_some()
 }
 
+/// The IGS SSR system offsets (IGS SSR v1.00, Table 5).
+const IGS_SSR_SYSTEMS: [(GnssSystem, u8); 6] = [
+    (GnssSystem::Gps, 20),
+    (GnssSystem::Glonass, 40),
+    (GnssSystem::Galileo, 60),
+    (GnssSystem::Qzss, 80),
+    (GnssSystem::BeiDou, 100),
+    (GnssSystem::Sbas, 120),
+];
+
+/// The IGS SSR message groups by their digit.
+const IGS_SSR_KINDS: [(SsrKind, u8); 7] = [
+    (SsrKind::Orbit, 1),
+    (SsrKind::Clock, 2),
+    (SsrKind::CombinedOrbitClock, 3),
+    (SsrKind::HighRateClock, 4),
+    (SsrKind::CodeBias, 5),
+    (SsrKind::PhaseBias, 6),
+    (SsrKind::Ura, 7),
+];
+
+/// The system and group an IGS SSR message number (IDF002) names, for the
+/// satellite messages 21..27, 41..47, 61..67, 81..87, 101..107 and 121..127.
+pub(crate) fn igs_ssr_kind(subtype: u8) -> Option<(GnssSystem, SsrKind)> {
+    let (system, offset) = IGS_SSR_SYSTEMS
+        .iter()
+        .copied()
+        .find(|&(_, offset)| subtype > offset && subtype <= offset + 7)?;
+    let digit = subtype - offset;
+    let (kind, _) = IGS_SSR_KINDS.iter().copied().find(|&(_, d)| d == digit)?;
+    Some((system, kind))
+}
+
+/// The IGS SSR message number (IDF002) of a system and group.
+pub(crate) fn igs_ssr_subtype(system: GnssSystem, kind: SsrKind) -> Option<u8> {
+    let (_, offset) = IGS_SSR_SYSTEMS
+        .iter()
+        .copied()
+        .find(|&(s, _)| s == system)?;
+    let (_, digit) = IGS_SSR_KINDS.iter().copied().find(|&(k, _)| k == kind)?;
+    Some(offset + digit)
+}
+
+/// The IGS SSR version (IDF001) and message number (IDF002) a 4076 body
+/// carries after its message number.
+pub(crate) fn igs_ssr_identity(body: &[u8]) -> DecodeResult<(u8, u8)> {
+    let mut r = BitReader::new(body);
+    r.u(12)?;
+    Ok((r.u(3)? as u8, r.u(8)? as u8))
+}
+
 impl SsrMessage {
-    /// Decode one RTCM SSR body, without the transport frame, under
-    /// [`RtcmPolicy::Strict`]: a body that ends before the records its header
-    /// counts is refused as truncated.
+    /// Decode one RTCM SSR body, or an IGS SSR (4076) satellite message body,
+    /// without the transport frame, under [`RtcmPolicy::Strict`]: a body that
+    /// ends before the records its header counts is refused as truncated. The
+    /// IGS SSR VTEC message (subtype 201) is a [`super::SsrVtecMessage`].
     ///
     /// Every bit after the last record is kept in [`Self::padding_bits`], so
     /// the body re-encodes as read.
@@ -239,13 +316,26 @@ impl SsrMessage {
     pub(crate) fn decode_inner(body: &[u8], ctx: &mut DecodeContext) -> DecodeResult<Self> {
         let mut r = BitReader::new(body);
         let message_number = r.u(12)? as u16;
-        let (system, kind) = ssr_kind(message_number).ok_or_else(|| {
-            Error::Parse(format!(
-                "message {message_number} is not a supported RTCM SSR Phase A type"
-            ))
-        })?;
-        let header = read_header(&mut r, system, kind)?;
-        let sat_bits = satellite_id_bits(system, message_number);
+        let (system, kind, igs_ssr_version) = if message_number == IGS_SSR_MESSAGE_NUMBER {
+            let version = r.u(3)? as u8;
+            let subtype = r.u(8)? as u8;
+            let (system, kind) = igs_ssr_kind(subtype).ok_or_else(|| {
+                Error::Parse(format!(
+                    "IGS SSR message number {subtype} is not a satellite correction message"
+                ))
+            })?;
+            (system, kind, Some(version))
+        } else {
+            let (system, kind) = ssr_kind(message_number).ok_or_else(|| {
+                Error::Parse(format!(
+                    "message {message_number} is not a supported RTCM SSR Phase A type"
+                ))
+            })?;
+            (system, kind, None)
+        };
+        let layout = Layout::new(system, message_number);
+        let header = read_header(&mut r, layout, kind)?;
+        let sat_bits = layout.satellite_bits;
         let count = usize::from(header.satellite_count);
         let mut orbit = Vec::new();
         let mut clock = Vec::new();
@@ -256,7 +346,7 @@ impl SsrMessage {
         match kind {
             SsrKind::Orbit => {
                 orbit = read_records(&mut r, ctx, message_number, count, &mut |r| {
-                    read_orbit_record(r, system, sat_bits)
+                    read_orbit_record(r, layout)
                 })?;
             }
             SsrKind::Clock => {
@@ -266,7 +356,7 @@ impl SsrMessage {
             }
             SsrKind::CombinedOrbitClock => {
                 let pairs = read_records(&mut r, ctx, message_number, count, &mut |r| {
-                    let rec = read_orbit_record(r, system, sat_bits)?;
+                    let rec = read_orbit_record(r, layout)?;
                     let clock = SsrClockRecord {
                         satellite_id: rec.satellite_id,
                         c0: r.i(22)? as i32,
@@ -302,12 +392,6 @@ impl SsrMessage {
                     read_phase_bias_record(r, sat_bits)
                 })?;
             }
-            SsrKind::Vtec => {
-                return Err(Error::Parse(format!(
-                    "message {message_number} is not enabled in RTCM SSR Phase A"
-                ))
-                .into());
-            }
         }
 
         let padding_bits = r.rest();
@@ -328,6 +412,7 @@ impl SsrMessage {
 
         Ok(Self {
             message_number,
+            igs_ssr_version,
             system,
             kind,
             header,
@@ -350,9 +435,12 @@ impl SsrMessage {
     /// * a message number this codec does not decode, or one whose
     ///   constellation and message group differ from [`Self::system`] and
     ///   [`Self::kind`]: the body would be written in one layout and read in
-    ///   another (4076, the IGS SSR number, has its own layout);
+    ///   another; for 4076, an [`Self::igs_ssr_version`] of `None`, or a
+    ///   system IGS SSR has no message for (NavIC), and for an RTCM SSR number
+    ///   an IGS SSR version of `Some`;
     /// * a satellite field wider than the message's: five bits for GLONASS,
-    ///   four for the native QZSS messages (1246..1251, 1268), six otherwise;
+    ///   four for the native QZSS messages (1246..1251, 1268), six otherwise
+    ///   and for every IGS SSR message;
     /// * a satellite count that differs from the number of records the message
     ///   group writes, or records in a list the group does not write (an orbit
     ///   message's clock list, say), which would be dropped;
@@ -383,19 +471,50 @@ impl SsrMessage {
     /// policies.
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         let number = self.message_number;
-        if ssr_kind(number) != Some((self.system, self.kind)) {
-            return Err(RtcmEncodeError::MessageNumber {
-                message_number: number,
-                record: RtcmRecordKind::Ssr {
-                    system: self.system,
-                    kind: self.kind,
-                },
+        let subtype = self.igs_ssr_subtype();
+        let record = RtcmRecordKind::Ssr {
+            system: self.system,
+            kind: self.kind,
+        };
+        if number == IGS_SSR_MESSAGE_NUMBER {
+            if self.igs_ssr_version.is_none() {
+                return Err(RtcmEncodeError::FieldPresence {
+                    message_number: number,
+                    record,
+                    field: "IGS SSR version",
+                    carried: true,
+                }
+                .into());
             }
-            .into());
+            if subtype.is_none() {
+                return Err(RtcmEncodeError::MessageNumber {
+                    message_number: number,
+                    record,
+                }
+                .into());
+            }
+        } else {
+            if self.igs_ssr_version.is_some() {
+                return Err(RtcmEncodeError::FieldPresence {
+                    message_number: number,
+                    record,
+                    field: "IGS SSR version",
+                    carried: false,
+                }
+                .into());
+            }
+            if ssr_kind(number) != Some((self.system, self.kind)) {
+                return Err(RtcmEncodeError::MessageNumber {
+                    message_number: number,
+                    record,
+                }
+                .into());
+            }
         }
         let departures = self.check_lists(policy)?;
         self.check_header_flags()?;
-        let sat_bits = satellite_id_bits(self.system, number);
+        let layout = Layout::new(self.system, number);
+        let sat_bits = layout.satellite_bits;
         let widest = (1u64 << sat_bits) - 1;
         if let Some(satellite_id) = self
             .satellite_fields()
@@ -411,12 +530,16 @@ impl SsrMessage {
         }
         let mut w = FieldWriter::new(number);
         w.u("message number", u64::from(number), 12)?;
-        write_header(&mut w, self.system, &self.header, self.kind)?;
+        if let (Some(version), Some(subtype)) = (self.igs_ssr_version, subtype) {
+            w.u("IGS SSR version", u64::from(version), 3)?;
+            w.u("IGS SSR message number", u64::from(subtype), 8)?;
+        }
+        write_header(&mut w, layout, &self.header, self.kind)?;
 
         match self.kind {
             SsrKind::Orbit => {
                 for rec in &self.orbit {
-                    write_orbit_record(&mut w, self.system, sat_bits, rec)?;
+                    write_orbit_record(&mut w, layout, rec)?;
                 }
             }
             SsrKind::Clock => {
@@ -426,7 +549,7 @@ impl SsrMessage {
             }
             SsrKind::CombinedOrbitClock => {
                 for (orbit, clock) in self.orbit.iter().zip(&self.clock) {
-                    write_orbit_record(&mut w, self.system, sat_bits, orbit)?;
+                    write_orbit_record(&mut w, layout, orbit)?;
                     write_clock_terms(&mut w, clock)?;
                 }
             }
@@ -460,7 +583,6 @@ impl SsrMessage {
                     write_phase_bias_record(&mut w, sat_bits, rec)?;
                 }
             }
-            SsrKind::Vtec => {}
         }
 
         let pad = (8 - (w.bit_len() + self.padding_bits.len()) % 8) % 8;
@@ -631,7 +753,48 @@ impl SsrMessage {
             SsrKind::Ura => self.ura.iter().map(|&(id, _)| id).collect(),
             SsrKind::CodeBias => self.code_bias.iter().map(|r| r.satellite_id).collect(),
             SsrKind::PhaseBias => self.phase_bias.iter().map(|r| r.satellite_id).collect(),
-            SsrKind::Vtec => Vec::new(),
+        }
+    }
+
+    /// The IGS SSR message number (IDF002) of a 4076 message: the system's
+    /// offset plus the group's digit. `None` for an RTCM SSR message number.
+    pub fn igs_ssr_subtype(&self) -> Option<u8> {
+        if self.message_number == IGS_SSR_MESSAGE_NUMBER {
+            igs_ssr_subtype(self.system, self.kind)
+        } else {
+            None
+        }
+    }
+}
+
+/// The field widths of one SSR message's layout.
+#[derive(Clone, Copy)]
+struct Layout {
+    igs: bool,
+    /// Width of the epoch time: 17 bits for an RTCM GLONASS message, 20
+    /// otherwise.
+    epoch_bits: usize,
+    /// Width of the satellite ID field.
+    satellite_bits: usize,
+    /// Width of the orbit record's issue field.
+    iode_bits: usize,
+}
+
+impl Layout {
+    fn new(system: GnssSystem, message_number: u16) -> Self {
+        if message_number == IGS_SSR_MESSAGE_NUMBER {
+            return Self {
+                igs: true,
+                epoch_bits: 20,
+                satellite_bits: 6,
+                iode_bits: 8,
+            };
+        }
+        Self {
+            igs: false,
+            epoch_bits: epoch_time_bits(system),
+            satellite_bits: satellite_id_bits(system, message_number),
+            iode_bits: iode_bits(system),
         }
     }
 }
@@ -672,16 +835,14 @@ fn read_records<T>(
     Ok(out)
 }
 
-fn read_header(
-    r: &mut BitReader<'_>,
-    system: GnssSystem,
-    kind: SsrKind,
-) -> DecodeResult<SsrHeader> {
-    let epoch_time_s = r.u(epoch_time_bits(system))? as u32;
+fn read_header(r: &mut BitReader<'_>, layout: Layout, kind: SsrKind) -> DecodeResult<SsrHeader> {
+    let epoch_time_s = r.u(layout.epoch_bits)? as u32;
     let update_interval = r.u(4)? as u8;
     let multiple_message = r.flag()?;
-    let satellite_reference_datum = if matches!(kind, SsrKind::Orbit | SsrKind::CombinedOrbitClock)
-    {
+    let datum = matches!(kind, SsrKind::Orbit | SsrKind::CombinedOrbitClock);
+    // RTCM SSR puts the satellite reference datum before the IOD SSR, IGS SSR
+    // its CRS indicator (IDF006) after the solution ID.
+    let mut satellite_reference_datum = if datum && !layout.igs {
         Some(r.flag()?)
     } else {
         None
@@ -689,6 +850,9 @@ fn read_header(
     let iod_ssr = r.u(4)? as u8;
     let provider_id = r.u(16)? as u16;
     let solution_id = r.u(4)? as u8;
+    if datum && layout.igs {
+        satellite_reference_datum = Some(r.flag()?);
+    }
     let dispersive_bias_consistency = if kind == SsrKind::PhaseBias {
         Some(r.flag()?)
     } else {
@@ -716,23 +880,30 @@ fn read_header(
 
 fn write_header(
     w: &mut FieldWriter,
-    system: GnssSystem,
+    layout: Layout,
     header: &SsrHeader,
     kind: SsrKind,
 ) -> Result<()> {
     w.u(
         "epoch time",
         u64::from(header.epoch_time_s),
-        epoch_time_bits(system),
+        layout.epoch_bits,
     )?;
     w.u("update interval", u64::from(header.update_interval), 4)?;
     w.flag(header.multiple_message);
-    if let Some(datum) = header.satellite_reference_datum {
-        w.flag(datum);
+    if !layout.igs {
+        if let Some(datum) = header.satellite_reference_datum {
+            w.flag(datum);
+        }
     }
     w.u("IOD SSR", u64::from(header.iod_ssr), 4)?;
     w.u("provider ID", u64::from(header.provider_id), 16)?;
     w.u("solution ID", u64::from(header.solution_id), 4)?;
+    if layout.igs {
+        if let Some(datum) = header.satellite_reference_datum {
+            w.flag(datum);
+        }
+    }
     if kind == SsrKind::PhaseBias {
         // `check_header_flags` has refused a phase-bias header without them.
         w.flag(header.dispersive_bias_consistency.unwrap_or_default());
@@ -745,14 +916,10 @@ fn write_header(
     )
 }
 
-fn read_orbit_record(
-    r: &mut BitReader<'_>,
-    system: GnssSystem,
-    sat_bits: usize,
-) -> DecodeResult<SsrOrbitRecord> {
+fn read_orbit_record(r: &mut BitReader<'_>, layout: Layout) -> DecodeResult<SsrOrbitRecord> {
     Ok(SsrOrbitRecord {
-        satellite_id: r.u(sat_bits)? as u8,
-        iode: r.u(iode_bits(system))? as u32,
+        satellite_id: r.u(layout.satellite_bits)? as u8,
+        iode: r.u(layout.iode_bits)? as u32,
         delta_radial: r.i(22)? as i32,
         delta_along: r.i(20)? as i32,
         delta_cross: r.i(20)? as i32,
@@ -762,18 +929,13 @@ fn read_orbit_record(
     })
 }
 
-fn write_orbit_record(
-    w: &mut FieldWriter,
-    system: GnssSystem,
-    sat_bits: usize,
-    rec: &SsrOrbitRecord,
-) -> Result<()> {
+fn write_orbit_record(w: &mut FieldWriter, layout: Layout, rec: &SsrOrbitRecord) -> Result<()> {
     let id = rec.satellite_id;
-    w.u("satellite id", u64::from(id), sat_bits)?;
+    w.u("satellite id", u64::from(id), layout.satellite_bits)?;
     w.u(
         format_args!("satellite {id} IODE"),
         u64::from(rec.iode),
-        iode_bits(system),
+        layout.iode_bits,
     )?;
     w.i(
         format_args!("satellite {id} radial delta"),
@@ -1153,7 +1315,6 @@ mod tests {
                     },
                 ],
             }),
-            SsrKind::Vtec => {}
         }
         let code_bias = if kind == SsrKind::CodeBias {
             vec![SsrCodeBiasRecord {
@@ -1165,6 +1326,7 @@ mod tests {
         };
         SsrMessage {
             message_number,
+            igs_ssr_version: None,
             system,
             kind,
             header: header(system, kind, 1),
@@ -1355,11 +1517,11 @@ mod tests {
         );
     }
 
-    /// The encoder writes the RTCM SSR layout for the message numbers this
-    /// codec decodes and nothing else. 4076 (IGS SSR) carries a version and a
-    /// subtype after its number; writing the RTCM layout under it would give
-    /// bytes no reader takes for the fields held, so it is refused, as is a
-    /// number whose system or group differs from the record's.
+    /// The encoder writes the layout the message number names and nothing
+    /// else. 4076 (IGS SSR) carries a version and a subtype after its number;
+    /// a 4076 message without an IGS SSR version is refused rather than
+    /// written in the RTCM layout, as is a number whose system or group
+    /// differs from the record's.
     #[test]
     fn ssr_encode_refuses_a_number_that_names_another_layout() {
         let igs = message(4076, GnssSystem::Qzss, SsrKind::Orbit);

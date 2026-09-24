@@ -25,9 +25,9 @@
  *   rtklib_rtcm_oracle encode-1041 <rinex nav> <out>
  *       Writes one 1041 frame per NavIC ephemeris of the RINEX navigation
  *       file, in file order.
- *   rtklib_rtcm_oracle encode-4076 <stream> <gps week> <tow s> <out>
- *       Reads the RTCM SSR corrections of <stream> and writes, per SSR epoch,
- *       the 4076 IGS SSR subtypes 21..27, 41..47, 61..67, 81..87, 101..107 and
+ *   rtklib_rtcm_oracle encode-4076 <stream> <gps week> <tow s> <epochs> <out>
+ *       Reads the RTCM SSR corrections of <stream> and writes, for each of the
+ *       first <epochs> SSR epochs, the 4076 IGS SSR subtypes 21..27, 41..47, 61..67, 81..87, 101..107 and
  *       121..127. The stream carries no phase biases, so each satellite of a
  *       phase-bias subtype is given one per signal it has a code bias for:
  *       the code bias times 1.37 m/m, with the yaw angle and rate set from the
@@ -437,11 +437,11 @@ static void flush_4076(rtcm_t *rtcm, FILE *out)
     for (int i = 0; i < MAXSAT; i++) rtcm->ssr[i].update = 0;
 }
 
-static int encode_4076(const char *path, int week, double tow, const char *outpath)
+static int encode_4076(const char *path, int week, double tow, int epochs, const char *outpath)
 {
     static rtcm_t rtcm;
     long len, pos = 0, at;
-    int frame_len, pending = 0;
+    int frame_len, pending = 0, done = 0;
     gtime_t epoch = {0};
     uint8_t *buf = read_file(path, &len);
     FILE *out = fopen(outpath, "wb");
@@ -459,12 +459,13 @@ static int encode_4076(const char *path, int week, double tow, const char *outpa
         if (pending && timediff(probe.time, epoch) != 0.0) {
             flush_4076(&rtcm, out);
             pending = 0;
+            if (++done >= epochs) break;
         }
         decode_one(&rtcm, buf + at, frame_len);
         epoch = rtcm.time;
         pending = 1;
     }
-    if (pending) flush_4076(&rtcm, out);
+    if (pending && done < epochs) flush_4076(&rtcm, out);
     fclose(out);
     free(buf);
     return 0;
@@ -484,8 +485,8 @@ int main(int argc, char **argv)
     if (argc == 4 && !strcmp(argv[1], "encode-1041")) {
         return encode_1041(argv[2], argv[3]);
     }
-    if (argc == 6 && !strcmp(argv[1], "encode-4076")) {
-        return encode_4076(argv[2], atoi(argv[3]), atof(argv[4]), argv[5]);
+    if (argc == 7 && !strcmp(argv[1], "encode-4076")) {
+        return encode_4076(argv[2], atoi(argv[3]), atof(argv[4]), atoi(argv[5]), argv[6]);
     }
     fprintf(stderr, "usage: see the comment at the top of %s\n", __FILE__);
     return 2;

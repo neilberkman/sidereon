@@ -398,6 +398,7 @@ fn synthetic_rtcm_store(
 ) -> SsrCorrectionStore {
     let message = Message::Ssr(SsrMessage {
         message_number: 1060,
+        igs_ssr_version: None,
         system: GnssSystem::Gps,
         kind: SsrKind::CombinedOrbitClock,
         header: SsrHeader {

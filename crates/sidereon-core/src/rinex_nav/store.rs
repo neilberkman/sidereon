@@ -480,6 +480,28 @@ impl BroadcastStore {
         })
     }
 
+    /// The first valid record of `nav_message` for `sat` at `t_j2000_s`, in selection
+    /// order, whose issue's `bits` least significant bits equal `low_bits`: how an IGS
+    /// SSR Galileo correction names its I/NAV record by the eight low bits of IODnav
+    /// (IGS SSR v1.00, IDF012).
+    pub(crate) fn select_by_issue_low_bits_at(
+        &self,
+        sat: GnssSatelliteId,
+        low_bits: u32,
+        bits: u32,
+        nav_message: NavMessage,
+        t_j2000_s: f64,
+    ) -> Option<&BroadcastRecord> {
+        let mask = (1u32 << bits) - 1;
+        let (t_native_s, _, _) = query_native_time(sat, t_j2000_s)?;
+        self.first_valid(sat, t_native_s, |r| {
+            r.message == nav_message
+                && r.issue_of_data.is_some_and(|issue| {
+                    issue.message == nav_message && issue.issue & mask == low_bits
+                })
+        })
+    }
+
     /// Position, velocity and clock of the GLONASS record for `sat` whose `tb`, the 15-min
     /// index of its reference epoch in UTC + 3 h, equals `iode`, as RTKLIB `satpos_ssr`
     /// forms them for a GLONASS SSR correction: `selgeph` by that issue (RTKLIB `readrnx`

@@ -32,12 +32,14 @@
 //! | Galileo ephemeris  | 1045 / 1046                              | [`GalileoFnavEphemeris`] / [`GalileoInavEphemeris`] |
 //! | GLONASS code-phase biases | 1230                              | [`GlonassCodePhaseBiases`] |
 //! | SSR corrections    | GPS 1057-1062, 1265; GLONASS 1063-1068; Galileo 1240-1245, 1267; QZSS 1246-1251, 1268; BeiDou 1258-1263, 1270 | [`SsrMessage`] |
+//! | IGS SSR corrections | 4076 subtypes 21-27 GPS, 41-47 GLONASS, 61-67 Galileo, 81-87 QZSS, 101-107 BeiDou, 121-127 SBAS | [`SsrMessage`] |
+//! | SSR ionosphere VTEC | 1264; 4076 subtype 201                  | [`SsrVtecMessage`] |
 //!
 //! Any other message number is preserved losslessly as [`Message::Unsupported`]
-//! (its raw body is kept so the frame still round-trips). Deferred message types
-//! include the IGS SSR messages 4076, the network-RTK correction families and
-//! the SSR messages not listed above. They decode as `Unsupported` rather than
-//! erroring.
+//! (its raw body is kept so the frame still round-trips), and so is a 4076
+//! message whose IGS SSR message number is none of the above. Deferred message
+//! types include the network-RTK correction families and the SSR messages not
+//! listed above. They decode as `Unsupported` rather than erroring.
 //!
 //! ## Departures and policy
 //!
@@ -102,6 +104,7 @@ mod lli;
 mod msm;
 mod ssr;
 mod station;
+mod vtec;
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
@@ -142,9 +145,10 @@ pub use msm::{
 pub(crate) use ssr::is_native_qzss_ssr;
 pub use ssr::{
     SsrClockRecord, SsrCodeBiasRecord, SsrHeader, SsrKind, SsrMessage, SsrOrbitRecord,
-    SsrPhaseBiasRecord, SsrPhaseBiasSignal,
+    SsrPhaseBiasRecord, SsrPhaseBiasSignal, IGS_SSR_MESSAGE_NUMBER,
 };
 pub use station::StationCoordinates;
+pub use vtec::{SsrVtecLayer, SsrVtecMessage};
 
 /// A message whose number is recognized but whose body this codec does not
 /// decode. The raw body is preserved so the frame still round-trips.
@@ -566,8 +570,10 @@ pub enum Message {
     GalileoInavEphemeris(GalileoInavEphemeris),
     /// A 1230 GLONASS code-phase bias message.
     GlonassCodePhaseBiases(GlonassCodePhaseBiases),
-    /// A supported RTCM SSR correction message.
+    /// A supported RTCM SSR or IGS SSR satellite correction message.
     Ssr(SsrMessage),
+    /// An SSR ionosphere VTEC message: 1264, or IGS SSR 4076 subtype 201.
+    SsrVtec(SsrVtecMessage),
     /// A recognized-but-undecoded message, preserved verbatim.
     Unsupported(UnsupportedMessage),
 }
@@ -643,6 +649,22 @@ impl Message {
                 Message::Msm(decode_body(body, ctx, MsmMessage::read)?)
             }
             n if ssr::is_supported_ssr(n) => Message::Ssr(SsrMessage::decode_inner(body, ctx)?),
+            n if vtec::is_rtcm_vtec(n) => {
+                Message::SsrVtec(decode_body(body, ctx, |r, _| SsrVtecMessage::read(r))?)
+            }
+            IGS_SSR_MESSAGE_NUMBER => {
+                let (_, subtype) = ssr::igs_ssr_identity(body)?;
+                if subtype == vtec::IGS_SSR_VTEC_SUBTYPE {
+                    Message::SsrVtec(decode_body(body, ctx, |r, _| SsrVtecMessage::read(r))?)
+                } else if ssr::igs_ssr_kind(subtype).is_some() {
+                    Message::Ssr(SsrMessage::decode_inner(body, ctx)?)
+                } else {
+                    Message::Unsupported(UnsupportedMessage {
+                        message_number: number,
+                        body: body.to_vec(),
+                    })
+                }
+            }
             _ => Message::Unsupported(UnsupportedMessage {
                 message_number: number,
                 body: body.to_vec(),
@@ -705,6 +727,7 @@ impl Message {
             Message::GalileoFnavEphemeris(e) => e.encode_with_policy(policy),
             Message::GalileoInavEphemeris(e) => e.encode_with_policy(policy),
             Message::Ssr(s) => s.encode_with_policy(policy),
+            Message::SsrVtec(v) => v.encode_with_policy(policy),
             Message::Unsupported(u) => u.encode().map(|body| (body, Vec::new())),
         }
     }
@@ -725,6 +748,7 @@ impl Message {
             Message::GalileoFnavEphemeris(_) => 1045,
             Message::GalileoInavEphemeris(_) => 1046,
             Message::Ssr(s) => s.message_number,
+            Message::SsrVtec(v) => v.message_number,
             Message::Unsupported(u) => u.message_number,
         }
     }
@@ -745,10 +769,11 @@ impl UnsupportedMessage {
     ///
     /// [`crate::Error::RtcmEncode`] when the body is shorter than the 12-bit
     /// message number, when its first 12 bits differ from
-    /// [`Self::message_number`], or when the number is one this codec decodes
-    /// into a typed variant: the body would then decode as that variant, or be
-    /// refused, rather than come back as this message. Frame such a body with
-    /// [`encode_frame`] directly.
+    /// [`Self::message_number`], or when the body is one this codec decodes
+    /// into a typed variant (every body of a decoded message number; a 4076
+    /// body whose IGS SSR message number is decoded): the body would then
+    /// decode as that variant, or be refused, rather than come back as this
+    /// message. Frame such a body with [`encode_frame`] directly.
     pub fn encode(&self) -> Result<Vec<u8>> {
         let carried = message_number(&self.body).map_err(|_| {
             crate::error::Error::from(RtcmEncodeError::UnsupportedBodyTooShort {
@@ -762,7 +787,7 @@ impl UnsupportedMessage {
             }
             .into());
         }
-        if is_decoded_number(self.message_number) {
+        if is_decoded_body(self.message_number, &self.body) {
             return Err(RtcmEncodeError::UnsupportedDecodedNumber {
                 message_number: self.message_number,
             }
@@ -770,6 +795,19 @@ impl UnsupportedMessage {
         }
         Ok(self.body.clone())
     }
+}
+
+/// Whether the body `body` of message `number` decodes into a typed
+/// [`Message`] variant, or is refused as one: every body of a decoded message
+/// number, and a 4076 body whose IGS SSR message number is decoded (or which
+/// ends before that number).
+fn is_decoded_body(number: u16, body: &[u8]) -> bool {
+    if number == IGS_SSR_MESSAGE_NUMBER {
+        return ssr::igs_ssr_identity(body).map_or(true, |(_, subtype)| {
+            subtype == vtec::IGS_SSR_VTEC_SUBTYPE || ssr::igs_ssr_kind(subtype).is_some()
+        });
+    }
+    is_decoded_number(number)
 }
 
 /// Whether `number` decodes into a typed [`Message`] variant.
@@ -780,6 +818,7 @@ fn is_decoded_number(number: u16) -> bool {
     ) || legacy::is_legacy_observation(number)
         || msm::is_supported_msm(number)
         || ssr::is_supported_ssr(number)
+        || vtec::is_rtcm_vtec(number)
 }
 
 /// Decode every frame of a complete RTCM byte stream under
