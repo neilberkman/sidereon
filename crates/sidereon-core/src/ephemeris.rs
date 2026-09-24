@@ -64,13 +64,13 @@ pub use crate::sp3::{
 };
 pub use crate::sp3::{
     check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport,
-    EpochWindow, OrbitClass, SpeedBound, StencilExtent, WindowContinuityDecision,
-    WindowContinuityVerdict,
+    EpochWindow, InterpolationNodes, OrbitClass, SpeedBound, StencilExtent,
+    WindowContinuityDecision, WindowContinuityVerdict,
 };
 pub use crate::sp3::{
-    CellProvenance, CellSelection, ContributorCoverage, MergeContinuityReport,
-    MergeContinuityViolation, MergeProvenance, PrecedenceTransition, ProvenanceMode,
-    TransitionReason,
+    CellProvenance, CellSelection, ContributorCoverage, MergeContinuityCell,
+    MergeContinuityCellRole, MergeContinuityReport, MergeContinuityViolation, MergeProvenance,
+    PrecedenceTransition, ProvenanceMode, TransitionReason,
 };
 pub use crate::sp3::{
     Sp3ChannelCoverage, Sp3Coverage, Sp3CoverageGap, Sp3CoverageSpan, Sp3EpochGrid,

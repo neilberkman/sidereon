@@ -1845,15 +1845,16 @@ mod write;
 pub use combine::{
     align_clock_reference, clock_reference_offset, merge, AgreementMetric, CellProvenance,
     CellSelection, ClockReferenceOffset, ContributorCoverage, EpochAgreement, MergeCombine,
-    MergeContinuityReport, MergeContinuityViolation, MergeFlag, MergeOptions, MergePrecedenceScope,
-    MergeProvenance, MergeReport, OutlierRejectOptions, PrecedenceTransition, ProvenanceMode,
-    Sp3FrameLabelSet, Sp3FrameReconciliation, Sp3FrameReconciliationMethod,
-    Sp3FrameReconciliationOptions, TransitionReason,
+    MergeContinuityCell, MergeContinuityCellRole, MergeContinuityReport, MergeContinuityViolation,
+    MergeFlag, MergeOptions, MergePrecedenceScope, MergeProvenance, MergeReport,
+    OutlierRejectOptions, PrecedenceTransition, ProvenanceMode, Sp3FrameLabelSet,
+    Sp3FrameReconciliation, Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions,
+    TransitionReason,
 };
 pub use continuity::{
     check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport,
-    EpochWindow, OrbitClass, SpeedBound, StencilExtent, WindowContinuityDecision,
-    WindowContinuityVerdict,
+    EpochWindow, InterpolationNodes, OrbitClass, SpeedBound, StencilExtent,
+    WindowContinuityDecision, WindowContinuityVerdict,
 };
 pub use coverage::{
     Sp3ChannelCoverage, Sp3Coverage, Sp3CoverageGap, Sp3CoverageSpan, Sp3SatelliteCoverage,

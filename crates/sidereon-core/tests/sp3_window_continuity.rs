@@ -17,9 +17,10 @@
 
 use sidereon_core::astro::time::model::{InstantRepr, JulianDateSplit};
 use sidereon_core::ephemeris::{
-    check_continuity, merge, ContinuityDefect, ContinuityOptions, ContinuityReport, EpochWindow,
-    MergeCombine, MergeContinuityReport, MergeContinuityViolation, MergeOptions,
-    MergePrecedenceScope, OrbitClass, Sp3, StencilExtent, WindowContinuityDecision,
+    check_continuity, merge, CellSelection, ContinuityDefect, ContinuityOptions, ContinuityReport,
+    EpochWindow, InterpolationNodes, MergeCombine, MergeContinuityCell, MergeContinuityCellRole,
+    MergeContinuityReport, MergeContinuityViolation, MergeOptions, MergePrecedenceScope,
+    OrbitClass, Sp3, StencilExtent, WindowContinuityDecision,
 };
 
 const DAY_S: f64 = 86_400.0;
@@ -86,8 +87,15 @@ fn real_product_window_query_preserves_global_attestation() {
     assert!(verdict.all_defects.is_empty());
 }
 
+/// A merge verdict reads the nodes each window's interpolations actually
+/// select, so it flips exactly where those nodes reach the seam record.
+///
+/// For a query on a node the interpolator pivots on the node before it (RTKLIB
+/// pephpos) and takes eleven nodes starting five before the pivot, so a query
+/// on the node five spacings before the seam reaches only the node before the
+/// seam, and any query past it reaches the seam.
 #[test]
-fn merged_daily_window_verdict_flips_when_the_stencil_reaches_the_seam() {
+fn merged_daily_window_verdict_flips_where_the_selected_nodes_reach_the_seam() {
     let first = real_daily_product();
     let second = writer_derived_next_day(&first);
     let first_epochs = first.epochs_j2000_seconds();
@@ -101,6 +109,7 @@ fn merged_daily_window_verdict_flips_when_the_stencil_reaches_the_seam() {
             && merged.epochs_j2000_seconds().last().copied().unwrap() > seam,
         "merged product must cover both sides of the seam"
     );
+    assert_eq!(merged.header.epoch_interval_s, 300.0);
 
     let defect = ContinuityDefect::SpeedBound {
         sat,
@@ -120,22 +129,28 @@ fn merged_daily_window_verdict_flips_when_the_stencil_reaches_the_seam() {
             defect,
             from_sources: vec![0],
             to_sources: vec![1],
+            cells: vec![
+                MergeContinuityCell {
+                    epoch_j2000_s: seam,
+                    role: MergeContinuityCellRole::PairEnd,
+                    selection: Some(CellSelection::SingleSource { source: 0 }),
+                },
+                MergeContinuityCell {
+                    epoch_j2000_s: seam + merged.header.epoch_interval_s,
+                    role: MergeContinuityCellRole::PairEnd,
+                    selection: Some(CellSelection::SingleSource { source: 1 }),
+                },
+            ],
+            sources: vec![0, 1],
             crosses_contributors: true,
         }],
+        nodes: InterpolationNodes::for_sp3(&merged),
     });
-
-    let stencil = StencilExtent::for_sp3(&merged).expect("merged-product stencil");
-    assert_eq!(merged.header.epoch_interval_s, 300.0);
-    // Eleven spacings, not five: ten for the one-sided stencil at a run edge
-    // plus one for a query served just outside a run. Every satellite in this
-    // product is sampled at the 300 s header interval.
-    assert_eq!(stencil.before_s(), 3_300.0);
-    assert_eq!(stencil.after_s(), 3_300.0);
 
     let inside_one_day =
         EpochWindow::new(seam - 18.0 * 3_600.0, seam - 6.0 * 3_600.0).expect("inside-day window");
     let inside_verdict = merge_report
-        .continuity_verdict_for_window(inside_one_day, stencil)
+        .continuity_verdict_for_window(inside_one_day)
         .expect("injected continuity report");
     assert_eq!(inside_verdict.decision, WindowContinuityDecision::Accept);
     assert!(inside_verdict.influencing_defects.is_empty());
@@ -144,7 +159,7 @@ fn merged_daily_window_verdict_flips_when_the_stencil_reaches_the_seam() {
 
     let straddles = EpochWindow::new(seam - 600.0, seam + 600.0).expect("straddling window");
     let straddling_verdict = merge_report
-        .continuity_verdict_for_window(straddles, stencil)
+        .continuity_verdict_for_window(straddles)
         .expect("injected continuity report");
     assert_eq!(
         straddling_verdict.decision,
@@ -153,27 +168,32 @@ fn merged_daily_window_verdict_flips_when_the_stencil_reaches_the_seam() {
     assert_eq!(straddling_verdict.influencing_defects.len(), 1);
     assert_eq!(straddling_verdict.influencing_splices.len(), 1);
 
-    let reaches_seam = EpochWindow::new(seam - 7_200.0, seam - stencil.after_s())
-        .expect("half-width boundary window");
+    let misses_seam =
+        EpochWindow::new(seam - 7_200.0, seam - 1_500.0).expect("window ending on a node");
     assert_eq!(
         merge_report
-            .continuity_verdict_for_window(reaches_seam, stencil)
-            .expect("injected continuity report")
-            .decision,
-        WindowContinuityDecision::Refuse,
-        "an inclusive window whose stencil reaches the seam must refuse"
-    );
-
-    let misses_seam = EpochWindow::new(seam - 7_200.0, seam - stencil.after_s() - 0.001)
-        .expect("outside-stencil window");
-    assert_eq!(
-        merge_report
-            .continuity_verdict_for_window(misses_seam, stencil)
+            .continuity_verdict_for_window(misses_seam)
             .expect("injected continuity report")
             .decision,
         WindowContinuityDecision::Accept,
-        "moving one millisecond beyond the derived stencil must accept"
+        "a query on the node five spacings before the seam selects nodes up to the one before it"
     );
+
+    let reaches_seam =
+        EpochWindow::new(seam - 7_200.0, seam - 1_499.999).expect("window just past that node");
+    assert_eq!(
+        merge_report
+            .continuity_verdict_for_window(reaches_seam)
+            .expect("injected continuity report")
+            .decision,
+        WindowContinuityDecision::Refuse,
+        "a query past it selects the seam record"
+    );
+
+    // The stencil extent still bounds the reach for plain continuity reports.
+    let stencil = StencilExtent::for_sp3(&merged).expect("merged-product stencil");
+    assert_eq!(stencil.before_s(), 3_300.0);
+    assert_eq!(stencil.after_s(), 3_300.0);
 }
 
 #[test]

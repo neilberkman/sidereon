@@ -1,10 +1,16 @@
-//! Per-satellite coverage of an SP3 product: where each satellite's positions
-//! and clocks are, where they are not, and the grid its epochs lie on.
+//! What a merge says about each satellite: which contributors a continuity
+//! finding rests on, which windows it refuses, and where each satellite's
+//! positions and clocks are and are not.
 //!
 //! The fixture is synthetic: six GPS satellites on circular trajectories, a
-//! 300-second grid on 2020-06-25.
+//! 300-second grid on 2020-06-25. Source A carries epochs 0-71, source B epochs
+//! 60-83, and B can be displaced bodily along X.
 
-use sidereon_core::ephemeris::{Sp3, Sp3CoverageGap};
+use sidereon_core::ephemeris::{
+    check_continuity, merge, CellSelection, ContinuityDefect, ContinuityOptions, EpochWindow,
+    MergeCombine, MergeContinuityCellRole, MergeOptions, MergePrecedenceScope, OrbitClass, Sp3,
+    Sp3CoverageGap, StencilExtent, WindowContinuityDecision,
+};
 
 const STEP_S: usize = 300;
 
@@ -75,6 +81,174 @@ fn product(indices: &[usize], offset_m: f64, record: impl Fn(u8, usize) -> Recor
     }
     text.push_str("EOF\n");
     Sp3::parse(text.as_bytes()).expect("synthetic SP3")
+}
+
+fn source(first: usize, count: usize, offset_m: f64) -> Sp3 {
+    let indices: Vec<usize> = (first..first + count).collect();
+    product(&indices, offset_m, |_, _| Record::Full)
+}
+
+fn precedence(scope: MergePrecedenceScope) -> MergeOptions {
+    let mut options = MergeOptions::default();
+    options.combine = MergeCombine::Precedence;
+    options.precedence_scope = scope;
+    options.min_agree = 1;
+    options.position_tolerance_m = 5.0;
+    options
+}
+
+/// A 0.8 m displacement of B inside the 5 m agreement tolerance: cell
+/// precedence writes A through epoch 71 and B after it. The hold-out replay
+/// keeps alternate nodes, so near the end of B's run the window for a sample
+/// between two B records slides back over A's records. That violation rests on
+/// A as well as B, and the report says so.
+#[test]
+fn a_hold_out_residual_is_attributed_to_every_node_its_prediction_used() {
+    let sources = [source(0, 72, 0.0), source(60, 24, 0.8)];
+    let mut options = precedence(MergePrecedenceScope::Cell);
+    options.verify_continuity = Some(ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss));
+
+    let (merged, report) = merge(&sources, &options).expect("merge");
+    let start = merged.epochs_j2000_seconds()[0];
+    let continuity = report.continuity.expect("verification requested");
+    assert!(!continuity.attested(), "the 0.8 m handover is reported");
+
+    let inside_b: Vec<_> = continuity
+        .violations
+        .iter()
+        .filter(|violation| violation.from_sources == vec![1] && violation.to_sources == vec![1])
+        .collect();
+    assert!(
+        !inside_b.is_empty(),
+        "a violation bracketed by two B records, got {:?}",
+        continuity.violations
+    );
+    for violation in inside_b {
+        let ContinuityDefect::HoldOutResidual {
+            epoch_j2000_s,
+            node_epochs_j2000_s,
+            ..
+        } = &violation.defect
+        else {
+            panic!("only the hold-out check sees a 0.8 m splice: {violation:?}");
+        };
+        // The retained series is every other node, and the window holds eleven
+        // of them.
+        assert_eq!(node_epochs_j2000_s.len(), 11);
+        assert!(node_epochs_j2000_s
+            .windows(2)
+            .all(|pair| pair[1] - pair[0] == 2.0 * STEP_S as f64));
+        assert!(
+            node_epochs_j2000_s[0] <= start + 71.0 * STEP_S as f64,
+            "the window reaches back over A's records"
+        );
+
+        assert!(violation.crosses_contributors, "{violation:?}");
+        assert_eq!(violation.sources, vec![0, 1]);
+        assert_eq!(violation.cells.len(), 12);
+        let held_out: Vec<_> = violation
+            .cells
+            .iter()
+            .filter(|cell| cell.role == MergeContinuityCellRole::HeldOut)
+            .collect();
+        assert_eq!(held_out.len(), 1);
+        assert_eq!(held_out[0].epoch_j2000_s, *epoch_j2000_s);
+        assert_eq!(
+            held_out[0].selection,
+            Some(CellSelection::SingleSource { source: 1 })
+        );
+        // A's nodes were written from A, with B in their agreement cluster:
+        // the selected source stays distinct from the other members.
+        assert!(violation.cells.iter().any(|cell| {
+            cell.role == MergeContinuityCellRole::InterpolationNode
+                && cell.selection
+                    == Some(CellSelection::Precedence {
+                        source: 0,
+                        members: vec![0, 1],
+                    })
+        }));
+    }
+}
+
+/// With no displacement the same merge has no finding at all.
+#[test]
+fn the_undisplaced_merge_attests() {
+    let sources = [source(0, 72, 0.0), source(60, 24, 0.0)];
+    let mut options = precedence(MergePrecedenceScope::Cell);
+    options.verify_continuity = Some(ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss));
+
+    let (_, report) = merge(&sources, &options).expect("merge");
+    let continuity = report.continuity.expect("verification requested");
+    assert!(continuity.attested(), "{:?}", continuity.report.defects);
+    assert!(continuity.violations.is_empty());
+}
+
+/// The window verdict on the 0.8 m merge refuses exactly the windows whose
+/// interpolations use the handover between A and B or a held-out record at
+/// fault. A window whose nodes are all A's records - every single-epoch window
+/// through epoch 67, and the window 51-66 - interpolates records no finding
+/// implicates and is accepted, although its conservative stencil bound
+/// reaches the handover.
+#[test]
+fn merge_window_verdicts_refuse_only_windows_that_use_the_handover_or_a_record_at_fault() {
+    let sources = [source(0, 72, 0.0), source(60, 24, 0.8)];
+    let mut options = precedence(MergePrecedenceScope::Cell);
+    options.verify_continuity = Some(ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss));
+    let (merged, report) = merge(&sources, &options).expect("merge");
+    let epochs = merged.epochs_j2000_seconds();
+    assert_eq!(epochs.len(), 84);
+
+    for (index, &epoch) in epochs.iter().enumerate() {
+        let window = EpochWindow::new(epoch, epoch).expect("window");
+        let verdict = report
+            .continuity_verdict_for_window(window)
+            .expect("verification requested");
+        let expected = if index >= 68 {
+            WindowContinuityDecision::Refuse
+        } else {
+            WindowContinuityDecision::Accept
+        };
+        assert_eq!(verdict.decision, expected, "single-epoch window at {index}");
+    }
+
+    let early = EpochWindow::new(epochs[51], epochs[66]).expect("window");
+    assert_eq!(
+        report
+            .continuity_verdict_for_window(early)
+            .expect("verification requested")
+            .decision,
+        WindowContinuityDecision::Accept
+    );
+    let reaching = EpochWindow::new(epochs[51], epochs[68]).expect("window");
+    let verdict = report
+        .continuity_verdict_for_window(reaching)
+        .expect("verification requested");
+    assert_eq!(verdict.decision, WindowContinuityDecision::Refuse);
+    assert!(!verdict.influencing_splices.is_empty());
+
+    // The same findings checked on the product alone place each on its
+    // offending pair and bound a window's reach by the stencil extent: the
+    // record pairs at 80-82 enter single-epoch windows from epoch 69, eleven
+    // spacings back.
+    let plain = check_continuity(
+        &merged.precise_ephemeris_samples(),
+        &ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss),
+    );
+    let stencil = StencilExtent::for_sp3(&merged).expect("stencil");
+    assert_eq!(stencil.before_s(), 3_300.0);
+    for (index, &epoch) in epochs.iter().enumerate() {
+        let window = EpochWindow::new(epoch, epoch).expect("window");
+        let expected = if index >= 69 {
+            WindowContinuityDecision::Refuse
+        } else {
+            WindowContinuityDecision::Accept
+        };
+        assert_eq!(
+            plain.verdict_for_window(window, stencil).decision,
+            expected,
+            "plain single-epoch window at {index}"
+        );
+    }
 }
 
 /// Coverage of a single product: a satellite missing from some epochs, one

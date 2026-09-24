@@ -72,15 +72,16 @@
 //! never inferred from the data being validated: a check that can be widened
 //! until it passes is not a check.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::astro::constants::earth::OMEGA_E_DOT_RAD_S;
 use crate::astro::constants::MU_EARTH;
 use crate::constants::KM_TO_M;
 use crate::id::GnssSatelliteId;
 use crate::sp3::interp::{
-    instant_to_j2000_seconds, interpolate_precise_state, precise_node_j2000_seconds,
-    precise_node_j2000_seconds_from_instant, selectable_reach_s, sp3_epoch_j2000_seconds,
+    gather_sp3_precise_series, instant_to_j2000_seconds, interpolate_precise_state,
+    nominal_positive_spacing, precise_node_j2000_seconds, precise_node_j2000_seconds_from_instant,
+    select_position_nodes, selectable_reach_s, sp3_epoch_j2000_seconds, PreciseQuery,
     Sp3InterpolationOptions, NEVILLE_POINTS,
 };
 use crate::sp3::samples::PreciseEphemerisSample;
@@ -238,6 +239,87 @@ impl StencilExtent {
             window.from_j2000_s - self.before_s,
             window.through_j2000_s + self.after_s,
         )
+    }
+}
+
+/// Each satellite's position nodes in a product, for asking exactly which of
+/// them an evaluation window's interpolations select.
+///
+/// [`StencilExtent`] bounds that reach by the widest window the product can
+/// select, which is safe but wide: near a run edge a query reaches ten spacings
+/// back, so the bound reaches that far from every query in every window. This
+/// answers exactly, by applying the position interpolator's own serving and
+/// node-selection rule to each satellite's node series. Merge continuity
+/// verdicts ([`super::combine::MergeContinuityReport::verdict_for_window`])
+/// use it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterpolationNodes {
+    series: BTreeMap<GnssSatelliteId, Vec<f64>>,
+    gap_threshold_factor: f64,
+}
+
+impl InterpolationNodes {
+    /// The position node series of every satellite in `sp3`, read under the
+    /// product's own interpolation options, as its interpolator reads them.
+    pub fn for_sp3(sp3: &Sp3) -> Self {
+        let mut satellites: Vec<GnssSatelliteId> = sp3
+            .interp_raw
+            .iter()
+            .flat_map(|nodes| nodes.keys().copied())
+            .collect();
+        satellites.sort_unstable();
+        satellites.dedup();
+        let series = satellites
+            .into_iter()
+            .map(|sat| (sat, gather_sp3_precise_series(sp3, sat).x))
+            .collect();
+        Self {
+            series,
+            gap_threshold_factor: sp3.interpolation.gap_threshold_factor(),
+        }
+    }
+
+    /// Epochs of the nodes that some position query of `sat` in `window`
+    /// selects, ascending and seconds since J2000; empty when no query in the
+    /// window is served for it.
+    ///
+    /// The selection changes only where a query crosses a node, one nominal
+    /// spacing either side of a node (the serving limits, the coverage-gap
+    /// limits and the anchoring to a run beyond a gap), so the rule is
+    /// evaluated at each such point inside the window, at the window's ends
+    /// and between each consecutive pair of them, which covers every query.
+    pub fn selected_nodes(&self, sat: GnssSatelliteId, window: EpochWindow) -> Vec<f64> {
+        let Some(x) = self.series.get(&sat) else {
+            return Vec::new();
+        };
+        let (from, through) = (window.from_j2000_s(), window.through_j2000_s());
+        let mut points = vec![from, through];
+        if let Some(nominal) = nominal_positive_spacing(x) {
+            for &node in x {
+                for point in [node - nominal, node, node + nominal] {
+                    if point > from && point < through {
+                        points.push(point);
+                    }
+                }
+            }
+        }
+        points.sort_by(f64::total_cmp);
+        points.dedup();
+        let midpoints: Vec<f64> = points
+            .windows(2)
+            .map(|pair| pair[0] + (pair[1] - pair[0]) / 2.0)
+            .collect();
+
+        let mut selected: BTreeSet<usize> = BTreeSet::new();
+        for query in points.into_iter().chain(midpoints) {
+            let query = PreciseQuery::at(query).j2000_s();
+            if let Ok(nodes) =
+                select_position_nodes(x.len(), query, self.gap_threshold_factor, |i| x[i])
+            {
+                selected.extend(nodes);
+            }
+        }
+        selected.into_iter().map(|index| x[index]).collect()
     }
 }
 
@@ -442,7 +524,8 @@ pub enum ContinuityDefect {
     },
     /// A sample disagrees with the arc its neighbours describe. This is the
     /// splice detector: `preceding_j2000_s` and `epoch_j2000_s` bracket the
-    /// offending pair.
+    /// offending pair, and `node_epochs_j2000_s` names every node the
+    /// prediction was formed from.
     HoldOutResidual {
         /// The satellite.
         sat: GnssSatelliteId,
@@ -456,6 +539,17 @@ pub enum ContinuityDefect {
         residual_m: f64,
         /// The tolerance it exceeded, meters.
         tolerance_m: f64,
+        /// Epochs of the retained nodes the prediction used, seconds since
+        /// J2000, ascending.
+        ///
+        /// The replay keeps every other sample, so these sit on twice the
+        /// product spacing, and near a run end the window slides inward to the
+        /// run's last eleven retained nodes, twenty product spacings long. A
+        /// residual can therefore come from a node far from the bracketing
+        /// pair, and these are the records it rests on besides the held-out
+        /// sample itself. They are selected by the same rule the position
+        /// interpolator applies.
+        node_epochs_j2000_s: Vec<f64>,
     },
 }
 
@@ -472,6 +566,12 @@ impl ContinuityDefect {
 
     /// Whether this finding can enter any interpolation stencil used by the
     /// evaluation window.
+    ///
+    /// A hold-out residual is placed on its offending pair, the held-out sample
+    /// and its predecessor. The nodes its prediction used stay in
+    /// `node_epochs_j2000_s` for attribution, but a window whose stencil reaches
+    /// only those nodes interpolates records the check did not find at fault,
+    /// and is not refused for them.
     pub(super) fn influences(&self, window: EpochWindow, stencil: StencilExtent) -> bool {
         let (needed_from, needed_through) = stencil.influence_bounds(window);
         let support = match self {
@@ -863,6 +963,11 @@ fn check_hold_out_residual(
                             preceding_j2000_s: series.x[index - 1],
                             residual_m,
                             tolerance_m,
+                            node_epochs_j2000_s: selected_node_epochs(
+                                &x,
+                                query,
+                                gap_threshold_factor,
+                            ),
                         });
                     }
                 }
@@ -876,6 +981,19 @@ fn check_hold_out_residual(
             }
         }
     }
+}
+
+/// Epochs of the retained nodes the interpolator selected for `query`.
+///
+/// Called only after the interpolation succeeded; the selection is the
+/// interpolator's own [`select_position_nodes`] over the same nodes, query and
+/// policy.
+fn selected_node_epochs(x: &[f64], query: f64, gap_threshold_factor: f64) -> Vec<f64> {
+    // The interpolator selects with the query as `PreciseQuery` restates it.
+    let query = PreciseQuery::at(query).j2000_s();
+    select_position_nodes(x.len(), query, gap_threshold_factor, |i| x[i])
+        .map(|window| x[window].to_vec())
+        .unwrap_or_default()
 }
 
 /// Epoch a defect is anchored at, for ordering a report as a timeline.

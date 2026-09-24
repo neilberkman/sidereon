@@ -6,7 +6,7 @@
 //! fewer than eleven are available. The fixture is synthetic: one GPS satellite
 //! on a circular trajectory, a 300-second grid on 2020-06-25.
 
-use sidereon_core::ephemeris::Sp3;
+use sidereon_core::ephemeris::{EpochWindow, InterpolationNodes, Sp3};
 use sidereon_core::Error;
 
 /// A one-satellite product with `count` epochs from 00:00 at 300 s.
@@ -65,4 +65,35 @@ fn a_run_shorter_than_eleven_nodes_is_refused_by_name() {
     assert!(enough
         .position_at_j2000_seconds(sat, epochs[5] + 150.0)
         .is_ok());
+}
+
+/// A query on node `k` pivots on node `k - 1` and takes nodes `k - 6` through
+/// `k + 4`; just past the node it pivots on node `k` and takes `k - 5` through
+/// `k + 5`. (At a node the interpolating polynomial passes through the node
+/// whichever window is taken, so the pivot shows in the selected nodes and in
+/// the rounding of the result, not in its value.)
+#[test]
+fn a_query_on_a_node_pivots_on_the_node_before_it() {
+    let k = 20;
+    let sp3 = product(40);
+    let sat = sp3.satellites()[0];
+    let epochs = sp3.epochs_j2000_seconds();
+    let nodes = InterpolationNodes::for_sp3(&sp3);
+
+    let on_node = EpochWindow::new(epochs[k], epochs[k]).expect("window");
+    assert_eq!(
+        nodes.selected_nodes(sat, on_node),
+        epochs[k - 6..=k + 4].to_vec()
+    );
+
+    let past = epochs[k] + 1.0e-3;
+    let past_node = EpochWindow::new(past, past).expect("window");
+    assert_eq!(
+        nodes.selected_nodes(sat, past_node),
+        epochs[k - 5..=k + 5].to_vec()
+    );
+
+    // Before the first node the pivot is the first node.
+    let first = EpochWindow::new(epochs[0], epochs[0]).expect("window");
+    assert_eq!(nodes.selected_nodes(sat, first), epochs[..11].to_vec());
 }
