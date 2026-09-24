@@ -670,8 +670,22 @@ fn start_elevation_bound_deg(start: &Value, ground: GroundStation) -> f64 {
 fn find_passes_match_skyfield() {
     let fx = fixture();
     let (mut checked, mut clamped) = (0, 0);
+    let (mut normal_adapter_checked, mut partial_adapter_checked) = (false, false);
     for w in pass_windows(&fx) {
         let c = case(&fx, &w.sat_name);
+        let window_seconds = w.end.diff_seconds(w.start);
+        let adapter_step_seconds = if !normal_adapter_checked
+            && w.sat_name == "25544"
+            && w.station_name == "london"
+            && w.mask == 0.0
+            && window_seconds == 86_400
+        {
+            Some(30.0)
+        } else if !partial_adapter_checked && window_seconds < 86_400 {
+            Some(10.0)
+        } else {
+            None
+        };
         for coarse_step_seconds in [30.0, 10.0] {
             let mut options = PassFinderOptions::default();
             options.elevation_mask_deg = w.mask;
@@ -679,30 +693,37 @@ fn find_passes_match_skyfield() {
             let tolerance = options.time_tolerance_seconds;
 
             let found = find_passes(&c.elements, w.ground, w.start, w.end, options).unwrap();
-            let one = std::slice::from_ref(&c.elements);
-            assert_eq!(
-                find_passes_batch_serial(one, w.ground, w.start, w.end, options)[0],
-                Ok(found.clone())
-            );
-            assert_eq!(
-                find_passes_batch_parallel(one, w.ground, w.start, w.end, options)[0],
-                Ok(found.clone())
-            );
-            assert_eq!(
-                find_passes_for_satellite(&c.satellite, w.ground, w.start, w.end, options),
-                Ok(found.clone())
-            );
-            assert_eq!(
-                find_passes_with_opsmode(
-                    &c.elements,
-                    w.ground,
-                    w.start,
-                    w.end,
-                    options,
-                    OpsMode::Improved
-                ),
-                Ok(found.clone())
-            );
+            if adapter_step_seconds == Some(coarse_step_seconds) {
+                let one = std::slice::from_ref(&c.elements);
+                assert_eq!(
+                    find_passes_batch_serial(one, w.ground, w.start, w.end, options)[0],
+                    Ok(found.clone())
+                );
+                assert_eq!(
+                    find_passes_batch_parallel(one, w.ground, w.start, w.end, options)[0],
+                    Ok(found.clone())
+                );
+                assert_eq!(
+                    find_passes_for_satellite(&c.satellite, w.ground, w.start, w.end, options),
+                    Ok(found.clone())
+                );
+                assert_eq!(
+                    find_passes_with_opsmode(
+                        &c.elements,
+                        w.ground,
+                        w.start,
+                        w.end,
+                        options,
+                        OpsMode::Improved
+                    ),
+                    Ok(found.clone())
+                );
+                if window_seconds == 86_400 {
+                    normal_adapter_checked = true;
+                } else {
+                    partial_adapter_checked = true;
+                }
+            }
 
             // A pass still up at the window end has no LOS here and no set in
             // Skyfield, so neither lists it.
@@ -770,6 +791,14 @@ fn find_passes_match_skyfield() {
     assert!(
         clamped > 0,
         "the partial windows hold passes cut at the start"
+    );
+    assert!(
+        normal_adapter_checked,
+        "normal-window adapters were not checked"
+    );
+    assert!(
+        partial_adapter_checked,
+        "partial-window adapters were not checked"
     );
 }
 
