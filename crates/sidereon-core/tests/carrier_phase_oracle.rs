@@ -117,6 +117,7 @@ fn arc_from_golden(rows: &[Value]) -> Vec<ArcEpoch> {
             f1_hz: maybe_hexf(&row["f1"]),
             f2_hz: maybe_hexf(&row["f2"]),
             gap_time_s: row["epoch"].as_i64().map(|epoch| epoch as f64),
+            gap_epoch: None,
         })
         .collect()
 }

@@ -229,6 +229,43 @@ impl ExactEpoch {
         (jd_whole, fraction)
     }
 
+    /// How the time from `earlier` to `self` compares with `seconds`,
+    /// exactly, with `seconds` read as the shortest decimal that reads back to
+    /// it, as a label's second is read: a 0.3 s threshold is three tenths of a
+    /// second, not the double below them. An infinite `seconds` compares as
+    /// infinity; `None` for NaN.
+    pub(crate) fn compare_interval(self, earlier: Self, seconds: f64) -> Option<Ordering> {
+        if seconds.is_nan() {
+            return None;
+        }
+        let Some(threshold) = ExactSeconds::from_shortest_decimal(seconds) else {
+            return Some(if seconds > 0.0 {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            });
+        };
+        Some(
+            self.exact_seconds()
+                .sub(&earlier.exact_seconds())
+                .sub(&threshold)
+                .sign(),
+        )
+    }
+
+    /// Whether `self` and `other` lie more than `seconds` apart, either way,
+    /// compared exactly: `difference.abs() > seconds` on the exact difference
+    /// and the decimal `seconds` states, so `false` for NaN and for positive
+    /// infinity.
+    pub(crate) fn interval_exceeds(self, other: Self, seconds: f64) -> bool {
+        let (later, earlier) = if self >= other {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        later.compare_interval(earlier, seconds) == Some(Ordering::Greater)
+    }
+
     /// The epoch as exact seconds since J2000.
     pub(crate) fn exact_seconds(self) -> ExactSeconds {
         let on_grid = ExactSeconds::from_decimal(self.total_attoseconds(), 18);
@@ -1088,5 +1125,25 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn exact_epochs_compare_intervals_with_a_threshold_exactly() {
+        let at = |second: f64| ExactEpoch::from_civil(2026, 9, 23, 6, 30, second).unwrap();
+        // Exactly half a second apart: not more than 0.5 s either way.
+        assert!(!at(0.6).interval_exceeds(at(0.1), 0.5));
+        assert!(!at(0.1).interval_exceeds(at(0.6), 0.5));
+        assert!(at(0.6).interval_exceeds(at(0.1), 0.499_999_999_999_999_9));
+        // A threshold is read as the decimal it states: a gap of three tenths
+        // does not exceed a 0.3 s threshold, though the double 0.3 is below
+        // three tenths, and it exceeds 0.29.
+        assert!(!at(0.5).interval_exceeds(at(0.2), 0.3));
+        assert!(at(0.5).interval_exceeds(at(0.2), 0.29));
+        assert_eq!(
+            at(0.5).compare_interval(at(0.2), 0.3),
+            Some(Ordering::Equal)
+        );
+        assert!(!at(0.5).interval_exceeds(at(0.2), f64::INFINITY));
+        assert!(!at(0.5).interval_exceeds(at(0.2), f64::NAN));
     }
 }

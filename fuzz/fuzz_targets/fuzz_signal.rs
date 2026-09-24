@@ -94,6 +94,7 @@ fn arc(input: &Input) -> Vec<ArcEpoch> {
             f1_hz: Some(input.params[4]),
             f2_hz: Some(input.params[5]),
             gap_time_s: Some(input.params[6] + idx as f64),
+            gap_epoch: None,
         })
         .collect()
 }

@@ -7,6 +7,7 @@ use crate::astro::angles::normalize_geodetic_lon_rad;
 use crate::astro::frames::transforms::itrs_to_geodetic_compute;
 use crate::astro::math::vec3::{dot3, norm3, sub3};
 use crate::astro::time::model::{Instant, JulianDateSplit, TimeScale};
+use crate::astro::time::ExactEpoch;
 
 use crate::ambiguity::{self, AmbiguityId, NarrowLaneParams};
 use crate::carrier_phase::{
@@ -156,6 +157,11 @@ pub struct DualCycleSlipEpoch {
     pub epoch_sort_key: String,
     /// Comparable epoch coordinate in seconds, when the caller can supply one.
     pub gap_time_s: Option<f64>,
+    /// The epoch held exactly, when the caller can supply one; when both
+    /// epochs of a gap test carry one, the test compares their exact
+    /// difference and `gap_time_s` is not used for it (see
+    /// [`crate::carrier_phase::ArcEpoch::gap_epoch`]).
+    pub gap_epoch: Option<ExactEpoch>,
     /// Base observations grouped by satellite by the cycle-slip detector before
     /// base-side events are emitted.
     pub base_observations: Vec<DualCycleSlipObservation>,
@@ -2359,6 +2365,7 @@ struct DualCycleSlipSample<'a> {
     epoch_index: usize,
     epoch_sort_key: &'a str,
     gap_time_s: Option<f64>,
+    gap_epoch: Option<ExactEpoch>,
     observation: &'a DualCycleSlipObservation,
 }
 
@@ -2383,6 +2390,7 @@ fn dual_cycle_slip_events_for_receiver(
                     epoch_index,
                     epoch_sort_key: &epoch.epoch_sort_key,
                     gap_time_s: epoch.gap_time_s,
+                    gap_epoch: epoch.gap_epoch,
                     observation,
                 });
         }
@@ -2392,7 +2400,7 @@ fn dual_cycle_slip_events_for_receiver(
         samples.sort_by(|a, b| a.epoch_sort_key.cmp(b.epoch_sort_key));
         let arc = samples
             .iter()
-            .map(|sample| dual_arc_epoch(sample.observation, sample.gap_time_s))
+            .map(|sample| dual_arc_epoch(sample.observation, sample.gap_time_s, sample.gap_epoch))
             .collect::<Vec<_>>();
         let results = detect_cycle_slips(&arc, options).map_err(cycle_slip_detector_error)?;
 
@@ -2422,7 +2430,11 @@ fn cycle_slip_detector_error(error: CarrierPhaseError) -> CycleSlipPrepError {
     invalid_cycle_slip_input(field, reason)
 }
 
-fn dual_arc_epoch(observation: &DualCycleSlipObservation, gap_time_s: Option<f64>) -> ArcEpoch {
+fn dual_arc_epoch(
+    observation: &DualCycleSlipObservation,
+    gap_time_s: Option<f64>,
+    gap_epoch: Option<ExactEpoch>,
+) -> ArcEpoch {
     ArcEpoch {
         phi1_cycles: Some(observation.phi1_cycles),
         phi2_cycles: Some(observation.phi2_cycles),
@@ -2433,6 +2445,7 @@ fn dual_arc_epoch(observation: &DualCycleSlipObservation, gap_time_s: Option<f64
         f1_hz: Some(observation.f1_hz),
         f2_hz: Some(observation.f2_hz),
         gap_time_s,
+        gap_epoch,
     }
 }
 
@@ -2479,6 +2492,7 @@ fn drop_dual_cycle_slip_satellites(
         .map(|epoch| DualCycleSlipEpoch {
             epoch_sort_key: epoch.epoch_sort_key.clone(),
             gap_time_s: epoch.gap_time_s,
+            gap_epoch: epoch.gap_epoch,
             base_observations: epoch
                 .base_observations
                 .iter()
@@ -3137,6 +3151,7 @@ mod tests {
         DualCycleSlipEpoch {
             epoch_sort_key: epoch_sort_key.to_string(),
             gap_time_s: Some(gap_time_s),
+            gap_epoch: None,
             base_observations,
             rover_observations,
         }
