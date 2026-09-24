@@ -380,10 +380,10 @@ pub(crate) fn seconds_from_split_exact(
 /// Elapsed seconds between two split Julian dates `later - earlier`.
 ///
 /// The whole-day and fractional differences are summed first and scaled once
-/// (`(dwhole + dfrac) * 86400`), the policy the reduced-orbit fit duration and
-/// the bias validity windows share. The difference of two labels is exact only
-/// through [`super::exact::ExactEpoch::seconds_since`]: each fraction here is
-/// already rounded. (The J2000-seconds conversion
+/// (`(dwhole + dfrac) * 86400`), which rounds more than once. No interval in
+/// the crate is formed this way: the difference of two labels is exact only
+/// through [`super::exact::ExactEpoch::seconds_since`], since each fraction
+/// here is already rounded. (The J2000-seconds conversion
 /// [`j2000_seconds_from_split`] scales each part separately; that ordering is
 /// kept distinct because the two are not bit-identical in the last place.)
 #[must_use]
@@ -394,6 +394,53 @@ pub fn seconds_between_splits(
     earlier_fraction: f64,
 ) -> f64 {
     ((later_whole - earlier_whole) + (later_fraction - earlier_fraction)) * SECONDS_PER_DAY
+}
+
+/// The exact seconds since J2000 an instant held as a split Julian date
+/// stands for.
+///
+/// A split that is [`split_julian_date`]'s reading of a civil label with at
+/// most ten fractional second digits (a `*.5` civil-midnight boundary and a
+/// fraction within the day) stands for that label: the nearest label on the
+/// 1e-10 s grid is the only candidate, since the reading lies within 5e-12 s
+/// of its label and two labels 1e-10 s apart read differently, and it is
+/// accepted when its reading reproduces the split bit for bit. Any other split
+/// stands for the exact time its two parts hold. `None` for a non-finite
+/// part.
+pub(crate) fn exact_j2000_seconds_of_split(jd_whole: f64, fraction: f64) -> Option<ExactSeconds> {
+    const UNITS_PER_SECOND: i64 = 10_000_000_000;
+    const UNITS_PER_DAY: i64 = SECONDS_PER_DAY_I64 * UNITS_PER_SECOND;
+    let midnight = jd_whole + 0.5;
+    if midnight.fract() == 0.0 && midnight.abs() < 1.0e9 && (0.0..1.0).contains(&fraction) {
+        // Within 0.1 unit of the exact product, far inside the half unit a
+        // label's reading can be from its tick.
+        let units = (fraction * UNITS_PER_DAY as f64).round() as i64;
+        if (0..UNITS_PER_DAY).contains(&units)
+            && nearest_ratio(i128::from(units), UNITS_PER_DAY as u128).to_bits()
+                == fraction.to_bits()
+        {
+            let days = midnight as i64 - J2000_JULIAN_DAY_NUMBER;
+            let from_j2000 = i128::from(days * SECONDS_PER_DAY_I64 - J2000_NOON_OFFSET_S)
+                * i128::from(UNITS_PER_SECOND)
+                + i128::from(units);
+            return Some(ExactSeconds::from_decimal(from_j2000, 10));
+        }
+    }
+    exact_seconds_of_split_parts(jd_whole, fraction)
+}
+
+/// The exact seconds since J2000 the two parts of a split Julian date hold,
+/// `(jd_whole - 2451545) * 86400 + fraction * 86400`; `None` for a non-finite
+/// part.
+pub(crate) fn exact_seconds_of_split_parts(jd_whole: f64, fraction: f64) -> Option<ExactSeconds> {
+    // J2000 is JD 2451545.0.
+    let days = ExactSeconds::from_f64(jd_whole)?.sub(&ExactSeconds::from_integer(i128::from(
+        J2000_JULIAN_DAY_NUMBER,
+    )));
+    Some(
+        days.mul_integer(SECONDS_PER_DAY_I64)
+            .add(&ExactSeconds::from_f64(fraction)?.mul_integer(SECONDS_PER_DAY_I64)),
+    )
 }
 
 /// Split Julian date `(jd_whole, fraction)` from continuous integer seconds

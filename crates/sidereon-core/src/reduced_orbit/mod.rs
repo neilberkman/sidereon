@@ -106,6 +106,7 @@ use crate::astro::math::least_squares::{
 use crate::astro::math::vec3::{cross3_ref as cross, norm3_ref as norm};
 use crate::astro::sgp4::{JulianDate, Satellite};
 use crate::astro::time::civil::{civil_from_julian_day_number, split_julian_date};
+use crate::astro::time::exact::ExactSeconds;
 use crate::astro::time::model::{Instant, JulianDateSplit, TimeScale};
 use crate::astro::time::scales::{julian_day_number, TimeScales};
 use crate::astro::time::{Validated, ValidityMode};
@@ -121,8 +122,8 @@ use crate::validate;
 use crate::GnssSatelliteId;
 
 mod time;
-use time::dt_seconds;
 pub use time::CalendarEpoch;
+use time::{dt_seconds, exact_tt_seconds};
 
 /// Minimum number of samples the fitter accepts. The circular model solves five
 /// free elements and the eccentric model eight; each ECEF sample contributes
@@ -948,20 +949,14 @@ fn fit_circular(
 
     // Order by absolute time so the seed, t0, and consecutive-pair plane fit do
     // not depend on the caller's sample order.
-    let mut ordered: Vec<(TimeScales, &EcefSample)> = samples
-        .iter()
-        .map(|s| (s.epoch.time_scales(scale), s))
-        .collect();
-    ordered.sort_by(|a, b| {
-        (a.0.jd_whole + a.0.tt_fraction).total_cmp(&(b.0.jd_whole + b.0.tt_fraction))
-    });
+    let ordered = order_by_tt(samples, scale);
 
     let t0_cal = ordered[0].1.epoch;
-    let t0_ts = ordered[0].0;
+    let t0_tt = ordered[0].2.clone();
 
     // Convert every ECEF sample to GCRS km at its own epoch.
     let mut gcrs: Vec<GcrsSample> = Vec::with_capacity(samples.len());
-    for (ts, s) in &ordered {
+    for (ts, s, tt) in &ordered {
         let admitted = gate.admit(*ts).map_err(frame_input)?;
         let (x, y, z) = itrs_to_gcrs_compute(
             s.x_m / M_PER_KM,
@@ -970,7 +965,7 @@ fn fit_circular(
             &admitted,
         )
         .map_err(frame_input)?;
-        let dt = dt_seconds(&t0_ts, ts);
+        let dt = dt_seconds(&t0_tt, tt);
         gcrs.push(GcrsSample {
             dt,
             r_km: [x, y, z],
@@ -1099,19 +1094,13 @@ fn to_gcrs_samples(
     }
     validate_fit_epochs(samples, scale)?;
 
-    let mut ordered: Vec<(TimeScales, &EcefSample)> = samples
-        .iter()
-        .map(|s| (s.epoch.time_scales(scale), s))
-        .collect();
-    ordered.sort_by(|a, b| {
-        (a.0.jd_whole + a.0.tt_fraction).total_cmp(&(b.0.jd_whole + b.0.tt_fraction))
-    });
+    let ordered = order_by_tt(samples, scale);
 
     let t0_cal = ordered[0].1.epoch;
-    let t0_ts = ordered[0].0;
+    let t0_tt = ordered[0].2.clone();
 
     let mut gcrs: Vec<GcrsSample> = Vec::with_capacity(samples.len());
-    for (ts, s) in &ordered {
+    for (ts, s, tt) in &ordered {
         let admitted = gate.admit(*ts).map_err(frame_input)?;
         let (x, y, z) = itrs_to_gcrs_compute(
             s.x_m / M_PER_KM,
@@ -1120,7 +1109,7 @@ fn to_gcrs_samples(
             &admitted,
         )
         .map_err(frame_input)?;
-        let dt = dt_seconds(&t0_ts, ts);
+        let dt = dt_seconds(&t0_tt, tt);
         gcrs.push(GcrsSample {
             dt,
             r_km: [x, y, z],
@@ -1337,7 +1326,10 @@ fn position_gated(
     validate_calendar_epoch(epoch, scale, "epoch")?;
     let t0_ts = elements.epoch.time_scales(scale);
     let ts = epoch.time_scales(scale);
-    let dt = dt_seconds(&t0_ts, &ts);
+    let dt = dt_seconds(
+        &exact_tt_seconds(elements.epoch, &t0_ts, scale),
+        &exact_tt_seconds(epoch, &ts, scale),
+    );
     validate_finite(dt, "dt_s")?;
     let r_gcrs_km = eval_position_km(elements, dt);
     let r = match frame {
@@ -1399,7 +1391,10 @@ fn position_velocity_gated(
     validate_calendar_epoch(epoch, scale, "epoch")?;
     let t0_ts = elements.epoch.time_scales(scale);
     let ts = epoch.time_scales(scale);
-    let dt = dt_seconds(&t0_ts, &ts);
+    let dt = dt_seconds(
+        &exact_tt_seconds(elements.epoch, &t0_ts, scale),
+        &exact_tt_seconds(epoch, &ts, scale),
+    );
     validate_finite(dt, "dt_s")?;
     let r_gcrs_km = eval_position_km(elements, dt);
     let v_gcrs_km_s = eval_velocity_km_s(elements, dt);
@@ -1947,6 +1942,25 @@ fn sample_sgp4_epoch(
         y_km * M_PER_KM,
         z_km * M_PER_KM,
     )))
+}
+
+/// Samples with their time scales and exact TT seconds
+/// ([`exact_tt_seconds`]), ordered by time, exactly; samples at one time keep
+/// the caller's order.
+fn order_by_tt(
+    samples: &[EcefSample],
+    scale: TimeScale,
+) -> Vec<(TimeScales, &EcefSample, ExactSeconds)> {
+    let mut ordered: Vec<(TimeScales, &EcefSample, ExactSeconds)> = samples
+        .iter()
+        .map(|s| {
+            let ts = s.epoch.time_scales(scale);
+            let tt = exact_tt_seconds(s.epoch, &ts, scale);
+            (ts, s, tt)
+        })
+        .collect();
+    ordered.sort_by(|a, b| a.2.sub(&b.2).sign());
+    ordered
 }
 
 fn instant_from_calendar(

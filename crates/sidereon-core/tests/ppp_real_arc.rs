@@ -1,7 +1,7 @@
 #![cfg(sidereon_repo_tests)]
 
 use sidereon_core::astro::time::model::JulianDateSplit;
-use sidereon_core::astro::time::split_julian_date;
+use sidereon_core::astro::time::{split_julian_date, ExactEpoch};
 use sidereon_core::atmosphere::troposphere::Met;
 use sidereon_core::combinations::{ionosphere_free, ionosphere_free_phase_cycles};
 use sidereon_core::constants::{C_M_S, F_L1_HZ, F_L2_HZ};
@@ -197,6 +197,14 @@ fn gps_dual_epochs(obs: &RinexObs, count: usize) -> Vec<DualFrequencyEpoch> {
             );
             DualFrequencyEpoch {
                 gap_time_s: Some(j2000_seconds(time)),
+                gap_epoch: ExactEpoch::from_civil(
+                    time.year,
+                    i32::from(time.month),
+                    i32::from(time.day),
+                    i32::from(time.hour),
+                    i32::from(time.minute),
+                    time.second,
+                ),
                 observations,
             }
         })

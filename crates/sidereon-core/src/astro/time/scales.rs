@@ -418,14 +418,7 @@ impl TimeScales {
         let jd1 = jd_day as f64 - 0.5;
         let utc_seconds_of_day =
             hour as f64 * SECONDS_PER_HOUR + minute as f64 * SECONDS_PER_MINUTE + second;
-        let leap_lookup_second = if second >= 60.0 { 59.0 } else { second };
-        let jd2 = (leap_lookup_second
-            + minute as f64 * SECONDS_PER_MINUTE
-            + hour as f64 * SECONDS_PER_HOUR)
-            / SECONDS_PER_DAY;
-        let jd_utc_total = jd1 + jd2;
-
-        let leap_seconds = find_leap_seconds(jd_utc_total);
+        let leap_seconds = utc_label_tai_minus_utc(jd1, hour, minute, second);
         let utc_seconds_at_midnight = jd1 * SECONDS_PER_DAY;
 
         let utc_whole_seconds = utc_seconds_of_day.trunc();
@@ -684,6 +677,52 @@ impl TimeScales {
     pub fn tcb_fraction(&self) -> f64 {
         tcb_fraction_from_tdb_split(self.jd_whole, self.tdb_fraction)
     }
+}
+
+/// TAI - UTC, in seconds, that [`TimeScales::from_utc`] applies to a UTC
+/// label on the day whose midnight is `jd1`: the leap-second table read at the
+/// label, with a `:60` leap-second label read at `:59` so it takes the count
+/// before the leap.
+fn utc_label_tai_minus_utc(jd1: f64, hour: i32, minute: i32, second: f64) -> f64 {
+    let leap_lookup_second = if second >= 60.0 { 59.0 } else { second };
+    let jd2 =
+        (leap_lookup_second + minute as f64 * SECONDS_PER_MINUTE + hour as f64 * SECONDS_PER_HOUR)
+            / SECONDS_PER_DAY;
+    find_leap_seconds(jd1 + jd2)
+}
+
+/// TAI - UTC, in seconds, that [`TimeScales::from_scale`] applies to a
+/// calendar label in `scale`: `Some` for UTC and GLONASST, whose labels are
+/// UTC labels (GLONASST three hours ahead), read as [`TimeScales::from_utc`]
+/// reads the UTC label; `None` for every other scale.
+pub(crate) fn label_tai_minus_utc(
+    scale: TimeScale,
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: f64,
+) -> Option<f64> {
+    if !matches!(scale, TimeScale::Utc | TimeScale::Glonasst) {
+        return None;
+    }
+    let utc = scale_calendar_to_utc(
+        scale,
+        ScaleCal {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        },
+        LEAP_SECONDS,
+    );
+    let jd1 = julian_day_number(utc.year, utc.month, utc.day) as f64 - 0.5;
+    Some(utc_label_tai_minus_utc(
+        jd1, utc.hour, utc.minute, utc.second,
+    ))
 }
 
 /// A mutable civil calendar instant used by the scale-to-UTC inverse.

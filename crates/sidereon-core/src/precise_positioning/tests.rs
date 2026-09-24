@@ -801,6 +801,7 @@ fn ppp_dual_epochs(slip: bool) -> Vec<DualFrequencyEpoch> {
     (0..3)
         .map(|epoch_idx| DualFrequencyEpoch {
             gap_time_s: Some(epoch_idx as f64 * 30.0),
+            gap_epoch: None,
             observations: (0..4)
                 .map(|sat_idx| {
                     let slip_cycles = if slip && sat_idx == 0 && epoch_idx >= 1 {
@@ -993,6 +994,7 @@ fn float_cycle_slip_split_tags_are_core_owned() {
         .into_iter()
         .map(|epoch| FloatCycleSlipEpoch {
             gap_time_s: epoch.gap_time_s,
+            gap_epoch: epoch.gap_epoch,
             observations: epoch
                 .observations
                 .into_iter()
@@ -1051,6 +1053,7 @@ fn float_cycle_slip_split_tags_are_core_owned() {
             .into_iter()
             .map(|epoch| FloatCycleSlipEpoch {
                 gap_time_s: epoch.gap_time_s,
+                gap_epoch: epoch.gap_epoch,
                 observations: epoch
                     .observations
                     .into_iter()

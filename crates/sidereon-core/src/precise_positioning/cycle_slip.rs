@@ -31,6 +31,7 @@
 //! let epochs = (0..4)
 //!     .map(|epoch| DualFrequencyEpoch {
 //!         gap_time_s: Some(epoch as f64 * 30.0),
+//!         gap_epoch: None,
 //!         observations: vec![observation(epoch, if epoch >= 2 { 9.0 } else { 5.0 })],
 //!     })
 //!     .collect::<Vec<_>>();
@@ -48,8 +49,10 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
+use crate::astro::time::ExactEpoch;
 use crate::carrier_phase::{
     CarrierPhaseError, SlipReason, DEFAULT_GF_THRESHOLD_M, DEFAULT_MIN_ARC_GAP_S,
     DEFAULT_MW_THRESHOLD_CYCLES,
@@ -264,6 +267,10 @@ impl Default for RunningMeanVariance {
 pub struct SatelliteCycleSlipState {
     /// Previous usable epoch time, in seconds, when supplied by the caller.
     pub previous_epoch_time_s: Option<f64>,
+    /// Previous usable epoch held exactly, when supplied by the caller. A gap
+    /// test between two epochs that both carry one uses their exact
+    /// difference.
+    pub previous_epoch: Option<ExactEpoch>,
     /// Previous Melbourne-Wubbena combination, in wide-lane cycles.
     pub previous_melbourne_wubbena_cycles: Option<f64>,
     /// Running Melbourne-Wubbena mean and variance, in wide-lane cycles.
@@ -277,6 +284,7 @@ impl SatelliteCycleSlipState {
     pub const fn new() -> Self {
         Self {
             previous_epoch_time_s: None,
+            previous_epoch: None,
             previous_melbourne_wubbena_cycles: None,
             melbourne_wubbena: RunningMeanVariance::new(),
             previous_geometry_free_m: None,
@@ -356,6 +364,8 @@ pub struct CycleSlipFlagObservation {
 pub struct CycleSlipFlagEpoch {
     /// Comparable epoch coordinate copied from the input epoch.
     pub gap_time_s: Option<f64>,
+    /// Exact epoch copied from the input epoch.
+    pub gap_epoch: Option<ExactEpoch>,
     /// Per-satellite slip flags for observations in this epoch.
     pub observations: Vec<CycleSlipFlagObservation>,
 }
@@ -399,23 +409,29 @@ pub fn geometry_free_m(observation: &DualFrequencyObservation) -> Result<f64, Cy
 }
 
 /// Update one satellite state with a geometry-free sample and classify it.
+///
+/// `epoch_time_s` and `epoch` are the epoch's seconds coordinate and its exact
+/// epoch, either of which may be absent; ordering and the data-gap reset use
+/// the exact difference when this epoch and the previous one both carry an
+/// exact epoch, and the seconds otherwise.
 pub fn update_geometry_free(
     state: &mut SatelliteCycleSlipState,
     observation: &DualFrequencyObservation,
     epoch_time_s: Option<f64>,
+    epoch: Option<ExactEpoch>,
     config: CycleSlipConfig,
 ) -> Result<GeometryFreeUpdate, CycleSlipError> {
     config.validate()?;
     validate_epoch_time(epoch_time_s)?;
-    if epoch_time_goes_back(state.previous_epoch_time_s, epoch_time_s) {
+    let time = EpochTime {
+        seconds: epoch_time_s,
+        exact: epoch,
+    };
+    if time.goes_back_from(state.previous_time()) {
         return Err(CycleSlipError::EpochsNotOrdered);
     }
     let gf_m = geometry_free_m(observation)?;
-    let reset = gap_reset(
-        state.previous_epoch_time_s,
-        epoch_time_s,
-        config.maximum_gap_s,
-    );
+    let reset = time.gap_exceeds(state.previous_time(), config.maximum_gap_s);
     if reset {
         state.reset_arc();
     }
@@ -424,7 +440,7 @@ pub fn update_geometry_free(
             .previous_geometry_free_m
             .is_some_and(|prev| (gf_m - prev).abs() > config.geometry_free_threshold_m);
 
-    remember_epoch_time(state, epoch_time_s);
+    remember_epoch_time(state, time);
     state.previous_geometry_free_m = Some(gf_m);
 
     Ok(GeometryFreeUpdate {
@@ -456,13 +472,17 @@ pub fn detect_cycle_slips(
                 classify_dual_frequency_observation(
                     ambiguity_state,
                     observation,
-                    epoch.gap_time_s,
+                    EpochTime {
+                        seconds: epoch.gap_time_s,
+                        exact: epoch.gap_epoch,
+                    },
                     config,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
         out.push(CycleSlipFlagEpoch {
             gap_time_s: epoch.gap_time_s,
+            gap_epoch: epoch.gap_epoch,
             observations,
         });
     }
@@ -513,16 +533,18 @@ fn validate_epoch_time(epoch_time_s: Option<f64>) -> Result<(), CycleSlipError> 
 }
 
 fn validate_epoch_order(epochs: &[super::prep::DualFrequencyEpoch]) -> Result<(), CycleSlipError> {
-    let mut previous_time_s = None;
+    let mut previous = EpochTime::default();
     for epoch in epochs {
         validate_epoch_time(epoch.gap_time_s)?;
-        if let (Some(previous), Some(current)) = (previous_time_s, epoch.gap_time_s) {
-            if current < previous {
-                return Err(CycleSlipError::EpochsNotOrdered);
-            }
+        let time = EpochTime {
+            seconds: epoch.gap_time_s,
+            exact: epoch.gap_epoch,
+        };
+        if time.goes_back_from(previous) {
+            return Err(CycleSlipError::EpochsNotOrdered);
         }
-        if epoch.gap_time_s.is_some() {
-            previous_time_s = epoch.gap_time_s;
+        if time.is_some() {
+            previous = time;
         }
     }
     Ok(())
@@ -596,23 +618,62 @@ fn melbourne_wubbena_slip(
     step_slip || sigma_slip
 }
 
-fn epoch_time_goes_back(prev_time_s: Option<f64>, time_s: Option<f64>) -> bool {
-    matches!(
-        (prev_time_s, time_s),
-        (Some(previous), Some(current)) if current < previous
-    )
+/// An epoch's time for ordering and gap tests: its seconds coordinate and
+/// its exact epoch, either of which may be absent.
+#[derive(Debug, Clone, Copy, Default)]
+struct EpochTime {
+    seconds: Option<f64>,
+    exact: Option<ExactEpoch>,
 }
 
-fn gap_reset(prev_time_s: Option<f64>, time_s: Option<f64>, maximum_gap_s: f64) -> bool {
-    match (prev_time_s, time_s) {
-        (Some(prev), Some(current)) => current - prev > maximum_gap_s,
-        _ => false,
+impl EpochTime {
+    fn is_some(self) -> bool {
+        self.seconds.is_some() || self.exact.is_some()
+    }
+
+    /// Whether this epoch is before `previous`: exactly when both carry an
+    /// exact epoch, otherwise by the seconds when both carry them.
+    fn goes_back_from(self, previous: Self) -> bool {
+        match (self.exact, previous.exact) {
+            (Some(current), Some(previous)) => current < previous,
+            _ => matches!(
+                (previous.seconds, self.seconds),
+                (Some(previous), Some(current)) if current < previous
+            ),
+        }
+    }
+
+    /// Whether more than `maximum_gap_s` elapsed since `previous`: exactly
+    /// when both carry an exact epoch, otherwise by the seconds when both
+    /// carry them.
+    fn gap_exceeds(self, previous: Self, maximum_gap_s: f64) -> bool {
+        match (self.exact, previous.exact) {
+            (Some(current), Some(previous)) => {
+                current.compare_interval(previous, maximum_gap_s) == Some(Ordering::Greater)
+            }
+            _ => match (previous.seconds, self.seconds) {
+                (Some(prev), Some(current)) => current - prev > maximum_gap_s,
+                _ => false,
+            },
+        }
     }
 }
 
-fn remember_epoch_time(state: &mut SatelliteCycleSlipState, epoch_time_s: Option<f64>) {
-    if let Some(time_s) = epoch_time_s {
-        state.previous_epoch_time_s = Some(time_s);
+impl SatelliteCycleSlipState {
+    fn previous_time(&self) -> EpochTime {
+        EpochTime {
+            seconds: self.previous_epoch_time_s,
+            exact: self.previous_epoch,
+        }
+    }
+}
+
+/// Remember an epoch that carries a time as the previous one, both its
+/// seconds and its exact epoch.
+fn remember_epoch_time(state: &mut SatelliteCycleSlipState, time: EpochTime) {
+    if time.is_some() {
+        state.previous_epoch_time_s = time.seconds;
+        state.previous_epoch = time.exact;
     }
 }
 
@@ -627,14 +688,10 @@ fn lli_bit0_set(lli: Option<i64>) -> bool {
 fn classify_dual_frequency_observation(
     state: &mut SatelliteCycleSlipState,
     observation: &DualFrequencyObservation,
-    epoch_time_s: Option<f64>,
+    time: EpochTime,
     config: CycleSlipConfig,
 ) -> Result<CycleSlipFlagObservation, CycleSlipError> {
-    let reset = gap_reset(
-        state.previous_epoch_time_s,
-        epoch_time_s,
-        config.maximum_gap_s,
-    );
+    let reset = time.gap_exceeds(state.previous_time(), config.maximum_gap_s);
     if reset {
         state.reset_arc();
     }
@@ -659,7 +716,7 @@ fn classify_dual_frequency_observation(
         }
     }
 
-    remember_epoch_time(state, epoch_time_s);
+    remember_epoch_time(state, time);
     state.previous_geometry_free_m = Some(gf_m);
     state.previous_melbourne_wubbena_cycles = Some(mw_cycles);
     state.melbourne_wubbena.push(mw_cycles);
@@ -674,6 +731,14 @@ fn classify_dual_frequency_observation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An epoch time with seconds and no exact epoch.
+    fn seconds_only(seconds: f64) -> EpochTime {
+        EpochTime {
+            seconds: Some(seconds),
+            exact: None,
+        }
+    }
     use crate::constants::{C_M_S, F_L1_HZ, F_L2_HZ};
 
     #[test]
@@ -687,6 +752,7 @@ mod tests {
         };
         let satellite = SatelliteCycleSlipState {
             previous_epoch_time_s: Some(30.0),
+            previous_epoch: None,
             previous_melbourne_wubbena_cycles: Some(12.0),
             melbourne_wubbena: RunningMeanVariance {
                 sample_count: 4,
@@ -707,6 +773,7 @@ mod tests {
                 .get(&("G01".to_string(), "G01:L1L2".to_string())),
             Some(&SatelliteCycleSlipState {
                 previous_epoch_time_s: Some(30.0),
+                previous_epoch: None,
                 previous_melbourne_wubbena_cycles: Some(12.0),
                 melbourne_wubbena: RunningMeanVariance {
                     sample_count: 4,
@@ -834,6 +901,7 @@ mod tests {
                     &mut state,
                     &gf_observation("G01", epoch, epoch as f64 * 0.01),
                     Some(epoch as f64 * 30.0),
+                    None,
                     config,
                 )
                 .expect("GF update")
@@ -863,6 +931,7 @@ mod tests {
                     &mut state,
                     &gf_observation("G01", epoch, gf_m),
                     Some(epoch as f64 * 30.0),
+                    None,
                     config,
                 )
                 .expect("GF update")
@@ -896,6 +965,7 @@ mod tests {
                     &mut state,
                     &gf_observation("G01", idx, *gf_m),
                     Some(*time_s),
+                    None,
                     config,
                 )
                 .expect("GF update")
@@ -928,6 +998,7 @@ mod tests {
             &mut state,
             &gf_observation("G01", 0, 0.01),
             Some(30.0),
+            None,
             config,
         )
         .expect("initial GF update");
@@ -936,6 +1007,7 @@ mod tests {
             &mut state,
             &gf_observation("G01", 1, 0.50),
             Some(0.0),
+            None,
             config,
         )
         .expect_err("backward timestamp");
@@ -958,6 +1030,7 @@ mod tests {
             &mut state,
             &gf_observation("G01", 0, 0.01),
             Some(30.0),
+            None,
             config,
         )
         .expect("initial GF update");
@@ -965,6 +1038,7 @@ mod tests {
             &mut state,
             &gf_observation("G01", 1, 0.50),
             Some(200.0),
+            None,
             config,
         )
         .expect("forward gap");
@@ -976,10 +1050,99 @@ mod tests {
     }
 
     #[test]
+    fn cycle_slip_gap_between_exact_epochs_is_compared_exactly() {
+        // Labels a tenth of a second apart are not more than 0.1 s apart;
+        // their J2000 doubles near 8e8 s are 0.10000002 s apart.
+        let at = |second: f64| {
+            (
+                crate::astro::time::j2000_seconds(2026, 9, 23, 6, 30, second),
+                ExactEpoch::from_civil(2026, 9, 23, 6, 30, second),
+            )
+        };
+        let config = CycleSlipConfig {
+            geometry_free_threshold_m: 0.05,
+            maximum_gap_s: 0.1,
+            ..CycleSlipConfig::default()
+        };
+        let (t0, e0) = at(0.1);
+        let (t1, e1) = at(0.2);
+        assert!(t1 - t0 > 0.1);
+
+        let mut state = SatelliteCycleSlipState::new();
+        update_geometry_free(
+            &mut state,
+            &gf_observation("G01", 0, 0.01),
+            Some(t0),
+            e0,
+            config,
+        )
+        .expect("initial GF update");
+        let update = update_geometry_free(
+            &mut state,
+            &gf_observation("G01", 1, 0.50),
+            Some(t1),
+            e1,
+            config,
+        )
+        .expect("second GF update");
+        assert!(!update.reset, "exactly 0.1 s is not a gap over 0.1 s");
+        assert!(update.slip, "the geometry-free jump is a slip");
+        assert_eq!(state.previous_epoch, e1);
+
+        // Without the exact epochs the seconds decide, and they reset.
+        let mut state = SatelliteCycleSlipState::new();
+        update_geometry_free(
+            &mut state,
+            &gf_observation("G01", 0, 0.01),
+            Some(t0),
+            None,
+            config,
+        )
+        .expect("initial GF update");
+        let update = update_geometry_free(
+            &mut state,
+            &gf_observation("G01", 1, 0.50),
+            Some(t1),
+            None,
+            config,
+        )
+        .expect("second GF update");
+        assert!(update.reset);
+
+        // The same through the epoch driver and its order check.
+        let epochs = [0.1, 0.2]
+            .iter()
+            .enumerate()
+            .map(|(index, &second)| super::super::prep::DualFrequencyEpoch {
+                gap_time_s: Some(at(second).0),
+                gap_epoch: at(second).1,
+                observations: vec![combined_observation(
+                    "G01",
+                    index,
+                    5.0,
+                    if index == 0 { 0.01 } else { 0.50 },
+                )],
+            })
+            .collect::<Vec<_>>();
+        let flags = detect_cycle_slips(&epochs, config).expect("ordered epochs");
+        assert_eq!(flags[1].gap_epoch, at(0.2).1);
+        assert!(flags[1].observations[0]
+            .reasons
+            .contains(&SlipReason::GeometryFree));
+        let mut backwards = epochs.clone();
+        backwards.swap(0, 1);
+        assert_eq!(
+            detect_cycle_slips(&backwards, config),
+            Err(CycleSlipError::EpochsNotOrdered)
+        );
+    }
+
+    #[test]
     fn cycle_slip_driver_flags_exact_satellite_and_epoch() {
         let epochs = (0..5)
             .map(|epoch| super::super::prep::DualFrequencyEpoch {
                 gap_time_s: Some(epoch as f64 * 30.0),
+                gap_epoch: None,
                 observations: vec![
                     combined_observation("G01", epoch, 5.0, epoch as f64 * 0.01),
                     combined_observation(
@@ -1012,6 +1175,7 @@ mod tests {
         let epochs = (0..5)
             .map(|epoch| super::super::prep::DualFrequencyEpoch {
                 gap_time_s: Some(epoch as f64 * 30.0),
+                gap_epoch: None,
                 observations: vec![
                     combined_observation_with_ambiguity(
                         "G01",
@@ -1079,6 +1243,7 @@ mod tests {
                 ));
                 super::super::prep::DualFrequencyEpoch {
                     gap_time_s: Some(epoch as f64 * 30.0),
+                    gap_epoch: None,
                     observations,
                 }
             })
@@ -1101,6 +1266,7 @@ mod tests {
     fn cycle_slip_driver_preserves_input_observation_order() {
         let epochs = vec![super::super::prep::DualFrequencyEpoch {
             gap_time_s: Some(0.0),
+            gap_epoch: None,
             observations: vec![
                 combined_observation("G03", 0, 5.0, 0.0),
                 combined_observation("G01", 0, 5.0, 0.0),
@@ -1138,7 +1304,7 @@ mod tests {
             let flag = classify_dual_frequency_observation(
                 &mut state,
                 &combined_observation("G01", epoch, 5.0, 0.0),
-                Some(epoch as f64 * 30.0),
+                seconds_only(epoch as f64 * 30.0),
                 config,
             )
             .expect("pre-slip epoch");
@@ -1147,9 +1313,13 @@ mod tests {
 
         let mut lli_epoch = combined_observation("G01", 50, 20.0, 0.50);
         lli_epoch.lli1 = Some(1);
-        let lli_flag =
-            classify_dual_frequency_observation(&mut state, &lli_epoch, Some(50.0 * 30.0), config)
-                .expect("LLI epoch");
+        let lli_flag = classify_dual_frequency_observation(
+            &mut state,
+            &lli_epoch,
+            seconds_only(50.0 * 30.0),
+            config,
+        )
+        .expect("LLI epoch");
 
         assert_eq!(lli_flag.reasons, vec![SlipReason::Lli]);
         assert_eq!(state.previous_epoch_time_s, Some(50.0 * 30.0));
@@ -1165,7 +1335,7 @@ mod tests {
         let clean_flag = classify_dual_frequency_observation(
             &mut state,
             &combined_observation("G01", 51, 20.05, 0.51),
-            Some(51.0 * 30.0),
+            seconds_only(51.0 * 30.0),
             config,
         )
         .expect("post-LLI epoch");
@@ -1183,7 +1353,7 @@ mod tests {
             let flag = classify_dual_frequency_observation(
                 &mut state,
                 &combined_observation("G01", epoch, 5.0 + epoch as f64 * 0.1, 0.0),
-                Some(epoch as f64 * 30.0),
+                seconds_only(epoch as f64 * 30.0),
                 config,
             )
             .expect("clean epoch");
@@ -1211,10 +1381,12 @@ mod tests {
         let epochs = vec![
             super::super::prep::DualFrequencyEpoch {
                 gap_time_s: Some(0.0),
+                gap_epoch: None,
                 observations: vec![combined_observation("G01", 0, 5.0, 0.00)],
             },
             super::super::prep::DualFrequencyEpoch {
                 gap_time_s: Some(30.0),
+                gap_epoch: None,
                 observations: vec![
                     combined_observation("G01", 1, 5.0, 0.01),
                     combined_observation("G02", 1, 20.0, 0.50),
@@ -1222,6 +1394,7 @@ mod tests {
             },
             super::super::prep::DualFrequencyEpoch {
                 gap_time_s: Some(600.0),
+                gap_epoch: None,
                 observations: vec![combined_observation("G01", 2, 20.0, 0.80)],
             },
         ];
@@ -1251,28 +1424,34 @@ mod tests {
         let intermittent = vec![
             super::super::prep::DualFrequencyEpoch {
                 gap_time_s: Some(0.0),
+                gap_epoch: None,
                 observations: vec![combined_observation("G01", 0, 5.0, 0.00)],
             },
             super::super::prep::DualFrequencyEpoch {
                 gap_time_s: None,
+                gap_epoch: None,
                 observations: vec![combined_observation("G01", 1, 5.2, 0.01)],
             },
             super::super::prep::DualFrequencyEpoch {
                 gap_time_s: Some(200.0),
+                gap_epoch: None,
                 observations: vec![combined_observation("G01", 2, 11.0, 0.50)],
             },
         ];
         let timed = vec![
             super::super::prep::DualFrequencyEpoch {
                 gap_time_s: Some(0.0),
+                gap_epoch: None,
                 observations: vec![combined_observation("G01", 0, 5.0, 0.00)],
             },
             super::super::prep::DualFrequencyEpoch {
                 gap_time_s: Some(30.0),
+                gap_epoch: None,
                 observations: vec![combined_observation("G01", 1, 5.2, 0.01)],
             },
             super::super::prep::DualFrequencyEpoch {
                 gap_time_s: Some(60.0),
+                gap_epoch: None,
                 observations: vec![combined_observation("G01", 2, 11.0, 0.50)],
             },
         ];
@@ -1297,10 +1476,12 @@ mod tests {
         let epochs = vec![
             super::super::prep::DualFrequencyEpoch {
                 gap_time_s: Some(30.0),
+                gap_epoch: None,
                 observations: Vec::new(),
             },
             super::super::prep::DualFrequencyEpoch {
                 gap_time_s: Some(0.0),
+                gap_epoch: None,
                 observations: Vec::new(),
             },
         ];
@@ -1418,6 +1599,7 @@ mod tests {
         (0..3)
             .map(|epoch| super::super::prep::DualFrequencyEpoch {
                 gap_time_s: Some(epoch as f64 * 30.0),
+                gap_epoch: None,
                 observations: vec![combined_observation("G01", epoch, 5.0, 0.0)],
             })
             .collect()
