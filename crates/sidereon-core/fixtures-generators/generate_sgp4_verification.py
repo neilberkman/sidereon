@@ -66,6 +66,7 @@ import json
 import math
 import platform
 import sys
+import sysconfig
 from pathlib import Path
 
 import copy
@@ -89,6 +90,10 @@ RUST_LIBM = vallado_order_module(
 )
 
 EXPECTED_SGP4_VERSION = "2.22"
+EXPECTED_SGP4_WHEEL = "sgp4-2.22-cp311-cp311-macosx_11_0_arm64"
+EXPECTED_SGP4_EXTENSION_SHA256 = "f69b3fd82f2dd6fd99f708466bef3a3798d508840f90c959cf9c7851b9ad5f3b"
+EXPECTED_PLATFORM = ("Darwin", "arm64")
+EXPECTED_PYTHON = ("CPython", "cpython-311", "cpython-311-darwin")
 FAR_TIMES = [1.0e7 + 1.0, -(1.0e7 + 1.0), 2.0e7, 1.0e8, -1.0e8]
 FAR_TIMES_WITHOUT_RESONANCE = [
     1.0e9,
@@ -309,7 +314,33 @@ def main() -> None:
     if sgp4.__version__ != EXPECTED_SGP4_VERSION or not accelerated:
         raise SystemExit(f"needs the compiled extension of sgp4 {EXPECTED_SGP4_VERSION}")
     extension = Path(sgp4.__file__).resolve().parent.glob("vallado_cpp*")
-    extension_sha256 = hashlib.sha256(next(extension).read_bytes()).hexdigest()
+    extension_path = next(extension, None)
+    if extension_path is None:
+        raise SystemExit("sgp4 reports an accelerated build but its Vallado extension is missing")
+    extension_sha256 = hashlib.sha256(extension_path.read_bytes()).hexdigest()
+    actual_platform = (platform.system(), platform.machine())
+    actual_python = (
+        platform.python_implementation(),
+        sys.implementation.cache_tag,
+        sysconfig.get_config_var("SOABI"),
+    )
+    if actual_platform != EXPECTED_PLATFORM or actual_python != EXPECTED_PYTHON:
+        raise SystemExit(
+            "reference build platform/ABI mismatch; refusing to regenerate the pinned oracle.\n"
+            f"  expected platform: {EXPECTED_PLATFORM}; got {actual_platform}\n"
+            f"  expected Python: {EXPECTED_PYTHON}; got {actual_python}\n"
+            f"  observed OS/Python releases: {platform.release()} / {platform.python_version()}\n"
+            "To accept a different provenance, deliberately review and update the EXPECTED_* "
+            "pins and the fixture metadata together."
+        )
+    if extension_sha256 != EXPECTED_SGP4_EXTENSION_SHA256:
+        raise SystemExit(
+            "python-sgp4 extension hash mismatch; refusing to regenerate the pinned oracle.\n"
+            f"  expected {EXPECTED_SGP4_EXTENSION_SHA256}; got {extension_sha256} "
+            f"({extension_path.name})\n"
+            "To accept a different provenance, deliberately review and update the EXPECTED_* "
+            "pins and the fixture metadata together."
+        )
 
     satellites = []
     for line1, line2, grid in verification_sets():
@@ -372,7 +403,7 @@ def main() -> None:
     fixture = {
         "reference": "python-sgp4 compiled extension (Vallado C++ 2020-07-13), Satrec.twoline2rv, sgp4_tsince",
         "sgp4_version": sgp4.__version__,
-        "sgp4_wheel": "sgp4-2.22-cp311-cp311-macosx_11_0_arm64",
+        "sgp4_wheel": EXPECTED_SGP4_WHEEL,
         "sgp4_extension_sha256": extension_sha256,
         "platform": f"{platform.system()} {platform.release()} {platform.machine()}, "
         f"{platform.python_implementation()} {platform.python_version()}",
