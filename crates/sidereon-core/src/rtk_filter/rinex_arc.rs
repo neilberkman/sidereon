@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::astro::time::{j2000_seconds_from_split, split_julian_date};
+use crate::astro::time::{split_julian_date, ExactEpoch};
 use crate::constants::C_M_S;
 use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::observables::{is_observable_state_gap, ObservableEphemerisSource, ObservablesError};
@@ -391,6 +391,7 @@ pub fn build_rinex_rtk_arc(
             continue;
         };
         let epoch_j2000_s = j2000_seconds(base_time);
+        let exact_epoch = exact_epoch(base_time);
         let mut base_values = single_frequency_observations(
             base_obs,
             base_timeline.at(base_index),
@@ -520,6 +521,7 @@ pub fn build_rinex_rtk_arc(
             rover_satellite_positions_m,
             velocity_mps: None,
             prediction_time_s: options.include_prediction_time.then_some(epoch_j2000_s),
+            prediction_epoch: exact_epoch.filter(|_| options.include_prediction_time),
         });
     }
 
@@ -594,6 +596,7 @@ pub fn build_dual_frequency_rinex_rtk_arc(
             continue;
         };
         let epoch_j2000_s = j2000_seconds(base_time);
+        let exact_epoch = exact_epoch(base_time);
         let base_values = dual_frequency_observations(
             base_obs,
             base_timeline.at(base_index),
@@ -724,12 +727,14 @@ pub fn build_dual_frequency_rinex_rtk_arc(
             jd_fraction,
             epoch_sort_key: Some(epoch_sort_key(base_time)),
             gap_time_s: Some(epoch_j2000_s),
+            gap_epoch: exact_epoch,
             observations,
             satellite_positions_m,
             base_satellite_positions_m,
             rover_satellite_positions_m,
             velocity_mps: None,
             prediction_time_s: options.include_prediction_time.then_some(epoch_j2000_s),
+            prediction_epoch: exact_epoch.filter(|_| options.include_prediction_time),
         });
     }
 
@@ -1407,9 +1412,30 @@ fn civil_to_julian_split(epoch: ObsEpochTime) -> (f64, f64) {
     )
 }
 
+/// Seconds since J2000 of an observation epoch: the whole clock seconds plus
+/// the second's fractional part in one `f64` addition, the time RTKLIB's
+/// `epoch2time` holds for the epoch, rounded once.
 fn j2000_seconds(epoch: ObsEpochTime) -> f64 {
-    let (jd_whole, fraction) = civil_to_julian_split(epoch);
-    j2000_seconds_from_split(jd_whole, fraction)
+    crate::astro::time::j2000_seconds(
+        epoch.year,
+        i32::from(epoch.month),
+        i32::from(epoch.day),
+        i32::from(epoch.hour),
+        i32::from(epoch.minute),
+        epoch.second,
+    )
+}
+
+/// The observation epoch held exactly, for intervals between epochs.
+fn exact_epoch(epoch: ObsEpochTime) -> Option<ExactEpoch> {
+    ExactEpoch::from_civil(
+        epoch.year,
+        i32::from(epoch.month),
+        i32::from(epoch.day),
+        i32::from(epoch.hour),
+        i32::from(epoch.minute),
+        epoch.second,
+    )
 }
 
 #[cfg(test)]

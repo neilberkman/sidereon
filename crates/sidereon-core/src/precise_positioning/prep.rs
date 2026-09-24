@@ -713,6 +713,7 @@ fn dual_arc_epoch(observation: &DualFrequencyObservation, gap_time_s: Option<f64
         f1_hz: Some(observation.f1_hz),
         f2_hz: Some(observation.f2_hz),
         gap_time_s,
+        gap_epoch: None,
     }
 }
 

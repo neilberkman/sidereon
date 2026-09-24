@@ -5,6 +5,7 @@
 //! Melbourne-Wubbena combinations, loss-of-lock/GF/MW/data-gap cycle-slip
 //! classification, and single/dual-frequency Hatch smoothing.
 
+use crate::astro::time::ExactEpoch;
 use crate::combinations;
 use crate::constants::C_M_S;
 use crate::tolerances::FREQUENCY_DENOMINATOR_EPS_HZ;
@@ -86,6 +87,11 @@ pub struct ArcEpoch {
     pub f2_hz: Option<f64>,
     /// Comparable epoch coordinate in seconds, when the caller can supply one.
     pub gap_time_s: Option<f64>,
+    /// The epoch held exactly, when the caller can supply one. When this epoch
+    /// and the one it is compared with both carry one, the data-gap test
+    /// compares their exact difference with the threshold, read as the decimal
+    /// it states, and `gap_time_s` is not used for it.
+    pub gap_epoch: Option<ExactEpoch>,
 }
 
 /// Options controlling cycle-slip classification.
@@ -326,6 +332,7 @@ pub fn detect_cycle_slips(
                 gf_m: result.gf_m,
                 mw_m: result.mw_m,
                 gap_time_s: ep.gap_time_s,
+                gap_epoch: ep.gap_epoch,
             });
         }
         results.push(result);
@@ -387,6 +394,7 @@ fn detect_band1_hatch_slips(
                 gf_m: None,
                 mw_m: None,
                 gap_time_s: ep.gap_time_s,
+                gap_epoch: ep.gap_epoch,
             });
         }
         if let Some(dual) = dual {
@@ -395,6 +403,7 @@ fn detect_band1_hatch_slips(
                     gf_m: dual.gf_m,
                     mw_m: dual.mw_m,
                     gap_time_s: ep.gap_time_s,
+                    gap_epoch: ep.gap_epoch,
                 });
             }
         }
@@ -454,6 +463,7 @@ struct PreviousEpoch {
     gf_m: Option<f64>,
     mw_m: Option<f64>,
     gap_time_s: Option<f64>,
+    gap_epoch: Option<ExactEpoch>,
 }
 
 fn classify_epoch(
@@ -478,7 +488,7 @@ fn classify_epoch(
     if loss_of_lock(ep) {
         reasons.push(SlipReason::Lli);
     }
-    if gap_reason(ep.gap_time_s, prev, options.min_arc_gap_s) {
+    if gap_reason(ep, prev, options.min_arc_gap_s) {
         reasons.push(SlipReason::DataGap);
     }
     if gf_reason(gf, prev, options.gf_threshold_m) {
@@ -516,7 +526,7 @@ fn classify_single_frequency_hatch_epoch(
     if lli_set(ep.lli1) {
         reasons.push(SlipReason::Lli);
     }
-    if gap_reason(ep.gap_time_s, prev, options.min_arc_gap_s) {
+    if gap_reason(ep, prev, options.min_arc_gap_s) {
         reasons.push(SlipReason::DataGap);
     }
 
@@ -583,8 +593,14 @@ fn mw_reason(
     ((mw - prev_mw).abs() / lambda_wl.abs()) > threshold_cycles
 }
 
-fn gap_reason(time_s: Option<f64>, prev: Option<PreviousEpoch>, min_arc_gap_s: f64) -> bool {
-    match (time_s, prev.and_then(|p| p.gap_time_s)) {
+fn gap_reason(ep: &ArcEpoch, prev: Option<PreviousEpoch>, min_arc_gap_s: f64) -> bool {
+    let Some(prev) = prev else {
+        return false;
+    };
+    if let (Some(epoch), Some(prev_epoch)) = (ep.gap_epoch, prev.gap_epoch) {
+        return epoch.interval_exceeds(prev_epoch, min_arc_gap_s);
+    }
+    match (ep.gap_time_s, prev.gap_time_s) {
         (Some(time_s), Some(prev_time_s)) => (time_s - prev_time_s).abs() > min_arc_gap_s,
         _ => false,
     }
@@ -915,6 +931,7 @@ mod tests {
                 f1_hz: f1.map(f),
                 f2_hz: f2.map(f),
                 gap_time_s: Some(epoch as f64),
+                gap_epoch: None,
             })
             .collect()
     }
@@ -1123,6 +1140,30 @@ mod tests {
     }
 
     #[test]
+    fn data_gap_between_exact_epochs_is_compared_exactly() {
+        use crate::astro::time::{j2000_seconds, ExactEpoch};
+        let mut arc = oracle_arc();
+        arc.truncate(2);
+        let options = CycleSlipOptions {
+            min_arc_gap_s: 0.1,
+            ..CycleSlipOptions::default()
+        };
+        for (epoch, second) in arc.iter_mut().zip([0.1, 0.2]) {
+            epoch.gap_time_s = Some(j2000_seconds(2026, 9, 23, 6, 30, second));
+            epoch.gap_epoch = ExactEpoch::from_civil(2026, 9, 23, 6, 30, second);
+        }
+        // Labels a tenth apart are not more than a tenth apart; their J2000
+        // doubles, 2^-23 s apart in the last place, are.
+        assert!(arc[1].gap_time_s.unwrap() - arc[0].gap_time_s.unwrap() > 0.1);
+        let actual = detect_cycle_slips(&arc, options).expect("valid cycle-slip arc");
+        assert!(!actual[1].reasons.contains(&SlipReason::DataGap));
+        // Without the exact epoch on both sides, the seconds decide.
+        arc[0].gap_epoch = None;
+        let actual = detect_cycle_slips(&arc, options).expect("valid cycle-slip arc");
+        assert!(actual[1].reasons.contains(&SlipReason::DataGap));
+    }
+
+    #[test]
     fn unusable_dual_frequency_row_does_not_hide_later_data_gap() {
         let mut arc = oracle_arc();
         arc.truncate(3);
@@ -1179,6 +1220,7 @@ mod tests {
                 f1_hz: Some(C_M_S),
                 f2_hz: None,
                 gap_time_s: Some(gap_time_s),
+                gap_epoch: None,
             })
             .collect();
 
@@ -1219,6 +1261,7 @@ mod tests {
                     f1_hz: Some(f1),
                     f2_hz,
                     gap_time_s: Some(gap_time_s),
+                    gap_epoch: None,
                 },
             )
             .collect();

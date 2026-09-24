@@ -3,13 +3,11 @@
 use serde_json::Value;
 use sidereon_core::antex::{Antenna, Antex, PcvGrid};
 use sidereon_core::astro::time::model::{Instant, JulianDateSplit, TimeScale};
-use sidereon_core::astro::time::split_julian_date;
+use sidereon_core::astro::time::{split_julian_date, ExactEpoch};
 use sidereon_core::carrier_phase::CycleSlipOptions;
 use sidereon_core::constants::{C_M_S, F_L1_HZ, F_L2_HZ};
 use sidereon_core::ephemeris::Sp3;
-use sidereon_core::observables::{
-    j2000_seconds_from_split, pseudorange_transmit_epoch_j2000_s, ObservableEphemerisSource,
-};
+use sidereon_core::observables::{pseudorange_transmit_epoch_j2000_s, ObservableEphemerisSource};
 use sidereon_core::rinex::observations::{
     band_frequency_hz, carrier_phase_rows, observation_values, ObsEpoch, ObsEpochTime,
     ObservationFilter, ObservationValueRow, RinexObs,
@@ -141,9 +139,28 @@ fn instant(epoch: ObsEpochTime) -> Instant {
     Instant::from_julian_date(TimeScale::Gpst, civil_to_julian_split(epoch))
 }
 
+/// J2000 seconds of an observation epoch as the RINEX arc builders form them,
+/// the time RTKLIB `epoch2time` holds.
 fn j2000_seconds(epoch: ObsEpochTime) -> f64 {
-    let split = civil_to_julian_split(epoch);
-    j2000_seconds_from_split(split.jd_whole, split.fraction).expect("valid split Julian date")
+    sidereon_core::astro::time::j2000_seconds(
+        epoch.year,
+        i32::from(epoch.month),
+        i32::from(epoch.day),
+        i32::from(epoch.hour),
+        i32::from(epoch.minute),
+        epoch.second,
+    )
+}
+
+fn exact_epoch(epoch: ObsEpochTime) -> Option<ExactEpoch> {
+    ExactEpoch::from_civil(
+        epoch.year,
+        i32::from(epoch.month),
+        i32::from(epoch.day),
+        i32::from(epoch.hour),
+        i32::from(epoch.minute),
+        epoch.second,
+    )
 }
 
 fn epoch_key(epoch: ObsEpochTime) -> (i32, u8, u8, u8, u8, u64) {
@@ -619,6 +636,7 @@ fn raw_epochs_to_rtk_arc_epochs(epochs: &[RawEpoch]) -> Vec<RtkArcEpoch> {
             rover_satellite_positions_m: epoch.rover_satellite_positions_m.clone(),
             velocity_mps: None,
             prediction_time_s: None,
+            prediction_epoch: None,
         })
         .collect()
 }
@@ -677,12 +695,14 @@ fn raw_dual_epochs_to_rtk_dual_frequency_arc_epochs(
                     epoch.epoch.second
                 )),
                 gap_time_s: Some(j2000_seconds(epoch.epoch)),
+                gap_epoch: exact_epoch(epoch.epoch),
                 observations,
                 satellite_positions_m: epoch.satellite_positions_m.clone(),
                 base_satellite_positions_m: epoch.base_satellite_positions_m.clone(),
                 rover_satellite_positions_m: epoch.rover_satellite_positions_m.clone(),
                 velocity_mps: None,
                 prediction_time_s: None,
+                prediction_epoch: None,
             }
         })
         .collect()
@@ -842,6 +862,7 @@ fn dual_cycle_slip_epochs(epochs: &[RawDualEpoch]) -> Vec<DualCycleSlipEpoch> {
                 epoch.epoch.second
             ),
             gap_time_s: Some(j2000_seconds(epoch.epoch)),
+            gap_epoch: None,
             base_observations: dual_cycle_slip_observations(&epoch.base_observations),
             rover_observations: dual_cycle_slip_observations(&epoch.rover_observations),
         })

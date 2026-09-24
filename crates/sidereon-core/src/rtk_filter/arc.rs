@@ -27,13 +27,16 @@
 //!   sighting with the single-difference phase-minus-code value, so the
 //!   information matrix is column-identical to the reference.
 //! - **Prediction deltas** between consecutive epochs come from the optional
-//!   per-epoch `prediction_time_s`: the first epoch is zero, a missing time is
+//!   per-epoch `prediction_epoch` (exact) or `prediction_time_s`: the exact
+//!   difference, rounded once, when both epochs carry an exact epoch, otherwise
+//!   the difference of the seconds; the first epoch is zero, a missing time is
 //!   zero under [`DynamicsModel::ConstantPosition`] (lenient) and an error under
 //!   [`DynamicsModel::VelocityPropagated`] (strict).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::astro::math::linear::invert_matrix_first_tie;
+use crate::astro::time::ExactEpoch;
 use crate::carrier_phase::CycleSlipOptions;
 use crate::geometry_quality::{classify, GeometryQuality, GeometryQualityThresholds};
 use crate::id::constellation_letter;
@@ -106,6 +109,11 @@ pub struct RtkArcEpoch {
     pub velocity_mps: Option<[f64; 3]>,
     /// Optional epoch time coordinate (seconds) for prediction-delta computation.
     pub prediction_time_s: Option<f64>,
+    /// Optional epoch held exactly. When this epoch and the timed epoch before
+    /// it both carry one, the prediction delta is their exact difference,
+    /// rounded once ([`ExactEpoch::seconds_since`]), and `prediction_time_s`
+    /// is not used for it.
+    pub prediction_epoch: Option<ExactEpoch>,
 }
 
 /// Optional preprocessing chained ahead of the core arc solve.
@@ -371,6 +379,9 @@ pub struct RtkDualFrequencyArcEpoch {
     pub epoch_sort_key: Option<String>,
     /// Seconds since J2000 used by dual cycle-slip preprocessing to detect gaps.
     pub gap_time_s: Option<f64>,
+    /// The epoch held exactly, used by dual cycle-slip preprocessing to detect
+    /// gaps exactly when consecutive epochs both carry one.
+    pub gap_epoch: Option<ExactEpoch>,
     /// Base/rover pairs retained after complete signal, ephemeris, and position
     /// checks.
     pub observations: Vec<RtkDualFrequencySatelliteObservation>,
@@ -389,6 +400,9 @@ pub struct RtkDualFrequencyArcEpoch {
     /// Optional seconds-since-J2000 coordinate preserved for prediction deltas
     /// in a later sequential solve.
     pub prediction_time_s: Option<f64>,
+    /// Optional exact epoch preserved for prediction deltas in a later
+    /// sequential solve (see [`RtkArcEpoch::prediction_epoch`]).
+    pub prediction_epoch: Option<ExactEpoch>,
 }
 
 /// Settings forwarded by `prepare_dual_frequency_arc` to dual-frequency
@@ -1608,6 +1622,7 @@ fn to_dual_cycle_slip_epoch(
             .clone()
             .unwrap_or_else(|| format!("{epoch_index:020}")),
         gap_time_s: epoch.gap_time_s,
+        gap_epoch: epoch.gap_epoch,
         base_observations: epoch
             .observations
             .iter()
@@ -1679,6 +1694,7 @@ fn apply_prepared_dual_observations(
                 jd_fraction: orig.jd_fraction,
                 epoch_sort_key: orig.epoch_sort_key.clone(),
                 gap_time_s: orig.gap_time_s,
+                gap_epoch: orig.gap_epoch,
                 observations,
                 satellite_positions_m: retain_map_keys(&orig.satellite_positions_m, &keep),
                 base_satellite_positions_m: retain_map_keys(
@@ -1691,6 +1707,7 @@ fn apply_prepared_dual_observations(
                 ),
                 velocity_mps: orig.velocity_mps,
                 prediction_time_s: orig.prediction_time_s,
+                prediction_epoch: orig.prediction_epoch,
             }
         })
         .collect()
@@ -2056,6 +2073,7 @@ fn ionosphere_free_arc_epoch(
         rover_satellite_positions_m: retain_map_keys(&original.rover_satellite_positions_m, &keep),
         velocity_mps: original.velocity_mps,
         prediction_time_s: original.prediction_time_s,
+        prediction_epoch: original.prediction_epoch,
     }
 }
 
@@ -2138,6 +2156,7 @@ fn apply_prepared_observations(
             rover_satellite_positions_m: orig.rover_satellite_positions_m.clone(),
             velocity_mps: orig.velocity_mps,
             prediction_time_s: orig.prediction_time_s,
+            prediction_epoch: orig.prediction_epoch,
         })
         .collect()
 }
@@ -2166,6 +2185,7 @@ fn thin_epoch_to_kept(epoch: &RtkArcEpoch, kept: &[String]) -> RtkArcEpoch {
         rover_satellite_positions_m: filter_positions(&epoch.rover_satellite_positions_m),
         velocity_mps: epoch.velocity_mps,
         prediction_time_s: epoch.prediction_time_s,
+        prediction_epoch: epoch.prediction_epoch,
     }
 }
 
@@ -2218,14 +2238,17 @@ fn solve_prepared_arc(
     }
 
     let strict_time = config.update_opts.dynamics_model == DynamicsModel::VelocityPropagated;
-    let mut previous_time: Option<f64> = None;
+    let mut previous_time = PredictionTime::default();
     let mut solutions = Vec::with_capacity(epochs.len());
 
     for (epoch_index, normalized_epoch) in normalized.iter().enumerate() {
         let dt_s = prediction_dt_s(
             epoch_index,
             normalized_epoch.velocity_mps,
-            epochs[epoch_index].prediction_time_s,
+            PredictionTime {
+                seconds: epochs[epoch_index].prediction_time_s,
+                exact: epochs[epoch_index].prediction_epoch,
+            },
             &mut previous_time,
             strict_time,
         )?;
@@ -2419,19 +2442,42 @@ fn sd_phase_minus_code(base: &RtkArcObservation, rover: &RtkArcObservation) -> f
     (rover.phase_m - base.phase_m) - (rover.code_m - base.code_m)
 }
 
+/// An epoch's time for prediction deltas: its seconds coordinate and its
+/// exact epoch, either of which may be absent.
+#[derive(Debug, Clone, Copy, Default)]
+struct PredictionTime {
+    seconds: Option<f64>,
+    exact: Option<ExactEpoch>,
+}
+
+impl PredictionTime {
+    fn is_some(self) -> bool {
+        self.seconds.is_some() || self.exact.is_some()
+    }
+
+    /// Seconds from `earlier` to `self`: exact when both carry an exact
+    /// epoch, otherwise the difference of the seconds coordinates.
+    fn seconds_since(self, earlier: Self) -> Option<f64> {
+        match (self.exact, earlier.exact) {
+            (Some(current), Some(previous)) => Some(current.seconds_since(previous)),
+            _ => Some(self.seconds? - earlier.seconds?),
+        }
+    }
+}
+
 /// Compute the prediction delta (seconds) before this epoch's update.
 fn prediction_dt_s(
     epoch_index: usize,
     velocity_mps: Option<[f64; 3]>,
-    prediction_time_s: Option<f64>,
-    previous_time: &mut Option<f64>,
+    current_time: PredictionTime,
+    previous_time: &mut PredictionTime,
     strict_time: bool,
 ) -> Result<f64, RtkArcError> {
     // The dt is only consumed by the velocity-propagated branch; carry the time
     // forward regardless so a later epoch can still difference against it.
-    let dt = match (epoch_index, *previous_time, prediction_time_s) {
-        (0, _, _) => 0.0,
-        (_, Some(previous), Some(current)) => current - previous,
+    let dt = match (epoch_index, current_time.seconds_since(*previous_time)) {
+        (0, _) => 0.0,
+        (_, Some(dt)) => dt,
         _ => {
             if strict_time {
                 return Err(RtkArcError::InvalidEpochTime { epoch_index });
@@ -2439,8 +2485,8 @@ fn prediction_dt_s(
             0.0
         }
     };
-    if prediction_time_s.is_some() {
-        *previous_time = prediction_time_s;
+    if current_time.is_some() {
+        *previous_time = current_time;
     }
     // A velocity-propagated epoch with no velocity still gets a zero delta (the
     // predict step is then an identity mean shift), matching the kernel guard.
@@ -2577,6 +2623,44 @@ mod tests {
         SearchOpts, StochasticModel,
     };
     use crate::{GnssSatelliteId, GnssSystem};
+
+    #[test]
+    fn prediction_deltas_between_exact_epochs_are_exact() {
+        let at = |second: f64| ExactEpoch::from_civil(2026, 9, 23, 6, 30, second).unwrap();
+        let timed = |second: f64| PredictionTime {
+            seconds: Some(at(second).j2000_seconds()),
+            exact: Some(at(second)),
+        };
+        let mut previous = PredictionTime::default();
+        assert_eq!(
+            prediction_dt_s(0, None, timed(0.2), &mut previous, true).unwrap(),
+            0.0
+        );
+        // Labels a tenth apart: the exact difference is 0.1, the difference
+        // of their J2000 doubles is not.
+        assert_eq!(
+            prediction_dt_s(1, None, timed(0.3), &mut previous, true).unwrap(),
+            0.1
+        );
+        assert_ne!(at(0.3).j2000_seconds() - at(0.2).j2000_seconds(), 0.1);
+        // Without an exact epoch on both sides, the seconds are differenced.
+        let seconds_only = PredictionTime {
+            seconds: Some(at(0.4).j2000_seconds()),
+            exact: None,
+        };
+        assert_eq!(
+            prediction_dt_s(2, None, seconds_only, &mut previous, true).unwrap(),
+            at(0.4).j2000_seconds() - at(0.3).j2000_seconds()
+        );
+        // An epoch with no time is an error when strict and zero otherwise,
+        // and leaves the previous time in place.
+        assert!(prediction_dt_s(3, None, PredictionTime::default(), &mut previous, true).is_err());
+        assert_eq!(
+            prediction_dt_s(3, None, PredictionTime::default(), &mut previous, false).unwrap(),
+            0.0
+        );
+        assert_eq!(previous.seconds, Some(at(0.4).j2000_seconds()));
+    }
 
     struct ArcSource {
         states: BTreeMap<GnssSatelliteId, [f64; 3]>,
@@ -2737,6 +2821,7 @@ mod tests {
                 rover_satellite_positions_m: BTreeMap::new(),
                 velocity_mps: None,
                 prediction_time_s: None,
+                prediction_epoch: None,
             });
         }
 
@@ -3250,6 +3335,7 @@ mod tests {
                         rover_satellite_positions_m: orig.rover_satellite_positions_m.clone(),
                         velocity_mps: orig.velocity_mps,
                         prediction_time_s: orig.prediction_time_s,
+                        prediction_epoch: orig.prediction_epoch,
                     }
                 })
                 .collect::<Vec<_>>()
@@ -3306,6 +3392,7 @@ mod tests {
                         rover_satellite_positions_m: fpos(&epoch.rover_satellite_positions_m),
                         velocity_mps: epoch.velocity_mps,
                         prediction_time_s: epoch.prediction_time_s,
+                        prediction_epoch: epoch.prediction_epoch,
                     }
                 })
                 .collect();
@@ -3810,6 +3897,7 @@ mod tests {
                 jd_fraction: 0.25 + idx as f64 / crate::constants::SECONDS_PER_DAY,
                 epoch_sort_key: Some(format!("{idx:03}")),
                 gap_time_s: Some(idx as f64),
+                gap_epoch: None,
                 observations: vec![
                     dual_satellite("G01", 2.0, 5.0),
                     dual_satellite("G02", 1.0, 7.0),
@@ -3821,6 +3909,7 @@ mod tests {
                 rover_satellite_positions_m: BTreeMap::new(),
                 velocity_mps: None,
                 prediction_time_s: None,
+                prediction_epoch: None,
             })
             .collect();
         (
@@ -4168,6 +4257,7 @@ mod carrier_arc_tests {
                 DualCycleSlipEpoch {
                     epoch_sort_key: format!("{index}"),
                     gap_time_s: Some(index as f64 * 10.0),
+                    gap_epoch: None,
                     base_observations: vec![observation.clone()],
                     rover_observations: vec![observation],
                 }

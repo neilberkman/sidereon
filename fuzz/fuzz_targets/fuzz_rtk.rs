@@ -271,6 +271,7 @@ fuzz_target!(|data: &[u8]| {
     let dual_slip_epoch = DualCycleSlipEpoch {
         epoch_sort_key: "0".to_string(),
         gap_time_s: Some(input.scalars[6]),
+        gap_epoch: None,
         base_observations: (0..count)
             .map(|idx| DualCycleSlipObservation {
                 satellite_id: sat(idx),
