@@ -1547,6 +1547,7 @@ fn message_enum_is_matched_exhaustively_without_wildcard() {
     let message = Message::StationCoordinates(sample_station(1005, None));
     let number = match &message {
         Message::Msm(m) => m.message_number,
+        Message::LegacyObservations(o) => o.message_number,
         Message::StationCoordinates(s) => s.message_number,
         Message::AntennaDescriptor(a) => a.message_number,
         Message::GpsEphemeris(_) => 1019,
@@ -3482,4 +3483,180 @@ fn lock_tracker_reads_each_msm_type_by_its_lock_field() {
     assert_eq!(minimum_lock_time_ms(MsmKind::Msm1, 0), None);
     assert_eq!(minimum_lock_time_ms(MsmKind::Msm3, 6), Some(1024));
     assert_eq!(minimum_lock_time_ms(MsmKind::Msm6, 6), Some(6));
+}
+
+/// A legacy observation message `number` with two satellites, every carried
+/// field set and every part the number's layout does not carry `None`.
+fn legacy_message(number: u16) -> LegacyObservations {
+    let glonass = number >= 1009;
+    let extended = matches!(number, 1002 | 1004 | 1010 | 1012);
+    let l2 = matches!(number, 1003 | 1004 | 1011 | 1012);
+    let satellites = [(5u8, 1u32), (24, 2)]
+        .into_iter()
+        .map(|(satellite_id, k)| LegacySatellite {
+            satellite_id,
+            frequency_channel: glonass.then_some(3 + k as u8),
+            l1: LegacyL1 {
+                code_indicator: k == 2,
+                pseudorange: 1_000_000 * k,
+                phase_range_minus_pseudorange: -300_000 + k as i32,
+                lock_time_indicator: 100 + k as u8,
+                pseudorange_modulus_ambiguity: extended.then_some(70 + k as u8),
+                cnr: extended.then_some(160 + k as u8),
+            },
+            l2: l2.then_some(LegacyL2 {
+                code_indicator: k as u8,
+                pseudorange_difference: -4_000 * k as i16,
+                phase_range_minus_l1_pseudorange: 400_000 - k as i32,
+                lock_time_indicator: 120 + k as u8,
+                cnr: extended.then_some(150 + k as u8),
+            }),
+        })
+        .collect();
+    LegacyObservations {
+        message_number: number,
+        reference_station_id: 2003,
+        epoch_time: if glonass { 86_399_000 } else { 604_799_000 },
+        synchronous_gnss: true,
+        satellite_count: 2,
+        divergence_free_smoothing: true,
+        smoothing_interval: 5,
+        satellites,
+        trailing_bits: Vec::new(),
+    }
+}
+
+/// Every legacy observation message round-trips, and its body is the header
+/// and records RTCM 10403.3 Tables 3.5-2 to 3.5-15 give it: a 64-bit GPS
+/// header (DF002..DF008) and 58, 74, 101 or 125 bits per satellite for 1001,
+/// 1002, 1003, 1004; a 61-bit GLONASS header (DF002, DF003, DF034..DF037) and
+/// 64, 79, 107 or 130 bits per satellite for 1009, 1010, 1011, 1012.
+#[test]
+fn legacy_observations_round_trip_with_their_field_widths() {
+    for (number, header, record) in [
+        (1001u16, 64usize, 58usize),
+        (1002, 64, 74),
+        (1003, 64, 101),
+        (1004, 64, 125),
+        (1009, 61, 64),
+        (1010, 61, 79),
+        (1011, 61, 107),
+        (1012, 61, 130),
+    ] {
+        let message = legacy_message(number);
+        let body = message.encode().unwrap();
+        assert_eq!(body.len(), (header + 2 * record).div_ceil(8), "{number}");
+        assert_eq!(
+            LegacyObservations::decode(&body).unwrap(),
+            message,
+            "{number}"
+        );
+        assert_eq!(
+            Message::decode(&body).unwrap(),
+            Message::LegacyObservations(message.clone()),
+            "{number}"
+        );
+        assert_eq!(
+            Message::LegacyObservations(message).message_number(),
+            number
+        );
+    }
+    let gps = legacy_message(1004);
+    assert_eq!(gps.system(), Some(crate::id::GnssSystem::Gps));
+    assert_eq!(
+        legacy_message(1011).system(),
+        Some(crate::id::GnssSystem::Glonass)
+    );
+}
+
+/// A legacy body that ends before the records its header counts is refused
+/// as truncated under the strict policy. Under the lenient policy the
+/// complete records are read, as RTKLIB `decode_type1004` reads them, the
+/// header count and the bits of the cut record are kept, and the lenient
+/// encoder writes the body back as read.
+#[test]
+fn short_legacy_body_is_refused_strictly_and_read_leniently() {
+    let full = legacy_message(1004);
+    let body = full.encode().unwrap();
+    // Header 64 bits and one 125-bit record end at bit 189; cut inside the
+    // second record.
+    let short = body[..30].to_vec();
+    let err = LegacyObservations::decode(&short).unwrap_err();
+    assert!(err.to_string().contains("truncated"), "{err}");
+
+    let departure = RtcmDeparture::RecordsShort {
+        message_number: 1004,
+        declared: 2,
+        read: 1,
+    };
+    let (read, departures) =
+        LegacyObservations::decode_with_policy(&short, RtcmPolicy::Lenient).unwrap();
+    assert_eq!(departures, vec![departure.clone()]);
+    assert_eq!(read.satellite_count, 2);
+    assert_eq!(read.satellites, full.satellites[..1].to_vec());
+    assert_eq!(read.trailing_bits.len(), 30 * 8 - 189);
+    assert!(read
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("header satellite count 2 differs from the 1 records"));
+    let (written, departures) = read.encode_with_policy(RtcmPolicy::Lenient).unwrap();
+    assert_eq!(written, short);
+    assert_eq!(departures, vec![departure]);
+
+    // Bits after a complete set of records are a trailing-bits departure.
+    let mut long = body.clone();
+    long.push(0x80);
+    assert!(LegacyObservations::decode(&long).is_err());
+    let (read, departures) =
+        LegacyObservations::decode_with_policy(&long, RtcmPolicy::Lenient).unwrap();
+    assert!(matches!(
+        departures[..],
+        [RtcmDeparture::TrailingBits { .. }]
+    ));
+    assert_eq!(
+        read.encode_with_policy(RtcmPolicy::Lenient).unwrap().0,
+        long
+    );
+}
+
+/// The legacy encoder refuses a part its layout does not carry, a missing
+/// part it does, a count other than the records, and values wider than their
+/// fields.
+#[test]
+fn legacy_encoder_refuses_what_its_layout_cannot_state() {
+    let refused = |message: LegacyObservations, needle: &str| {
+        let err = message.encode().expect_err(needle).to_string();
+        assert!(err.contains(needle), "expected {needle:?}, got {err}");
+    };
+    let mut m = legacy_message(1001);
+    m.satellites[0].l2 = legacy_message(1003).satellites[0].l2;
+    refused(m, "L2 observables is given, and 1001 does not carry it");
+    let mut m = legacy_message(1012);
+    m.satellites[1].frequency_channel = None;
+    refused(m, "frequency channel is not given, and 1012 carries it");
+    let mut m = legacy_message(1004);
+    m.satellites[0].frequency_channel = Some(7);
+    refused(m, "frequency channel is given, and 1004 does not carry it");
+    let mut m = legacy_message(1002);
+    m.satellites[0].l1.cnr = None;
+    refused(m, "L1 CNR is not given, and 1002 carries it");
+    let mut m = legacy_message(1003);
+    m.satellites[0].l2.as_mut().unwrap().cnr = Some(1);
+    refused(m, "L2 CNR is given, and 1003 does not carry it");
+    let mut m = legacy_message(1004);
+    m.satellite_count = 1;
+    refused(m, "header satellite count 1 differs from the 2 records");
+    let mut m = legacy_message(1004);
+    m.satellites[0].l1.pseudorange = 1 << 24;
+    refused(m, "L1 pseudorange 16777216");
+    // GLONASS DF041 is one bit wider, DF044 one bit narrower.
+    let mut m = legacy_message(1012);
+    m.satellites[0].l1.pseudorange = 1 << 24;
+    m.encode().expect("DF041 is 25 bits");
+    m.satellites[0].l1.pseudorange_modulus_ambiguity = Some(128);
+    refused(m, "L1 pseudorange modulus ambiguity 128");
+    let mut m = legacy_message(1004);
+    m.message_number = 1005;
+    refused(m, "is not a legacy observation message");
 }

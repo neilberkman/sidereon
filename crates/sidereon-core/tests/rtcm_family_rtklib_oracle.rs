@@ -18,16 +18,25 @@
 //!
 //! - `rtk2go_*.rtcm3`: real streams captured from the public rtk2go.com NTRIP
 //!   caster on 2026-09-24 between 04:26:37 and 04:26:57 UTC (mountpoints
-//!   `TiftGA`, `Ormalingen_Ribi`, `sejongnav` and `Mirmenhof`), reduced to the
-//!   frames of the family each file names, byte for byte.
+//!   `TiftGA`, `Ormalingen_Ribi`, `sejongnav`, `Mirmenhof`, `granthamall` and
+//!   `jacksbay`), reduced to the frames of the family each file names, byte for
+//!   byte.
+//! - `rtklib_testglo_legacy.rtcm3`: the first 60 frames (1004 and 1012) of
+//!   RTKLIB's test stream `test/data/rcvraw/testglo.rtcm3`, byte for byte.
 //! - `rtklib_encoded_msm1_to_msm4.rtcm3`: RTKLIB's encoder output (`encode-msm`)
 //!   from the MSM7 observations of RTKLIB's test stream
 //!   `test/data/rcvraw/GMSD7_20121014.rtcm3`, first 12 epochs.
+//! - `rtklib_encoded_legacy.rtcm3`: RTKLIB's encoder output
+//!   (`encode-legacy`), 1001..1004 and 1009..1012 from the observations of
+//!   `testglo.rtcm3`, first 12 epochs.
 
 use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
-use sidereon_core::rtcm::{self, FrameScanner, Message, MsmKind, MsmMessage};
+use sidereon_core::rtcm::{
+    self, FrameScanner, LegacyObservations, Message, MsmKind, MsmMessage,
+    LEGACY_PHASE_RANGE_INVALID, LEGACY_PSEUDORANGE_DIFFERENCE_INVALID,
+};
 use sidereon_core::GnssSystem;
 
 const FAMILIES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rtcm/families/");
@@ -493,4 +502,279 @@ fn msm6_matches_rtklib() {
     let coverage = check_msm_stream(name);
     eprintln!("{name}: {coverage:?}");
     assert!(coverage.values > 0, "{name}");
+}
+
+const PRUNIT_GPS: f64 = 299792.458;
+const PRUNIT_GLO: f64 = 599584.916;
+
+/// State `decode_type1002`..`decode_type1012` carry between messages: the
+/// carrier-phase rollover reference (`rtcm->cp`) and lock history.
+#[derive(Default)]
+struct LegacyOracleState {
+    cp: HashMap<(String, usize), f64>,
+    locks: LockState,
+}
+
+impl LegacyOracleState {
+    /// RTKLIB `adjcp`.
+    fn adjcp(&mut self, satellite: &str, slot: usize, cp: f64) -> f64 {
+        let previous = self
+            .cp
+            .get(&(satellite.to_string(), slot))
+            .copied()
+            .unwrap_or(0.0);
+        let mut cp = cp;
+        if previous != 0.0 {
+            if cp < previous - 750.0 {
+                cp += 1500.0;
+            } else if cp > previous + 750.0 {
+                cp -= 1500.0;
+            }
+        }
+        self.cp.insert((satellite.to_string(), slot), cp);
+        cp
+    }
+}
+
+/// RTKLIB `snratio`.
+fn snratio(snr: f64) -> f64 {
+    if snr <= 0.0 || 100.0 <= snr {
+        0.0
+    } else {
+        snr
+    }
+}
+
+/// RTKLIB's satellite name for a legacy satellite ID, or `None` when RTKLIB
+/// `satno` has no satellite for it and skips the record.
+fn legacy_satellite_name(system: GnssSystem, id: u8) -> Option<String> {
+    match system {
+        GnssSystem::Gps if (1..=32).contains(&id) => Some(format!("G{id:02}")),
+        // decode_type1002/1004: an ID from 40 is SBAS, PRN + 80.
+        GnssSystem::Gps if (40..=58).contains(&id) => Some(format!("{:03}", u16::from(id) + 80)),
+        GnssSystem::Glonass if (1..=27).contains(&id) => Some(format!("R{id:02}")),
+        _ => None,
+    }
+}
+
+/// Compare one decoded legacy observation message with RTKLIB's record.
+fn check_legacy(
+    name: &str,
+    frame: &Frame,
+    obs: &LegacyObservations,
+    state: &mut LegacyOracleState,
+    coverage: &mut Coverage,
+) {
+    let at = format!("{name} frame at {} ({})", frame.offset, obs.message_number);
+    let rtklib = &frame.rtklib;
+    let system = obs.system().expect("legacy system");
+    coverage.frames += 1;
+    if system == GnssSystem::Gps {
+        assert_eq!(
+            bits64(&rtklib["tow"]),
+            rtklib_tow(f64::from(obs.epoch_time) * 0.001).to_bits(),
+            "{at}: epoch"
+        );
+    }
+    assert_eq!(
+        rtklib["staid"].as_u64(),
+        Some(u64::from(obs.reference_station_id)),
+        "{at}: station"
+    );
+    let stored = rtklib["obs"].as_array().expect("obs");
+    let extended = obs.satellites.iter().all(|s| s.l1.cnr.is_some());
+    if !matches!(obs.message_number, 1002 | 1004 | 1010 | 1012) {
+        // RTKLIB decode_type1001/1003/1009/1011 read the header only.
+        assert!(stored.is_empty(), "{at}");
+        coverage.header_only += 1;
+        return;
+    }
+    assert!(extended, "{at}");
+    let by_satellite: BTreeMap<&str, &Value> = stored
+        .iter()
+        .map(|entry| (entry["sat"].as_str().expect("sat"), &entry["sig"]))
+        .collect();
+    let mut matched = 0usize;
+    for s in &obs.satellites {
+        let Some(sat_name) = legacy_satellite_name(system, s.satellite_id) else {
+            coverage.not_stored += 1;
+            continue;
+        };
+        let sigs = by_satellite
+            .get(sat_name.as_str())
+            .unwrap_or_else(|| panic!("{at}: RTKLIB stored no {sat_name}"))
+            .as_array()
+            .expect("sig");
+        let slot = |index: u64| {
+            sigs.iter()
+                .find(|sig| sig["slot"].as_u64() == Some(index))
+                .unwrap_or_else(|| panic!("{at}: {sat_name} has no slot {index}"))
+        };
+        let (unit, freq1, freq2) = match system {
+            GnssSystem::Glonass => {
+                let fcn = i32::from(s.frequency_channel.expect("channel")) - 7;
+                (
+                    PRUNIT_GLO,
+                    code2freq(system, "1C", fcn),
+                    code2freq(system, "2C", fcn),
+                )
+            }
+            _ => (PRUNIT_GPS, FREQL1, FREQL2),
+        };
+        let ambiguity = s.l1.pseudorange_modulus_ambiguity.expect("ambiguity");
+        let pr1 = f64::from(s.l1.pseudorange) * 0.02 + f64::from(ambiguity) * unit;
+        let l1 = if s.l1.phase_range_minus_pseudorange != LEGACY_PHASE_RANGE_INVALID {
+            let cp1 = state.adjcp(
+                &sat_name,
+                0,
+                f64::from(s.l1.phase_range_minus_pseudorange) * 0.0005 * freq1 / CLIGHT,
+            );
+            pr1 * freq1 / CLIGHT + cp1
+        } else {
+            0.0
+        };
+        let lli1 = state
+            .locks
+            .loss_of_lock(&sat_name, 0, u16::from(s.l1.lock_time_indicator));
+        let snr1 = snratio(f64::from(s.l1.cnr.expect("CNR")) * 0.25) as f32;
+        let code1 = if s.l1.code_indicator { "1P" } else { "1C" };
+        let entry = slot(0);
+        let cell = format!("{at} {sat_name} L1");
+        assert_eq!(entry["code"].as_str(), Some(code1), "{cell}: code");
+        assert_eq!(bits64(&entry["P"]), pr1.to_bits(), "{cell}: P");
+        assert_eq!(bits64(&entry["L"]), l1.to_bits(), "{cell}: L");
+        assert_eq!(bits32(&entry["SNR"]), snr1.to_bits(), "{cell}: SNR");
+        assert_eq!(entry["LLI"].as_u64(), Some(u64::from(lli1)), "{cell}: LLI");
+        matched += 1;
+        coverage.values += 1;
+        if let Some(l2) = &s.l2 {
+            let p2 = if l2.pseudorange_difference != LEGACY_PSEUDORANGE_DIFFERENCE_INVALID {
+                pr1 + f64::from(l2.pseudorange_difference) * 0.02
+            } else {
+                0.0
+            };
+            let phase2 = if l2.phase_range_minus_l1_pseudorange != LEGACY_PHASE_RANGE_INVALID {
+                let cp2 = state.adjcp(
+                    &sat_name,
+                    1,
+                    f64::from(l2.phase_range_minus_l1_pseudorange) * 0.0005 * freq2 / CLIGHT,
+                );
+                pr1 * freq2 / CLIGHT + cp2
+            } else {
+                0.0
+            };
+            let lli2 = state
+                .locks
+                .loss_of_lock(&sat_name, 1, u16::from(l2.lock_time_indicator));
+            let snr2 = snratio(f64::from(l2.cnr.expect("CNR")) * 0.25) as f32;
+            let code2 = match system {
+                GnssSystem::Glonass if l2.code_indicator != 0 => "2P",
+                GnssSystem::Glonass => "2C",
+                _ => ["2X", "2P", "2D", "2W"][usize::from(l2.code_indicator)],
+            };
+            let entry = slot(1);
+            let cell = format!("{at} {sat_name} L2");
+            assert_eq!(entry["code"].as_str(), Some(code2), "{cell}: code");
+            assert_eq!(bits64(&entry["P"]), p2.to_bits(), "{cell}: P");
+            assert_eq!(bits64(&entry["L"]), phase2.to_bits(), "{cell}: L");
+            assert_eq!(bits32(&entry["SNR"]), snr2.to_bits(), "{cell}: SNR");
+            assert_eq!(entry["LLI"].as_u64(), Some(u64::from(lli2)), "{cell}: LLI");
+            matched += 1;
+            coverage.values += 1;
+        }
+    }
+    let rtklib_cells: usize = stored
+        .iter()
+        .map(|entry| entry["sig"].as_array().expect("sig").len())
+        .sum();
+    assert_eq!(
+        matched, rtklib_cells,
+        "{at}: every value RTKLIB stored is checked"
+    );
+}
+
+/// Check every legacy frame of `name` against RTKLIB, and each compact
+/// message (1001, 1003, 1009, 1011) and 1002/1010 against the 1004 or 1012 of
+/// its epoch in the same stream, where one is there.
+fn check_legacy_stream(name: &str) -> (Coverage, usize) {
+    let frames = fixture(name);
+    let mut state = LegacyOracleState::default();
+    let mut coverage = Coverage::default();
+    let mut full: HashMap<(GnssSystem, u32), LegacyObservations> = HashMap::new();
+    for frame in &frames {
+        let Message::LegacyObservations(obs) = &frame.message else {
+            panic!(
+                "{name}: frame at {} is not a legacy observation",
+                frame.offset
+            );
+        };
+        check_legacy(name, frame, obs, &mut state, &mut coverage);
+        if matches!(obs.message_number, 1004 | 1012) {
+            full.insert((obs.system().expect("system"), obs.epoch_time), obs.clone());
+        }
+    }
+    let mut compared = 0;
+    for frame in &frames {
+        let Message::LegacyObservations(obs) = &frame.message else {
+            continue;
+        };
+        if matches!(obs.message_number, 1004 | 1012) {
+            continue;
+        }
+        let Some(reference) = full.get(&(obs.system().expect("system"), obs.epoch_time)) else {
+            continue;
+        };
+        let at = format!("{name} frame at {} ({})", frame.offset, obs.message_number);
+        assert_eq!(obs.satellites.len(), reference.satellites.len(), "{at}");
+        for (a, b) in obs.satellites.iter().zip(&reference.satellites) {
+            let sat = format!("{at} satellite {}", a.satellite_id);
+            assert_eq!(a.satellite_id, b.satellite_id, "{sat}");
+            assert_eq!(a.frequency_channel, b.frequency_channel, "{sat}");
+            assert_eq!(a.l1.code_indicator, b.l1.code_indicator, "{sat}");
+            assert_eq!(a.l1.pseudorange, b.l1.pseudorange, "{sat}");
+            assert_eq!(
+                a.l1.phase_range_minus_pseudorange, b.l1.phase_range_minus_pseudorange,
+                "{sat}"
+            );
+            assert_eq!(a.l1.lock_time_indicator, b.l1.lock_time_indicator, "{sat}");
+            if a.l1.cnr.is_some() {
+                assert_eq!(
+                    a.l1.pseudorange_modulus_ambiguity, b.l1.pseudorange_modulus_ambiguity,
+                    "{sat}"
+                );
+                assert_eq!(a.l1.cnr, b.l1.cnr, "{sat}");
+            }
+            if let (Some(x), Some(y)) = (&a.l2, &b.l2) {
+                assert_eq!(x.code_indicator, y.code_indicator, "{sat}");
+                assert_eq!(x.pseudorange_difference, y.pseudorange_difference, "{sat}");
+                assert_eq!(
+                    x.phase_range_minus_l1_pseudorange, y.phase_range_minus_l1_pseudorange,
+                    "{sat}"
+                );
+                assert_eq!(x.lock_time_indicator, y.lock_time_indicator, "{sat}");
+            }
+        }
+        compared += 1;
+    }
+    (coverage, compared)
+}
+
+/// Real 1004 and 1012 from three receivers and RTKLIB's own test stream, real
+/// 1001, 1003 and 1009, and RTKLIB-encoded 1001..1004 and 1009..1012: every
+/// value RTKLIB stores from 1002, 1004, 1010 and 1012 bit for bit, the headers
+/// of the others, and their fields against the 1004 or 1012 of the same epoch.
+#[test]
+fn legacy_observations_match_rtklib() {
+    for (name, compact) in [
+        ("rtk2go_granthamall_legacy.rtcm3", true),
+        ("rtk2go_jacksbay_legacy.rtcm3", true),
+        ("rtk2go_mirmenhof_legacy.rtcm3", false),
+        ("rtklib_testglo_legacy.rtcm3", false),
+        ("rtklib_encoded_legacy.rtcm3", true),
+    ] {
+        let (coverage, compared) = check_legacy_stream(name);
+        eprintln!("{name}: {coverage:?}, {compared} messages checked against 1004/1012");
+        assert!(coverage.values > 0, "{name}");
+        assert_eq!(compared > 0, compact, "{name}");
+    }
 }
