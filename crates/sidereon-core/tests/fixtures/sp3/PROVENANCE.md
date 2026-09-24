@@ -160,8 +160,11 @@ are of the committed files.
   the five epochs 11:45 through 12:45; the eight around them were added from
   the source because the position interpolator takes eleven nodes (RTKLIB
   pephpos's `NMAX + 1`), and a query near 12:00 selects 10:30 through 13:00.
-- **Committed file:** 7352 bytes, SHA-256
-  `ca8775f84c65b069a6f956badba55a66326793ca908176d3ec2802fe0bd247d3`.
+  Its 22-line SP3 header follows RTKLIB `readsp3h`; shorter headers make that
+  reader consume body rows while seeking the fixed header end and omit leading
+  epochs.
+- **Committed file:** 7668 bytes, SHA-256
+  `fd0aa5e7047b67b41a567e1d8f9307b3d28af448dd5cf288098fc1300358c6ea`.
 - **Used by:** `tests/go_fixture_parity.rs` and the static-positioning tests.
 
 ## `degenerate_coincident_5sat.sp3`

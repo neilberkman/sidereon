@@ -559,11 +559,9 @@ pub fn second_of_day_from_instant(epoch: Instant) -> f64 {
             day_fraction * SECONDS_PER_DAY
         }
         InstantRepr::Nanos(nanos) => {
-            // The count runs from the J2000 origin, which is noon: move it to
-            // civil midnight of the J2000 day before reducing by the day.
             let ns_per_day: i128 = 86_400 * 1_000_000_000;
             let noon_ns: i128 = J2000_NOON_OFFSET_S as i128 * 1_000_000_000;
-            (nanos + noon_ns).rem_euclid(ns_per_day) as f64 / 1.0e9
+            (nanos.rem_euclid(ns_per_day) + noon_ns).rem_euclid(ns_per_day) as f64 / 1.0e9
         }
     }
 }
@@ -807,6 +805,21 @@ mod tests {
             super::super::model::JulianDateSplit::new(whole, frac).expect("valid split"),
         );
         assert!((second_of_day_from_instant(split) - at(21_600 * 1_000_000_000)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nanosecond_second_of_day_accepts_i128_endpoints() {
+        use super::super::model::TimeScale;
+
+        for (nanos, expected_nanos) in [
+            (i128::MAX, 6_115_884_105_727_u64),
+            (i128::MIN, 80_284_115_894_272_u64),
+        ] {
+            assert_eq!(
+                second_of_day_from_instant(Instant::from_nanos(TimeScale::Gpst, nanos)),
+                expected_nanos as f64 / 1.0e9,
+            );
+        }
     }
 
     #[test]

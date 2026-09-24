@@ -4,6 +4,21 @@ Where the broadcast navigation files in this directory came from and how the
 committed copies were derived. Sizes and SHA-256 digests are of the committed
 files.
 
+## `BRDM00DLR_S_20201760000_01D_MN.rnx`
+
+- **Product:** DLR/GSOC merged multi-GNSS broadcast navigation file, RINEX
+  3.04, 2020 day-of-year 176 (2020-06-24), GPS week 2111.
+- **Source:** IGS BKG archive,
+  `https://igs.bkg.bund.de/root_ftp/IGS/BRDC/2020/176/BRDM00DLR_S_20201760000_01D_MN.rnx.gz`.
+- **Content:** uncompressed RINEX product with 384 GPS ephemeris records and
+  mixed-constellation records. G08, G10, G16, G18, G20, G21, G26 and G27 have
+  broadcast ephemerides at or immediately around 2020-06-24 12:00 GPST.
+- **Committed file:** 8619012 bytes, SHA-256
+  `778e99a30b9fc3f2ea2844219f459535a9060645ec6accf89d83410154db5c53`.
+- **Used by:** `fixtures-generators/rtklib_sp3_oracle/generate.sh` for RTKLIB
+  `pntpos`; `satposs` requires broadcast ephemerides for transmit-time
+  estimation before using precise SP3 positions.
+
 ## `ESBC00DNK_R_20201770000_01D_MN.rnx`
 
 - **Product:** IGS MGEX daily mixed broadcast navigation file for station

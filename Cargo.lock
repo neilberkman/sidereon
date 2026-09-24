@@ -1453,6 +1453,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sidereon-core",
  "simba",
  "thiserror 1.0.69",
  "trust-region-least-squares",
