@@ -82,13 +82,18 @@
 //! whichever restates the stored split, so a leap epoch is written back as the
 //! leap line it was read from.
 //!
-//! An epoch held as [`crate::astro::time::model::InstantRepr::Nanos`] rather
-//! than as a split Julian date is refused by name
-//! ([`Sp3WriteError::EpochRepresentationUnsupported`]). `Sp3::parse` never
-//! builds one, but [`Sp3::epochs`] is public and can be assigned one; the
-//! refusal records the limit of this writer's contract, not a claim that the
-//! calendar fields are unrecoverable from an exact nanosecond count. See that
-//! variant for why choosing an origin here is a separate decision.
+//! An epoch held as [`crate::astro::time::model::InstantRepr::Nanos`] is read
+//! as nanoseconds from the J2000 origin (2000-01-01 12:00:00) in the instant's
+//! own scale, the convention
+//! [`crate::astro::time::civil::julian_date_from_instant`] documents and the
+//! IONEX and RINEX clock writers read, and which the SP3 interpolation axis
+//! reads too. `Sp3::parse` never builds one, but [`Sp3::epochs`] is public and
+//! can be assigned one. Its record is the count's own calendar decomposition
+//! in integer arithmetic, never reduced through `f64`, so it is written when
+//! the count is a whole number of the 10-nanosecond ticks the seconds field
+//! resolves, and reported as [`Sp3WriteError::EpochNotRestatable`] otherwise.
+//! Days are whole 86,400-second days, so a count never states a `23:59:60`
+//! label.
 //!
 //! Header numeric fields are held to the same standard, so a base or cadence
 //! value re-reads as exactly the number the product holds. The parser is looser
@@ -116,7 +121,8 @@ use core::fmt::Write as _;
 use std::collections::BTreeSet;
 
 use crate::astro::time::civil::civil_from_julian_day_number as civil_from_jdn;
-use crate::astro::time::model::{Instant, JulianDateSplit, TimeScale};
+use crate::astro::time::civil::{J2000_JULIAN_DAY_NUMBER, J2000_NOON_OFFSET_S};
+use crate::astro::time::model::{Instant, InstantRepr, JulianDateSplit, TimeScale};
 use crate::constants::{KM_TO_M, SECONDS_PER_DAY, US_TO_S};
 use crate::frame::ItrfVelocityMS;
 use crate::id::GnssSatelliteId;
@@ -195,9 +201,6 @@ const JDN_CONVERSION_LIMIT: f64 = (1_i64 << 40) as f64;
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Sp3WriteError {
-    /// The product holds no epoch, so header line 1 has no start epoch to state.
-    /// SP3 has no representation for an epoch-less product.
-    NoEpochs,
     /// A text field carries a byte canonical SP3 text cannot hold: a line break,
     /// another control byte, or a non-ASCII byte.
     TextNotColumnSafe {
@@ -287,28 +290,6 @@ pub enum Sp3WriteError {
         epoch_index: usize,
         /// The year the epoch converts to.
         year: i64,
-    },
-    /// An epoch is held as [`InstantRepr::Nanos`] rather than as a split Julian
-    /// date, and this writer states a calendar record only from the latter.
-    ///
-    /// This is a limit of the SP3 writer's contract, not of the representation.
-    /// An integer-nanosecond instant carries an exact count, and several core
-    /// adapters read one against the J2000 origin
-    /// ([`crate::astro::time::civil::julian_date_from_instant`], and the RINEX
-    /// clock writer's own civil decomposition, which is exact integer
-    /// arithmetic). SP3's own node axis takes the opposite position: the count
-    /// is "nanoseconds since an implied scale epoch"
-    /// ([`InstantRepr::Nanos`]), the type names no origin, and
-    /// `sp3::interp` declines the conversion for that reason rather than
-    /// assuming one. Writing a calendar record here would have to settle that
-    /// question for the whole SP3 module, and settling it is a separate public
-    /// contract - so the writer refuses by name instead of picking an origin,
-    /// and instead of reducing an `i128` through `f64` to hide the choice.
-    ///
-    /// [`InstantRepr::Nanos`]: crate::astro::time::model::InstantRepr::Nanos
-    EpochRepresentationUnsupported {
-        /// Index of the epoch in [`Sp3::epochs`].
-        epoch_index: usize,
     },
     /// An epoch record cannot restate the instant the product holds: read back
     /// the way [`Sp3::parse`] reads an epoch line, the record states a
@@ -491,7 +472,6 @@ pub enum Sp3WriteError {
 impl core::fmt::Display for Sp3WriteError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::NoEpochs => write!(f, "SP3 product holds no epoch to write as its start epoch"),
             Self::TextNotColumnSafe { field, value } => write!(
                 f,
                 "SP3 {field} {value:?} carries a byte fixed-column SP3 text cannot hold"
@@ -543,10 +523,6 @@ impl core::fmt::Display for Sp3WriteError {
             Self::YearNotRepresentable { epoch_index, year } => write!(
                 f,
                 "SP3 epoch {epoch_index} falls in year {year}, outside the 4-digit year field"
-            ),
-            Self::EpochRepresentationUnsupported { epoch_index } => write!(
-                f,
-                "SP3 epoch {epoch_index} counts nanoseconds from an origin the instant does not name; this writer states a calendar record only from a split Julian date"
             ),
             Self::EpochNotRestatable {
                 epoch_index,
@@ -827,10 +803,14 @@ impl Sp3 {
         // Line 1: version/type, first-epoch calendar (cosmetic - the parser reads
         // epochs from the `*` lines), epoch count, data descriptor, coordinate
         // system, orbit type, agency. Columns match the parser's field offsets.
-        // The start epoch is the product's own first epoch; a product with no
-        // epoch has no start to state and is refused rather than dated.
-        let first = self.epochs.first().ok_or(Sp3WriteError::NoEpochs)?;
-        let dt = self.format_calendar(first, 0)?;
+        // The start epoch is the product's own first epoch. SP3 sets no minimum
+        // epoch count, and RTKLIB `readsp3` reads a file that carries only a
+        // header; a product with no epoch states its own declared line-1 start
+        // (see `epochless_start_tick`).
+        let dt = match self.epochs.first() {
+            Some(first) => self.format_calendar(first, 0)?,
+            None => tick_calendar(epochless_start_tick(self)?, 0, h.time_system)?,
+        };
         let data = optional_text(h.data_used.as_deref(), "data used", LINE1_DATA_USED_COLUMNS)?;
         check_text(
             &h.coordinate_system,
@@ -1012,10 +992,10 @@ impl Sp3 {
     /// SS.SSSSSSSS`.
     ///
     /// The record carries no time scale of its own, so the epoch must be in the
-    /// scale the header states, and it must be a split-Julian-date instant (see
-    /// [`Sp3WriteError::EpochRepresentationUnsupported`] for what that excludes
-    /// and why). `epoch_index` names the epoch in any error, including for
-    /// header line 1, whose calendar fields are the first epoch's.
+    /// scale the header states. `epoch_index` names the epoch in any error,
+    /// including for header line 1, whose calendar fields are the first
+    /// epoch's. An integer-nanosecond epoch is stated by
+    /// [`nanos_calendar`]; what follows describes a split Julian date.
     ///
     /// The statement is then checked by reading it: the candidate calendar
     /// fields are formatted, read back through the same civil conversion
@@ -1045,9 +1025,12 @@ impl Sp3 {
                 header_scale: self.header.time_scale,
             });
         }
-        let split = epoch
-            .julian_date()
-            .ok_or(Sp3WriteError::EpochRepresentationUnsupported { epoch_index })?;
+        let split = match epoch.repr {
+            InstantRepr::JulianDate(split) => split,
+            InstantRepr::Nanos(nanos) => {
+                return nanos_calendar(nanos, epoch_index, self.header.time_system)
+            }
+        };
         // `Sp3::epochs` is public and `JulianDateSplit`'s fields are public, so
         // a split this constructor never validated can arrive here. A
         // non-finite part has no calendar fields at all, and the tick and day
@@ -1717,6 +1700,144 @@ fn epoch_candidates(
         return (ordinary, Some(label));
     }
     (ordinary, None)
+}
+
+/// Nanoseconds per tick of the `F11.8` seconds field.
+const NANOS_PER_TICK: i128 = 1_000_000_000 / SP3_TIME_TICKS_PER_SECOND as i128;
+
+/// Ticks from civil midnight of the J2000 day to the J2000 origin (noon).
+const J2000_NOON_TICKS: i128 = J2000_NOON_OFFSET_S as i128 * SP3_TIME_TICKS_PER_SECOND as i128;
+
+/// The epoch record for an instant held as integer nanoseconds from the J2000
+/// origin (2000-01-01 12:00:00) in its own scale.
+///
+/// A count that is not a whole number of the 10-nanosecond ticks the seconds
+/// field resolves has no record: the nearest record below it is reported with
+/// the remainder as [`Sp3WriteError::EpochNotRestatable`], never rounded onto a
+/// neighbouring tick. Otherwise the record is [`tick_calendar`]'s.
+fn nanos_calendar(
+    nanos: i128,
+    epoch_index: usize,
+    time_system: Sp3TimeSystem,
+) -> Result<String, Sp3WriteError> {
+    let tick = nanos.div_euclid(NANOS_PER_TICK);
+    let below_tick = nanos.rem_euclid(NANOS_PER_TICK);
+    let text = tick_calendar(tick, epoch_index, time_system)?;
+    if below_tick != 0 {
+        let (day, ticks) = tick_day(tick);
+        return Err(Sp3WriteError::EpochNotRestatable {
+            epoch_index,
+            field_seconds: civil_fields(day, ticks).seconds,
+            residual_s: below_tick as f64 / 1.0e9,
+        });
+    }
+    Ok(text)
+}
+
+/// Ticks from the J2000 origin of the start an epoch-less product's line 1
+/// states.
+///
+/// The start is the product's own line-1 epoch
+/// ([`Sp3::declared_start_j2000_s`]): the parser reads it from a file's line 1,
+/// and a merge that writes no epoch sets it to its first union-grid epoch. It is
+/// written only as the record that reads back, the way the parser reads line 1,
+/// as exactly that value; otherwise the start is
+/// [`Sp3WriteError::EpochNotRestatable`] at index 0. A product that declares no
+/// start states the one its line-2 MJD and day fraction name, the fraction
+/// taken to the nearest tick: thirteen decimals resolve 8.64 ns, finer than a
+/// tick, so a fraction rounded from a whole number of ticks gives that tick
+/// back.
+fn epochless_start_tick(sp3: &Sp3) -> Result<i128, Sp3WriteError> {
+    const TICKS_PER_DAY: i128 = SP3_TIME_TICKS_PER_DAY as i128;
+    // MJD 51544 is the civil day of the J2000 origin (MJD 51544.5).
+    const J2000_MJD_DAY: i128 = 51_544;
+    let h = &sp3.header;
+    let Some(seconds) = sp3.declared_start_j2000_s else {
+        check_exact(
+            h.mjd_fraction,
+            "MJD fraction",
+            LINE2_MJD_FRACTION_WIDTH,
+            LINE2_MJD_FRACTION_DECIMALS,
+        )?;
+        let within_day = (h.mjd_fraction * TICKS_PER_DAY as f64).round() as i128;
+        return Ok(
+            (i128::from(h.mjd) - J2000_MJD_DAY) * TICKS_PER_DAY + within_day - J2000_NOON_TICKS,
+        );
+    };
+    if !seconds.is_finite() {
+        return Err(Sp3WriteError::NonFinite {
+            field: "declared start epoch",
+        });
+    }
+    let whole = seconds.floor();
+    let tick = whole as i128 * SP3_TIME_TICKS_PER_SECOND as i128
+        + ((seconds - whole) * SP3_TIME_TICKS_PER_SECOND as f64).round() as i128;
+    let (day, ticks) = tick_day(tick);
+    let fields = civil_fields(day, ticks);
+    if super::parse_declared_start_j2000_s(&format!("#cP{}", fields.record_text())) == Some(seconds)
+    {
+        Ok(tick)
+    } else {
+        Err(Sp3WriteError::EpochNotRestatable {
+            epoch_index: 0,
+            field_seconds: fields.seconds,
+            residual_s: f64::NAN,
+        })
+    }
+}
+
+/// The civil day (a Julian Day Number) and the tick within it of a whole
+/// number of ticks from the J2000 origin, bounded to the range the calendar
+/// inverse is evaluated at.
+fn tick_day(tick: i128) -> (i64, i64) {
+    let from_midnight = tick.saturating_add(J2000_NOON_TICKS);
+    let day_offset = from_midnight.div_euclid(SP3_TIME_TICKS_PER_DAY as i128);
+    let within_day = from_midnight.rem_euclid(SP3_TIME_TICKS_PER_DAY as i128);
+    let limit = JDN_CONVERSION_LIMIT as i128;
+    let day = (J2000_JULIAN_DAY_NUMBER as i128 + day_offset).clamp(-limit, limit) as i64;
+    (day, within_day as i64)
+}
+
+/// The epoch record for a whole number of 10-nanosecond ticks from the J2000
+/// origin (2000-01-01 12:00:00) in the product's own scale.
+///
+/// The count is moved to civil midnight of the J2000 day and divided into
+/// whole days and a within-day remainder in `i128`, so the calendar fields are
+/// the count's exact decomposition: the same arithmetic the RINEX clock writer
+/// applies to such a count, carried to the tick the seconds field resolves.
+/// Days are whole 86,400-second days, the convention
+/// [`crate::astro::time::civil::julian_date_from_instant`] documents, so a
+/// count never names a `23:59:60` label, whatever the time system. The record
+/// is read back the way [`Sp3::parse`] reads an epoch line, and one the parser
+/// would not accept is [`Sp3WriteError::EpochNotRestatable`].
+fn tick_calendar(
+    tick: i128,
+    epoch_index: usize,
+    time_system: Sp3TimeSystem,
+) -> Result<String, Sp3WriteError> {
+    let (day, ticks) = tick_day(tick);
+    let fields = civil_fields(day, ticks);
+    if !(0..10i64.pow(CALENDAR_YEAR_COLUMNS as u32)).contains(&fields.year) {
+        return Err(Sp3WriteError::YearNotRepresentable {
+            epoch_index,
+            year: fields.year,
+        });
+    }
+    check_finite_width(
+        fields.seconds,
+        "epoch seconds",
+        EPOCH_SECONDS_WIDTH,
+        EPOCH_SECONDS_DECIMALS,
+    )?;
+    let text = fields.record_text();
+    if restated_split(&text, time_system).is_none() {
+        return Err(Sp3WriteError::EpochNotRestatable {
+            epoch_index,
+            field_seconds: fields.seconds,
+            residual_s: f64::NAN,
+        });
+    }
+    Ok(text)
 }
 
 /// The civil day a split Julian date falls in, the whole tick count within that

@@ -198,17 +198,21 @@ impl Sp3TimeSystem {
 
     /// Core time scale used to tag parsed [`Instant`] values.
     ///
-    /// For labels the core model has exactly, this is the direct equivalent. For
-    /// SP3-only labels, the exact product label remains available through
-    /// [`Sp3Header::time_system`], and this value preserves the existing
-    /// interpolation-axis API until the global time model grows those scales.
+    /// For labels the core model has exactly, this is the direct equivalent:
+    /// `GLO` epochs are GLONASS system time, [`TimeScale::Glonasst`] (UTC(SU)
+    /// plus three hours), never UTC. IRNSS has no distinct core scale and is
+    /// tagged GPST; the exact product label remains available through
+    /// [`Sp3Header::time_system`].
     pub fn time_scale(self) -> TimeScale {
         match self {
             Sp3TimeSystem::Gps | Sp3TimeSystem::Irnss => TimeScale::Gpst,
             // QZSST is the exact core scale for the SP3 "QZS" label (nominally
             // synchronous with GPST); IRNSS has no distinct core scale yet.
             Sp3TimeSystem::Qzss => TimeScale::Qzsst,
-            Sp3TimeSystem::Glonass | Sp3TimeSystem::Utc => TimeScale::Utc,
+            // GLONASST = UTC(SU) + 3 h: a GLO epoch record states Moscow-time
+            // civil fields, three hours from the UTC instant of the same fields.
+            Sp3TimeSystem::Glonass => TimeScale::Glonasst,
+            Sp3TimeSystem::Utc => TimeScale::Utc,
             Sp3TimeSystem::Galileo => TimeScale::Gst,
             Sp3TimeSystem::Tai => TimeScale::Tai,
             Sp3TimeSystem::Beidou => TimeScale::Bdt,

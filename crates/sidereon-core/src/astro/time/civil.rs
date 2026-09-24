@@ -546,8 +546,9 @@ pub fn fractional_day_of_year_from_instant(epoch: Instant) -> f64 {
 /// Second-of-day in `[0, 86400)` carried by an [`Instant`], in its own scale.
 ///
 /// A split-Julian-date instant shifts the noon day origin to midnight and keeps
-/// the within-day part; an integer-nanosecond instant reduces by the
-/// seconds-per-day modulus (exact). This is the single home for the diurnal
+/// the within-day part; an integer-nanosecond instant, counted from the J2000
+/// noon origin, is moved to midnight the same way and reduced by the day
+/// (exact). This is the single home for the diurnal
 /// second-of-day argument the IONEX Klobuchar term open-coded.
 #[must_use]
 pub fn second_of_day_from_instant(epoch: Instant) -> f64 {
@@ -558,12 +559,11 @@ pub fn second_of_day_from_instant(epoch: Instant) -> f64 {
             day_fraction * SECONDS_PER_DAY
         }
         InstantRepr::Nanos(nanos) => {
+            // The count runs from the J2000 origin, which is noon: move it to
+            // civil midnight of the J2000 day before reducing by the day.
             let ns_per_day: i128 = 86_400 * 1_000_000_000;
-            let mut rem = nanos % ns_per_day;
-            if rem < 0 {
-                rem += ns_per_day;
-            }
-            rem as f64 / 1.0e9
+            let noon_ns: i128 = J2000_NOON_OFFSET_S as i128 * 1_000_000_000;
+            (nanos + noon_ns).rem_euclid(ns_per_day) as f64 / 1.0e9
         }
     }
 }
@@ -787,6 +787,26 @@ mod tests {
         // 2020 is a leap year; June 25 is day 177, plus 6h = 0.25 day fraction.
         assert!((fractional_day_of_year_from_instant(epoch) - (177.0 + 0.25)).abs() < 1e-9);
         assert!((second_of_day_from_instant(epoch) - 6.0 * SECONDS_PER_HOUR).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nanosecond_second_of_day_counts_from_the_j2000_noon_origin() {
+        use super::super::model::TimeScale;
+        let at =
+            |nanos: i128| second_of_day_from_instant(Instant::from_nanos(TimeScale::Gpst, nanos));
+        // The origin itself is noon.
+        assert_eq!(at(0), 43_200.0);
+        // Twelve hours later is the next civil midnight.
+        assert_eq!(at(43_200 * 1_000_000_000), 0.0);
+        // One second before the origin is 11:59:59.
+        assert_eq!(at(-1_000_000_000), 43_199.0);
+        // The split Julian date of the same instant agrees.
+        let (whole, frac) = split_julian_date(2000, 1, 1, 18, 0, 0.0);
+        let split = Instant::from_julian_date(
+            TimeScale::Gpst,
+            super::super::model::JulianDateSplit::new(whole, frac).expect("valid split"),
+        );
+        assert!((second_of_day_from_instant(split) - at(21_600 * 1_000_000_000)).abs() < 1e-6);
     }
 
     #[test]

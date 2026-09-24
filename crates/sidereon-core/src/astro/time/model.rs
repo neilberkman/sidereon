@@ -135,7 +135,11 @@ impl JulianDateSplit {
 /// Julian date for the astronomy/Skyfield path.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InstantRepr {
-    /// Integer nanoseconds since an implied scale epoch (exact arithmetic).
+    /// Integer nanoseconds from the J2000 origin (2000-01-01 12:00:00, JD
+    /// 2451545.0) in the instant's own scale, counted in whole 86,400-second
+    /// days (exact arithmetic). Every core reader of the count uses this
+    /// origin: [`crate::astro::time::civil::julian_date_from_instant`], the
+    /// IONEX, RINEX clock, bias and SP3 epoch axes and writers.
     Nanos(i128),
     /// Two-part Julian date in the instant's own scale.
     JulianDate(JulianDateSplit),
