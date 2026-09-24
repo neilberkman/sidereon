@@ -69,7 +69,8 @@ pub struct HelmertTransformation {
     pub r2: i32,
     /// Rotation around the Z axis (DF161, int32), scale 2e-5 arc seconds.
     pub r3: i32,
-    /// Scale correction (DF162, int25).
+    /// Scale correction (DF162, int25), in units of 0.00001 ppm per RTCM
+    /// 10403.3. The raw integer is retained unchanged.
     pub ds: i32,
     /// Rotation point (DF163..DF165), carried by 1022 and `None` in 1021.
     pub rotation_point: Option<RotationPoint>,
@@ -132,6 +133,11 @@ fn write_name(w: &mut FieldWriter, field: &str, name: &str, count_bits: usize) -
 }
 
 impl HelmertTransformation {
+    /// DF162 scale correction in parts per million (RTCM 10403.3).
+    pub fn scale_correction_ppm(&self) -> f64 {
+        f64::from(self.ds) * 0.00001
+    }
+
     /// Decode a 1021 or 1022 body (without the transport frame) under
     /// [`RtcmPolicy::Strict`].
     pub fn decode(body: &[u8]) -> Result<Self> {

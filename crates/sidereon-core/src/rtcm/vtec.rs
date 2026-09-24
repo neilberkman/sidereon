@@ -15,6 +15,10 @@ use super::bits::{BitReader, FieldWriter};
 use super::ssr::IGS_SSR_MESSAGE_NUMBER;
 use super::{decode_body, write_trailing, DecodeContext, DecodeResult, RtcmDeparture, RtcmPolicy};
 
+const VTEC_EARTH_RADIUS_M: f64 = 6_370_000.0;
+const EARTH_ROTATION_RAD_S: f64 = 7.292_115_146_7e-5;
+const VTEC_COEFFICIENT_SCALE_TECU: f64 = 0.005;
+
 /// RTCM message number of the RTCM SSR VTEC message.
 const RTCM_VTEC_MESSAGE_NUMBER: u16 = 1264;
 
@@ -75,14 +79,45 @@ pub struct SsrVtecLayer {
     pub sine: Vec<i16>,
 }
 
+/// The VTEC and mapped STEC contribution for one thin ionosphere layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SsrVtecLayerEvaluation {
+    /// Geocentric latitude of the layer pierce point, radians.
+    pub pierce_latitude_rad: f64,
+    /// Geocentric longitude of the layer pierce point, radians in `[-pi, pi]`.
+    pub pierce_longitude_rad: f64,
+    /// Mean-sun-fixed longitude used by the harmonic model, radians in `[0, 2*pi)`.
+    pub sun_fixed_longitude_rad: f64,
+    /// Evaluated VTEC, TECU, after the specification's negative-value clamp.
+    pub vtec_tecu: f64,
+    /// Thin-shell mapping factor `1 / sin(elevation + central_angle)`.
+    pub mapping_factor: f64,
+    /// Layer slant TEC, TECU.
+    pub stec_tecu: f64,
+}
+
+/// Evaluated IGS/RTCM VTEC model at one receiver-satellite geometry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SsrVtecEvaluation {
+    /// Per-layer geometry and TEC contributions, in message order.
+    pub layers: Vec<SsrVtecLayerEvaluation>,
+    /// Sum of layer slant TEC values, TECU.
+    pub stec_tecu: f64,
+    /// First-order ionospheric pseudorange delay at the requested frequency, m.
+    pub pseudorange_delay_m: f64,
+    /// First-order ionospheric carrier-phase advance at the requested frequency, m.
+    pub phase_range_advance_m: f64,
+}
+
 impl SsrVtecLayer {
     /// The number of cosine and sine coefficients a layer of degree `degree`
     /// and order `order` carries: the terms of the sequence the formats state,
     /// `C_nm` for `m = 0..=M`, `n = m..=N` and `S_nm` for `m = 1..=M`,
-    /// `n = m..=N`. For `M <= N` these are the counts of the closed formula of
-    /// IDF039/IDF040, `(N+1)(N+2)/2 - (N-M)(N-M+1)/2` and that less `N + 1`; an
-    /// order above the degree adds no term, as no `n` runs from `m` to `N`
-    /// for `m > N`.
+    /// `n = m..=N`. IGS SSR v1.00 §4.5.1 requires `M <= N`; callers validating
+    /// a message must enforce that relation before using these counts. Lenient
+    /// codec handling of `M > N` uses this degree-limited sequence as an
+    /// explicit nonconforming interpretation; for `M >= N + 2` it differs
+    /// from the IGS coefficient-count formula.
     pub fn coefficient_counts(degree: u8, order: u8) -> (usize, usize) {
         let n = usize::from(degree);
         let terms = |m: usize| (n + 1).saturating_sub(m);
@@ -98,17 +133,243 @@ pub(crate) fn is_rtcm_vtec(message_number: u16) -> bool {
 }
 
 impl SsrVtecMessage {
+    /// Evaluate this model using the IGS SSR v1.00 thin-shell spherical-harmonic
+    /// definition. Satellite coordinates are ECEF at signal transmission and
+    /// are rotated into the reception frame using the geometric light time.
+    /// `gps_seconds_of_day` is the transmitted SSR computation epoch modulo one
+    /// GPS day, not the later time at which a retained model is queried.
+    /// Coefficients are converted from their transmitted integer scale of
+    /// 0.005 TECU; Legendre functions use the fully normalized, no-Condon-Shortley
+    /// convention. The reserved -32768 coefficient sentinel is refused rather
+    /// than interpreted as a physical value. Negative layer VTEC is replaced
+    /// by zero as required by IGS.
+    pub fn evaluate(
+        &self,
+        receiver_ecef_m: [f64; 3],
+        satellite_transmit_ecef_m: [f64; 3],
+        gps_seconds_of_day: f64,
+        frequency_hz: f64,
+    ) -> Result<SsrVtecEvaluation> {
+        if !gps_seconds_of_day.is_finite() || !(0.0..86_400.0).contains(&gps_seconds_of_day) {
+            return Err(Error::InvalidInput(
+                "VTEC computation time must be finite GPS seconds within the day".to_string(),
+            ));
+        }
+        if !frequency_hz.is_finite() || frequency_hz <= 0.0 {
+            return Err(Error::InvalidInput(
+                "VTEC evaluation frequency must be finite and positive".to_string(),
+            ));
+        }
+        if receiver_ecef_m
+            .iter()
+            .chain(&satellite_transmit_ecef_m)
+            .any(|coordinate| !coordinate.is_finite())
+        {
+            return Err(Error::InvalidInput(
+                "VTEC receiver and satellite ECEF coordinates must be finite".to_string(),
+            ));
+        }
+        if self.layers.is_empty() {
+            return Err(Error::InvalidInput(
+                "VTEC evaluation requires at least one ionosphere layer".to_string(),
+            ));
+        }
+        if !(1..=4).contains(&self.layers.len())
+            || !matches!(
+                (self.message_number, self.igs_ssr_version),
+                (RTCM_VTEC_MESSAGE_NUMBER, None) | (IGS_SSR_MESSAGE_NUMBER, Some(0..=7))
+            )
+        {
+            return Err(Error::InvalidInput(
+                "VTEC message identification or layer count is invalid".to_string(),
+            ));
+        }
+
+        let receiver_radius = norm(receiver_ecef_m);
+        let range = norm(subtract(satellite_transmit_ecef_m, receiver_ecef_m));
+        if !receiver_radius.is_finite()
+            || !range.is_finite()
+            || receiver_radius <= 0.0
+            || range <= 0.0
+        {
+            return Err(Error::InvalidInput(
+                "VTEC evaluation requires distinct nonzero receiver and satellite positions"
+                    .to_string(),
+            ));
+        }
+        let light_time_s = range / crate::constants::C_M_S;
+        let earth_rotation = EARTH_ROTATION_RAD_S * light_time_s;
+        let (sin_rotation, cos_rotation) = libm::sincos(earth_rotation);
+        let satellite_ecef_m = [
+            cos_rotation * satellite_transmit_ecef_m[0]
+                + sin_rotation * satellite_transmit_ecef_m[1],
+            -sin_rotation * satellite_transmit_ecef_m[0]
+                + cos_rotation * satellite_transmit_ecef_m[1],
+            satellite_transmit_ecef_m[2],
+        ];
+        let receiver_latitude = libm::asin((receiver_ecef_m[2] / receiver_radius).clamp(-1.0, 1.0));
+        let receiver_longitude = libm::atan2(receiver_ecef_m[1], receiver_ecef_m[0]);
+        let receive_frame_range = norm(subtract(satellite_ecef_m, receiver_ecef_m));
+        if !receive_frame_range.is_finite() || receive_frame_range <= 0.0 {
+            return Err(Error::InvalidInput(
+                "Sagnac-rotated satellite position coincides with the receiver".to_string(),
+            ));
+        }
+        let line_of_sight = scale(
+            subtract(satellite_ecef_m, receiver_ecef_m),
+            1.0 / receive_frame_range,
+        );
+        let (sin_latitude, cos_latitude) = libm::sincos(receiver_latitude);
+        let (sin_longitude, cos_longitude) = libm::sincos(receiver_longitude);
+        let east = [-sin_longitude, cos_longitude, 0.0];
+        let north = [
+            -sin_latitude * cos_longitude,
+            -sin_latitude * sin_longitude,
+            cos_latitude,
+        ];
+        let up = [
+            cos_latitude * cos_longitude,
+            cos_latitude * sin_longitude,
+            sin_latitude,
+        ];
+        let elevation = libm::asin(dot(line_of_sight, up).clamp(-1.0, 1.0));
+        if elevation < 0.0 {
+            return Err(Error::InvalidInput(
+                "VTEC thin-shell evaluation requires a satellite above the local horizon"
+                    .to_string(),
+            ));
+        }
+        let azimuth = libm::atan2(dot(line_of_sight, east), dot(line_of_sight, north));
+
+        let mut layers = Vec::with_capacity(self.layers.len());
+        let mut stec_tecu = 0.0;
+        for layer in &self.layers {
+            if !(1..=16).contains(&layer.degree)
+                || !(1..=16).contains(&layer.order)
+                || layer.order > layer.degree
+            {
+                return Err(Error::InvalidInput(
+                    "VTEC layer must satisfy 1 <= order <= degree <= 16".to_string(),
+                ));
+            }
+            let (cosine_count, sine_count) =
+                SsrVtecLayer::coefficient_counts(layer.degree, layer.order);
+            if layer.cosine.len() != cosine_count || layer.sine.len() != sine_count {
+                return Err(Error::InvalidInput(
+                    "VTEC layer coefficient counts do not match its degree and order".to_string(),
+                ));
+            }
+            if layer
+                .cosine
+                .iter()
+                .chain(&layer.sine)
+                .any(|&coefficient| coefficient == i16::MIN)
+            {
+                return Err(Error::InvalidInput(
+                    "VTEC coefficient -32768 denotes unavailable or out-of-range data".to_string(),
+                ));
+            }
+            let shell_radius = VTEC_EARTH_RADIUS_M + f64::from(layer.height) * 10_000.0;
+            if shell_radius <= receiver_radius {
+                return Err(Error::InvalidInput(
+                    "VTEC ionosphere shell must lie above the receiver".to_string(),
+                ));
+            }
+            let ratio = (receiver_radius / shell_radius * libm::cos(elevation)).clamp(-1.0, 1.0);
+            let central_angle = core::f64::consts::FRAC_PI_2 - elevation - libm::asin(ratio);
+            let (sin_central, cos_central) = libm::sincos(central_angle);
+            let pierce = [
+                cos_central * up[0]
+                    + sin_central * (libm::cos(azimuth) * north[0] + libm::sin(azimuth) * east[0]),
+                cos_central * up[1]
+                    + sin_central * (libm::cos(azimuth) * north[1] + libm::sin(azimuth) * east[1]),
+                cos_central * up[2]
+                    + sin_central * (libm::cos(azimuth) * north[2] + libm::sin(azimuth) * east[2]),
+            ];
+            let pierce_latitude = libm::asin(pierce[2].clamp(-1.0, 1.0));
+            let pierce_longitude = libm::atan2(pierce[1], pierce[0]);
+            let sun_fixed_longitude = (pierce_longitude
+                + (gps_seconds_of_day - 50_400.0) * core::f64::consts::PI / 43_200.0)
+                .rem_euclid(2.0 * core::f64::consts::PI);
+            let legendre = fully_normalized_legendre(
+                pierce_latitude,
+                usize::from(layer.degree),
+                usize::from(layer.order).min(usize::from(layer.degree)),
+            );
+            let mut cosine_index = 0;
+            let mut sine_index = 0;
+            let mut vtec = 0.0;
+            for order in 0..=usize::from(layer.order).min(usize::from(layer.degree)) {
+                for degree in order..=usize::from(layer.degree) {
+                    let phase = order as f64 * sun_fixed_longitude;
+                    let cosine = f64::from(*layer.cosine.get(cosine_index).ok_or_else(|| {
+                        Error::InvalidInput(
+                            "VTEC cosine coefficient list is incomplete".to_string(),
+                        )
+                    })?) * VTEC_COEFFICIENT_SCALE_TECU;
+                    cosine_index += 1;
+                    vtec += cosine * libm::cos(phase) * legendre[degree][order];
+                    if order > 0 {
+                        let sine = f64::from(*layer.sine.get(sine_index).ok_or_else(|| {
+                            Error::InvalidInput(
+                                "VTEC sine coefficient list is incomplete".to_string(),
+                            )
+                        })?) * VTEC_COEFFICIENT_SCALE_TECU;
+                        sine_index += 1;
+                        vtec += sine * libm::sin(phase) * legendre[degree][order];
+                    }
+                }
+            }
+            let vtec_tecu = vtec.max(0.0);
+            let mapping_denominator = libm::sin(elevation + central_angle);
+            if mapping_denominator <= 0.0 {
+                return Err(Error::InvalidInput(
+                    "VTEC thin-shell mapping has a nonpositive elevation factor".to_string(),
+                ));
+            }
+            let mapping_factor = 1.0 / mapping_denominator;
+            let layer_stec = vtec_tecu * mapping_factor;
+            stec_tecu += layer_stec;
+            layers.push(SsrVtecLayerEvaluation {
+                pierce_latitude_rad: pierce_latitude,
+                pierce_longitude_rad: pierce_longitude,
+                sun_fixed_longitude_rad: sun_fixed_longitude,
+                vtec_tecu,
+                mapping_factor,
+                stec_tecu: layer_stec,
+            });
+        }
+        let pseudorange_delay_m = 40.3e16 * stec_tecu / (frequency_hz * frequency_hz);
+        Ok(SsrVtecEvaluation {
+            layers,
+            stec_tecu,
+            pseudorange_delay_m,
+            phase_range_advance_m: -pseudorange_delay_m,
+        })
+    }
+
     /// Decode a 1264 or 4076 subtype 201 body (without the transport frame)
     /// under [`RtcmPolicy::Strict`]: bits after the last field other than the
     /// zero byte alignment are refused.
     pub fn decode(body: &[u8]) -> Result<Self> {
-        decode_body(body, &mut DecodeContext::new(RtcmPolicy::Strict), |r, _| {
-            Self::read(r)
-        })
-        .map_err(Into::into)
+        Self::decode_with_policy(body, RtcmPolicy::Strict).map(|(message, _)| message)
     }
 
-    pub(crate) fn read(r: &mut BitReader<'_>) -> DecodeResult<Self> {
+    /// Decode under `policy`, returning departures read under the lenient
+    /// policy. For an order above degree, lenient decoding follows the
+    /// transmitted coefficient sequence (`m` through `min(M, N)`); this is
+    /// explicitly nonconforming and for `M >= N + 2` differs from the IGS
+    /// count formula. Strict decoding refuses the layer.
+    pub fn decode_with_policy(
+        body: &[u8],
+        policy: RtcmPolicy,
+    ) -> Result<(Self, Vec<RtcmDeparture>)> {
+        let mut ctx = DecodeContext::new(policy);
+        let message = decode_body(body, &mut ctx, Self::read)?;
+        Ok((message, ctx.into_departures()))
+    }
+
+    pub(crate) fn read(r: &mut BitReader<'_>, ctx: &mut DecodeContext) -> DecodeResult<Self> {
         let message_number = r.u(12)? as u16;
         let igs_ssr_version = match message_number {
             RTCM_VTEC_MESSAGE_NUMBER => None,
@@ -139,10 +400,18 @@ impl SsrVtecMessage {
         let quality_indicator = r.u(9)? as u16;
         let layer_count = r.u(2)? as usize + 1;
         let mut layers = Vec::with_capacity(layer_count);
-        for _ in 0..layer_count {
+        for layer_index in 0..layer_count {
             let height = r.u(8)? as u8;
             let degree = r.u(4)? as u8 + 1;
             let order = r.u(4)? as u8 + 1;
+            if order > degree {
+                ctx.depart(RtcmDeparture::OrderExceedsDegree {
+                    message_number,
+                    layer_index,
+                    degree,
+                    order,
+                })?;
+            }
             let (cosines, sines) = SsrVtecLayer::coefficient_counts(degree, order);
             let mut cosine = Vec::with_capacity(cosines);
             for _ in 0..cosines {
@@ -182,7 +451,8 @@ impl SsrVtecMessage {
     /// [`Error::InvalidInput`] naming what the message cannot state: a message
     /// number other than 1264 and 4076, an IGS SSR version held for 1264 or
     /// missing for 4076, no layer or more than four, a degree or order outside
-    /// `1..=16`, a coefficient list whose length differs from the count the
+    /// `1..=16`, an order greater than degree under strict policy, a coefficient
+    /// list whose length differs from the count the
     /// degree and order give ([`SsrVtecLayer::coefficient_counts`]), or a value
     /// wider than its field.
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -190,10 +460,13 @@ impl SsrVtecMessage {
             .map(|(body, _)| body)
     }
 
-    /// Encode this body under `policy`. Under [`RtcmPolicy::Lenient`] nonempty
-    /// `trailing_bits` are written after the last field and reported as an
-    /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
-    /// under both policies.
+    /// Encode this body under `policy`. Under [`RtcmPolicy::Lenient`], an
+    /// order above degree uses the degree-limited coefficient sequence and is
+    /// reported as [`RtcmDeparture::OrderExceedsDegree`]; for `M >= N + 2`
+    /// this interpretation differs from the IGS count formula. Nonempty
+    /// `trailing_bits` are also written and reported as
+    /// [`RtcmDeparture::TrailingBits`]. Other refusals apply under both
+    /// policies.
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         let number = self.message_number;
         match (number, self.igs_ssr_version) {
@@ -240,6 +513,7 @@ impl SsrVtecMessage {
             9,
         )?;
         w.u("number of layers", self.layers.len() as u64 - 1, 2)?;
+        let mut departures = Vec::new();
         for (index, layer) in self.layers.iter().enumerate() {
             for (name, value) in [("degree", layer.degree), ("order", layer.order)] {
                 if !(1..=16).contains(&value) {
@@ -247,6 +521,20 @@ impl SsrVtecMessage {
                         "RTCM {number} VTEC layer {index} {name} {value} is outside 1..=16"
                     )));
                 }
+            }
+            if layer.order > layer.degree {
+                let departure = RtcmDeparture::OrderExceedsDegree {
+                    message_number: number,
+                    layer_index: index,
+                    degree: layer.degree,
+                    order: layer.order,
+                };
+                if policy == RtcmPolicy::Strict {
+                    return Err(Error::InvalidInput(format!(
+                        "{departure} (refused under the strict policy)"
+                    )));
+                }
+                departures.push(departure);
             }
             let (cosines, sines) = SsrVtecLayer::coefficient_counts(layer.degree, layer.order);
             for (name, held, count) in [
@@ -280,13 +568,400 @@ impl SsrVtecMessage {
                 w.i(format_args!("layer {index} coefficient"), i64::from(c), 16)?;
             }
         }
-        let departures = write_trailing(&mut w, &self.trailing_bits, policy)?;
+        departures.extend(write_trailing(&mut w, &self.trailing_bits, policy)?);
         Ok((w.into_bytes(), departures))
     }
+}
+
+fn norm(vector: [f64; 3]) -> f64 {
+    libm::sqrt(dot(vector, vector))
+}
+
+fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
+fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+}
+
+fn scale(vector: [f64; 3], factor: f64) -> [f64; 3] {
+    [vector[0] * factor, vector[1] * factor, vector[2] * factor]
+}
+
+fn fully_normalized_legendre(latitude_rad: f64, degree: usize, order: usize) -> [[f64; 17]; 17] {
+    let x = libm::sin(latitude_rad);
+    let cos_latitude = libm::cos(latitude_rad);
+    let mut values = [[0.0; 17]; 17];
+    values[0][0] = 1.0;
+    for m in 0..=order {
+        if m > 0 {
+            values[m][m] = (2 * m - 1) as f64 * cos_latitude * values[m - 1][m - 1];
+        }
+        if m < degree {
+            values[m + 1][m] = (2 * m + 1) as f64 * x * values[m][m];
+        }
+        for n in (m + 2)..=degree {
+            values[n][m] = ((2 * n - 1) as f64 * x * values[n - 1][m]
+                - (n + m - 1) as f64 * values[n - 2][m])
+                / (n - m) as f64;
+        }
+    }
+    for n in 0..=degree {
+        for m in 0..=n.min(order) {
+            let mut factorial_ratio = 1.0;
+            for k in (n - m + 1)..=(n + m) {
+                factorial_ratio /= k as f64;
+            }
+            let multiplicity = if m == 0 { 1.0 } else { 2.0 };
+            let normalization = libm::sqrt((2 * n + 1) as f64 * multiplicity * factorial_ratio);
+            values[n][m] *= normalization;
+        }
+    }
+    values
 }
 
 impl super::TrailingBits for SsrVtecMessage {
     fn trailing_bits_mut(&mut self) -> &mut Vec<bool> {
         &mut self.trailing_bits
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn packed(fields: &[(u64, usize)]) -> Vec<u8> {
+        let bit_count: usize = fields.iter().map(|(_, width)| width).sum();
+        let mut bytes = vec![0u8; bit_count.div_ceil(8)];
+        let mut bit = 0;
+        for &(value, width) in fields {
+            for shift in (0..width).rev() {
+                if value >> shift & 1 != 0 {
+                    bytes[bit / 8] |= 1 << (7 - bit % 8);
+                }
+                bit += 1;
+            }
+        }
+        bytes
+    }
+
+    fn twos(value: i16) -> u64 {
+        u64::from(value as u16)
+    }
+
+    fn malformed_order_body(message_number: u16, order: u8) -> Vec<u8> {
+        let mut fields = vec![(u64::from(message_number), 12)];
+        if message_number == 4076 {
+            fields.extend([(1, 3), (u64::from(IGS_SSR_VTEC_SUBTYPE), 8)]);
+        }
+        fields.extend([
+            (50_400, 20),
+            (0, 4),
+            (0, 1),
+            (3, 4),
+            (0x1234, 16),
+            (2, 4),
+            (7, 9),
+            (0, 2),
+            (45, 8),
+            (0, 4),
+            (u64::from(order - 1), 4),
+            (twos(100), 16),
+            (twos(-200), 16),
+            (twos(300), 16),
+            (twos(400), 16),
+        ]);
+        packed(&fields)
+    }
+
+    fn constant_model(cosine: Vec<i16>) -> SsrVtecMessage {
+        let (degree, order, sine) = if cosine.len() == 3 {
+            (1, 1, vec![0])
+        } else {
+            (1, 0, Vec::new())
+        };
+        SsrVtecMessage {
+            message_number: 4076,
+            igs_ssr_version: Some(1),
+            epoch_time_s: 50_400,
+            update_interval: 0,
+            multiple_message: false,
+            iod_ssr: 0,
+            provider_id: 256,
+            solution_id: 0,
+            quality_indicator: 1,
+            layers: vec![SsrVtecLayer {
+                height: 45,
+                degree,
+                order,
+                cosine,
+                sine,
+            }],
+            trailing_bits: Vec::new(),
+        }
+    }
+
+    /// Independent closed-form check of IGS SSR v1.00 §4.5.1: at the north
+    /// pole P00=1 and fully normalized P10=sqrt(3); IDF039 scales each raw
+    /// coefficient by 0.005 TECU. Zenith gives a unit thin-shell mapping factor.
+    #[test]
+    fn vtec_matches_igs_v100_harmonic_scale_mapping_and_range_signs() {
+        let model = constant_model(vec![100, 200, 0]);
+        let evaluated = model
+            .evaluate(
+                [0.0, 0.0, VTEC_EARTH_RADIUS_M],
+                [0.0, 0.0, 26_000_000.0],
+                50_400.0,
+                1.0e9,
+            )
+            .unwrap();
+        let expected_vtec_tecu = 0.5 + libm::sqrt(3.0);
+        assert!((evaluated.layers[0].vtec_tecu - expected_vtec_tecu).abs() < 1.0e-12);
+        assert!((evaluated.layers[0].mapping_factor - 1.0).abs() < 1.0e-12);
+        assert!((evaluated.stec_tecu - expected_vtec_tecu).abs() < 1.0e-12);
+        let expected_delay_m = 40.3e16 * expected_vtec_tecu / 1.0e18;
+        assert!((evaluated.pseudorange_delay_m - expected_delay_m).abs() < 1.0e-12);
+        assert_eq!(evaluated.phase_range_advance_m, -expected_delay_m);
+    }
+
+    /// The IGS SSR v1.00 mean-sun-fixed longitude rotates with computation
+    /// time. At an equatorial zenith pierce point, P11=sqrt(3), so a 4-hour
+    /// offset from 14:00 gives an independently calculable m=1 cosine/sine sum.
+    #[test]
+    fn vtec_matches_igs_sun_fixed_longitude_harmonics() {
+        let mut model = constant_model(vec![0, 0, 100]);
+        model.layers[0].sine = vec![200];
+        let evaluated = model
+            .evaluate(
+                [VTEC_EARTH_RADIUS_M, 0.0, 0.0],
+                [26_000_000.0, 0.0, 0.0],
+                64_800.0,
+                1.0e9,
+            )
+            .unwrap();
+        let phase = core::f64::consts::PI / 3.0;
+        let expected_vtec = libm::sqrt(3.0) * (0.5 * libm::cos(phase) + libm::sin(phase));
+        assert!((evaluated.layers[0].sun_fixed_longitude_rad - phase).abs() < 1.0e-12);
+        assert!((evaluated.layers[0].vtec_tecu - expected_vtec).abs() < 1.0e-12);
+        assert!((evaluated.stec_tecu - expected_vtec).abs() < 1.0e-12);
+    }
+
+    /// At a polar receiver, rotating the satellite around the Earth axis does
+    /// not change its 30-degree elevation. The pierce latitude and shell
+    /// mapping therefore have the direct spherical-trigonometry values below,
+    /// independently of the implementation's ECEF basis calculation.
+    #[test]
+    fn vtec_uses_igs_thin_shell_geometry_off_zenith() {
+        let model = constant_model(vec![100, 200, 0]);
+        let elevation = core::f64::consts::FRAC_PI_6;
+        let range_m: f64 = 20_000_000.0;
+        let satellite = [
+            range_m * libm::cos(elevation),
+            0.0,
+            VTEC_EARTH_RADIUS_M + range_m * libm::sin(elevation),
+        ];
+        let evaluated = model
+            .evaluate([0.0, 0.0, VTEC_EARTH_RADIUS_M], satellite, 50_400.0, 1.0e9)
+            .unwrap();
+        let shell_radius_m = VTEC_EARTH_RADIUS_M + 450_000.0;
+        let central_angle = core::f64::consts::FRAC_PI_2
+            - elevation
+            - libm::asin(VTEC_EARTH_RADIUS_M / shell_radius_m * libm::cos(elevation));
+        let expected_mapping = 1.0 / libm::sin(elevation + central_angle);
+        let pierce_latitude = core::f64::consts::FRAC_PI_2 - central_angle;
+        let expected_vtec = 0.5 + libm::sqrt(3.0) * libm::sin(pierce_latitude);
+        assert!((evaluated.layers[0].mapping_factor - expected_mapping).abs() < 1.0e-12);
+        assert!((evaluated.layers[0].pierce_latitude_rad - pierce_latitude).abs() < 1.0e-12);
+        assert!((evaluated.layers[0].vtec_tecu - expected_vtec).abs() < 1.0e-12);
+        assert!((evaluated.stec_tecu - expected_vtec * expected_mapping).abs() < 1.0e-12);
+    }
+
+    /// IGS SSR v1.00 §4.5.1 requires negative layer VTEC to contribute zero,
+    /// rather than a negative ionospheric delay.
+    #[test]
+    fn negative_vtec_is_clamped_per_igs_v100() {
+        let model = constant_model(vec![-100, 0, 0]);
+        let evaluated = model
+            .evaluate(
+                [0.0, 0.0, VTEC_EARTH_RADIUS_M],
+                [0.0, 0.0, 26_000_000.0],
+                50_400.0,
+                1.0e9,
+            )
+            .unwrap();
+        assert_eq!(evaluated.layers[0].vtec_tecu, 0.0);
+        assert_eq!(evaluated.stec_tecu, 0.0);
+        assert_eq!(evaluated.pseudorange_delay_m, 0.0);
+    }
+
+    /// IDF039/IDF040 reserve -163.84 TECU (raw -32768) for unavailable or
+    /// out-of-range coefficients; it is not a negative physical coefficient.
+    #[test]
+    fn unavailable_vtec_coefficient_is_not_evaluated_as_zero_tec() {
+        let model = constant_model(vec![i16::MIN]);
+        let result = model.evaluate(
+            [0.0, 0.0, VTEC_EARTH_RADIUS_M],
+            [0.0, 0.0, 26_000_000.0],
+            50_400.0,
+            1.0e9,
+        );
+        assert!(matches!(result, Err(Error::InvalidInput(_))));
+    }
+
+    #[test]
+    fn vtec_native_and_igs_valid_packed_vectors_obey_order_at_most_degree() {
+        let native_fields = [
+            (1264, 12),
+            (50_400, 20),
+            (0, 4),
+            (0, 1),
+            (3, 4),
+            (0x1234, 16),
+            (2, 4),
+            (7, 9),
+            (0, 2),
+            (45, 8),
+            (1, 4),
+            (0, 4),
+            (twos(100), 16),
+            (twos(-200), 16),
+            (twos(300), 16),
+            (twos(400), 16),
+            (twos(-500), 16),
+            (twos(0), 16),
+            (twos(50), 16),
+        ];
+        let native_body = packed(&native_fields);
+        let native = SsrVtecMessage::decode(&native_body).expect("packed native VTEC");
+        assert_eq!(native.message_number, 1264);
+        assert_eq!(native.igs_ssr_version, None);
+        assert_eq!(native.layers[0].degree, 2);
+        assert_eq!(native.layers[0].order, 1);
+        assert_eq!(native.layers[0].cosine, [100, -200, 300, 400, -500]);
+        assert_eq!(native.layers[0].sine, [0, 50]);
+        assert_eq!(native.encode().expect("encode native VTEC"), native_body);
+
+        let igs_fields = [
+            (4076, 12),
+            (1, 3),
+            (201, 8),
+            (50_400, 20),
+            (0, 4),
+            (0, 1),
+            (3, 4),
+            (0x1234, 16),
+            (2, 4),
+            (7, 9),
+            (0, 2),
+            (45, 8),
+            (1, 4),
+            (0, 4),
+            (twos(-1), 16),
+            (twos(2), 16),
+            (twos(0), 16),
+            (twos(3), 16),
+            (twos(-4), 16),
+            (twos(5), 16),
+            (twos(6), 16),
+        ];
+        let igs_body = packed(&igs_fields);
+        let igs = SsrVtecMessage::decode(&igs_body).expect("packed IGS VTEC");
+        assert_eq!(igs.message_number, 4076);
+        assert_eq!(igs.igs_ssr_version, Some(1));
+        assert_eq!(igs.layers[0].degree, 2);
+        assert_eq!(igs.layers[0].order, 1);
+        assert_eq!(igs.layers[0].cosine, [-1, 2, 0, 3, -4]);
+        assert_eq!(igs.layers[0].sine, [5, 6]);
+        assert_eq!(igs.encode().expect("encode IGS VTEC"), igs_body);
+    }
+
+    #[test]
+    fn vtec_order_above_degree_policy_round_trips_degree_limited_wire_sequence() {
+        for message_number in [1264, 4076] {
+            for order in [2, 3] {
+                let body = malformed_order_body(message_number, order);
+                let departure = RtcmDeparture::OrderExceedsDegree {
+                    message_number,
+                    layer_index: 0,
+                    degree: 1,
+                    order,
+                };
+
+                assert!(SsrVtecMessage::decode(&body).is_err());
+                assert!(crate::rtcm::Message::decode(&body).is_err());
+
+                let (decoded, departures) =
+                    SsrVtecMessage::decode_with_policy(&body, RtcmPolicy::Lenient)
+                        .expect("lenient VTEC sequence interpretation");
+                assert_eq!(departures, vec![departure.clone()]);
+                assert_eq!(decoded.layers[0].degree, 1);
+                assert_eq!(decoded.layers[0].order, order);
+                assert_eq!(decoded.layers[0].cosine, [100, -200, 300]);
+                assert_eq!(decoded.layers[0].sine, [400]);
+                assert!(decoded
+                    .evaluate(
+                        [0.0, 0.0, VTEC_EARTH_RADIUS_M],
+                        [0.0, 0.0, 26_000_000.0],
+                        50_400.0,
+                        1.0e9,
+                    )
+                    .is_err());
+
+                let (generic, generic_departures) =
+                    crate::rtcm::Message::decode_with_policy(&body, RtcmPolicy::Lenient)
+                        .expect("generic lenient VTEC decode");
+                assert!(matches!(&generic, crate::rtcm::Message::SsrVtec(_)));
+                assert_eq!(generic_departures, vec![departure.clone()]);
+                let (generic_encoded, generic_encode_departures) = generic
+                    .encode_with_policy(RtcmPolicy::Lenient)
+                    .expect("generic lenient VTEC encode");
+                assert_eq!(generic_encode_departures, vec![departure.clone()]);
+                assert_eq!(generic_encoded, body);
+
+                assert!(decoded.encode().is_err());
+                let (encoded, encode_departures) = decoded
+                    .encode_with_policy(RtcmPolicy::Lenient)
+                    .expect("lenient VTEC encode");
+                assert_eq!(encode_departures, vec![departure]);
+                assert_eq!(encoded, body);
+            }
+        }
+    }
+
+    #[test]
+    fn vtec_sagnac_rotation_matches_independent_geometry() {
+        let model = constant_model(vec![100, 0, 0]);
+        let receiver = [VTEC_EARTH_RADIUS_M, 0.0, 0.0];
+        let satellite_tx = [16_370_000.0, 20_000_000.0, 0.0];
+        let dx_tx = satellite_tx[0] - receiver[0];
+        let dy_tx = satellite_tx[1] - receiver[1];
+        let dz_tx = satellite_tx[2] - receiver[2];
+        let geometric_range = libm::sqrt(dx_tx * dx_tx + dy_tx * dy_tx + dz_tx * dz_tx);
+        let rotation = EARTH_ROTATION_RAD_S * geometric_range / crate::constants::C_M_S;
+        let satellite_rx = [
+            libm::cos(rotation) * satellite_tx[0] + libm::sin(rotation) * satellite_tx[1],
+            -libm::sin(rotation) * satellite_tx[0] + libm::cos(rotation) * satellite_tx[1],
+            satellite_tx[2],
+        ];
+        let dx = satellite_rx[0] - receiver[0];
+        let dy = satellite_rx[1] - receiver[1];
+        let range_rx = libm::sqrt(dx * dx + dy * dy);
+        let elevation = libm::asin((dx / range_rx).clamp(-1.0, 1.0));
+        let azimuth = libm::atan2(dy, 0.0);
+        let shell_radius = VTEC_EARTH_RADIUS_M + 450_000.0;
+        let central = core::f64::consts::FRAC_PI_2
+            - elevation
+            - libm::asin(VTEC_EARTH_RADIUS_M / shell_radius * libm::cos(elevation));
+        let expected_pierce_longitude = central * libm::sin(azimuth);
+
+        let evaluated = model
+            .evaluate(receiver, satellite_tx, 50_400.0, 1.0e9)
+            .expect("nonzero-Sagnac VTEC geometry");
+        assert!(rotation > 1.0e-6);
+        assert!(expected_pierce_longitude.abs() > 1.0e-3);
+        assert!(
+            (evaluated.layers[0].pierce_longitude_rad - expected_pierce_longitude).abs() < 1.0e-10
+        );
     }
 }

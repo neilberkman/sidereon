@@ -16,7 +16,7 @@ use super::{
     parse_nav_file, week_tow_native_j2000_s, BroadcastGroupDelays, BroadcastIssue, BroadcastRecord,
     CnavParameters, GlonassRecord, IonoCorrections, IonosphereFrame, NavDiagnostic, NavHeader,
     NavMessage, NavParseError, SbasRecord, SkippedNavBlock, EPHPOS_STEP_S, GLONASS_MAX_AGE_S,
-    SBAS_MAX_AGE_S,
+    J2000_GPS_SECONDS_OF_WEEK, SBAS_MAX_AGE_S,
 };
 use super::{ephpos_stepped_tk, query_native_time, toe_native_j2000_s};
 use crate::astro::time::model::GnssWeekTow;
@@ -694,6 +694,68 @@ impl BroadcastStore {
         }
         Some((rec, t_j2000_s - rec.t0_j2000_s()))
     }
+
+    /// SBAS broadcast state named by an SSR orbit issue, selecting among only the
+    /// matching records at the observation epoch and evaluating the selected record at
+    /// the transmit epoch. IGS SSR names `IODN`; native RTCM SSR names `t0 mod 8192 s`
+    /// in 16-second units. RINEX SBAS navigation records do not carry the native IOD
+    /// CRC, so that field is retained in the SSR correction but cannot be cross-checked
+    /// against this broadcast source.
+    pub(crate) fn sbas_ssr_state(
+        &self,
+        sat: GnssSatelliteId,
+        issue: u32,
+        igs_ssr: bool,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<([f64; 3], [f64; 3], f64)> {
+        if sat.system != GnssSystem::Sbas
+            || !t_j2000_s.is_finite()
+            || !selection_j2000_s.is_finite()
+        {
+            return None;
+        }
+        let mut best: Option<(usize, f64)> = None;
+        for &index in &self.sbas_selection {
+            let record = &self.sbas[index];
+            if record.satellite_id != sat {
+                continue;
+            }
+            let age = (record.t0_j2000_s() - selection_j2000_s).abs();
+            if age > SBAS_MAX_AGE_S || !sbas_issue_matches(record, issue, igs_ssr) {
+                continue;
+            }
+            if best.is_none_or(|(_, best_age)| age <= best_age) {
+                best = Some((index, age));
+            }
+        }
+        let record = &self.sbas[best?.0];
+        if self.exclude_unusable && sbas_excluded(record) {
+            return None;
+        }
+        let t = t_j2000_s - record.t0_j2000_s();
+        let position = record.position_at(t);
+        let next_position = record.position_at(ephpos_stepped_tk(t));
+        let velocity = [
+            (next_position[0] - position[0]) / EPHPOS_STEP_S,
+            (next_position[1] - position[1]) / EPHPOS_STEP_S,
+            (next_position[2] - position[2]) / EPHPOS_STEP_S,
+        ];
+        let clock = record.af0_s + record.af1_s_s * t;
+        Some((position, velocity, clock))
+    }
+}
+
+fn sbas_issue_matches(record: &SbasRecord, issue: u32, igs_ssr: bool) -> bool {
+    if igs_ssr {
+        return issue <= u32::from(u8::MAX) && record.iodn == Some(f64::from(issue));
+    }
+    if issue > 0x1FF {
+        return false;
+    }
+    let t0_sow = (record.t0_j2000_s().rem_euclid(SECONDS_PER_WEEK) + J2000_GPS_SECONDS_OF_WEEK)
+        .rem_euclid(SECONDS_PER_WEEK);
+    (t0_sow / 16.0).floor() as u32 % 512 == issue
 }
 
 /// RTKLIB `MAX_VAR_EPH`: the largest ephemeris variance `satexclude` accepts, m².
