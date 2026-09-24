@@ -274,6 +274,7 @@ static int decode_stream(const char *path, int week, double tow)
         if (is_obs_type(type)) rtcm.obs.n = 0;
         if (is_ssr_type(type)) memset(rtcm.ssr, 0, sizeof rtcm.ssr);
         rtcm.ephsat = 0;
+        rtcm.msg[0] = '\0';
         ret = decode_one(&rtcm, buf + at, frame_len);
         t = time2gpst(rtcm.time, &wk);
         printf("{\"offset\":%ld,\"type\":%d,\"ret\":%d,\"staid\":%d,\"week\":%d,", at, type,
@@ -289,6 +290,11 @@ static int decode_stream(const char *path, int week, double tow)
             printf("]}");
         }
         if (is_ssr_type(type)) print_ssr(&rtcm);
+        if (type == 1029 && ret == 0) {
+            printf(",\"text\":\"");
+            for (const char *c = rtcm.msg; *c; c++) printf("%02x", (unsigned char)*c);
+            printf("\"");
+        }
         printf("}\n");
     }
     free(buf);

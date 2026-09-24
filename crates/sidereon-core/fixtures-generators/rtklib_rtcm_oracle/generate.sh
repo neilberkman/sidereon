@@ -74,3 +74,7 @@ decode rtk2go_1230.rtcm3 $RTK2GO
 
 # IGS SSR 4076.
 decode rtklib_encoded_4076.rtcm3 $SSRA03
+
+# System parameters 1013 (RTKLIB reads none of it) and text 1029.
+decode rtk2go_1013.rtcm3 $RTK2GO
+decode text_1029.rtcm3 $RTK2GO

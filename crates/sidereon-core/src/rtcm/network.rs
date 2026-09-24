@@ -23,7 +23,7 @@ use super::{
 /// last record other than the zero byte alignment are refused; under the
 /// lenient policy the complete records are read, the bits of a cut record or
 /// of a departing tail are returned, and the departure is recorded.
-fn read_counted<T>(
+pub(super) fn read_counted<T>(
     r: &mut BitReader<'_>,
     ctx: &mut DecodeContext,
     message_number: u16,
@@ -69,7 +69,7 @@ fn read_counted<T>(
 /// Check a header record count against the records to be written: equal, or
 /// under the lenient policy larger (a message read leniently from a short
 /// body), which is reported. Returns whether the count is short.
-fn check_count(
+pub(super) fn check_count(
     message_number: u16,
     declared: usize,
     records: usize,
@@ -95,7 +95,7 @@ fn check_count(
 
 /// Write the kept bits after the records: the cut record's bits after a short
 /// count, which the count's departure reports, or the trailing bits.
-fn write_tail(
+pub(super) fn write_tail(
     w: &mut FieldWriter,
     short: bool,
     bits: &[bool],

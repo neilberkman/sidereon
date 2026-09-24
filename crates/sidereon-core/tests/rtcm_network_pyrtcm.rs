@@ -1,8 +1,9 @@
-//! Network RTK and coordinate transformation messages against an independent
-//! layout reference.
+//! System, text, network RTK and coordinate transformation messages against an
+//! independent layout reference.
 //!
-//! RTKLIB does not decode 1014-1017, 1021-1027, 1030-1032, 1034, 1035 or
-//! 1037-1039, so these messages are checked against pyrtcm 1.2.0's message
+//! RTKLIB does not decode 1013, 1014-1017, 1021-1027, 1030-1032, 1034, 1035 or
+//! 1037-1039, and reads 1029 by its character count rather than its code-unit
+//! count, so these messages are checked against pyrtcm 1.2.0's message
 //! layouts: `fixtures-generators/pyrtcm_layouts/generate_network_frames.py`
 //! writes four frames of each message in pyrtcm's field order and widths, with
 //! every field drawn over its whole range (the extremes included), checks that
@@ -20,6 +21,32 @@ const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rtcm/netw
 fn wire_values(message: &Message) -> Vec<i64> {
     let mut v = Vec::new();
     match message {
+        Message::SystemParameters(m) => {
+            v.extend([
+                i64::from(m.reference_station_id),
+                i64::from(m.mjd),
+                i64::from(m.seconds_of_day),
+                i64::from(m.announcement_count),
+                i64::from(m.leap_seconds),
+            ]);
+            for a in &m.announcements {
+                v.extend([
+                    i64::from(a.message_number),
+                    i64::from(a.synchronous),
+                    i64::from(a.interval),
+                ]);
+            }
+        }
+        Message::Text(m) => {
+            v.extend([
+                i64::from(m.reference_station_id),
+                i64::from(m.mjd),
+                i64::from(m.seconds_of_day),
+                i64::from(m.character_count),
+                m.code_units.len() as i64,
+            ]);
+            v.extend(m.code_units.iter().map(|&u| i64::from(u)));
+        }
         Message::NetworkAuxiliaryStation(m) => v.extend([
             i64::from(m.network_id),
             i64::from(m.subnetwork_id),
@@ -221,7 +248,7 @@ fn wire_values(message: &Message) -> Vec<i64> {
 /// decodes strictly to the values written, field for field in wire order, and
 /// re-encodes to its exact body.
 #[test]
-fn network_rtk_and_transformation_messages_match_pyrtcm_layouts() {
+fn system_text_network_and_transformation_messages_match_pyrtcm_layouts() {
     let bytes = std::fs::read(format!("{DIR}pyrtcm_network_rtk.rtcm3")).expect("frames");
     let reference: Value = serde_json::from_str(
         &std::fs::read_to_string(format!("{DIR}pyrtcm_network_rtk.json")).expect("values"),
@@ -260,5 +287,5 @@ fn network_rtk_and_transformation_messages_match_pyrtcm_layouts() {
         frames.len(),
         types.len()
     );
-    assert_eq!(types.len(), 19);
+    assert_eq!(types.len(), 21);
 }

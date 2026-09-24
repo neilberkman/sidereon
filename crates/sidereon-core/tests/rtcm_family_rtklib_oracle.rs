@@ -26,6 +26,9 @@
 //! - `rtklib_encoded_msm1_to_msm4.rtcm3`: RTKLIB's encoder output (`encode-msm`)
 //!   from the MSM7 observations of RTKLIB's test stream
 //!   `test/data/rcvraw/GMSD7_20121014.rtcm3`, first 12 epochs.
+//! - `rtk2go_1013.rtcm3`: the 1013 frames of the `sejongnav` capture.
+//! - `text_1029.rtcm3`: 1029 frames written by
+//!   `fixtures-generators/pyrtcm_layouts/generate_network_frames.py`.
 //! - `rtk2go_1230.rtcm3`: the first two 1230 frames of each capture above and of
 //!   `HEYT` and `FF-Malar`, byte for byte.
 //! - `rtklib_encoded_1041.rtcm3`: RTKLIB's encoder output (`encode-1041`), one
@@ -1238,4 +1241,45 @@ fn igs_ssr_matches_rtklib() {
     );
     assert_eq!(subtypes.len(), 42, "every satellite subtype");
     assert!(values > 0);
+}
+
+/// Real 1013 frames decode strictly and round-trip; RTKLIB `decode_type1013`
+/// reads nothing from them. 1029 frames with ASCII and multi-byte UTF-8 text:
+/// the text is the DF139 count of code units, and RTKLIB `decode_type1029`,
+/// which reads the DF138 count of characters as bytes, stores the first
+/// `character_count` of those code units, so a multi-byte text reaches it cut
+/// short.
+#[test]
+fn system_parameters_and_text_match_rtklib() {
+    let frames = fixture("rtk2go_1013.rtcm3");
+    assert!(!frames.is_empty());
+    for frame in &frames {
+        let Message::SystemParameters(parameters) = &frame.message else {
+            panic!("frame at {} is not 1013", frame.offset);
+        };
+        assert_eq!(
+            usize::from(parameters.announcement_count),
+            parameters.announcements.len()
+        );
+    }
+    let frames = fixture("text_1029.rtcm3");
+    let mut cut = 0;
+    for frame in &frames {
+        let Message::Text(text) = &frame.message else {
+            panic!("frame at {} is not 1029", frame.offset);
+        };
+        assert!(text.text().is_ok());
+        assert_eq!(
+            text.text().expect("UTF-8").chars().count(),
+            usize::from(text.character_count)
+        );
+        let stored = frame.rtklib["text"].as_str().expect("text");
+        let expected: String = text.code_units[..usize::from(text.character_count).min(126)]
+            .iter()
+            .map(|unit| format!("{unit:02x}"))
+            .collect();
+        assert_eq!(stored, expected, "frame at {}", frame.offset);
+        cut += usize::from(usize::from(text.character_count) < text.code_units.len());
+    }
+    assert!(cut > 0, "a multi-byte text is among the frames");
 }

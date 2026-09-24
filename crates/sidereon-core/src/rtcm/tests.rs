@@ -1550,6 +1550,8 @@ fn message_enum_is_matched_exhaustively_without_wildcard() {
         Message::LegacyObservations(o) => o.message_number,
         Message::StationCoordinates(s) => s.message_number,
         Message::AntennaDescriptor(a) => a.message_number,
+        Message::SystemParameters(_) => 1013,
+        Message::Text(_) => 1029,
         Message::NetworkAuxiliaryStation(_) => 1014,
         Message::NetworkCorrectionDifferences(m) => m.message_number,
         Message::HelmertTransformation(m) => m.message_number,
@@ -4440,4 +4442,64 @@ fn transformation_messages_round_trip_with_their_field_widths() {
             projection.message_number()
         );
     }
+}
+
+/// 1013 announcements and a 1029 text round-trip; the 1029 text is the DF139
+/// count of UTF-8 code units, the DF138 character count kept apart from it.
+#[test]
+fn system_parameters_and_text_round_trip() {
+    let parameters = SystemParameters {
+        reference_station_id: 4095,
+        mjd: 61_000,
+        seconds_of_day: 86_399,
+        announcement_count: 2,
+        leap_seconds: 18,
+        announcements: vec![
+            MessageAnnouncement {
+                message_number: 1077,
+                synchronous: true,
+                interval: 10,
+            },
+            MessageAnnouncement {
+                message_number: 1230,
+                synchronous: false,
+                interval: 65_535,
+            },
+        ],
+        trailing_bits: Vec::new(),
+    };
+    let body = parameters.encode().unwrap();
+    assert_eq!(
+        body.len(),
+        (12 + 12 + 16 + 17 + 5 + 8 + 2 * 29usize).div_ceil(8)
+    );
+    assert_eq!(SystemParameters::decode(&body).unwrap(), parameters);
+    let mut wrong = parameters.clone();
+    wrong.announcement_count = 1;
+    assert!(wrong.encode().is_err());
+
+    let text = TextMessage {
+        reference_station_id: 1,
+        mjd: 61_000,
+        seconds_of_day: 1,
+        character_count: 5,
+        code_units: "Zürch".as_bytes().to_vec(),
+        trailing_bits: Vec::new(),
+    };
+    let body = text.encode().unwrap();
+    assert_eq!(
+        body.len(),
+        (12 + 12 + 16 + 17 + 7 + 8 + 6 * 8usize).div_ceil(8)
+    );
+    let decoded = TextMessage::decode(&body).unwrap();
+    assert_eq!(decoded, text);
+    assert_eq!(decoded.text().unwrap(), "Zürch");
+    assert_eq!(Message::decode(&body).unwrap(), Message::Text(text.clone()));
+    let mut long = text;
+    long.code_units = vec![b'x'; 256];
+    assert!(long
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("code unit count 256"));
 }
