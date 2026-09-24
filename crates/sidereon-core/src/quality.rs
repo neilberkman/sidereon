@@ -1442,6 +1442,8 @@ mod tests {
             },
             robust: None,
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            qzss_clock: crate::spp::QzssClock::Gps,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
         }
     }
 

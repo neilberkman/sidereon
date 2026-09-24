@@ -30,7 +30,7 @@ use crate::astro::time::model::{Instant, InstantRepr};
 use crate::error::{Error, Result};
 use crate::frame::Wgs84Geodetic;
 
-pub(crate) use saastamoinen::slant_components;
+pub(crate) use saastamoinen::{rtklib_tropmodel_m, slant_components};
 pub use zwd::{
     tropo_delay_xyz as tropo_zwd_delay_xyz, zenith_wet_delay as zwd_zenith_wet_delay,
     AltitudeClamp, ZwdEpoch, ZwdProfile, ZwdSlantOptions,

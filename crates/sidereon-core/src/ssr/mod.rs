@@ -4193,6 +4193,58 @@ impl EphemerisSource for SsrCorrectedEphemeris<'_> {
             .transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
             .map(Validated::ok))
     }
+
+    /// RTKLIB `satpos_ssr`'s `var_urassr` of the satellite's SSR URA for an SSR-corrected
+    /// state, the broadcast record's variance for a broadcast fallback state, and `0.0`
+    /// where this source returns no state.
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> f64 {
+        if self.store.is_satellite_excluded(sat, t_j2000_s) {
+            return 0.0;
+        }
+        match self.ssr_corrected_state(sat, t_j2000_s, selection_j2000_s) {
+            Ok(_) => ssr_ura_variance_m2(self.store.ura_index(sat)),
+            Err(SsrStateUnavailable::Ut1OutsideCoverage(_)) => 0.0,
+            Err(_) => {
+                if self
+                    .broadcast_fallback_with_group_delay(sat, t_j2000_s, selection_j2000_s)
+                    .is_some()
+                {
+                    EphemerisSource::ephemeris_variance_m2(
+                        self.broadcast,
+                        sat,
+                        t_j2000_s,
+                        selection_j2000_s,
+                    )
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
+
+/// RTKLIB `ephemeris.c` `DEFURASSR`: the SSR correction error (m) of a satellite with no
+/// URA or URA index 0.
+const DEFURASSR_M: f64 = 0.15;
+
+/// RTKLIB `var_urassr`, m²: the SSR URA (IGS SSR / RTCM DF389) class `(ura >> 3) & 7` and
+/// value `ura & 7` give `(3^class (1 + value / 4) - 1)` mm; index 0 or no URA gives
+/// `DEFURASSR`, and index 63 the largest stated error, 5.4665 m.
+fn ssr_ura_variance_m2(ura_index: Option<u8>) -> f64 {
+    let ura = i32::from(ura_index.unwrap_or(0));
+    if ura <= 0 {
+        return DEFURASSR_M * DEFURASSR_M;
+    }
+    if ura >= 63 {
+        return 5.4665 * 5.4665;
+    }
+    let std_m = (3.0_f64.powi((ura >> 3) & 7) * (1.0 + f64::from(ura & 7) / 4.0) - 1.0) * 1e-3;
+    std_m * std_m
 }
 
 impl ObservableEphemerisSource for SsrCorrectedEphemeris<'_> {
@@ -4604,6 +4656,16 @@ impl EphemerisSource for SsrCorrectedEphemerisOwned {
     ) -> Result<Option<Validated<f64>>> {
         self.borrowed()
             .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> f64 {
+        self.borrowed()
+            .ephemeris_variance_m2(sat, t_j2000_s, selection_j2000_s)
     }
 }
 

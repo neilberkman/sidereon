@@ -42,6 +42,32 @@ impl EphemerisSource for StaticBroadcast {
     }
 }
 
+/// The states of `states` with the ephemeris variances of `variances`.
+struct WithVariances<'a> {
+    states: &'a dyn EphemerisSource,
+    variances: &'a dyn EphemerisSource,
+}
+
+impl EphemerisSource for WithVariances<'_> {
+    fn position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64)> {
+        self.states.position_clock_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> f64 {
+        self.variances
+            .ephemeris_variance_m2(sat, t_j2000_s, selection_j2000_s)
+    }
+}
+
 impl IssueAwareBroadcast for StaticBroadcast {
     fn state_by_iode_at(
         &self,
@@ -196,6 +222,7 @@ fn iono_grid(lon_deg: f64) -> SbasIonoGrid {
                 lon_deg: lon,
                 vertical_delay_m: 5.0,
                 give_variance_m2: None,
+                t0_j2000_s: 0.0,
             });
         }
     }
@@ -397,6 +424,8 @@ fn sbas_corrected_spp_with_geo_ranging_beats_uncorrected() {
         met: SurfaceMet::default(),
         robust: None,
         pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
+        qzss_clock: sidereon_core::positioning::QzssClock::Gps,
+        troposphere_model: sidereon_core::positioning::TroposphereModel::Rtklib,
     };
 
     let uncorrected = StaticBroadcast {
@@ -404,8 +433,14 @@ fn sbas_corrected_spp_with_geo_ranging_beats_uncorrected() {
         dynamic_geo: Some((geo, geo_state)),
     };
     let uncorrected_solution = solve(&uncorrected, &base_inputs, false).expect("uncorrected solve");
-    let reference_solution = solve(&true_broadcast, &base_inputs, false).expect("reference solve");
     let corrected = SbasCorrectedEphemeris::new(&uncorrected, &store, geo);
+    // The reference solve takes the true states with the corrected source's variances,
+    // so the two solves weight each satellite alike and differ only in the states.
+    let reference = WithVariances {
+        states: &true_broadcast,
+        variances: &corrected,
+    };
+    let reference_solution = solve(&reference, &base_inputs, false).expect("reference solve");
     let corrected_solution = solve(&corrected, &base_inputs, false).expect("SBAS corrected solve");
 
     assert!(corrected_solution.used_sats.contains(&geo));

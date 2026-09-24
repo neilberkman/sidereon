@@ -8,8 +8,46 @@ const PI: f64 = std::f64::consts::PI;
 /// elevation is strictly below this value.
 pub const ELEVATION_MASK_RAD: f64 = 10.0 * PI / 180.0;
 
-/// Base measurement standard deviation (m) for the elevation weight model.
-pub const SIGMA0_M: f64 = 1.0;
+/// Ratio of the code to the carrier-phase error, RTKLIB `prcopt_default` `eratio[0]`:
+/// the code error of RTKLIB `varerr` is this times the carrier-phase terms
+/// [`PHASE_ERROR_BASE_M`] and [`PHASE_ERROR_ELEVATION_M`].
+pub const CODE_PHASE_ERROR_RATIO: f64 = 300.0;
+
+/// Carrier-phase error term independent of elevation (m), RTKLIB `prcopt_default`
+/// `err[1]`.
+pub const PHASE_ERROR_BASE_M: f64 = 0.003;
+
+/// Carrier-phase error term divided by `sin(el)` (m), RTKLIB `prcopt_default`
+/// `err[2]`.
+pub const PHASE_ERROR_ELEVATION_M: f64 = 0.003;
+
+/// Elevation (rad) below which RTKLIB `varerr` evaluates its elevation term at this
+/// elevation instead, `MIN_EL` (5 degrees).
+pub const ERROR_MODEL_MIN_ELEVATION_RAD: f64 = 5.0 * (PI / 180.0);
+
+/// Code bias error standard deviation (m) of a single-frequency pseudorange, RTKLIB
+/// `ERR_CBIAS`.
+pub const CODE_BIAS_ERROR_M: f64 = 0.3;
+
+/// Standard deviation (m) of the ionosphere delay a solve does not correct, RTKLIB
+/// `ERR_ION`.
+pub const UNCORRECTED_IONOSPHERE_ERROR_M: f64 = 5.0;
+
+/// Error factor of a broadcast ionosphere model: the standard deviation is this times
+/// the delay, RTKLIB `ERR_BRDCI`.
+pub const BROADCAST_IONOSPHERE_ERROR_FACTOR: f64 = 0.5;
+
+/// Standard deviation (m) of the troposphere delay a solve does not correct, RTKLIB
+/// `ERR_TROP`.
+pub const UNCORRECTED_TROPOSPHERE_ERROR_M: f64 = 3.0;
+
+/// Relative humidity RTKLIB `tropcorr` gives `tropmodel` for its Saastamoinen option,
+/// `REL_HUMI`.
+pub const RTKLIB_TROPOSPHERE_RELATIVE_HUMIDITY: f64 = 0.7;
+
+/// Zenith error (m) of the Saastamoinen troposphere model, RTKLIB `ERR_SAAS`, mapped
+/// to the line of sight as `ERR_SAAS / (sin(el) + 0.1)`.
+pub const TROPOSPHERE_MODEL_ERROR_M: f64 = 0.3;
 
 /// Default Huber tuning constant for the opt-in robust reweighting path.
 pub use crate::astro::math::robust::HUBER_K as DEFAULT_HUBER_K;

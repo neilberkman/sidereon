@@ -187,6 +187,8 @@ fn pseudorange_inputs(
         met: SurfaceMet::default(),
         robust: None,
         pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
+        qzss_clock: sidereon_core::positioning::QzssClock::Gps,
+        troposphere_model: sidereon_core::positioning::TroposphereModel::Rtklib,
     }
 }
 
@@ -401,6 +403,8 @@ fn esbc_solve_inputs(obs: &RinexObs, epoch: &ObsEpoch) -> SolveInputs {
         met: SurfaceMet::default(),
         robust: None,
         pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
+        qzss_clock: sidereon_core::positioning::QzssClock::Gps,
+        troposphere_model: sidereon_core::positioning::TroposphereModel::Rtklib,
     }
 }
 

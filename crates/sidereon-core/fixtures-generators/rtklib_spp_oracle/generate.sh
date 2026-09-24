@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Regenerate tests/fixtures/rtk/rtklib_spp_selection_oracle.json: RTKLIB `pntpos`
 # single-point solutions of the ESBC and WTZR 120-epoch RINEX fixtures from four
-# initial positions each (see rtklib_spp_oracle.c).
+# initial positions each (see rtklib_spp_oracle.c), with the troposphere corrected
+# and uncorrected.
 #
 # usage: RTKLIB_SRC=/path/to/RTKLIB/src ./generate.sh
 #
@@ -42,6 +43,12 @@ NAV="$FIX/nav/ESBC00DNK_R_20201770000_01D_MN.rnx"
     printf ',\n'
     "$BUILD/rtklib_spp_oracle" esbc_tropo \
         "$FIX/obs/ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx" "$NAV" 0 1
+    printf ',\n'
+    "$BUILD/rtklib_spp_oracle" esbc_iono \
+        "$FIX/obs/ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx" "$NAV" 1 0
+    printf ',\n'
+    "$BUILD/rtklib_spp_oracle" wtzr_iono \
+        "$FIX/obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx" "$NAV" 1 0
     printf ']}\n'
 } > "$OUT"
 echo "wrote $OUT"

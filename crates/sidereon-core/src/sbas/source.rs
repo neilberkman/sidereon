@@ -382,6 +382,53 @@ impl<'a> SbasCorrectedEphemeris<'a> {
             .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
     }
 
+    /// Variance (m²) of the state [`Self::corrected_state_with_group_delay_selected`]
+    /// returns: RTKLIB `satpos_sbas` replaces the broadcast variance with the fast
+    /// correction's (`sbsfastcorr`), so a state with a fast correction applied takes that,
+    /// and a broadcast state (a long-term-only partial correction, or the mixed-mode
+    /// fallback) the broadcast record's variance. The GEO without a fast correction is
+    /// read from its message type 9 navigation state as a broadcast state, and takes the
+    /// variance RTKLIB `seph2pos` gives that state, `var_uraeph` of the message's URA
+    /// index. `0.0` where no state is returned.
+    fn state_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> f64 {
+        if self
+            .corrected_state_with_group_delay_selected(sat, t_j2000_s, selection_j2000_s)
+            .is_none()
+        {
+            return 0.0;
+        }
+        let fast_variance_m2 = self
+            .store
+            .fast_correction_variance_m2(self.geo, sat, t_j2000_s);
+        if sat == self.geo {
+            return fast_variance_m2.unwrap_or_else(|| {
+                self.store
+                    .fresh_geo_nav(self.geo, t_j2000_s)
+                    .map_or(0.0, |geo_state| {
+                        crate::rinex_nav::ura_variance_m2(usize::from(geo_state.ura_index))
+                    })
+            });
+        }
+        let long = sat.system == GnssSystem::Gps
+            && self
+                .store
+                .fresh_long_term(self.geo, sat, t_j2000_s)
+                .is_some();
+        match fast_variance_m2 {
+            // The fast correction is applied with the long-term one, or alone when
+            // partial corrections are allowed.
+            Some(variance_m2) if long || self.store.allow_partial_corrections() => variance_m2,
+            _ => self
+                .broadcast
+                .ephemeris_variance_m2(sat, t_j2000_s, selection_j2000_s),
+        }
+    }
+
     fn fast_clock_delta_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
         let fast = self.store.fresh_fast(self.geo, sat, t_j2000_s)?;
         Some((fast.prc_m + fast.rrc_m_s * (t_j2000_s - fast.t_of_j2000_s)) / C_M_S)
@@ -440,6 +487,15 @@ impl EphemerisSource for SbasCorrectedEphemeris<'_> {
         selection_j2000_s: f64,
     ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
         self.transmit_epoch_clock(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> f64 {
+        self.state_variance_m2(sat, t_j2000_s, selection_j2000_s)
     }
 }
 
@@ -651,6 +707,16 @@ impl EphemerisSource for SbasCorrectedEphemerisOwned {
     ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
         self.borrowed()
             .transmit_epoch_clock(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> f64 {
+        self.borrowed()
+            .state_variance_m2(sat, t_j2000_s, selection_j2000_s)
     }
 }
 
@@ -1100,7 +1166,7 @@ mod tests {
                 &SbasMessage::GeoNav(SbasGeoNav {
                     preamble: 0x9A,
                     time_of_day_s: 1,
-                    ura: 0,
+                    ura: 3,
                     x_m: 100,
                     y_m: 200,
                     z_m: 300,
@@ -1122,7 +1188,12 @@ mod tests {
         let expected = store.geo_nav(geo).expect("GEO nav").state_at(t);
         let source = SbasCorrectedEphemeris::new(&broadcast, &store, geo);
         assert_eq!(source.position_clock_at_j2000_s(geo, t), Some(expected));
+        // That state takes the variance RTKLIB `seph2pos` gives the message's URA
+        // index 3: `var_uraeph`, 6.85 m squared.
+        assert_eq!(store.geo_nav(geo).expect("GEO nav").ura_index, 3);
+        assert_eq!(source.ephemeris_variance_m2(geo, t, t), 6.85 * 6.85);
         let sbas_only = source.with_mode(SbasSolveMode::SbasOnly);
+        assert_eq!(sbas_only.ephemeris_variance_m2(geo, t, t), 0.0);
         assert_eq!(sbas_only.position_clock_at_j2000_s(geo, t), None);
         assert!(matches!(
             sbas_only.velocity_at_j2000_s(geo, t),

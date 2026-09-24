@@ -386,6 +386,8 @@ fn spp_seed_inputs(epoch: &FloatEpoch, options: PppAutoInitOptions) -> spp::Solv
         // The float epochs carry ionosphere-free code, so no single-frequency
         // group delay applies (RTKLIB `prange` under IFLC).
         pseudorange_code: crate::spp::PseudorangeCode::IonosphereFree,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     }
 }
 

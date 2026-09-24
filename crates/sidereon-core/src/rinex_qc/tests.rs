@@ -1362,6 +1362,8 @@ fn solve_esbc_first_epoch(
         },
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     };
     crate::spp::solve(broadcast, &inputs, false).expect("solve SPP")
 }

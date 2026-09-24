@@ -59,6 +59,8 @@ fn options() -> StaticSolveOptions {
         initial_position_m: [TRUTH[0] + 120.0, TRUTH[1] - 80.0, TRUTH[2] + 50.0],
         with_geodetic: true,
         robust: None,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     }
 }
 
@@ -156,6 +158,8 @@ fn pseudorange(
         met: SurfaceMet::default(),
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     };
     let env = SatModelEnv {
         eph,
@@ -164,6 +168,7 @@ fn pseudorange(
         day_of_year,
         corrections: Corrections::NONE,
         met: &inputs.met,
+        troposphere_model: inputs.troposphere_model,
         glonass_channels: &inputs.glonass_channels,
         model: SppModelRecipe::reference(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -654,6 +659,7 @@ fn hand_covariance(
             day_of_year: epoch.day_of_year,
             corrections: epoch.corrections,
             met: &epoch.met,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
             glonass_channels: &epoch.glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -685,10 +691,7 @@ fn hand_covariance(
 }
 
 fn clock_system_for(satellite_id: GnssSatelliteId) -> GnssSystem {
-    match satellite_id.system {
-        GnssSystem::Sbas => GnssSystem::Gps,
-        system => system,
-    }
+    crate::spp::clock_system(satellite_id.system, crate::spp::QzssClock::Gps)
 }
 
 // A single measurement-starved epoch (3 usable measurements) is underdetermined
@@ -805,6 +808,8 @@ fn go_fixture_rtklib_placement_differs_from_the_replay_by_the_transmit_epoch_alo
         met: SurfaceMet::default(),
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     };
     let epochs = [
         StaticEpoch::from_solve_inputs(inputs.clone()),
@@ -822,6 +827,7 @@ fn go_fixture_rtklib_placement_differs_from_the_replay_by_the_transmit_epoch_alo
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,
         met: &inputs.met,
+        troposphere_model: inputs.troposphere_model,
         glonass_channels: &inputs.glonass_channels,
         model: SppModelRecipe::geometric_light_time_replay(),
         pseudorange_code: inputs.pseudorange_code,

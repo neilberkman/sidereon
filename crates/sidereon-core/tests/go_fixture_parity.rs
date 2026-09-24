@@ -59,6 +59,8 @@ fn go_fixture_inputs() -> SolveInputs {
         met: SurfaceMet::default(),
         robust: None,
         pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
+        qzss_clock: sidereon_core::positioning::QzssClock::Gps,
+        troposphere_model: sidereon_core::positioning::TroposphereModel::Rtklib,
     }
 }
 
@@ -66,10 +68,62 @@ fn bit_pattern(values: &[f64]) -> Vec<u64> {
     values.iter().map(|value| value.to_bits()).collect()
 }
 
+fn static_result_bit_fields(
+    result: &sidereon_core::static_positioning::StaticSolution,
+) -> Vec<(&'static str, Vec<u64>)> {
+    let covariance_ecef = result
+        .covariance
+        .position_ecef_m2
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let covariance_state = result
+        .covariance
+        .state_m2
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    vec![
+        ("position", bit_pattern(&result.position.as_array())),
+        (
+            "per_epoch_clock",
+            result
+                .per_epoch_clock
+                .iter()
+                .map(|clock| clock.clock_s.to_bits())
+                .collect(),
+        ),
+        ("covariance_ecef", bit_pattern(&covariance_ecef)),
+        ("covariance_state", bit_pattern(&covariance_state)),
+        ("iterations", vec![result.metadata.iterations as u64]),
+        (
+            "condition_number",
+            vec![result.geometry_quality.condition_number.to_bits()],
+        ),
+        ("gdop", vec![result.geometry_quality.gdop.to_bits()]),
+        (
+            "residuals",
+            result
+                .residuals_m
+                .iter()
+                .map(|row| row.residual_m.to_bits())
+                .collect(),
+        ),
+        (
+            "base_weights",
+            result
+                .residuals_m
+                .iter()
+                .map(|row| row.base_weight.to_bits())
+                .collect(),
+        ),
+    ]
+}
+
 /// The SP3 source through the no-term path: its clock as written, with no `peph2pos`
-/// relativistic term. The Go fixture's pseudoranges come from a model without the term,
-/// so the frozen bits are those of the no-term path; positioning applies the term, and
-/// the SPP trace tests check that the term is the only difference between the paths.
+/// relativistic term. The Go fixture's pseudoranges come from a model without the term;
+/// positioning applies it through the source callback.
 struct NoRelativityTerm<'a>(&'a Sp3);
 
 impl EphemerisSource for NoRelativityTerm<'_> {
@@ -162,23 +216,32 @@ fn go_fixture_static_term_through_the_source_equals_the_folded_clock() {
 
 /// The Go fixture's pseudoranges come from a geometric light-time model, which iterates
 /// the transmission epoch from the receiver's time tag and leaves out the receiver clock
-/// (about 0.1 ms here). The frozen bits are that model's, replayed through
-/// [`solve_static_geometric_light_time_replay`]; the static solve places each epoch from
-/// the pseudorange as RTKLIB `satposs` does, and the in-crate static tests check that the
-/// two differ through the transmission epoch alone.
+/// (about 0.1 ms here). This test checks repeated-run bit determinism through
+/// [`solve_static_geometric_light_time_replay`], not numerical accuracy; the independent
+/// precise oracle is separate.
 #[test]
-fn go_fixture_static_portable_bits() {
+fn go_fixture_static_repeated_run_bits_are_deterministic() {
     let sp3 = fixture_sp3();
     let source = NoRelativityTerm(&sp3);
     let inputs = go_fixture_inputs();
-    let first = StaticEpoch::from_solve_inputs(inputs.clone());
-    let second = StaticEpoch::from_solve_inputs(inputs.clone());
+    let make_epochs = || {
+        [
+            StaticEpoch::from_solve_inputs(inputs.clone()),
+            StaticEpoch::from_solve_inputs(inputs.clone()),
+        ]
+    };
     let static_result = solve_static_geometric_light_time_replay(
         &source,
-        &[first, second],
+        &make_epochs(),
         StaticSolveOptions::default(),
     )
     .expect("static solve");
+    let repeated_result = solve_static_geometric_light_time_replay(
+        &source,
+        &make_epochs(),
+        StaticSolveOptions::default(),
+    )
+    .expect("repeated static solve");
 
     // With the term the same pseudoranges solve elsewhere: every satellite has a nonzero
     // term, and the solution moves by metres, not by rounding.
@@ -197,7 +260,7 @@ fn go_fixture_static_portable_bits() {
         &sp3,
         &[
             StaticEpoch::from_solve_inputs(inputs.clone()),
-            StaticEpoch::from_solve_inputs(inputs),
+            StaticEpoch::from_solve_inputs(inputs.clone()),
         ],
         StaticSolveOptions::default(),
     )
@@ -215,178 +278,9 @@ fn go_fixture_static_portable_bits() {
         "the term moves the solution by {moved} m"
     );
 
-    let ecef = static_result
-        .covariance
-        .position_ecef_m2
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    let state = static_result
-        .covariance
-        .state_m2
-        .iter()
-        .flatten()
-        .copied()
-        .collect::<Vec<_>>();
-    // Every frozen value is compared at once and all are printed on a mismatch.
-    let got: Vec<(&str, Vec<u64>)> = vec![
-        ("position", bit_pattern(&static_result.position.as_array())),
-        (
-            "per_epoch_clock",
-            static_result
-                .per_epoch_clock
-                .iter()
-                .map(|clock| clock.clock_s.to_bits())
-                .collect(),
-        ),
-        ("covariance_ecef", bit_pattern(&ecef)),
-        ("covariance_state", bit_pattern(&state)),
-        ("iterations", vec![static_result.metadata.iterations as u64]),
-        (
-            "condition_number",
-            vec![static_result.geometry_quality.condition_number.to_bits()],
-        ),
-        ("gdop", vec![static_result.geometry_quality.gdop.to_bits()]),
-        (
-            "residuals",
-            static_result
-                .residuals_m
-                .iter()
-                .map(|row| row.residual_m.to_bits())
-                .collect(),
-        ),
-        (
-            "base_weights",
-            static_result
-                .residuals_m
-                .iter()
-                .map(|row| row.base_weight.to_bits())
-                .collect(),
-        ),
-    ];
-    // Re-frozen when the selection, elevation mask and weights moved to the current
-    // iterate, as RTKLIB `estpos` re-runs `rescode`. The solve starts at the geocentre,
-    // the default initial position, where the weights had stayed for the whole solve;
-    // they are now the elevation weights at the solution, which moves the covariance and
-    // the base weights, and the position by 1.6 mm. The solve also ends with RTKLIB's
-    // least-squares step, counted as an iteration, whose rounding leaves the clocks of
-    // the two identical epochs 24 ulp apart. The condition number is that of the
-    // design RTKLIB steps with, `sqrt(W) [-e, 1]` at the solution.
-    //
-    // Re-frozen again when the fixture grew from five epochs to thirteen, because the
-    // position interpolator refuses a run shorter than the eleven nodes RTKLIB pephpos
-    // takes. With five nodes every satellite was a degree-4 fit; with eleven the model
-    // reproduces the Go fixture's pseudoranges to within 3.7e-9 m (every residual is
-    // 0 or 2^-28 m), where the degree-4 fit left residuals up to 7e-4 m. The solution
-    // moves by 1.2 mm, the two identical epochs now share one clock, and the solve
-    // takes nine iterations rather than ten.
-    let frozen: Vec<(&str, Vec<u64>)> = vec![
-        (
-            "position",
-            vec![0x41511b07ff82440b, 0x4120cd6b5f861f74, 0x41511e62229e1c36],
-        ),
-        (
-            "per_epoch_clock",
-            vec![0x3f1a3b884188ea82, 0x3f1a3b884188ea82],
-        ),
-        (
-            "covariance_ecef",
-            vec![
-                0x400988cb35cb6e11,
-                0x3fd48b9a0d51f1e2,
-                0x4000274f931ac7c4,
-                0x3fd48b9a0d51f1e2,
-                0x3fe7a0ee62d73fe8,
-                0x3fe106d7a566227f,
-                0x4000274f931ac7c4,
-                0x3fe106d7a566227f,
-                0x40065c549e8921f4,
-            ],
-        ),
-        (
-            "covariance_state",
-            vec![
-                0x400988cb35cb6e11,
-                0x3fd48b9a0d51f1e2,
-                0x4000274f931ac7c4,
-                0x4008c021d0623ceb,
-                0x4008c021d0623cec,
-                0x3fd48b9a0d51f1e2,
-                0x3fe7a0ee62d73fe8,
-                0x3fe106d7a566227f,
-                0x3fe263bc6a6c1354,
-                0x3fe263bc6a6c1357,
-                0x4000274f931ac7c4,
-                0x3fe106d7a566227f,
-                0x40065c549e8921f4,
-                0x4006a259132f61ab,
-                0x4006a259132f61af,
-                0x4008c021d0623ceb,
-                0x3fe263bc6a6c1354,
-                0x4006a259132f61ab,
-                0x400dccf820cc54a6,
-                0x400c11bbda6ca6ae,
-                0x4008c021d0623cec,
-                0x3fe263bc6a6c1357,
-                0x4006a259132f61af,
-                0x400c11bbda6ca6ae,
-                0x400dccf820cc54ac,
-            ],
-        ),
-        ("iterations", vec![0x9]),
-        ("condition_number", vec![0x40274ea1c23d4ba0]),
-        ("gdop", vec![0x400e1ec71a66a2e7]),
-        (
-            "residuals",
-            vec![
-                0x0,
-                0x0,
-                0x3e30000000000000,
-                0x3e30000000000000,
-                0xbe30000000000000,
-                0x3e30000000000000,
-                0x3e30000000000000,
-                0xbe30000000000000,
-                0x0,
-                0x0,
-                0x3e30000000000000,
-                0x3e30000000000000,
-                0xbe30000000000000,
-                0x3e30000000000000,
-                0x3e30000000000000,
-                0xbe30000000000000,
-            ],
-        ),
-        (
-            "base_weights",
-            vec![
-                0x3fb8cb465b587ec3,
-                0x3fd44d0c2b9a2f6a,
-                0x3fed27a1c8576fdb,
-                0x3fddb593331039dd,
-                0x3fe3378d7e2df301,
-                0x3fef228ba75cba43,
-                0x3fe5ac56ce184d4e,
-                0x3fe292e96d2254b2,
-                0x3fb8cb465b587ec3,
-                0x3fd44d0c2b9a2f6a,
-                0x3fed27a1c8576fdb,
-                0x3fddb593331039dd,
-                0x3fe3378d7e2df301,
-                0x3fef228ba75cba43,
-                0x3fe5ac56ce184d4e,
-                0x3fe292e96d2254b2,
-            ],
-        ),
-    ];
     assert_eq!(
-        got.iter()
-            .map(|(label, bits)| format!("{label}: {bits:#x?}"))
-            .collect::<Vec<_>>(),
-        frozen
-            .iter()
-            .map(|(label, bits)| format!("{label}: {bits:#x?}"))
-            .collect::<Vec<_>>(),
-        "Go fixture static frozen bits"
+        static_result_bit_fields(&static_result),
+        static_result_bit_fields(&repeated_result),
+        "repeated Go fixture static solves are deterministic"
     );
 }

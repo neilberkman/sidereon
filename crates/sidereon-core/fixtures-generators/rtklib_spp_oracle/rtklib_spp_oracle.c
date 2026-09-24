@@ -1,8 +1,12 @@
 /*
  * RTKLIB single-point positioning oracle: runs RTKLIB `pntpos` on every epoch of a
  * RINEX observation file from several initial positions and prints, for each epoch
- * and initial position, the solution status, the position, the receiver clock and
- * the satellites `estpos` used, as one JSON object. `generate.sh` builds it against
+ * and initial position, the solution status, the position, its covariance, the
+ * receiver clock and the satellites `estpos` used, as one JSON object. The
+ * covariance is `sol.qr`, the single-precision position block of `estpos`'s
+ * `Q = (H^T W H)^-1` with the pseudorange variances of `rescode`, in the order
+ * xx, yy, zz, xy, yz, zx, printed with the nine significant digits that restate a
+ * float exactly. `generate.sh` builds it against
  * RTKLIB and writes `tests/fixtures/rtk/rtklib_spp_selection_oracle.json` from three
  * runs of it.
  *
@@ -120,6 +124,8 @@ int main(int argc, char **argv)
             first_case = 0;
             printf("\"position_m\": ");
             print_position(sol.rr);
+            printf(", \"qr_m2\": [%.9g, %.9g, %.9g, %.9g, %.9g, %.9g]", sol.qr[0], sol.qr[1],
+                   sol.qr[2], sol.qr[3], sol.qr[4], sol.qr[5]);
             printf(", \"clock_m\": %.17g, \"used\": [", sol.dtr[0] * CLIGHT);
             for (k = 0; k < MAXSAT; k++) {
                 char id[8];

@@ -296,6 +296,7 @@ fn igp(lat_deg: f64, lon_deg: f64, give_variance_m2: f64) -> SbasIgp {
         lon_deg,
         vertical_delay_m: 0.0,
         give_variance_m2: Some(give_variance_m2),
+        t0_j2000_s: 0.0,
     }
 }
 

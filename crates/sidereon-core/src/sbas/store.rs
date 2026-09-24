@@ -43,6 +43,10 @@ pub const SBAS_UDRE_VARIANCE_M2: [f64; 14] = [
     20.7870, 230.9661, 2078.695,
 ];
 
+/// RTKLIB `sbsioncorr` factor (per second) on a grid point's GIVE variance times its
+/// age.
+const RTKLIB_IONO_VARIANCE_AGE_FACTOR_PER_S: f64 = 9e-8;
+
 /// DO-229 GIVE variance table, in square meters, for GIVEI values 0 through 14.
 pub const SBAS_GIVE_VARIANCE_M2: [f64; 15] = [
     0.0084, 0.0333, 0.0749, 0.1331, 0.2079, 0.2994, 0.4075, 0.5322, 0.6735, 0.8315, 1.1974, 1.8709,
@@ -127,6 +131,9 @@ pub struct SbasIgp {
     pub vertical_delay_m: f64,
     /// DO-229 GIVE variance in square meters, or None when no usable variance was supplied.
     pub give_variance_m2: Option<f64>,
+    /// Epoch, seconds since J2000, of the message that gave the point its delay and
+    /// GIVEI, which RTKLIB `decode_sbstype26` keeps as the point's `t0`.
+    pub t0_j2000_s: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -215,6 +222,95 @@ impl SbasIonoGrid {
         let mapping = 1.0 / (1.0 - geom.s * geom.s).sqrt();
         let frequency_scale = (F_L1_HZ / frequency_hz) * (F_L1_HZ / frequency_hz);
         Some(vertical_delay_m * mapping * frequency_scale)
+    }
+
+    /// Variance (m²) of [`Self::slant_delay_m`] at a receiver look direction at
+    /// `t_j2000_s`, as RTKLIB `sbsioncorr` states it: each covering point's GIVE
+    /// variance times `9e-8 |t - t0|`, its age from [`SbasIgp::t0_j2000_s`] in seconds,
+    /// interpolated with the delay's weights, mapped to the line of sight by the square
+    /// of the obliquity factor, and scaled to `frequency_hz` by the square of the delay's
+    /// `(f_L1 / f)²` scaling, as RTKLIB `rescode` scales it. A point without a GIVE
+    /// variance contributes none, as RTKLIB `varicorr` gives none for a GIVEI it does
+    /// not tabulate. `None` where the grid gives no delay.
+    pub fn slant_variance_m2(
+        &self,
+        receiver: Wgs84Geodetic,
+        elevation_rad: f64,
+        azimuth_rad: f64,
+        frequency_hz: f64,
+        t_j2000_s: f64,
+    ) -> Option<f64> {
+        if self.igps.is_empty() || !frequency_hz.is_finite() || frequency_hz <= 0.0 {
+            return None;
+        }
+        let geom = pierce_point(
+            receiver.lat_rad,
+            receiver.lon_rad,
+            azimuth_rad,
+            elevation_rad,
+            MEAN_EARTH_RADIUS_KM,
+            SBAS_SHELL_HEIGHT_KM,
+        );
+        let vertical_variance_m2 = self.interpolate_at_ipp(
+            geom.phi_ipp_deg,
+            normalize_lon(geom.lambda_ipp_deg),
+            |point| {
+                let give_variance_m2 = point.give_variance_m2.unwrap_or(0.0);
+                give_variance_m2
+                    * RTKLIB_IONO_VARIANCE_AGE_FACTOR_PER_S
+                    * (t_j2000_s - point.t0_j2000_s).abs()
+            },
+        )?;
+        let mapping = 1.0 / (1.0 - geom.s * geom.s).sqrt();
+        let frequency_scale = (F_L1_HZ / frequency_hz) * (F_L1_HZ / frequency_hz);
+        Some(vertical_variance_m2 * (mapping * mapping) * (frequency_scale * frequency_scale))
+    }
+
+    /// `value` of the covering points interpolated at an ionospheric pierce point with
+    /// the weights [`Self::slant_delay_m`] interpolates the delay with: bilinear over
+    /// four points, the plane through three.
+    fn interpolate_at_ipp(
+        &self,
+        lat_deg: f64,
+        lon_deg: f64,
+        value: impl Fn(&SbasIgp) -> f64,
+    ) -> Option<f64> {
+        let mut lats: Vec<f64> = self.igps.iter().map(|p| p.lat_deg).collect();
+        lats.sort_by(f64_total_cmp);
+        lats.dedup_by(|a, b| (*a - *b).abs() < SBAS_IGP_COORD_EPS_DEG);
+        let mut lons: Vec<f64> = self.igps.iter().map(|p| normalize_lon(p.lon_deg)).collect();
+        lons.sort_by(f64_total_cmp);
+        lons.dedup_by(|a, b| (*a - *b).abs() < SBAS_IGP_COORD_EPS_DEG);
+        let (lat0, lat1) = bracket_pair(&lats, lat_deg)?;
+        let (lon0, lon1) = bracket_pair(&lons, lon_deg)?;
+        if (lat1 - lat0).abs() < f64::EPSILON || (lon1 - lon0).abs() < f64::EPSILON {
+            return None;
+        }
+        let corners = [
+            self.find_igp(lat0, lon0),
+            self.find_igp(lat0, lon1),
+            self.find_igp(lat1, lon0),
+            self.find_igp(lat1, lon1),
+        ];
+        let active: Vec<SbasIgp> = corners.into_iter().flatten().collect();
+        match active.len() {
+            4 => {
+                let q = (lat_deg - lat0) / (lat1 - lat0);
+                let p = (lon_deg - lon0) / (lon1 - lon0);
+                let v00 = value(active_point(&active, lat0, lon0)?);
+                let v01 = value(active_point(&active, lat0, lon1)?);
+                let v10 = value(active_point(&active, lat1, lon0)?);
+                let v11 = value(active_point(&active, lat1, lon1)?);
+                Some(
+                    (1.0 - p) * (1.0 - q) * v00
+                        + p * (1.0 - q) * v01
+                        + (1.0 - p) * q * v10
+                        + p * q * v11,
+                )
+            }
+            3 => plane_interpolate_value(&active, lat_deg, lon_deg, |point| Some(value(point))),
+            _ => None,
+        }
     }
 
     /// Interpolate the vertical GIVE variance at an ionospheric pierce point.
@@ -316,6 +412,9 @@ pub struct SbasGeoState {
     pub clock_drift_s_s: f64,
     /// Reference epoch for position and clock propagation, in seconds since J2000.
     pub t0_j2000_s: f64,
+    /// URA index from the message, which RTKLIB `decode_sbstype9` keeps as the GEO
+    /// ephemeris `sva`.
+    pub ura_index: u8,
 }
 
 impl SbasGeoState {
@@ -430,6 +529,7 @@ impl SbasCorrectionStore {
             SbasMessage::FastDegradation(degradation) => {
                 if Some(degradation.iodp) == partition.active_iodp {
                     partition.system_latency_s = f64::from(degradation.system_latency_s);
+                    ingest_degradation_factors(partition, degradation.iodp, &degradation.ai);
                 }
             }
             SbasMessage::GeoNav(geo_nav) => {
@@ -571,6 +671,32 @@ impl SbasCorrectionStore {
             .then_some(&timed.value)
     }
 
+    /// Variance (m²) of the fresh fast correction for `sat` at `t_j2000_s`, as RTKLIB
+    /// `sbsfastcorr` states it: `varfcorr` of the UDREI (the DO-229 UDRE variance) plus
+    /// the degradation `degfcorr(ai) t² / 2`, with `t` the time since the correction's
+    /// message plus the system latency and `ai` the message type 7 degradation indicator
+    /// of the satellite's mask slot. Without a type 7 indicator `ai` is 0, which
+    /// `degfcorr` reads as the largest factor, 0.0058 m/s², as RTKLIB does. `None`
+    /// without a fresh fast correction.
+    pub(crate) fn fast_correction_variance_m2(
+        &self,
+        geo: GnssSatelliteId,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<f64> {
+        let fast = self.fresh_fast(geo, sat, t_j2000_s)?;
+        let p = self.partitions.get(&geo)?;
+        let message_epoch_j2000_s = p
+            .fast_message_epoch_j2000_s
+            .get(&sat)
+            .copied()
+            .unwrap_or(fast.t_of_j2000_s - p.system_latency_s);
+        let t = t_j2000_s - message_epoch_j2000_s + p.system_latency_s;
+        let ai = p.fast_degradation_ai.get(&sat).copied().unwrap_or(0);
+        let udre_variance_m2 = udre_variance_m2_for_udrei(fast.udrei).unwrap_or(0.0);
+        Some(udre_variance_m2 + fast_degradation_factor(ai) * t * t / 2.0)
+    }
+
     pub(crate) fn fresh_long_term(
         &self,
         geo: GnssSatelliteId,
@@ -656,6 +782,10 @@ struct GeoPartition {
     iono_grid: Option<Timed<SbasIonoGrid>>,
     geo_nav: Option<Timed<SbasGeoState>>,
     withdrawn: BTreeSet<GnssSatelliteId>,
+    /// Epoch of the message each satellite's current fast correction came in.
+    fast_message_epoch_j2000_s: BTreeMap<GnssSatelliteId, f64>,
+    /// Message type 7 fast-correction degradation indicator of each satellite.
+    fast_degradation_ai: BTreeMap<GnssSatelliteId, u8>,
     system_latency_s: f64,
     disabled_until_j2000_s: Option<f64>,
     last_update_j2000_s: f64,
@@ -715,6 +845,9 @@ fn ingest_fast(
             iodf,
         };
         partition.previous_fast.insert(sat, correction.clone());
+        partition
+            .fast_message_epoch_j2000_s
+            .insert(sat, epoch_j2000_s);
         partition.fast.insert(
             sat,
             Timed {
@@ -723,6 +856,36 @@ fn ingest_fast(
             },
         );
         partition.withdrawn.remove(&sat);
+    }
+}
+
+/// RTKLIB `degfcorr` fast-correction degradation factors (m/s²) of the type 7 indicators
+/// 1 through 15.
+const FAST_DEGRADATION_FACTORS_M_S2: [f64; 16] = [
+    0.00000, 0.00005, 0.00009, 0.00012, 0.00015, 0.00020, 0.00030, 0.00045, 0.00060, 0.00090,
+    0.00150, 0.00210, 0.00270, 0.00330, 0.00460, 0.00580,
+];
+
+/// RTKLIB `degfcorr`: the factor of indicator `ai` 1 through 15, and 0.0058 m/s² for
+/// indicator 0, which is also the value of a satellite no type 7 message has reached.
+fn fast_degradation_factor(ai: u8) -> f64 {
+    if (1..=15).contains(&ai) {
+        FAST_DEGRADATION_FACTORS_M_S2[usize::from(ai)]
+    } else {
+        0.0058
+    }
+}
+
+/// Record the message type 7 degradation indicator of each satellite in the PRN mask of
+/// issue `iodp`, by mask slot, as RTKLIB `decode_sbstype7` records them.
+fn ingest_degradation_factors(partition: &mut GeoPartition, iodp: u8, ai: &[u8]) {
+    let Some(mask) = partition.masks.get(&iodp) else {
+        return;
+    };
+    for (slot, &indicator) in mask.iter().zip(ai) {
+        if let MaskSlot::Satellite(sat) = *slot {
+            partition.fast_degradation_ai.insert(sat, indicator);
+        }
     }
 }
 
@@ -858,6 +1021,7 @@ fn ingest_iono(partition: &mut GeoPartition, delays: &SbasIonoDelays, epoch_j200
             lon_deg,
             vertical_delay_m: f64::from(entry.vertical_delay) * IONO_DELAY_SCALE_M,
             give_variance_m2: give_variance_m2_for_givei(entry.givei),
+            t0_j2000_s: epoch_j2000_s,
         };
         if let Some(existing) = igps.iter_mut().find(|p| same_point(p.lat_deg, p.lon_deg)) {
             *existing = point;
@@ -917,6 +1081,7 @@ fn geo_state_from_message(message: &SbasGeoNav, epoch: GnssWeekTow) -> SbasGeoSt
         clock_offset_s: f64::from(message.a_gf0_s) * GEO_AF0_SCALE_S,
         clock_drift_s_s: f64::from(message.a_gf1_s_s) * GEO_AF1_SCALE_S_S,
         t0_j2000_s: lift_time_of_day(epoch, f64::from(message.time_of_day_s) * 16.0),
+        ura_index: message.ura,
     }
 }
 
@@ -2113,30 +2278,98 @@ mod tests {
                     lon_deg: 0.0,
                     vertical_delay_m: 1.0,
                     give_variance_m2: None,
+                    t0_j2000_s: 0.0,
                 },
                 SbasIgp {
                     lat_deg: 0.0,
                     lon_deg: 5.0,
                     vertical_delay_m: 2.0,
                     give_variance_m2: None,
+                    t0_j2000_s: 0.0,
                 },
                 SbasIgp {
                     lat_deg: 5.0,
                     lon_deg: 0.0,
                     vertical_delay_m: 3.0,
                     give_variance_m2: None,
+                    t0_j2000_s: 0.0,
                 },
                 SbasIgp {
                     lat_deg: 5.0,
                     lon_deg: 5.0,
                     vertical_delay_m: 4.0,
                     give_variance_m2: None,
+                    t0_j2000_s: 0.0,
                 },
             ],
             0,
         );
         let vertical = grid.vertical_delay_at_ipp(2.5, 2.5).unwrap();
         assert_eq!(vertical.to_bits(), 2.5_f64.to_bits());
+    }
+
+    /// RTKLIB `sbsioncorr`: each covering point's GIVE variance times `9e-8 |t - t0|`,
+    /// interpolated with the delay's weights and mapped by the square of the obliquity
+    /// factor. At a zenith look the obliquity factor is 1, and the pierce point is the
+    /// receiver's, the centre of the cell, where each point weighs a quarter.
+    #[test]
+    fn iono_grid_variance_grows_with_each_point_age_as_rtklib_states_it() {
+        let point = |lat_deg: f64, lon_deg: f64, givei: u8, t0_j2000_s: f64| SbasIgp {
+            lat_deg,
+            lon_deg,
+            vertical_delay_m: 1.0,
+            give_variance_m2: give_variance_m2_for_givei(givei),
+            t0_j2000_s,
+        };
+        let grid = SbasIonoGrid::new(
+            vec![
+                point(0.0, 0.0, 3, 1000.0),
+                point(0.0, 5.0, 5, 1100.0),
+                point(5.0, 0.0, 7, 1200.0),
+                point(5.0, 5.0, 9, 1300.0),
+            ],
+            0,
+        );
+        let receiver = Wgs84Geodetic::new(2.5_f64.to_radians(), 2.5_f64.to_radians(), 0.0).unwrap();
+        let t_j2000_s = 1400.0;
+        let got = grid
+            .slant_variance_m2(
+                receiver,
+                core::f64::consts::FRAC_PI_2,
+                0.0,
+                F_L1_HZ,
+                t_j2000_s,
+            )
+            .expect("the grid covers the pierce point");
+        let expected = [(3, 1000.0), (5, 1100.0), (7, 1200.0), (9, 1300.0)]
+            .iter()
+            .map(|&(givei, t0_j2000_s)| {
+                0.25 * give_variance_m2_for_givei(givei).unwrap() * 9e-8 * (t_j2000_s - t0_j2000_s)
+            })
+            .sum::<f64>();
+        assert!(
+            (got - expected).abs() <= 1e-12 * expected,
+            "variance {got} m², RTKLIB {expected} m²"
+        );
+        // Points just given their delays state no variance yet.
+        let fresh = SbasIonoGrid::new(
+            vec![
+                point(0.0, 0.0, 3, t_j2000_s),
+                point(0.0, 5.0, 5, t_j2000_s),
+                point(5.0, 0.0, 7, t_j2000_s),
+                point(5.0, 5.0, 9, t_j2000_s),
+            ],
+            0,
+        )
+        .slant_variance_m2(
+            receiver,
+            core::f64::consts::FRAC_PI_2,
+            0.0,
+            F_L1_HZ,
+            t_j2000_s,
+        )
+        .expect("covered");
+        assert_eq!(fresh, 0.0);
     }
 
     /// RTKLIB `decode_longcorr1` scales the velocity deltas by `P2_11` and the

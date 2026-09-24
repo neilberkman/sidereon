@@ -1106,6 +1106,7 @@ fn spp_code_satellite_prediction(
         day_of_year: 1.0,
         corrections: Corrections::NONE,
         met: &met,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
         glonass_channels: &glonass_channels,
         model: SppModelRecipe {
             range: RangeRecipe::RtklibSatpossPseudorange,
@@ -1603,6 +1604,8 @@ mod tests {
             met: SurfaceMet::default(),
             robust: None,
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            qzss_clock: crate::spp::QzssClock::Gps,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
         }
     }
 
@@ -2025,6 +2028,7 @@ mod tests {
                 day_of_year: DOY,
                 corrections: Corrections::NONE,
                 met: &met,
+                troposphere_model: crate::spp::TroposphereModel::Rtklib,
                 glonass_channels: &glonass_channels,
                 model: SppModelRecipe::reference(),
                 pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,

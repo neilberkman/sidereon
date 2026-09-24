@@ -8,6 +8,7 @@ fn igp(lat_deg: f64, lon_deg: f64, vertical_delay_m: f64) -> SbasIgp {
         lon_deg,
         vertical_delay_m,
         give_variance_m2: None,
+        t0_j2000_s: 0.0,
     }
 }
 

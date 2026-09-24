@@ -770,6 +770,9 @@ const URA_EPH_M: [f64; 15] = [
 /// RTKLIB `ephemeris.c` `STD_GAL_NAPA`: the Galileo error (m) for no accurate prediction.
 const STD_GAL_NAPA_M: f64 = 500.0;
 
+/// RTKLIB `ephemeris.c` `ERREPH_GLO`: the GLONASS broadcast ephemeris error (m).
+const ERREPH_GLO_M: f64 = 5.0;
+
 /// RTKLIB `uraindex`: the first URA index whose value is at least `value`, 15 past the
 /// table.
 fn ura_index(value: f64) -> usize {
@@ -780,7 +783,7 @@ fn ura_index(value: f64) -> usize {
 }
 
 /// RTKLIB `var_uraeph` for a URA index, m² (6144² past the table).
-fn ura_variance_m2(index: usize) -> f64 {
+pub(crate) fn ura_variance_m2(index: usize) -> f64 {
     let ura = URA_EPH_M.get(index).copied().unwrap_or(6144.0);
     ura * ura
 }
@@ -813,6 +816,24 @@ fn sisa_variance_m2(value: f64) -> f64 {
         }
     };
     std * std
+}
+
+/// RTKLIB `var_uraeph` of a Keplerian record, m²: the Galileo SISA through `sisa_index`,
+/// the URA index of the stated accuracy through `uraindex` otherwise. A blank accuracy is
+/// read as 0, as RTKLIB `readrnx` reads it.
+fn keplerian_variance_m2(record: &BroadcastRecord) -> f64 {
+    let accuracy_m = record.sv_accuracy_m.unwrap_or(0.0);
+    if record.satellite_id.system == GnssSystem::Galileo {
+        sisa_variance_m2(accuracy_m)
+    } else {
+        ura_variance_m2(ura_index(accuracy_m))
+    }
+}
+
+/// RTKLIB `var_uraeph(SYS_SBS, sva)` of an SBAS record, m², its URA read through
+/// `uraindex`, a blank URA as 0.
+fn sbas_variance_m2(record: &SbasRecord) -> f64 {
+    ura_variance_m2(ura_index(record.ura_m.unwrap_or(0.0)))
 }
 
 /// The health part of RTKLIB `satexclude` for a Keplerian record: the health word, read
@@ -1323,6 +1344,32 @@ impl BroadcastStore {
         }
     }
 
+    /// Variance (m²) of the satellite position and clock error of the record selected
+    /// for `sat` at `selection_j2000_s`, as RTKLIB `eph2pos`, `geph2pos` and `seph2pos`
+    /// state it: `var_uraeph` of a Keplerian record's accuracy (the Galileo SISA through
+    /// `sisa_index`, the URA index of any other system's stated URA through `uraindex`,
+    /// a blank accuracy as 0), `ERREPH_GLO²` (25 m²) for a GLONASS record, and
+    /// `var_uraeph` of an SBAS record's URA. `None` where no record is selected.
+    pub fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        selection_j2000_s: f64,
+    ) -> Option<f64> {
+        match sat.system {
+            GnssSystem::Glonass => self
+                .select_glonass(sat, selection_j2000_s)
+                .map(|_| ERREPH_GLO_M * ERREPH_GLO_M),
+            GnssSystem::Sbas => self
+                .select_sbas(sat, selection_j2000_s)
+                .map(|(record, _)| sbas_variance_m2(record)),
+            _ => {
+                let (selection_native_s, _, _) = query_native_time(sat, selection_j2000_s)?;
+                self.select(sat, selection_native_s)
+                    .map(keplerian_variance_m2)
+            }
+        }
+    }
+
     /// The Keplerian record for `sat` selected at `selection_j2000_s`, with the seconds of
     /// week and the GEO flag of `t_j2000_s`, the epoch it is evaluated at.
     fn keplerian_selected(
@@ -1426,6 +1473,17 @@ impl EphemerisSource for BroadcastStore {
             BroadcastStore::transmit_epoch_clock_s(self, sat, t_j2000_s, selection_j2000_s)
                 .map(crate::astro::time::Validated::ok),
         )
+    }
+
+    /// [`BroadcastStore::ephemeris_variance_m2`] of the record selected at
+    /// `selection_j2000_s`, or `0.0` where no record is selected.
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        _t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> f64 {
+        BroadcastStore::ephemeris_variance_m2(self, sat, selection_j2000_s).unwrap_or(0.0)
     }
 }
 

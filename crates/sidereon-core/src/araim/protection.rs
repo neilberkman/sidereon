@@ -252,7 +252,7 @@ pub(crate) fn design_row(
     design[0] = -los.e_x;
     design[1] = -los.e_y;
     design[2] = -los.e_z;
-    let clock_system = clock_system_for_row(row.system);
+    let clock_system = clock_system_for_row(row.system, clock_systems);
     let clock_idx = clock_systems
         .iter()
         .position(|&system| system == clock_system)

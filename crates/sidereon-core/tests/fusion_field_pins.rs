@@ -20,7 +20,7 @@ use sidereon_core::inertial::{
 };
 use sidereon_core::positioning::{
     solve_with_doppler_velocity, Corrections, DopplerObservation, KlobucharCoeffs, Observation,
-    SolveInputs, SurfaceMet,
+    SolveInputs, SurfaceMet, TroposphereModel,
 };
 use sidereon_core::scenario::{
     simulate_scenario, Scenario, ScenarioClockModel, ScenarioConstellation, ScenarioEpochRange,
@@ -644,8 +644,10 @@ fn field_mode_defaults_keep_existing_loose_fixture_bits() {
     // velocity rows read the same placed states, with the rate of the first-order Sagnac
     // term), and the tightly coupled range-rate rows added that Sagnac rate. Re-frozen
     // again when the SPP fixes feeding it took their selection, elevation mask and
-    // weights at the current iterate and ended with RTKLIB's least-squares step.
-    const EXPECTED_DEFAULT_HASH: u64 = 0x7d19_8582_6044_5077;
+    // weights at the current iterate and ended with RTKLIB's least-squares step. Re-frozen
+    // again when the SPP fixes took the inverse RTKLIB `rescode` variances as weights,
+    // which moves their positions and the covariances the loose updates read.
+    const EXPECTED_DEFAULT_HASH: u64 = 0x1ba9_0218_456e_910b;
     let scenario = field_scenario();
     let simulated = simulate_scenario(&scenario).expect("simulate scenario");
     let source = source_from_scenario(&scenario);
@@ -934,6 +936,8 @@ fn solve_gnss_epochs(
             corrections: Corrections::IONO_TROPO,
             klobuchar: IONO,
             met: MET,
+            // The scenario simulates the troposphere as Saastamoinen with Niell mapping.
+            troposphere_model: TroposphereModel::SaastamoinenNiell,
             robust: None,
             ..SolveInputs::default()
         };

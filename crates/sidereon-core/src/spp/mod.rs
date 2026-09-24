@@ -2,8 +2,9 @@
 //!
 //! Recovers a receiver ECEF position and clock bias from a set of pseudoranges,
 //! a satellite ephemeris source (a precise SP3 product or a broadcast navigation
-//! message, via the [`EphemerisSource`] trait), and broadcast ionosphere /
-//! Saastamoinen-Niell troposphere correction models. GPS L1 C/A, Galileo E1,
+//! message, via the [`EphemerisSource`] trait), and broadcast ionosphere and
+//! troposphere correction models: RTKLIB `tropmodel` by default, or Saastamoinen
+//! with surface meteorology and Niell mapping ([`TroposphereModel`]). GPS L1 C/A, Galileo E1,
 //! BeiDou B1I, and GLONASS G1 are supported; GPS, BeiDou, and GLONASS use
 //! broadcast Klobuchar coefficients with carrier-frequency scaling, while
 //! Galileo can use its broadcast NeQuick-G `ai0`/`ai1`/`ai2` coefficients when
@@ -31,7 +32,10 @@
 //! unrotated position plus the first-order Sagnac term), the line-of-sight
 //! azimuth/elevation follow, then the ionosphere and troposphere delays are added
 //! to the predicted range left-to-right. The residual the solver sees is
-//! `sqrt(w) * (P_meas - P_hat)` with the elevation weight `w = sin^2(el) / sigma0^2`.
+//! `sqrt(w) * (P_meas - P_hat)` with the weight `w` the inverse of the pseudorange
+//! variance RTKLIB `rescode` forms with the `prcopt_default` options: the ephemeris
+//! variance of the satellite's state, the code bias, ionosphere and troposphere model
+//! variances, and the `varerr` code error.
 //!
 //! The satellite selection, the elevation mask and the weights are evaluated at
 //! the current iterate, as RTKLIB `estpos` re-runs `rescode` at every iteration,
@@ -83,9 +87,12 @@ mod fallback;
 mod source;
 use crate::astro::math::robust::{huber_weight, mad_scale, RobustError};
 pub use config::{
-    DEFAULT_HUBER_K, DEFAULT_ROBUST_MAX_OUTER, DEFAULT_ROBUST_OUTER_TOL_M,
-    DEFAULT_ROBUST_SCALE_FLOOR_M, ELEVATION_MASK_RAD, MAX_SELECTION_PASSES, SELECTION_STEP_TOL_M,
-    SIGMA0_M, TRANSMIT_TIME_ITERATIONS,
+    BROADCAST_IONOSPHERE_ERROR_FACTOR, CODE_BIAS_ERROR_M, CODE_PHASE_ERROR_RATIO, DEFAULT_HUBER_K,
+    DEFAULT_ROBUST_MAX_OUTER, DEFAULT_ROBUST_OUTER_TOL_M, DEFAULT_ROBUST_SCALE_FLOOR_M,
+    ELEVATION_MASK_RAD, ERROR_MODEL_MIN_ELEVATION_RAD, MAX_SELECTION_PASSES, PHASE_ERROR_BASE_M,
+    PHASE_ERROR_ELEVATION_M, RTKLIB_TROPOSPHERE_RELATIVE_HUMIDITY, SELECTION_STEP_TOL_M,
+    TRANSMIT_TIME_ITERATIONS, TROPOSPHERE_MODEL_ERROR_M, UNCORRECTED_IONOSPHERE_ERROR_M,
+    UNCORRECTED_TROPOSPHERE_ERROR_M,
 };
 pub use fallback::{
     solve_broadcast, solve_with_fallback, BroadcastReason, FallbackError, FixSource,
@@ -100,7 +107,7 @@ use crate::dop::{dop, dop_multi, Dop, LineOfSight, PositionCovariance};
 use crate::estimation::recipe::{
     EstimationRecipe, FrameRecipe, RangeRecipe, SagnacRecipe, SolverRecipe,
 };
-use crate::estimation::substrate::frames::{az_el_from_ecef, geodetic_from_ecef};
+use crate::estimation::substrate::frames::{az_el_from_ecef, geodetic_from_ecef, AzEl};
 use crate::estimation::substrate::parameters::ParameterLayout;
 use crate::estimation::substrate::range::{geometric_range, rotate_transmit_satellite};
 use crate::frame::{ItrfPositionM, Wgs84Geodetic};
@@ -116,7 +123,7 @@ use crate::quality::{
     validate_receiver_solution, SolutionValidationError, SolutionValidationOptions,
 };
 use crate::sbas::SbasIonoGrid;
-use crate::tropo::slant_components;
+use crate::tropo::{rtklib_tropmodel_m, slant_components};
 use crate::validate;
 use crate::velocity::{
     self, VelocityError, VelocityObservable, VelocityObservation, VelocitySolution,
@@ -327,7 +334,8 @@ pub struct ReceiverSolution {
     /// `rx_clock_s`; the inter-system bias for any other system is *its clock
     /// minus that reference* (these are absolute per-system clocks, not biases).
     pub system_clocks_s: Vec<(GnssSystem, f64)>,
-    /// Dilution-of-precision scalars from the converged geometry. A
+    /// Dilution-of-precision scalars from the converged geometry, every line of
+    /// sight at unit weight, as RTKLIB `dops` forms them. A
     /// single-system solve uses the 0-ULP four-state cofactor; a multi-system
     /// solve uses the general inverse with one clock column per constellation (a
     /// deterministic diagnostic, not a 0-ULP target). `None` only if the
@@ -343,7 +351,9 @@ pub struct ReceiverSolution {
     /// per-system TDOPs already GNSS-tagged in [`Dop::system_tdops`], so this is
     /// a direct copy and needs no re-tagging.
     pub system_tdops: Vec<(GnssSystem, f64)>,
-    /// Position covariance in square metres.
+    /// Position covariance in square metres: the position block of
+    /// `(H^T W H)^-1` with the weights the solve used, the inverse pseudorange
+    /// variances, as RTKLIB `estpos` forms `Q`.
     ///
     /// `ecef_m2` is the ITRF/IGS ECEF covariance. `enu_m2` is the same block
     /// rotated into the local geodetic east-north-up frame at the solved
@@ -436,7 +446,7 @@ impl ReceiverSolution {
 pub struct Corrections {
     /// Apply the Klobuchar L1 ionosphere delay.
     pub ionosphere: bool,
-    /// Apply the Saastamoinen/Niell troposphere delay.
+    /// Apply the troposphere delay of [`SolveInputs::troposphere_model`].
     pub troposphere: bool,
 }
 
@@ -492,15 +502,16 @@ impl Default for SurfaceMet {
 /// Opt-in Huber/IRLS robust-reweighting configuration.
 ///
 /// When a [`SolveInputs::robust`] is `Some(_)`, the solve runs an outer
-/// iteratively-reweighted least-squares loop on top of the static elevation
+/// iteratively-reweighted least-squares loop on top of the static variance
 /// weighting: a warm start from the settled static solve (identical to the
 /// static path), then re-solves that each take the selection at the current
-/// state and weight it as `elevation_weight * huber(r_i / s)`, where `r_i` is the
+/// state and weight it as `weight * huber(r_i / s)`, where `weight` is the inverse
+/// pseudorange variance, `r_i` is the
 /// unweighted residual at that state and `s` is a floored MAD scale. The loop
 /// settles when the position moves less than `outer_tol_m` and the selection at
 /// the new state is the one solved with; after `max_outer` total solves without
 /// settling it ends with [`Status::OuterBudgetExhausted`] and has not converged. With
-/// `robust = None` the solve is byte-identical to the static elevation-weighted
+/// `robust = None` the solve is byte-identical to the static variance-weighted
 /// solve. `Default` matches the `DEFAULT_*` config constants.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
@@ -575,15 +586,62 @@ pub struct SolveInputs {
     /// the FDMA allocation, is excluded from the solve and reported with
     /// [`RejectionReason::IonosphereCarrierUnresolved`].
     pub glonass_channels: BTreeMap<u8, i8>,
-    /// Surface meteorology (used iff `corrections.troposphere`).
+    /// Surface meteorology, read by [`TroposphereModel::SaastamoinenNiell`] when
+    /// `corrections.troposphere` is set.
     pub met: SurfaceMet,
+    /// The troposphere model `corrections.troposphere` applies: RTKLIB `tropmodel`
+    /// ([`TroposphereModel::Rtklib`], the default) or the Saastamoinen zenith delays of
+    /// [`Self::met`] mapped by the Niell functions.
+    pub troposphere_model: TroposphereModel,
     /// Opt-in Huber/IRLS robust reweighting. `None` (the default behavior)
-    /// runs the static elevation-weighted solve byte-identically; `Some(_)`
+    /// runs the static variance-weighted solve byte-identically; `Some(_)`
     /// adds the outer reweighting loop described on [`RobustConfig`].
     pub robust: Option<RobustConfig>,
     /// Which code the pseudoranges are: single-frequency, which takes the broadcast
     /// group delay, or ionosphere-free, which takes none.
     pub pseudorange_code: PseudorangeCode,
+    /// Which receiver clock QZSS pseudoranges are solved on: the GPS clock
+    /// ([`QzssClock::Gps`], the default) or a clock of their own.
+    pub qzss_clock: QzssClock,
+}
+
+/// The troposphere delay an SPP solve applies to each pseudorange when
+/// [`Corrections::troposphere`] is set.
+///
+/// No specification prescribes a single-point troposphere model, so the default is the
+/// one RTKLIB `pntpos` applies with `TROPOPT_SAAS`. Both models take the troposphere
+/// variance RTKLIB `tropcorr` states for its Saastamoinen model,
+/// `(`[`TROPOSPHERE_MODEL_ERROR_M`]` / (sin(el) + 0.1))²`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TroposphereModel {
+    /// RTKLIB `tropmodel` with the relative humidity
+    /// [`RTKLIB_TROPOSPHERE_RELATIVE_HUMIDITY`] `tropcorr` passes it: the Saastamoinen
+    /// hydrostatic and wet zenith delays from the standard atmosphere at the receiver
+    /// height, each mapped by `1 / cos(z)`. [`SolveInputs::met`] is not read.
+    #[default]
+    Rtklib,
+    /// The Saastamoinen zenith delays of the surface meteorology
+    /// [`SolveInputs::met`] states, mapped by the Niell (1996) hydrostatic and wet
+    /// functions at the solve's day of year.
+    SaastamoinenNiell,
+}
+
+/// Which receiver clock an SPP solve puts QZSS pseudoranges on.
+///
+/// IS-QZSS-PNT defines QZSS system time as aligned with GPS time and states the QZSS
+/// broadcast clocks against it, so a QZSS pseudorange carries the receiver's GPS
+/// clock offset and, by default, takes the GPS clock parameter: a GPS and QZSS solve
+/// estimates one clock. RTKLIB demo5 `pntpos` estimates a QZS-GPS time offset
+/// instead when built with `QZSDT`, which the demo5 source has defined since 2024;
+/// [`Self::Separate`] solves QZSS on a clock of its own in the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QzssClock {
+    /// QZSS pseudoranges take the GPS receiver clock.
+    #[default]
+    Gps,
+    /// QZSS pseudoranges take a receiver clock of their own, estimated as the clock
+    /// of another system is.
+    Separate,
 }
 
 /// Which code an SPP solve's pseudoranges are, which decides whether the broadcast
@@ -617,8 +675,10 @@ impl Default for SolveInputs {
             sbas_iono: None,
             glonass_channels: BTreeMap::new(),
             met: SurfaceMet::default(),
+            troposphere_model: TroposphereModel::Rtklib,
             robust: None,
             pseudorange_code: PseudorangeCode::SingleFrequency,
+            qzss_clock: QzssClock::Gps,
         }
     }
 }
@@ -897,6 +957,14 @@ pub(crate) struct SatModel {
     pub rho_m: f64,
     pub iono_m: f64,
     pub tropo_m: f64,
+    /// Variance (m²) of `iono_m` as RTKLIB `ionocorr` states it, scaled to the
+    /// satellite's carrier as `rescode` scales it; see [`ionosphere_variance_m2`].
+    pub iono_variance_m2: f64,
+    /// Epoch the satellite state was read at, and the epoch its record was selected at:
+    /// the transmission and reception epochs under the RTKLIB placement, the state epoch
+    /// for both under a light-time recipe, which selects no record apart.
+    pub state_epoch_j2000_s: f64,
+    pub selection_epoch_j2000_s: f64,
     #[cfg(all(test, sidereon_repo_tests))]
     pub az_rad: f64,
     #[cfg(all(test, sidereon_repo_tests))]
@@ -958,8 +1026,10 @@ pub(crate) struct SatModelEnv<'a> {
     pub day_of_year: f64,
     /// The correction terms to apply.
     pub corrections: Corrections,
-    /// Surface meteorology (used iff `corrections.troposphere`).
+    /// Surface meteorology, read by the Saastamoinen-Niell troposphere model.
     pub met: &'a SurfaceMet,
+    /// The troposphere model `corrections.troposphere` applies.
+    pub troposphere_model: TroposphereModel,
     /// GLONASS FDMA channel numbers keyed by slot (PRN), used to resolve the
     /// per-satellite GLONASS carrier for the ionosphere scaling.
     pub glonass_channels: &'a BTreeMap<u8, i8>,
@@ -1099,7 +1169,7 @@ pub(crate) fn sat_model_checked(
 
     // Transmission epoch, selected by the range recipe.
     // `_t_tx` is read only by the test-build trace fields below.
-    let (sat_pos, dt_sat, tau, group_delay, t_state, _t_tx) = match env.model.range {
+    let (sat_pos, dt_sat, tau, group_delay, t_state, _t_tx, t_selection) = match env.model.range {
         RangeRecipe::RtklibSatpossPseudorange => {
             // RTKLIB `satposs`: the clock read at `t_rx - P / c` (`ephclk`) places the
             // transmission epoch `t_rx - P / c - dts`, and the state is read there. No
@@ -1142,7 +1212,7 @@ pub(crate) fn sat_model_checked(
             // `geodist` rotates nothing and takes the first-order Sagnac term instead.
             let tau = geometric_range(SagnacRecipe::Off, pos, rx_ecef_m, OMEGA_E_DOT_RAD_S, C_M_S)
                 / C_M_S;
-            (pos, clk, tau, gd, t_tx, t_tx)
+            (pos, clk, tau, gd, t_tx, t_tx, env.t_rx_j2000_s)
         }
         RangeRecipe::SppMeasuredPseudorangeFixedIter => {
             // Geometric light time from the receiver's time tag: fixed iteration count,
@@ -1170,7 +1240,7 @@ pub(crate) fn sat_model_checked(
                 tau = rho0 / C_M_S;
                 t_tx = env.t_rx_j2000_s - tau;
             }
-            (sat_pos, dt_sat, tau, group_delay, t_state, t_tx)
+            (sat_pos, dt_sat, tau, group_delay, t_state, t_tx, t_state)
         }
         RangeRecipe::CanonicalLightTimeClosedFormSagnac => {
             // Full iterative light-time (the IERS-rigorous op-order): iterate the
@@ -1209,7 +1279,7 @@ pub(crate) fn sat_model_checked(
                 }
                 prev_tau = tau;
             }
-            (sat_pos, dt_sat, tau, group_delay, t_state, t_tx)
+            (sat_pos, dt_sat, tau, group_delay, t_state, t_tx, t_state)
         }
         RangeRecipe::ObservableRoundedMicrosecondFixedIter
         | RangeRecipe::RtkProvidedTxFirstOrderSagnac => unreachable!(
@@ -1264,6 +1334,13 @@ pub(crate) fn sat_model_checked(
 
     let mut iono_m = 0.0;
     let mut tropo_m = 0.0;
+    // The carrier the ionosphere delay and its variance are scaled to. A used satellite
+    // always has a resolvable carrier when the correction is applied: selection
+    // excludes, from an ionosphere-corrected solve, any satellite that does not,
+    // GLONASS included via its FDMA channel. Selection evaluates such a satellite with
+    // the L1 fallback only to classify it and then discards that model, so no solved
+    // measurement uses the fallback.
+    let freq_hz = spp_iono_frequency_hz(sat, env.glonass_channels).unwrap_or(F_L1_HZ);
     // RTKLIB evaluates no broadcast ionosphere delay for a receiver more than 1 km
     // below the ellipsoid or a satellite at or below its horizon (`ionmodel`), and
     // no augmentation-grid delay more than 100 m below it or at or below the
@@ -1282,14 +1359,8 @@ pub(crate) fn sat_model_checked(
         let lon_deg = rad_to_deg_ref(g.geodetic.lon_rad);
         let az_deg = rad_to_deg_ref(g.az_rad);
         let el_deg = rad_to_deg_ref(g.el_rad);
-        // A used satellite always has a resolvable carrier here: selection
-        // excludes, from an ionosphere-corrected solve, any satellite that does
-        // not, GLONASS included via its FDMA channel. Selection evaluates such a
-        // satellite with the L1 fallback only to classify it and then discards
-        // that model, so no solved measurement uses the fallback. The GLONASS
-        // per-satellite carrier makes the Klobuchar delay scale by
+        // The GLONASS per-satellite carrier makes the Klobuchar delay scale by
         // `(f_L1 / f_k)^2` inside the kernel, exactly as RTKLIB-demo5 does.
-        let freq_hz = spp_iono_frequency_hz(sat, env.glonass_channels).unwrap_or(F_L1_HZ);
         iono_m = match ionosphere {
             SppIonosphere::Klobuchar(klobuchar) => klobuchar_native_unchecked(
                 &KlobucharParams {
@@ -1320,16 +1391,26 @@ pub(crate) fn sat_model_checked(
         };
     }
     if env.corrections.troposphere {
-        tropo_m = slant_components(
-            g.el_rad,
-            g.geodetic,
-            env.met.pressure_hpa,
-            env.met.temperature_k,
-            env.met.relative_humidity,
-            env.day_of_year,
-        )
-        .slant_m;
+        tropo_m = match env.troposphere_model {
+            TroposphereModel::Rtklib => {
+                rtklib_tropmodel_m(g.el_rad, g.geodetic, RTKLIB_TROPOSPHERE_RELATIVE_HUMIDITY)
+            }
+            TroposphereModel::SaastamoinenNiell => {
+                slant_components(
+                    g.el_rad,
+                    g.geodetic,
+                    env.met.pressure_hpa,
+                    env.met.temperature_k,
+                    env.met.relative_humidity,
+                    env.day_of_year,
+                )
+                .slant_m
+            }
+        };
     }
+
+    let iono_variance_m2 =
+        ionosphere_variance_m2(env, ionosphere, ionosphere_gated, iono_m, &g, freq_hz);
 
     // Predicted pseudorange, left-to-right; c*dt_sat is a single multiply.
     let p_hat = rho + b_m - C_M_S * dt_sat + iono_m + tropo_m;
@@ -1342,6 +1423,9 @@ pub(crate) fn sat_model_checked(
         rho_m: rho,
         iono_m,
         tropo_m,
+        iono_variance_m2,
+        state_epoch_j2000_s: t_state,
+        selection_epoch_j2000_s: t_selection,
         #[cfg(all(test, sidereon_repo_tests))]
         az_rad: g.az_rad,
         #[cfg(all(test, sidereon_repo_tests))]
@@ -1359,14 +1443,137 @@ pub(crate) fn sat_model_checked(
     })
 }
 
+/// Variance (m²) of the ionosphere delay `iono_m` a satellite model took, as RTKLIB
+/// `ionocorr` states it and `rescode` scales it to the satellite's carrier `freq_hz`:
+///
+/// - the correction applied from a broadcast model (Klobuchar, NeQuick-G): the square of
+///   [`BROADCAST_IONOSPHERE_ERROR_FACTOR`] times the delay, `0` where the model gives no
+///   delay (a receiver more than 1 km below the ellipsoid, a satellite at or below its
+///   horizon);
+/// - the correction applied from an augmentation grid: the grid's slant variance
+///   ([`SbasIonoGrid::slant_variance_m2`], RTKLIB `sbsioncorr`'s variance, which grows
+///   with each grid point's age), `0` where it gives no delay;
+/// - no correction, on a single-frequency code: [`UNCORRECTED_IONOSPHERE_ERROR_M`]
+///   squared, scaled from L1 to the carrier by `(f_L1 / f)⁴`;
+/// - no correction, on the ionosphere-free code: `0`, as `ionocorr` gives for
+///   `IONOOPT_IFLC`.
+fn ionosphere_variance_m2(
+    env: &SatModelEnv,
+    ionosphere: SppIonosphere<'_>,
+    gated: bool,
+    iono_m: f64,
+    geometry: &AzEl,
+    freq_hz: f64,
+) -> f64 {
+    if env.corrections.ionosphere {
+        if gated {
+            return 0.0;
+        }
+        return match ionosphere {
+            SppIonosphere::Klobuchar(_) | SppIonosphere::GalileoNequick(_) => {
+                let std_m = iono_m * BROADCAST_IONOSPHERE_ERROR_FACTOR;
+                std_m * std_m
+            }
+            SppIonosphere::SbasGrid(grid) => grid
+                .slant_variance_m2(
+                    geometry.geodetic,
+                    geometry.el_rad,
+                    geometry.az_rad,
+                    freq_hz,
+                    env.t_rx_j2000_s,
+                )
+                .unwrap_or(0.0),
+        };
+    }
+    match env.pseudorange_code {
+        PseudorangeCode::IonosphereFree => 0.0,
+        PseudorangeCode::SingleFrequency => {
+            let ratio = F_L1_HZ / freq_hz;
+            UNCORRECTED_IONOSPHERE_ERROR_M
+                * UNCORRECTED_IONOSPHERE_ERROR_M
+                * ((ratio * ratio) * (ratio * ratio))
+        }
+    }
+}
+
+/// RTKLIB `varerr` with the `prcopt_default` options, m²: the code error of a satellite
+/// of `system` at elevation `el_rad`,
+/// `EFACT² · eratio² · (err[1]² + err[2]² / sin(el))`, with `el` no lower than
+/// [`ERROR_MODEL_MIN_ELEVATION_RAD`], `eratio = `[`CODE_PHASE_ERROR_RATIO`],
+/// `err[1] = `[`PHASE_ERROR_BASE_M`], `err[2] = `[`PHASE_ERROR_ELEVATION_M`], and the
+/// system error factor `EFACT` 1.5 for GLONASS and NavIC, 3 for SBAS and 1 otherwise
+/// (RTKLIB's switch has no Galileo case, so Galileo takes the GPS factor, 1). The
+/// ionosphere-free code takes it three times over (`varr *= 3²`). The signal-strength
+/// and receiver-noise terms of `varerr` are off by default and are not formed.
+pub(crate) fn code_error_variance_m2(
+    system: GnssSystem,
+    el_rad: f64,
+    code: PseudorangeCode,
+) -> f64 {
+    let fact = match system {
+        GnssSystem::Glonass | GnssSystem::Navic => 1.5,
+        GnssSystem::Sbas => 3.0,
+        GnssSystem::Gps | GnssSystem::Galileo | GnssSystem::BeiDou | GnssSystem::Qzss => 1.0,
+    };
+    let el = if el_rad < ERROR_MODEL_MIN_ELEVATION_RAD {
+        ERROR_MODEL_MIN_ELEVATION_RAD
+    } else {
+        el_rad
+    };
+    let mut varr = PHASE_ERROR_BASE_M * PHASE_ERROR_BASE_M
+        + PHASE_ERROR_ELEVATION_M * PHASE_ERROR_ELEVATION_M / libm::sin(el);
+    varr *= CODE_PHASE_ERROR_RATIO * CODE_PHASE_ERROR_RATIO;
+    if code == PseudorangeCode::IonosphereFree {
+        varr *= 3.0 * 3.0;
+    }
+    fact * fact * varr
+}
+
+/// Variance (m²) of a satellite's pseudorange as RTKLIB `rescode` forms it, the weight
+/// a single-point solve gives the satellite being its inverse:
+/// `vare + vmeas + vion + vtrp + varerr`, in that order, with
+///
+/// - `vare` the ephemeris variance of the satellite's state
+///   ([`EphemerisSource::ephemeris_variance_m2`]);
+/// - `vmeas` [`CODE_BIAS_ERROR_M`] squared for a single-frequency code, `0` for the
+///   ionosphere-free code (`prange`);
+/// - `vion` the ionosphere variance of the model ([`SatModel::iono_variance_m2`]);
+/// - `vtrp` `(`[`TROPOSPHERE_MODEL_ERROR_M`]` / (sin(el) + 0.1))²` with the troposphere
+///   corrected, [`UNCORRECTED_TROPOSPHERE_ERROR_M`] squared without (`tropcorr`);
+/// - `varerr` the code error ([`code_error_variance_m2`]).
+pub(crate) fn pseudorange_variance_m2(
+    sat: GnssSatelliteId,
+    model: &SatModel,
+    ephemeris_variance_m2: f64,
+    corrections: Corrections,
+    code: PseudorangeCode,
+) -> f64 {
+    let code_bias_m2 = match code {
+        PseudorangeCode::SingleFrequency => CODE_BIAS_ERROR_M * CODE_BIAS_ERROR_M,
+        PseudorangeCode::IonosphereFree => 0.0,
+    };
+    let troposphere_m2 = if corrections.troposphere {
+        let std_m = TROPOSPHERE_MODEL_ERROR_M / (libm::sin(model.el_rad) + 0.1);
+        std_m * std_m
+    } else {
+        UNCORRECTED_TROPOSPHERE_ERROR_M * UNCORRECTED_TROPOSPHERE_ERROR_M
+    };
+    ephemeris_variance_m2
+        + code_bias_m2
+        + model.iono_variance_m2
+        + troposphere_m2
+        + code_error_variance_m2(sat.system, model.el_rad, code)
+}
+
 /// The satellite selection at one receiver state, as RTKLIB `rescode` makes it:
 /// used satellites (ascending id), rejected satellites with reason, and for each
-/// used satellite its elevation weight, line of sight and residual at that state.
+/// used satellite its weight, line of sight and residual at that state.
 pub(crate) struct Selection {
     pub used: Vec<GnssSatelliteId>,
     pub rejected: Vec<RejectedSat>,
-    /// `weight` per used satellite, index-aligned to `used`: `sin^2(el) / sigma0^2`
-    /// at the state the selection was made at.
+    /// `weight` per used satellite, index-aligned to `used`: the inverse of the
+    /// pseudorange variance ([`pseudorange_variance_m2`]) at the state the selection was
+    /// made at.
     pub weights: Vec<f64>,
     /// Unit line of sight from the receiver to the satellite position the range
     /// is formed from, per used satellite, index-aligned to `used`.
@@ -1376,11 +1583,12 @@ pub(crate) struct Selection {
     pub residuals_m: Vec<f64>,
 }
 
-/// The clock a satellite's residual takes: SBAS ranges on the GPS clock.
-pub(crate) const fn clock_system(system: GnssSystem) -> GnssSystem {
-    match system {
-        GnssSystem::Sbas => GnssSystem::Gps,
-        system => system,
+/// The clock a satellite's residual takes: SBAS ranges on the GPS clock, and QZSS
+/// ranges on the GPS clock unless `qzss_clock` gives QZSS its own.
+pub(crate) const fn clock_system(system: GnssSystem, qzss_clock: QzssClock) -> GnssSystem {
+    match (system, qzss_clock) {
+        (GnssSystem::Sbas, _) | (GnssSystem::Qzss, QzssClock::Gps) => GnssSystem::Gps,
+        (system, _) => system,
     }
 }
 
@@ -1416,6 +1624,7 @@ pub(crate) fn select_at(
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,
         met: &inputs.met,
+        troposphere_model: inputs.troposphere_model,
         glonass_channels: &inputs.glonass_channels,
         model,
         pseudorange_code: inputs.pseudorange_code,
@@ -1423,7 +1632,7 @@ pub(crate) fn select_at(
     };
     for ob in obs {
         let sat = ob.satellite_id;
-        let b = clock_m(clock_system(sat.system));
+        let b = clock_m(clock_system(sat.system, inputs.qzss_clock));
         let ionosphere = ionosphere_for(sat.system, inputs);
         let model = match sat_model_checked(&env, sat, rx_ecef_m, b, ob.pseudorange_m, ionosphere) {
             Ok(model) => model,
@@ -1489,10 +1698,20 @@ pub(crate) fn select_at(
             });
             continue;
         }
-        let sin_el = libm::sin(model.el_rad);
-        let weight = (sin_el * sin_el) / (SIGMA0_M * SIGMA0_M);
+        let ephemeris_variance_m2 = eph.ephemeris_variance_m2(
+            sat,
+            model.state_epoch_j2000_s,
+            model.selection_epoch_j2000_s,
+        );
+        let variance_m2 = pseudorange_variance_m2(
+            sat,
+            &model,
+            ephemeris_variance_m2,
+            inputs.corrections,
+            inputs.pseudorange_code,
+        );
         used.push(sat);
-        weights.push(weight);
+        weights.push(1.0 / variance_m2);
         lines_of_sight.push(line_of_sight(model.sat_rot_ecef_m, rx_ecef_m));
         residuals_m.push(ob.pseudorange_m - model.p_hat_m);
     }
@@ -1523,8 +1742,11 @@ pub(crate) fn line_of_sight(sat_ecef_m: [f64; 3], rx_ecef_m: [f64; 3]) -> LineOf
 /// reference clock and a system's inter-system bias is its clock minus that
 /// reference. For a single-system solve this is one element and the state is the
 /// classic `[x, y, z, b]`.
-pub(crate) fn clock_systems(used: &[GnssSatelliteId]) -> Vec<GnssSystem> {
-    let mut systems: Vec<GnssSystem> = used.iter().map(|s| clock_system(s.system)).collect();
+pub(crate) fn clock_systems(used: &[GnssSatelliteId], qzss_clock: QzssClock) -> Vec<GnssSystem> {
+    let mut systems: Vec<GnssSystem> = used
+        .iter()
+        .map(|s| clock_system(s.system, qzss_clock))
+        .collect();
     systems.sort_unstable();
     systems.dedup();
     systems
@@ -1566,7 +1788,7 @@ fn residual_unweighted_placed(
     placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
 ) -> Result<Vec<f64>, GnssSatelliteId> {
     let rx = [x[0], x[1], x[2]];
-    let systems = clock_systems(used);
+    let systems = clock_systems(used, inputs.qzss_clock);
     let env = SatModelEnv {
         eph,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
@@ -1574,6 +1796,7 @@ fn residual_unweighted_placed(
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,
         met: &inputs.met,
+        troposphere_model: inputs.troposphere_model,
         glonass_channels: &inputs.glonass_channels,
         model,
         pseudorange_code: inputs.pseudorange_code,
@@ -1589,7 +1812,7 @@ fn residual_unweighted_placed(
         // The clock for this satellite's system (index 0 = reference clock).
         let sys_idx = systems
             .iter()
-            .position(|s| *s == clock_system(sat.system))
+            .position(|s| *s == clock_system(sat.system, inputs.qzss_clock))
             .unwrap_or(0);
         let b = x[3 + sys_idx];
         let m =
@@ -1908,7 +2131,7 @@ fn select_at_state(
     // `3 + n_systems` parameters and needs at least that many usable satellites.
     // Floor the clock count at one: the minimum solve is the four-parameter
     // single-system form even when no satellite survives selection.
-    let systems = clock_systems(&sel.used);
+    let systems = clock_systems(&sel.used, inputs.qzss_clock);
     // SPP's weighted-residual rows feed the trust-region solver, which owns the
     // normal-equation factorization (NormalRecipe::SppWeightedResidualFiniteDifference
     // via SolverRecipe::NalgebraTrfLegacy); only the parameter stack is named here.
@@ -1924,12 +2147,16 @@ fn select_at_state(
 
 /// The state column of each used satellite's clock: `3 +` the index of its clock
 /// system in `systems`.
-fn clock_columns(used: &[GnssSatelliteId], systems: &[GnssSystem]) -> Vec<usize> {
+fn clock_columns(
+    used: &[GnssSatelliteId],
+    systems: &[GnssSystem],
+    qzss_clock: QzssClock,
+) -> Vec<usize> {
     used.iter()
         .map(|sat| {
             3 + systems
                 .iter()
-                .position(|s| *s == clock_system(sat.system))
+                .position(|s| *s == clock_system(sat.system, qzss_clock))
                 .unwrap_or(0)
         })
         .collect()
@@ -2106,6 +2333,7 @@ pub(crate) fn model_env<'a>(
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,
         met: &inputs.met,
+        troposphere_model: inputs.troposphere_model,
         glonass_channels: &inputs.glonass_channels,
         model,
         pseudorange_code: inputs.pseudorange_code,
@@ -2178,7 +2406,7 @@ fn solve_selected(
             .ok_or(SppError::EphemerisLost { satellite })?;
         let column = 3 + systems
             .iter()
-            .position(|s| *s == clock_system(satellite.system))
+            .position(|s| *s == clock_system(satellite.system, inputs.qzss_clock))
             .unwrap_or(0);
         let env = model_env(eph, inputs, model, placement);
         let rx = [x[0], x[1], x[2]];
@@ -2240,7 +2468,7 @@ fn evaluate_used(
             .find(|o| o.satellite_id == sat)
             .map(|o| o.pseudorange_m)
             .ok_or(SppError::EphemerisLost { satellite: sat })?;
-        let b = state.clock_m(clock_system(sat.system));
+        let b = state.clock_m(clock_system(sat.system, inputs.qzss_clock));
         let ionosphere = ionosphere_for(sat.system, inputs);
         let Some(m) = sat_model(&env, sat, state.rx_ecef_m, b, p_meas, ionosphere) else {
             if lost_grid_coverage(&env, inputs, sat, state.rx_ecef_m, b, p_meas) {
@@ -2310,7 +2538,7 @@ fn solve_tracked(
         if last_used.as_ref() == Some(&sel.used) {
             // The selection holds: the step RTKLIB takes here, from this
             // iterate's residuals and weights.
-            let columns = clock_columns(&sel.used, &systems);
+            let columns = clock_columns(&sel.used, &systems, inputs.qzss_clock);
             let dx = rtklib_step(
                 &sel.lines_of_sight,
                 &columns,
@@ -2403,7 +2631,7 @@ fn solve_tracked(
     // Outer Huber/IRLS reweighting loop, ONLY on the robust path, warm-started
     // from the settled solve above. Each iteration takes the selection at the
     // current state, derives a floored MAD scale from its residuals, builds the
-    // effective weight vector `elevation_weight * huber(r_i / s)` index-aligned
+    // effective weight vector `weight * huber(r_i / s)` index-aligned
     // to that selection, and re-solves from the current state. It settles when the
     // position step drops below `outer_tol_m` and the selection at the new state
     // is the one solved with; a solve whose budget runs out first ends with
@@ -2430,7 +2658,7 @@ fn solve_tracked(
             outer_iterations += 1;
             if step_next {
                 step_next = false;
-                let columns = clock_columns(&sel.used, &systems);
+                let columns = clock_columns(&sel.used, &systems, inputs.qzss_clock);
                 let dx = rtklib_step(
                     &sel.lines_of_sight,
                     &columns,
@@ -2465,7 +2693,7 @@ fn solve_tracked(
                     }
                     PassEnd::CoverageLost(x) => {
                         // The last accepted iterate, reported with the selection and
-                        // elevation weights there until a reweighted solve or step
+                        // weights there until a reweighted solve or step
                         // replaces them.
                         state.update(&systems, &x);
                         let (next, next_systems) =
@@ -2509,7 +2737,7 @@ fn solve_tracked(
                     Some(scale),
                 ),
                 // A satellite left the augmentation grid: report the selection and
-                // elevation weights at the state reached.
+                // weights at the state reached.
                 None => (
                     FinalSet {
                         used: next.used.clone(),
@@ -2540,7 +2768,7 @@ fn solve_tracked(
     }
 
     // The clock columns of the reported set: the systems it was solved with.
-    let systems = clock_systems(&final_set.used);
+    let systems = clock_systems(&final_set.used, inputs.qzss_clock);
     let n_clocks = systems.len();
     let xs = state.parameters(&systems);
     let position = ItrfPositionM::new(xs[0], xs[1], xs[2]).expect("valid ITRF position");
@@ -2559,15 +2787,18 @@ fn solve_tracked(
     };
 
     // DOP and covariance from the reported geometry: the line-of-sight unit
-    // vectors to the satellite positions the ranges were formed from, with the
-    // reported weights. A single-system solve uses the 0-ULP four-state cofactor
-    // inverse; a multi-system solve uses the general (3 + n_systems) inverse with
-    // one clock column per GNSS (a deterministic geometry diagnostic, not a 0-ULP
-    // target).
+    // vectors to the satellite positions the ranges were formed from. The DOP is the
+    // geometry's alone, every row at unit weight, as RTKLIB `dops` forms it; the
+    // covariance is `(H^T W H)^-1` with the reported weights, the inverse
+    // pseudorange variances, which is RTKLIB `estpos`'s `Q` in square metres. A
+    // single-system solve uses the 0-ULP four-state cofactor inverse; a multi-system
+    // solve uses the general (3 + n_systems) inverse with one clock column per GNSS (a
+    // deterministic geometry diagnostic, not a 0-ULP target).
     let geo = geodetic_from_ecef(model.frame, [xs[0], xs[1], xs[2]]);
-    let columns = clock_columns(&final_set.used, &systems);
+    let columns = clock_columns(&final_set.used, &systems, inputs.qzss_clock);
     let clock_index: Vec<usize> = columns.iter().map(|column| column - 3).collect();
     let los = &final_set.lines_of_sight;
+    let unit_weights = vec![1.0_f64; los.len()];
     // `systems` is the clock-column ordering: `clock_index[k] ==
     // systems.position(clock system of sat k)`, so `systems[c]` owns clock column
     // `c` (the same ordering `system_clocks_s` uses). The multi-system path is
@@ -2575,20 +2806,12 @@ fn solve_tracked(
     // single-system 0-ULP `dop` carries no constellation identity, so tag its
     // lone clock here with the one system in the solve.
     let dop_result = if n_clocks == 1 {
-        dop(los, &final_set.weights, geo).ok().map(|mut d| {
+        dop(los, &unit_weights, geo).ok().map(|mut d| {
             d.system_tdops = vec![(systems[0], d.tdop)];
             d
         })
     } else {
-        dop_multi(
-            los,
-            &clock_index,
-            &systems,
-            n_clocks,
-            &final_set.weights,
-            geo,
-        )
-        .ok()
+        dop_multi(los, &clock_index, &systems, n_clocks, &unit_weights, geo).ok()
     };
     let n_params = xs.len();
     // The geometry diagnostics of the reported design, `sqrt(W) [-e, 1]` at the
@@ -2950,7 +3173,9 @@ pub(crate) fn validate_solve_inputs(inputs: &SolveInputs) -> Result<(), SppError
     if let Some(nequick) = &inputs.galileo_nequick {
         validate_galileo_nequick(nequick)?;
     }
-    if inputs.corrections.troposphere {
+    if inputs.corrections.troposphere
+        && inputs.troposphere_model == TroposphereModel::SaastamoinenNiell
+    {
         validate_met(&inputs.met)?;
     }
     validate_observations(&inputs.observations)?;

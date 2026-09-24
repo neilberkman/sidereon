@@ -307,7 +307,7 @@ fn active_clock_systems(geometry: &AraimGeometry, hypothesis: &FaultHypothesis) 
         .filter(|&clock_system| {
             geometry.rows.iter().any(|row| {
                 !hypothesis.excludes_satellite(row.id, row.system)
-                    && clock_system_for_row(row.system) == clock_system
+                    && clock_system_for_row(row.system, &geometry.clock_systems) == clock_system
             })
         })
         .collect()
