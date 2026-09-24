@@ -33,6 +33,23 @@ model and the crate's published algorithms, not from sidereon-core's output.
 
 The ISS states at split Julian dates are python-sgp4's `Satrec.sgp4(jd, fr)`.
 
+`far_times` holds each satellite far from epoch, where python-sgp4 still
+propagates or returns its own error code: 1e7 to 1e8 minutes either way for
+every satellite, and for the orbits without a resonance integrator also 1e9
+minutes up to the largest finite double. A resonant orbit steps its
+integrator 720 minutes at a time, so python-sgp4 needs about 1.4e6 steps
+per 1e9 minutes; those times are left out, and so is every time past 2^63
+minutes, where the integrator never ends. The far states of a resonant orbit
+carry no bound: summed over the thousands of integrator steps, the bound
+overflows to NaN. A far state of any other orbit carries its bound, or none
+where a comparison or an angle reduction could go either way; every far
+state carries its `rust_libm` expectation.
+
+`drag_free_iss` is the ISS element set with B* = 0 at the far times of an
+orbit without resonance and at +-1e100: python-sgp4 returns a finite state
+with code 0 up to 1e19 minutes, and from 1e100 code 0 with a NaN state,
+which sidereon-core reports as a non-finite output instead.
+
 The build that produced the committed file:
     sgp4 2.22, wheel sgp4-2.22-cp311-cp311-macosx_11_0_arm64 (no fused
     multiply-add instructions in its extension), CPython 3.11, macOS 26 on
@@ -72,10 +89,27 @@ RUST_LIBM = vallado_order_module(
 )
 
 EXPECTED_SGP4_VERSION = "2.22"
+FAR_TIMES = [1.0e7 + 1.0, -(1.0e7 + 1.0), 2.0e7, 1.0e8, -1.0e8]
+FAR_TIMES_WITHOUT_RESONANCE = [
+    1.0e9,
+    -1.0e9,
+    1.0e10,
+    1.0e12,
+    1.0e15,
+    2.0**63,
+    1.0e19,
+    1.0e100,
+    1.0e300,
+    -1.0e300,
+    sys.float_info.max,
+    -sys.float_info.max,
+]
 FIXED_GRID = [0.0, 120.0, 360.0, 720.0, 1080.0, 1440.0]
 LABELS = ["px", "py", "pz", "vx", "vy", "vz"]
 ISS_LINE1 = "1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9993"
 ISS_LINE2 = "2 25544  51.6414 295.8524 0003435 262.6267 204.2868 15.54005638121106"
+DRAG_FREE_ISS_LINE1 = "1 25544U 98067A   18184.80969102  .00001614  00000-0  00000-0 0  9999"
+DRAG_FREE_ISS_TIMES = FAR_TIMES + FAR_TIMES_WITHOUT_RESONANCE + [-1.0e100]
 ISS_SPLITS = [
     ("2018-07-04T00:00:00", 2458303.0, 0.5),
     ("2018-07-04T00:30:00", 2458303.0, 0.520833333333),
@@ -165,6 +199,18 @@ class TrackedSatellite:
             raise RuntimeError(f"a branch may differ between libm builds: {flags[:3]}")
         return [bound.lift(c).radius() for c in list(r) + list(v)]
 
+    def bounds_where_derivable(self, tsince: float):
+        """The bound, or None where a comparison could go either way or the
+        bound is not finite."""
+        try:
+            radii = self.bounds(tsince)
+        except (RuntimeError, ArithmeticError, ValueError, OverflowError):
+            return None
+        return radii if all(math.isfinite(x) for x in radii) else None
+
+    def resonant(self) -> bool:
+        return self.record.irez != 0
+
 
 class RustLibmSatellite:
     """python-sgp4's model in the C++ order with the Rust libm port."""
@@ -224,6 +270,25 @@ def state(reference_lines, tsince, tracked, rust) -> dict:
     return out
 
 
+def far_state(reference_lines, tsince, tracked, rust, allow_non_finite=False) -> dict:
+    out, state_vector = python_state(reference_lines, tsince)
+    if state_vector is not None:
+        if all(math.isfinite(x) for x in state_vector):
+            out["bound"] = None if tracked.resonant() else tracked.bounds_where_derivable(tsince)
+        elif allow_non_finite:
+            out["non_finite"] = True
+        else:
+            raise RuntimeError(f"python-sgp4 returned a non-finite state without an error at {tsince}")
+    out["rust_libm"] = rust.expect(tsince)
+    return out
+
+
+def far_order(times):
+    """Each side of epoch in increasing distance, so the resonance
+    integrator resumes rather than restarts."""
+    return sorted(times, key=lambda t: (t < 0.0, abs(t)))
+
+
 def element_record(reference: Satrec) -> dict:
     return {
         "jdsatepoch": hexf(reference.jdsatepoch),
@@ -256,6 +321,11 @@ def main() -> None:
         tracked = TrackedSatellite(reference)
         rust = RustLibmSatellite(reference)
         propagations = [state((line1, line2), t, tracked, rust) for t in times]
+        far = TrackedSatellite(reference)
+        far_times = FAR_TIMES + ([] if far.resonant() else FAR_TIMES_WITHOUT_RESONANCE)
+        far_propagations = [
+            far_state((line1, line2), t, far, rust) for t in far_order(far_times)
+        ]
         print(line1[2:7], "done", flush=True)
         satellites.append(
             {
@@ -265,6 +335,8 @@ def main() -> None:
                 "verification_grid": list(grid),
                 **element_record(reference),
                 "propagations": propagations,
+                "resonant": far.resonant(),
+                "far_times": far_propagations,
             }
         )
 
@@ -283,6 +355,20 @@ def main() -> None:
         row["rust_libm"] = iss_rust.expect(tsince)
         iss_states.append(row)
 
+    drag_free = Satrec.twoline2rv(DRAG_FREE_ISS_LINE1, ISS_LINE2, WGS72)
+    drag_free_tracked = TrackedSatellite(drag_free)
+    drag_free_rust = RustLibmSatellite(drag_free)
+    drag_free_states = [
+        far_state(
+            (DRAG_FREE_ISS_LINE1, ISS_LINE2),
+            t,
+            drag_free_tracked,
+            drag_free_rust,
+            allow_non_finite=True,
+        )
+        for t in far_order(DRAG_FREE_ISS_TIMES)
+    ]
+
     fixture = {
         "reference": "python-sgp4 compiled extension (Vallado C++ 2020-07-13), Satrec.twoline2rv, sgp4_tsince",
         "sgp4_version": sgp4.__version__,
@@ -298,15 +384,24 @@ def main() -> None:
         "num_satellites": len(satellites),
         "satellites": satellites,
         "iss_split_jd_tests": iss_states,
+        "drag_free_iss": {
+            "line1": DRAG_FREE_ISS_LINE1,
+            "line2": ISS_LINE2,
+            "far_times": drag_free_states,
+        },
     }
     OUT.write_text(json.dumps(fixture, indent=2) + "\n", encoding="utf-8")
     n = sum(len(s["propagations"]) for s in satellites)
     errors = sum(1 for s in satellites for p in s["propagations"] if "error" in p)
     print(f"wrote {OUT.name}: {len(satellites)} satellites, {n} states, {errors} error states")
+    far = [p for s in satellites for p in s["far_times"]]
+    far_errors = sum(1 for p in far if "error" in p)
+    far_bounded = sum(1 for p in far if p.get("bound") is not None)
+    print(f"far times: {len(far)} states, {far_errors} error states, {far_bounded} with a bound")
     agree = sum(
         1
         for s in satellites
-        for p in s["propagations"]
+        for p in s["propagations"] + s["far_times"]
         if ("error" in p) == ("error" in p["rust_libm"])
         and all(p.get(k) == p["rust_libm"].get(k) for k in LABELS)
     )

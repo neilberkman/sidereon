@@ -129,6 +129,13 @@ pub struct ElsetRec {
     pub zmol: f64,
     pub zmos: f64,
     pub atime: f64,
+    /// Not in Vallado's record: the most 720-minute resonance integrator
+    /// steps one `sgp4` call may take, or `None` for no limit (Vallado's
+    /// behaviour). When a call would need more, `dspace` stops and
+    /// `resonance_budget_exhausted` is set.
+    pub resonance_step_budget: Option<u64>,
+    /// Set by `sgp4` when `resonance_step_budget` stopped the integrator.
+    pub resonance_budget_exhausted: bool,
     pub xli: f64,
     pub xni: f64,
 
@@ -260,6 +267,8 @@ impl Default for ElsetRec {
             zmol: 0.0,
             zmos: 0.0,
             atime: 0.0,
+            resonance_step_budget: None,
+            resonance_budget_exhausted: false,
             xli: 0.0,
             xni: 0.0,
             a: 0.0,
@@ -1429,6 +1438,7 @@ fn dsinit(
 //                           procedure dspace
 // ============================================================================
 struct DspaceResult {
+    budget_exhausted: bool,
     atime: f64,
     em: f64,
     argpm: f64,
@@ -1478,6 +1488,7 @@ fn dspace(
     mut xni: f64,
     mut nodem: f64,
     mut nm: f64,
+    step_budget: Option<u64>,
 ) -> DspaceResult {
     let twopi = 2.0 * PI_VAL;
     let mut iretn: i32;
@@ -1519,6 +1530,8 @@ fn dspace(
     /* - update resonances : numerical (euler-maclaurin) integration - */
     /* ------------------------- epoch restart ----------------------  */
     ft = 0.0;
+    let mut steps: u64 = 0;
+    let mut budget_exhausted = false;
     if irez != 0 {
         // sgp4fix streamline check
         if (atime == 0.0) || (t * atime <= 0.0) || (t.abs() < atime.abs()) {
@@ -1584,7 +1597,12 @@ fn dspace(
                 iretn = 0;
             }
 
+            if iretn == 381 && step_budget.is_some_and(|budget| steps >= budget) {
+                budget_exhausted = true;
+                break;
+            }
             if iretn == 381 {
+                steps += 1;
                 xli = xli + xldot * delt + xndt * step2;
                 xni = xni + xndt * delt + xnddt * step2;
                 atime = atime + delt;
@@ -1604,6 +1622,7 @@ fn dspace(
     }
 
     DspaceResult {
+        budget_exhausted,
         atime,
         em,
         argpm,
@@ -2499,7 +2518,12 @@ pub fn sgp4(satrec: &mut ElsetRec, tsince: f64, r: &mut [f64; 3], v: &mut [f64; 
             satrec.xni,
             nodem,
             nm,
+            satrec.resonance_step_budget,
         );
+        if ds.budget_exhausted {
+            satrec.resonance_budget_exhausted = true;
+            return false;
+        }
         satrec.atime = ds.atime;
         em = ds.em;
         argpm = ds.argpm;
