@@ -535,8 +535,43 @@ fn utc_time_system_accepts_fractional_leap_second_epoch_label() {
 
     assert_eq!(sp3.header.time_system, Sp3TimeSystem::Utc);
     assert_eq!(sp3.epochs[0].scale, TimeScale::Utc);
+    // Held as the RINEX clock reader holds a leap-second label: on the next
+    // day's boundary less the half second remaining to it.
     assert_eq!(split.jd_whole, 2_457_754.5);
-    assert!((split.fraction - 0.5 / crate::constants::SECONDS_PER_DAY).abs() < 1.0e-15);
+    assert_eq!(split.fraction, -0.5 / crate::constants::SECONDS_PER_DAY);
+}
+
+/// A leap-second label and the next day's same-second label are two epochs.
+/// Carried past the day boundary on its own day's grid, 23:59:60.67959836
+/// rounded onto the split of 00:00:00.67959836 (both `0x3ee07ee091200000`);
+/// held on the next day's boundary less the 0.32040164 s remaining, it is a
+/// different split, and the writer restates each line.
+#[test]
+fn utc_leap_second_label_is_distinct_from_the_next_days_label() {
+    let utc = SP3C_FILE
+        .replacen("%c G  cc GPS", "%c G  cc UTC", 1)
+        .replacen(
+            "*  2020  6 24  0  0  0.00000000",
+            "*  2016 12 31 23 59 60.67959836",
+            1,
+        )
+        .replacen(
+            "*  2020  6 24  0 15  0.00000000",
+            "*  2017  1  1  0  0  0.67959836",
+            1,
+        );
+    let sp3 = Sp3::parse(utc.as_bytes()).expect("UTC SP3 with a leap-second label");
+    let leap = sp3.epochs[0].julian_date().unwrap();
+    let next = sp3.epochs[1].julian_date().unwrap();
+    assert_eq!((leap.jd_whole, next.jd_whole), (2_457_754.5, 2_457_754.5));
+    assert_eq!(leap.fraction.to_bits(), 0xbecf_1ba0_3eb9_44a4);
+    assert_eq!(next.fraction.to_bits(), 0x3ee0_7ee0_9120_0000);
+
+    let text = sp3.to_sp3_string().expect("both epochs write");
+    assert!(text.contains("*  2016 12 31 23 59 60.67959836\n"), "{text}");
+    assert!(text.contains("*  2017  1  1  0  0  0.67959836\n"), "{text}");
+    let reparsed = Sp3::parse(text.as_bytes()).expect("the written product reparses");
+    assert_eq!(reparsed.epochs, sp3.epochs);
 }
 
 #[test]

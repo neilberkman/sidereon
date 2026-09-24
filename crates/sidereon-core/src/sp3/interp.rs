@@ -394,7 +394,14 @@ pub(super) fn gather_sp3_precise_series(source: &Sp3, sat: GnssSatelliteId) -> P
 pub(super) fn sp3_epoch_j2000_seconds(source: &Sp3, idx: usize, epoch: &Instant) -> Option<f64> {
     let public_seconds = instant_to_j2000_seconds(epoch)?;
     let parsed_seconds = *source.epoch_j2000_s.get(idx)?;
-    if (public_seconds - parsed_seconds).abs() <= WHOLE_SECOND_EPS_S {
+    // A `23:59:60.xx` label is held on the next day's boundary less the time
+    // remaining to it, one second before the J2000 seconds its line states
+    // (`j2000_seconds` counts the label as the next day's `00:00:00.xx`).
+    let leap_label = epoch.julian_date().is_some_and(|split| {
+        (split.jd_whole + 0.5).fract() == 0.0
+            && (-1.0 / SECONDS_PER_DAY..0.0).contains(&split.fraction)
+    }) && (public_seconds + 1.0 - parsed_seconds).abs() <= WHOLE_SECOND_EPS_S;
+    if leap_label || (public_seconds - parsed_seconds).abs() <= WHOLE_SECOND_EPS_S {
         Some(parsed_seconds)
     } else {
         Some(public_seconds)

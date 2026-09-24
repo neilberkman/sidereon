@@ -8,6 +8,10 @@
 //! - [`civil`] - the no-leap-second civil-calendar conversions (split Julian
 //!   date, seconds since J2000, second-of-day, fractional day-of-year) that the
 //!   GNSS bindings consume directly, so each interface stops reimplementing them.
+//! - [`exact`] - [`ExactEpoch`], an epoch held exactly as whole seconds plus
+//!   attoseconds and an exact remainder below them (the role RTKLIB's
+//!   `gtime_t` plays), so intervals between labels are exact before they are
+//!   rounded once.
 //! - [`model`] - the public time model type family ([`TimeScale`], [`Instant`],
 //!   [`Duration`], [`JulianDateSplit`], [`GnssWeekTow`]).
 //! - [`eop`] - time/EOP validity + provenance API with strict-vs-permissive
@@ -18,6 +22,7 @@
 
 pub mod civil;
 pub mod eop;
+pub mod exact;
 pub mod gnss;
 pub mod model;
 pub mod scales;
@@ -34,6 +39,7 @@ pub use eop::{
     CoverageError, DegradeReason, LeapSecondTable, TimeScaleInputErrorKind, Ut1Provenance,
     Validated, ValidityMode,
 };
+pub use exact::ExactEpoch;
 pub use model::{
     Duration, GnssWeekTow, Instant, InstantRepr, JulianDateSplit, TimeModelError, TimeScale,
     SECONDS_PER_WEEK,

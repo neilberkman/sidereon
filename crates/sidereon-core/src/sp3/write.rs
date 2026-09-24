@@ -1656,15 +1656,19 @@ impl EpochFields {
 /// Neither rounding there is trusted: what the writer emits is decided by
 /// reading the candidate back, not by how close the roundings came.
 ///
-/// Most instants have exactly one statement. A UTC-like system has two for one
-/// second of the year, because `split_julian_date` carries a `:60` leap-second
-/// label past the day boundary: a fraction of exactly `1.0` is the label
-/// itself, and a label with a fractional part lands in the next day's small
-/// fraction. Both statements are offered in that window, ordered so the one
-/// whose split the parser would rebuild unchanged is offered first - the pair
-/// the parser builds for a label is the one whose own `jd_whole` boundary opens
-/// the day *before* the one the instant falls in. The ordinary decomposition is
-/// always one of the two. A statement the parser would not accept back - a
+/// Most instants have exactly one statement. A UTC-like system has two for the
+/// last second of a day that ends with a leap second. The parser holds a
+/// `23:59:60.xx` label on the next day's boundary with the negative fraction
+/// of the time remaining to it, so a split on the boundary of the day after
+/// the one its instant falls in, in that day's last second, is offered as the
+/// label first and as the ordinary `23:59:59.xx` statement second. Splits
+/// earlier readers built carried the label past the boundary instead: a
+/// fraction of exactly `1.0` on the label's own day, or the next day's small
+/// fraction; both statements are offered in that window too, ordered so the
+/// one whose split that reader would rebuild unchanged is offered first - the
+/// pair it built for a label is the one whose own `jd_whole` boundary opens
+/// the day *before* the one the instant falls in. The ordinary decomposition
+/// is always one of the two. A statement the parser would not accept back - a
 /// `:60` label on a day that carries no leap second - is discarded by the
 /// readback rather than by a rule here.
 fn epoch_candidates(
@@ -1673,7 +1677,16 @@ fn epoch_candidates(
 ) -> (EpochFields, Option<EpochFields>) {
     let (day, ticks, boundary_day) = midnight_decomposition(split);
     let ordinary = civil_fields(day, ticks);
-    if !is_utc_like(time_system) || ticks >= SP3_TIME_TICKS_PER_SECOND {
+    if !is_utc_like(time_system) {
+        return (ordinary, None);
+    }
+    let last_second = SP3_TIME_TICKS_PER_DAY - SP3_TIME_TICKS_PER_SECOND;
+    if boundary_day == day + 1 && ticks >= last_second {
+        // Held on the next day's boundary, in the last second of the day: the
+        // parser's form of that day's `23:59:60.xx` label.
+        return (leap_fields(day, ticks - last_second), Some(ordinary));
+    }
+    if ticks >= SP3_TIME_TICKS_PER_SECOND {
         return (ordinary, None);
     }
     // Less than a second into a day: the window this day's `00:00:00.xx` shares
