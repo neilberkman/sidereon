@@ -1148,8 +1148,9 @@ struct MemoEntry {
 
 struct SatelliteMemo {
     sat: GnssSatelliteId,
-    /// Most recently used first.
     entries: [Option<MemoEntry>; MEMO_EPOCHS_PER_SATELLITE],
+    most_recent_first: [usize; MEMO_EPOCHS_PER_SATELLITE],
+    len: usize,
 }
 
 impl<'a> TransmitStateMemo<'a> {
@@ -1185,9 +1186,23 @@ impl<'a> TransmitStateMemo<'a> {
         selection_epoch: &ExactEpochQuery,
         f: impl FnOnce(&mut MemoEntry) -> R,
     ) -> R {
-        self.with_entry_key(
+        self.with_entry_key_matching(
             sat,
-            MemoKey::Exact(state_epoch.clone(), selection_epoch.clone()),
+            true,
+            |key| match key {
+                MemoKey::Exact(cached_state, cached_selection) => {
+                    cached_state.shares_representation(state_epoch)
+                        && cached_selection.shares_representation(selection_epoch)
+                }
+                MemoKey::Scalar(_, _) => false,
+            },
+            |key| match key {
+                MemoKey::Exact(cached_state, cached_selection) => {
+                    cached_state == state_epoch && cached_selection == selection_epoch
+                }
+                MemoKey::Scalar(_, _) => false,
+            },
+            || MemoKey::Exact(state_epoch.clone(), selection_epoch.clone()),
             f,
         )
     }
@@ -1198,6 +1213,25 @@ impl<'a> TransmitStateMemo<'a> {
         key: MemoKey,
         f: impl FnOnce(&mut MemoEntry) -> R,
     ) -> R {
+        self.with_entry_key_matching(
+            sat,
+            false,
+            |_| false,
+            |candidate| candidate == &key,
+            || key.clone(),
+            f,
+        )
+    }
+
+    fn with_entry_key_matching<R>(
+        &self,
+        sat: GnssSatelliteId,
+        try_fast_match: bool,
+        mut fast_matches: impl FnMut(&MemoKey) -> bool,
+        mut matches: impl FnMut(&MemoKey) -> bool,
+        make_key: impl FnOnce() -> MemoKey,
+        f: impl FnOnce(&mut MemoEntry) -> R,
+    ) -> R {
         let mut satellites = self.satellites.borrow_mut();
         let index = match satellites.iter().position(|memo| memo.sat == sat) {
             Some(index) => index,
@@ -1205,32 +1239,56 @@ impl<'a> TransmitStateMemo<'a> {
                 satellites.push(SatelliteMemo {
                     sat,
                     entries: std::array::from_fn(|_| None),
+                    most_recent_first: std::array::from_fn(|index| index),
+                    len: 0,
                 });
                 satellites.len() - 1
             }
         };
-        let entries = &mut satellites[index].entries;
-        let slot = match entries
-            .iter()
-            .position(|entry| entry.as_ref().is_some_and(|entry| entry.key == key))
-        {
-            Some(slot) => slot,
+        let memo = &mut satellites[index];
+        let mut found = None;
+        if try_fast_match {
+            for (position, &slot) in memo.most_recent_first[..memo.len].iter().enumerate() {
+                if memo.entries[slot]
+                    .as_ref()
+                    .is_some_and(|entry| fast_matches(&entry.key))
+                {
+                    found = Some((slot, position));
+                    break;
+                }
+            }
+        }
+        if found.is_none() {
+            for (position, &slot) in memo.most_recent_first[..memo.len].iter().enumerate() {
+                if memo.entries[slot]
+                    .as_ref()
+                    .is_some_and(|entry| matches(&entry.key))
+                {
+                    found = Some((slot, position));
+                    break;
+                }
+            }
+        }
+        let (slot, position) = match found {
+            Some(found) => found,
             None => {
-                let slot = MEMO_EPOCHS_PER_SATELLITE - 1;
-                entries[slot] = Some(MemoEntry {
-                    key,
+                let position = memo.len.min(MEMO_EPOCHS_PER_SATELLITE - 1);
+                let slot = memo.most_recent_first[position];
+                memo.entries[slot] = Some(MemoEntry {
+                    key: make_key(),
                     state: None,
                     transmit_epoch_clock: None,
                     variance_m2: None,
                     relativity: None,
                 });
-                slot
+                memo.len = (memo.len + 1).min(MEMO_EPOCHS_PER_SATELLITE);
+                (slot, position)
             }
         };
-        entries[..=slot].rotate_right(1);
-        let entry = entries[0]
+        memo.most_recent_first[..=position].rotate_right(1);
+        let entry = memo.entries[slot]
             .as_mut()
-            .expect("the entry was just placed first");
+            .expect("the selected entry is populated");
         f(entry)
     }
 }
@@ -1586,6 +1644,150 @@ mod memo_tests {
         )
         .expect("distinct exact selection query");
         assert_eq!(source.state_queries.get(), 2);
+    }
+
+    #[test]
+    fn exact_query_memo_representation_match_scans_past_newer_entries() {
+        let source = CountingSource {
+            state_queries: Cell::new(0),
+            variance_queries: Cell::new(0),
+        };
+        let memo = TransmitStateMemo::new(&source, 1);
+        let satellite =
+            GnssSatelliteId::new(crate::id::GnssSystem::Gps, 1).expect("valid GPS satellite");
+        let first_state = ExactEpoch::new(90, 0).expect("valid exact epoch").query();
+        let first_selection = first_state
+            .clone()
+            .checked_add_binary_seconds(0.25)
+            .expect("finite exact selection offset");
+        let second_state = first_state
+            .clone()
+            .checked_add_binary_seconds(0.5)
+            .expect("finite distinct state offset");
+        let second_selection = first_selection
+            .clone()
+            .checked_add_binary_seconds(0.5)
+            .expect("finite distinct selection offset");
+
+        memo.try_position_clock_group_delay_selected_at_epoch_query(
+            satellite,
+            &first_state,
+            &first_selection,
+        )
+        .expect("first exact state query");
+        memo.try_position_clock_group_delay_selected_at_epoch_query(
+            satellite,
+            &second_state,
+            &second_selection,
+        )
+        .expect("second exact state query");
+        memo.try_position_clock_group_delay_selected_at_epoch_query(
+            satellite,
+            &first_state.clone(),
+            &first_selection.clone(),
+        )
+        .expect("older shared-representation query hits memo");
+
+        assert_eq!(source.state_queries.get(), 2);
+    }
+
+    #[test]
+    fn exact_query_memo_hits_equivalent_epoch_offset_representations() {
+        let source = CountingSource {
+            state_queries: Cell::new(0),
+            variance_queries: Cell::new(0),
+        };
+        let memo = TransmitStateMemo::new(&source, 1);
+        let satellite =
+            GnssSatelliteId::new(crate::id::GnssSystem::Gps, 1).expect("valid GPS satellite");
+        let state_with_offset = ExactEpoch::new(90, 0)
+            .expect("valid exact epoch")
+            .query()
+            .checked_add_binary_seconds(1.0)
+            .expect("finite state offset");
+        let state_as_epoch = ExactEpoch::new(91, 0).expect("valid exact epoch").query();
+        let selection_with_offset = ExactEpoch::new(99, 0)
+            .expect("valid exact epoch")
+            .query()
+            .checked_add_binary_seconds(1.0)
+            .expect("finite selection offset");
+        let selection_as_epoch = ExactEpoch::new(100, 0).expect("valid exact epoch").query();
+        assert_eq!(state_with_offset, state_as_epoch);
+        assert_eq!(selection_with_offset, selection_as_epoch);
+
+        memo.try_position_clock_group_delay_selected_at_epoch_query(
+            satellite,
+            &state_with_offset,
+            &selection_with_offset,
+        )
+        .expect("first exact state query");
+        memo.try_position_clock_group_delay_selected_at_epoch_query(
+            satellite,
+            &state_as_epoch,
+            &selection_as_epoch,
+        )
+        .expect("equivalent exact state query hits memo");
+        assert_eq!(source.state_queries.get(), 1);
+
+        assert_eq!(
+            memo.ephemeris_variance_at_epoch_query(
+                satellite,
+                &state_with_offset,
+                &selection_with_offset,
+            ),
+            5.0
+        );
+        assert_eq!(
+            memo.ephemeris_variance_at_epoch_query(
+                satellite,
+                &state_as_epoch,
+                &selection_as_epoch,
+            ),
+            5.0
+        );
+        assert_eq!(source.variance_queries.get(), 1);
+    }
+
+    #[test]
+    fn memo_preserves_six_entry_lru_eviction_after_promotion() {
+        let source = CountingSource {
+            state_queries: Cell::new(0),
+            variance_queries: Cell::new(0),
+        };
+        let memo = TransmitStateMemo::new(&source, 1);
+        let satellite =
+            GnssSatelliteId::new(crate::id::GnssSystem::Gps, 1).expect("valid GPS satellite");
+        let query_at = |seconds| ExactEpoch::new(seconds, 0).expect("valid epoch").query();
+        let read = |query: &ExactEpochQuery| {
+            memo.try_position_clock_group_delay_selected_at_epoch_query(satellite, query, query)
+                .expect("state query")
+                .expect("source state");
+        };
+
+        for seconds in 100..100 + MEMO_EPOCHS_PER_SATELLITE as i64 {
+            read(&query_at(seconds));
+        }
+        assert_eq!(source.state_queries.get(), MEMO_EPOCHS_PER_SATELLITE);
+
+        let least_recent = query_at(100);
+        read(&least_recent);
+        assert_eq!(source.state_queries.get(), MEMO_EPOCHS_PER_SATELLITE);
+
+        read(&query_at(100 + MEMO_EPOCHS_PER_SATELLITE as i64));
+        assert_eq!(source.state_queries.get(), MEMO_EPOCHS_PER_SATELLITE + 1);
+
+        read(&query_at(101));
+        assert_eq!(
+            source.state_queries.get(),
+            MEMO_EPOCHS_PER_SATELLITE + 2,
+            "the unpromoted least-recent entry was evicted"
+        );
+        read(&least_recent);
+        assert_eq!(
+            source.state_queries.get(),
+            MEMO_EPOCHS_PER_SATELLITE + 2,
+            "the promoted entry remained cached"
+        );
     }
 
     struct RelativityCapturingSource {

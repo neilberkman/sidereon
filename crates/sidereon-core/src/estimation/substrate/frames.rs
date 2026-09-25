@@ -127,6 +127,71 @@ pub(crate) struct AzEl {
     pub el_rad: f64,
 }
 
+#[derive(Clone, Copy)]
+struct ReceiverFrame {
+    recipe: FrameRecipe,
+    receiver_bits: [u64; 3],
+    geodetic: Wgs84Geodetic,
+    sin_lat: f64,
+    cos_lat: f64,
+    sin_lon: f64,
+    cos_lon: f64,
+}
+
+impl ReceiverFrame {
+    fn new(recipe: FrameRecipe, rx_ecef_m: [f64; 3], geodetic: Wgs84Geodetic) -> Self {
+        let sin_lat = libm::sin(geodetic.lat_rad);
+        let cos_lat = libm::cos(geodetic.lat_rad);
+        let sin_lon = libm::sin(geodetic.lon_rad);
+        let cos_lon = libm::cos(geodetic.lon_rad);
+        Self {
+            recipe,
+            receiver_bits: rx_ecef_m.map(f64::to_bits),
+            geodetic,
+            sin_lat,
+            cos_lat,
+            sin_lon,
+            cos_lon,
+        }
+    }
+
+    fn matches(&self, recipe: FrameRecipe, rx_ecef_m: [f64; 3]) -> bool {
+        self.recipe == recipe && self.receiver_bits == rx_ecef_m.map(f64::to_bits)
+    }
+}
+
+pub(crate) struct ReceiverFrameMemo {
+    frame: std::cell::OnceCell<ReceiverFrame>,
+}
+
+impl ReceiverFrameMemo {
+    pub(crate) fn new() -> Self {
+        Self {
+            frame: std::cell::OnceCell::new(),
+        }
+    }
+
+    pub(crate) fn az_el(
+        &self,
+        recipe: FrameRecipe,
+        rx_ecef_m: [f64; 3],
+        sat_ecef_m: [f64; 3],
+    ) -> AzEl {
+        if let Some(receiver_frame) = self.frame.get() {
+            if receiver_frame.matches(recipe, rx_ecef_m) {
+                let delta = receiver_delta(rx_ecef_m, sat_ecef_m);
+                return geodetic_enu_az_el(receiver_frame, delta);
+            }
+        }
+
+        let geodetic = geodetic_for_recipe(recipe, rx_ecef_m);
+        let delta = receiver_delta(rx_ecef_m, sat_ecef_m);
+        let uncached_frame = ReceiverFrame::new(recipe, rx_ecef_m, geodetic);
+        let _ = self.frame.set(uncached_frame);
+        geodetic_enu_az_el(&uncached_frame, delta)
+    }
+}
+
 /// Topocentric azimuth/elevation of a satellite seen from the receiver, selected
 /// by frame recipe.
 ///
@@ -140,14 +205,28 @@ pub(crate) fn az_el_from_ecef(
     rx_ecef_m: [f64; 3],
     sat_ecef_m: [f64; 3],
 ) -> AzEl {
-    let geo = match frame {
+    let geodetic = geodetic_for_recipe(frame, rx_ecef_m);
+    let delta = receiver_delta(rx_ecef_m, sat_ecef_m);
+    let receiver_frame = ReceiverFrame::new(frame, rx_ecef_m, geodetic);
+    geodetic_enu_az_el(&receiver_frame, delta)
+}
+
+fn geodetic_for_recipe(frame: FrameRecipe, rx_ecef_m: [f64; 3]) -> Wgs84Geodetic {
+    match frame {
         FrameRecipe::SppSkyfieldAuThreeIter => skyfield_au_geodetic(rx_ecef_m),
         FrameRecipe::CanonicalWgs84 => canonical_wgs84_geodetic(rx_ecef_m),
         _ => unreachable!(
             "the geodetic ENU azimuth/elevation is selected only by the SPP Skyfield and canonical recipes"
         ),
-    };
-    geodetic_enu_az_el(geo, rx_ecef_m, sat_ecef_m)
+    }
+}
+
+fn receiver_delta(rx_ecef_m: [f64; 3], sat_ecef_m: [f64; 3]) -> [f64; 3] {
+    [
+        sat_ecef_m[0] - rx_ecef_m[0],
+        sat_ecef_m[1] - rx_ecef_m[1],
+        sat_ecef_m[2] - rx_ecef_m[2],
+    ]
 }
 
 /// RTKLIB `satazel`: the azimuth and elevation (radians) of the line of sight
@@ -218,15 +297,14 @@ pub(crate) fn geodetic_neu_basis(rx_ecef_m: [f64; 3]) -> ([f64; 3], [f64; 3], [f
 /// az/el math. The receiver-satellite delta and the basis trig are independent
 /// (no shared rounding), so factoring `geo` out is bit-identical to computing it
 /// inline.
-fn geodetic_enu_az_el(geo: Wgs84Geodetic, rx_ecef_m: [f64; 3], sat_ecef_m: [f64; 3]) -> AzEl {
-    let dx = sat_ecef_m[0] - rx_ecef_m[0];
-    let dy = sat_ecef_m[1] - rx_ecef_m[1];
-    let dz = sat_ecef_m[2] - rx_ecef_m[2];
-
-    let sin_lat = libm::sin(geo.lat_rad);
-    let cos_lat = libm::cos(geo.lat_rad);
-    let sin_lon = libm::sin(geo.lon_rad);
-    let cos_lon = libm::cos(geo.lon_rad);
+fn geodetic_enu_az_el(receiver_frame: &ReceiverFrame, delta: [f64; 3]) -> AzEl {
+    let sin_lat = receiver_frame.sin_lat;
+    let cos_lat = receiver_frame.cos_lat;
+    let sin_lon = receiver_frame.sin_lon;
+    let cos_lon = receiver_frame.cos_lon;
+    let dx = delta[0];
+    let dy = delta[1];
+    let dz = delta[2];
 
     let e = -sin_lon * dx + cos_lon * dy;
     let n = -sin_lat * cos_lon * dx - sin_lat * sin_lon * dy + cos_lat * dz;
@@ -240,7 +318,7 @@ fn geodetic_enu_az_el(geo: Wgs84Geodetic, rx_ecef_m: [f64; 3], sat_ecef_m: [f64;
     }
 
     AzEl {
-        geodetic: geo,
+        geodetic: receiver_frame.geodetic,
         az_rad: az,
         el_rad: el,
     }
@@ -316,7 +394,11 @@ mod tests {
     fn spp_az_el_recipe_matches_geodetic_enu_bits() {
         let sat = [15_600_000.0, -20_400_000.0, 9_800_000.0];
         let got = az_el_from_ecef(FrameRecipe::SppSkyfieldAuThreeIter, POSITION, sat);
-        let want = geodetic_enu_az_el(skyfield_au_geodetic(POSITION), POSITION, sat);
+        let geodetic = skyfield_au_geodetic(POSITION);
+        let want = geodetic_enu_az_el(
+            &ReceiverFrame::new(FrameRecipe::SppSkyfieldAuThreeIter, POSITION, geodetic),
+            receiver_delta(POSITION, sat),
+        );
         assert_eq!(got.az_rad.to_bits(), want.az_rad.to_bits());
         assert_eq!(got.el_rad.to_bits(), want.el_rad.to_bits());
         assert_eq!(
@@ -340,13 +422,88 @@ mod tests {
     fn canonical_az_el_recipe_matches_geodetic_enu_bits() {
         let sat = [15_600_000.0, -20_400_000.0, 9_800_000.0];
         let got = az_el_from_ecef(FrameRecipe::CanonicalWgs84, POSITION, sat);
-        let want = geodetic_enu_az_el(canonical_wgs84_geodetic(POSITION), POSITION, sat);
+        let geodetic = canonical_wgs84_geodetic(POSITION);
+        let want = geodetic_enu_az_el(
+            &ReceiverFrame::new(FrameRecipe::CanonicalWgs84, POSITION, geodetic),
+            receiver_delta(POSITION, sat),
+        );
         assert_eq!(got.az_rad.to_bits(), want.az_rad.to_bits());
         assert_eq!(got.el_rad.to_bits(), want.el_rad.to_bits());
         assert_eq!(
             got.geodetic.lat_rad.to_bits(),
             want.geodetic.lat_rad.to_bits()
         );
+    }
+
+    #[test]
+    fn receiver_frame_memo_matches_wrapper_bits_for_both_recipes_and_edge_positions() {
+        let positions = [
+            POSITION,
+            [WGS84_A_KM * KM_TO_M, 0.0, 0.0],
+            [0.0, WGS84_A_KM * KM_TO_M, 0.0],
+            [0.0, 0.0, 6_356_752.314_245],
+            [-3_912_961.0, -3_656_402.0, -3_178_234.0],
+        ];
+        let recipes = [
+            FrameRecipe::SppSkyfieldAuThreeIter,
+            FrameRecipe::CanonicalWgs84,
+        ];
+        let satellites = [
+            [15_600_000.0, -20_400_000.0, 9_800_000.0],
+            [-20_100_000.0, 13_800_000.0, -7_300_000.0],
+        ];
+
+        for recipe in recipes {
+            for receiver in positions {
+                let memo = ReceiverFrameMemo::new();
+                for satellite in satellites {
+                    let expected = az_el_from_ecef(recipe, receiver, satellite);
+                    let got = memo.az_el(recipe, receiver, satellite);
+                    assert_eq!(got.az_rad.to_bits(), expected.az_rad.to_bits());
+                    assert_eq!(got.el_rad.to_bits(), expected.el_rad.to_bits());
+                    assert_eq!(
+                        got.geodetic.lat_rad.to_bits(),
+                        expected.geodetic.lat_rad.to_bits()
+                    );
+                    assert_eq!(
+                        got.geodetic.lon_rad.to_bits(),
+                        expected.geodetic.lon_rad.to_bits()
+                    );
+                    assert_eq!(
+                        got.geodetic.height_m.to_bits(),
+                        expected.geodetic.height_m.to_bits()
+                    );
+                }
+            }
+        }
+
+        let memo = ReceiverFrameMemo::new();
+        for (recipe, receiver) in [
+            (FrameRecipe::SppSkyfieldAuThreeIter, POSITION),
+            (FrameRecipe::CanonicalWgs84, POSITION),
+            (
+                FrameRecipe::SppSkyfieldAuThreeIter,
+                [POSITION[0] + 0.25, POSITION[1], POSITION[2]],
+            ),
+        ] {
+            let satellite = [15_600_000.0, -20_400_000.0, 9_800_000.0];
+            let expected = az_el_from_ecef(recipe, receiver, satellite);
+            let got = memo.az_el(recipe, receiver, satellite);
+            assert_eq!(got.az_rad.to_bits(), expected.az_rad.to_bits());
+            assert_eq!(got.el_rad.to_bits(), expected.el_rad.to_bits());
+            assert_eq!(
+                got.geodetic.lat_rad.to_bits(),
+                expected.geodetic.lat_rad.to_bits()
+            );
+            assert_eq!(
+                got.geodetic.lon_rad.to_bits(),
+                expected.geodetic.lon_rad.to_bits()
+            );
+            assert_eq!(
+                got.geodetic.height_m.to_bits(),
+                expected.geodetic.height_m.to_bits()
+            );
+        }
     }
 
     #[test]

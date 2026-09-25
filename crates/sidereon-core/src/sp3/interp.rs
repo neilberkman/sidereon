@@ -901,8 +901,7 @@ pub(super) fn query_minus_node_cmp(
     node_s: f64,
     offset_s: f64,
 ) -> Option<core::cmp::Ordering> {
-    let node_query = ExactEpoch::from_binary_j2000_seconds(node_s)?;
-    query.compare_interval_query(&node_query, offset_s)
+    query.compare_interval_binary_j2000_seconds(node_s, offset_s)
 }
 
 pub(crate) fn accuracy_node_indices(

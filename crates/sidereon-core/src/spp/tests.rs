@@ -2514,6 +2514,260 @@ fn transmit_epoch_is_rtklib_satposs_arithmetic_on_a_real_pseudorange() {
     assert!(checked >= 4, "only {checked} ESBC satellites were placed");
 }
 
+#[test]
+fn rtklib_placement_query_memo_preserves_query_identity_and_clock_key() {
+    let receive_epoch = crate::astro::time::ExactEpoch::from_binary_j2000_seconds(646_229_000.0)
+        .expect("finite receive epoch");
+    let memo = super::RtklibPlacementQueryMemo::new(Some(&receive_epoch), 0.0);
+    let satellite = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite");
+    let placement_pseudorange: f64 = 22_000_000.0;
+    let pseudorange_bits = placement_pseudorange.to_bits();
+    let first_clock_epoch = memo
+        .clock_epoch(
+            satellite,
+            &receive_epoch,
+            pseudorange_bits,
+            placement_pseudorange / C_M_S,
+        )
+        .expect("clock query");
+    let first_transmit_epoch = memo
+        .transmit_epoch(
+            satellite,
+            &receive_epoch,
+            pseudorange_bits,
+            &first_clock_epoch,
+            1.0e-6_f64.to_bits(),
+            1.0e-6,
+        )
+        .expect("transmit query");
+    let changed_clock_epoch = memo
+        .clock_epoch(
+            satellite,
+            &receive_epoch,
+            pseudorange_bits,
+            placement_pseudorange / C_M_S,
+        )
+        .expect("same clock query");
+    let changed_transmit_epoch = memo
+        .transmit_epoch(
+            satellite,
+            &receive_epoch,
+            pseudorange_bits,
+            &changed_clock_epoch,
+            2.0e-6_f64.to_bits(),
+            2.0e-6,
+        )
+        .expect("transmit query for changed clock");
+    assert_eq!(first_clock_epoch, changed_clock_epoch);
+    assert_ne!(first_transmit_epoch, changed_transmit_epoch);
+    let repeated_transmit_epoch = memo
+        .transmit_epoch(
+            satellite,
+            &receive_epoch,
+            pseudorange_bits,
+            &changed_clock_epoch,
+            2.0e-6_f64.to_bits(),
+            2.0e-6,
+        )
+        .expect("repeated transmit query");
+    assert_eq!(changed_transmit_epoch, repeated_transmit_epoch);
+
+    let different_selection = receive_epoch
+        .clone()
+        .checked_add_binary_seconds(1.0)
+        .expect("shifted selection");
+    let distinct_clock_epoch = memo
+        .clock_epoch(
+            satellite,
+            &different_selection,
+            pseudorange_bits,
+            placement_pseudorange / C_M_S,
+        )
+        .expect("query for distinct selection");
+    assert_ne!(first_clock_epoch, distinct_clock_epoch);
+    let entries = memo.entries.borrow();
+    let distinct_entry = entries
+        .iter()
+        .find(|entry| entry.selection_epoch.as_ref() == &different_selection)
+        .expect("entry retains the selection used to derive its query");
+    assert_eq!(
+        distinct_entry.clock_epoch.as_ref(),
+        distinct_clock_epoch.as_ref()
+    );
+}
+
+#[derive(Clone, Copy)]
+enum PlacementClockFailure {
+    TypedRefusal,
+    Missing,
+    NonFinite,
+}
+
+struct RefusingPlacementClockEphemeris {
+    inner: SyntheticEphemeris,
+    clock_calls: std::cell::Cell<usize>,
+    failure: PlacementClockFailure,
+}
+
+impl super::EphemerisSource for RefusingPlacementClockEphemeris {
+    fn position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64)> {
+        self.inner.position_clock_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        _sat: GnssSatelliteId,
+        _epoch: &crate::astro::time::ExactEpochQuery,
+        _selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Result<Option<crate::astro::time::Validated<f64>>, crate::Error> {
+        self.clock_calls.set(self.clock_calls.get() + 1);
+        match self.failure {
+            PlacementClockFailure::TypedRefusal => Err(crate::Error::Ut1OutsideCoverage(
+                crate::astro::time::DegradeReason::AfterCoverage,
+            )),
+            PlacementClockFailure::Missing => Ok(None),
+            PlacementClockFailure::NonFinite => {
+                Ok(Some(crate::astro::time::Validated::ok(f64::NAN)))
+            }
+        }
+    }
+}
+
+#[test]
+fn rtklib_placement_query_memo_does_not_cache_clock_failures() {
+    let directions = [
+        [0.85, 0.20, 0.49],
+        [0.60, -0.62, 0.50],
+        [0.70, 0.62, -0.35],
+        [0.92, -0.15, -0.36],
+    ];
+    let (inner, inputs) = synthetic_spp_case(&directions);
+    let receive_epoch =
+        crate::astro::time::ExactEpoch::from_binary_j2000_seconds(inputs.t_rx_j2000_s)
+            .expect("finite receive epoch");
+    let observation = &inputs.observations[0];
+    for failure in [
+        PlacementClockFailure::TypedRefusal,
+        PlacementClockFailure::Missing,
+        PlacementClockFailure::NonFinite,
+    ] {
+        let source = RefusingPlacementClockEphemeris {
+            inner: inner.clone(),
+            clock_calls: std::cell::Cell::new(0),
+            failure,
+        };
+        let env = super::model_env(&source, &inputs, SppModelRecipe::reference(), None);
+        let query_memo =
+            super::RtklibPlacementQueryMemo::new(Some(&receive_epoch), inputs.t_rx_j2000_s);
+        for _ in 0..2 {
+            assert!(matches!(
+                super::sat_model_checked_with_query_memo(
+                    &env,
+                    observation.satellite_id,
+                    inputs.initial_guess[..3]
+                        .try_into()
+                        .expect("three position coordinates"),
+                    0.0,
+                    observation.pseudorange_m,
+                    SppIonosphere::Klobuchar(inputs.klobuchar),
+                    Some(&query_memo),
+                ),
+                Err(super::SatModelGap::Other)
+            ));
+        }
+        assert_eq!(source.clock_calls.get(), 2);
+    }
+}
+
+#[test]
+fn rtklib_placement_query_memo_keeps_model_outputs_bitwise() {
+    let directions = [
+        [0.85, 0.20, 0.49],
+        [0.60, -0.62, 0.50],
+        [0.70, 0.62, -0.35],
+        [0.92, -0.15, -0.36],
+    ];
+    let (source, inputs) = synthetic_spp_case(&directions);
+    let mut env = super::model_env(&source, &inputs, SppModelRecipe::reference(), None);
+    let receive_epoch =
+        crate::astro::time::ExactEpoch::from_binary_j2000_seconds(inputs.t_rx_j2000_s)
+            .expect("finite receive epoch");
+    env.receive_epoch = Some(receive_epoch.clone());
+    let query_memo =
+        super::RtklibPlacementQueryMemo::new(Some(&receive_epoch), inputs.t_rx_j2000_s);
+    let observation = &inputs.observations[0];
+    let receiver = [
+        inputs.initial_guess[0],
+        inputs.initial_guess[1],
+        inputs.initial_guess[2],
+    ];
+    let ionosphere = SppIonosphere::Klobuchar(inputs.klobuchar);
+    let uncached = super::sat_model_checked(
+        &env,
+        observation.satellite_id,
+        receiver,
+        0.0,
+        observation.pseudorange_m,
+        ionosphere,
+    )
+    .expect("uncached model");
+    let assert_same_bits = |cached: super::SatModel| {
+        assert_eq!(
+            cached.sat_rot_ecef_m.map(f64::to_bits),
+            uncached.sat_rot_ecef_m.map(f64::to_bits)
+        );
+        assert_eq!(cached.el_rad.to_bits(), uncached.el_rad.to_bits());
+        assert_eq!(cached.p_hat_m.to_bits(), uncached.p_hat_m.to_bits());
+        assert_eq!(cached.dt_sat_s.to_bits(), uncached.dt_sat_s.to_bits());
+        assert_eq!(cached.rho_m.to_bits(), uncached.rho_m.to_bits());
+        assert_eq!(cached.iono_m.to_bits(), uncached.iono_m.to_bits());
+        assert_eq!(cached.tropo_m.to_bits(), uncached.tropo_m.to_bits());
+        assert_eq!(
+            cached.iono_variance_m2.to_bits(),
+            uncached.iono_variance_m2.to_bits()
+        );
+        assert_eq!(
+            cached.ephemeris_variance_m2.to_bits(),
+            uncached.ephemeris_variance_m2.to_bits()
+        );
+        #[cfg(sidereon_repo_tests)]
+        {
+            assert_eq!(cached.az_rad.to_bits(), uncached.az_rad.to_bits());
+            assert_eq!(cached.tau_s.to_bits(), uncached.tau_s.to_bits());
+            assert_eq!(
+                cached.t_tx_j2000_s.to_bits(),
+                uncached.t_tx_j2000_s.to_bits()
+            );
+            assert_eq!(
+                cached.sat_ecef_m.map(f64::to_bits),
+                uncached.sat_ecef_m.map(f64::to_bits)
+            );
+            assert_eq!(cached.theta_rad.to_bits(), uncached.theta_rad.to_bits());
+            assert_eq!(
+                cached.clock_epoch_j2000_s.to_bits(),
+                uncached.clock_epoch_j2000_s.to_bits()
+            );
+        }
+    };
+    for _ in 0..2 {
+        let cached = super::sat_model_checked_with_query_memo(
+            &env,
+            observation.satellite_id,
+            receiver,
+            0.0,
+            observation.pseudorange_m,
+            ionosphere,
+            Some(&query_memo),
+        )
+        .expect("cached model");
+        assert_same_bits(cached);
+    }
+}
+
 /// On the ESBC epoch, whose receiver clock is about half a millisecond, the SPP model
 /// differs from the geometric light-time model only through the transmission epoch, at
 /// the converged state, and the difference is decimetres: the geometric light time
