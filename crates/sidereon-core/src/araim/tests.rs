@@ -859,6 +859,8 @@ fn receiver_solution(
             enu_m2: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         },
         residuals_m: vec![0.0; used_count],
+        pseudorange_variances_m2: vec![1.0; used_count],
+        weights: vec![1.0; used_count],
         used_sats,
         rejected_sats: Vec::new(),
         geometry_quality: crate::geometry_quality::classify(

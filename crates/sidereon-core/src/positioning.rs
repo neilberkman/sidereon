@@ -9,6 +9,7 @@ use crate::ephemeris::{BroadcastEphemeris, Sp3};
 use crate::id::GnssSystem;
 pub use crate::quality::{
     spp_robust_fde_driver, FdeError, FdeOptions, FdeResult, FdeSppError, FdeSppOptions,
+    FdeUnresolved, FdeUnresolvedReason,
 };
 use crate::rinex::observations::{pseudoranges, ObsEpochTime, ObservationFile, SignalPolicy};
 use crate::rtcm::{self, MsmKind};

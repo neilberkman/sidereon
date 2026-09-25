@@ -492,6 +492,8 @@ impl Finite for sidereon_core::positioning::ReceiverSolution {
         }
         self.dop.push_finite_values(out);
         out.extend(self.residuals_m.iter().copied());
+        out.extend(self.pseudorange_variances_m2.iter().copied());
+        out.extend(self.weights.iter().copied());
     }
 }
 
