@@ -695,6 +695,7 @@ pub(crate) fn satellite_state_unchecked(
     satellite_state_at_deltas_unchecked(elements, None, clock, consts, tk, toc, tgd_s, is_geo)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn satellite_state_at_deltas_unchecked(
     elements: &KeplerianElements,
     cnav_rates: Option<&CnavRates>,

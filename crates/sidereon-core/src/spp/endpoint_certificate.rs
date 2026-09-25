@@ -13,8 +13,8 @@ use super::covariance_certificate;
 use super::interval_certificate::Interval;
 use super::regional_certificate::{self, SatelliteRegion};
 use super::{
-    ClockRelativity, EphemerisSource, GnssSystem, PseudorangeCode, Selection, SolveInputs,
-    SppModelRecipe, TroposphereModel, C_M_S, ELEVATION_MASK_RAD,
+    ClockRelativity, Corrections, EphemerisSource, GnssSystem, PseudorangeCode, Selection,
+    SolveInputs, SppModelRecipe, TroposphereModel, C_M_S, ELEVATION_MASK_RAD,
 };
 use crate::constants::{WGS84_A_M, WGS84_F};
 
@@ -22,7 +22,8 @@ const REGION_RADIUS_M: f64 = 1.0;
 
 #[cfg(test)]
 mod tests {
-    use super::{midpoint, radius, Interval};
+    use super::{klobuchar_error_for_corrections, midpoint, radius, Interval};
+    use crate::spp::Corrections;
 
     #[test]
     fn radius_encloses_both_endpoints_after_midpoint_rounding() {
@@ -35,6 +36,41 @@ mod tests {
             let enclosure = radius(interval);
             assert!(enclosure >= (interval.lower() - center).abs());
             assert!(enclosure >= (interval.upper() - center).abs());
+        }
+    }
+
+    #[test]
+    fn fixture_correction_configurations_only_require_active_ionosphere() {
+        let fixtures = [
+            ("esbc_iono_tropo", true, true),
+            ("esbc_tropo", false, true),
+            ("esbc_iono", true, false),
+            ("wtzr_iono_tropo", true, true),
+            ("wtzr_iono", true, false),
+        ];
+        for (label, ionosphere, troposphere) in fixtures {
+            let result = klobuchar_error_for_corrections(
+                Corrections {
+                    ionosphere,
+                    troposphere,
+                },
+                || Err(super::EndpointCertificateError::UnsupportedInputs),
+            );
+            if ionosphere {
+                assert!(
+                    matches!(
+                        result,
+                        Err(super::EndpointCertificateError::UnsupportedInputs)
+                    ),
+                    "{label}: enabled ionosphere requires its center enclosure"
+                );
+            } else {
+                let error = result.expect("disabled ionosphere has no center discrepancy");
+                assert_eq!(error.raw_phi_i_semicircles, 0.0);
+                assert_eq!(error.phi_m_semicircles, 0.0);
+                assert_eq!(error.local_time_seconds, 0.0);
+                assert_eq!(error.phase_radians, 0.0);
+            }
         }
     }
 }
@@ -1154,36 +1190,54 @@ fn source_klobuchar_error(
     candidate: &CandidateState,
     center: &CenterIntervals,
 ) -> Result<KlobucharCenterError, EndpointCertificateError> {
-    let ideal = center
-        .ideal_klobuchar
-        .as_ref()
-        .ok_or(EndpointCertificateError::UnsupportedInputs)?;
-    let geometry = super::az_el_from_ecef(
-        SppModelRecipe::reference().frame,
-        endpoint.position_ecef_m,
-        candidate.position_ecef_m,
-    );
-    let source = crate::ionex::klobuchar_l1_components(
-        geometry.geodetic.lat_rad.to_degrees(),
-        geometry.geodetic.lon_rad.to_degrees(),
-        geometry.az_rad.to_degrees(),
-        geometry.el_rad.to_degrees(),
-        inputs.t_rx_second_of_day_s,
-        inputs.klobuchar.alpha,
-        inputs.klobuchar.beta,
-    );
-    if ![source.phi_i, source.phi_m, source.t, source.x]
-        .iter()
-        .all(|value| value.is_finite())
-    {
-        return Err(EndpointCertificateError::InvalidEndpoint);
-    }
-    Ok(KlobucharCenterError {
-        raw_phi_i_semicircles: distance_to_interval(source.phi_i, ideal.raw_phi_i_semicircles),
-        phi_m_semicircles: distance_to_interval(source.phi_m, ideal.phi_m_semicircles),
-        local_time_seconds: distance_to_interval(source.t, ideal.local_time_seconds),
-        phase_radians: distance_to_interval(source.x, ideal.phase_radians),
+    klobuchar_error_for_corrections(inputs.corrections, || {
+        let ideal = center
+            .ideal_klobuchar
+            .as_ref()
+            .ok_or(EndpointCertificateError::UnsupportedInputs)?;
+        let geometry = super::az_el_from_ecef(
+            SppModelRecipe::reference().frame,
+            endpoint.position_ecef_m,
+            candidate.position_ecef_m,
+        );
+        let source = crate::ionex::klobuchar_l1_components(
+            geometry.geodetic.lat_rad.to_degrees(),
+            geometry.geodetic.lon_rad.to_degrees(),
+            geometry.az_rad.to_degrees(),
+            geometry.el_rad.to_degrees(),
+            inputs.t_rx_second_of_day_s,
+            inputs.klobuchar.alpha,
+            inputs.klobuchar.beta,
+        );
+        if ![source.phi_i, source.phi_m, source.t, source.x]
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return Err(EndpointCertificateError::InvalidEndpoint);
+        }
+        Ok(KlobucharCenterError {
+            raw_phi_i_semicircles: distance_to_interval(source.phi_i, ideal.raw_phi_i_semicircles),
+            phi_m_semicircles: distance_to_interval(source.phi_m, ideal.phi_m_semicircles),
+            local_time_seconds: distance_to_interval(source.t, ideal.local_time_seconds),
+            phase_radians: distance_to_interval(source.x, ideal.phase_radians),
+        })
     })
+}
+
+fn klobuchar_error_for_corrections(
+    corrections: Corrections,
+    calculate: impl FnOnce() -> Result<KlobucharCenterError, EndpointCertificateError>,
+) -> Result<KlobucharCenterError, EndpointCertificateError> {
+    if corrections.ionosphere {
+        calculate()
+    } else {
+        Ok(KlobucharCenterError {
+            raw_phi_i_semicircles: 0.0,
+            phi_m_semicircles: 0.0,
+            local_time_seconds: 0.0,
+            phase_radians: 0.0,
+        })
+    }
 }
 
 fn merge_regions(

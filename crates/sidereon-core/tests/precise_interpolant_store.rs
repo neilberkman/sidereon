@@ -259,6 +259,184 @@ fn header_checksum(bytes: &[u8]) -> u64 {
     )
 }
 
+const HEADER_VERSION_OFFSET: usize = 8;
+const HEADER_SAT_COUNT_OFFSET: usize = 12;
+const HEADER_INDEX_OFFSET_OFFSET: usize = 16;
+const HEADER_DATA_OFFSET_OFFSET: usize = 24;
+const HEADER_TOTAL_LEN_OFFSET: usize = 32;
+const V1_STORE_VERSION: u16 = 1;
+const V2_STORE_VERSION: u16 = 2;
+const SAT_INDEX_RECORD_LEN: usize = 96;
+const SAT_POSITION_COUNT_OFFSET: usize = 4;
+const SAT_CLOCK_NODE_COUNT_OFFSET: usize = 8;
+const SAT_CLOCK_ARC_COUNT_OFFSET: usize = 12;
+const SAT_POS_X_OFFSET: usize = 16;
+const SAT_POS_KX_OFFSET: usize = 24;
+const SAT_POS_KY_OFFSET: usize = 32;
+const SAT_POS_KZ_OFFSET: usize = 40;
+const SAT_CLOCK_NODE_OFFSET: usize = 48;
+const SAT_CLOCK_ARC_OFFSET: usize = 56;
+const SAT_CHECKSUM_OFFSET: usize = 80;
+const CLOCK_ARC_RECORD_LEN: usize = 64;
+const CLOCK_ARC_ARRAY_OFFSETS: [usize; 5] = [8, 16, 24, 32, 40];
+const ACCURACY_VALUE_RECORD_LEN: usize = 16;
+const STORE_ALIGNMENT: usize = 4096;
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn read_u32_at(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn read_u16_at(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
+}
+
+fn read_u64_at(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
+fn write_u16_at(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_u64_at(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+    })
+}
+
+fn legacy_v1_checksum64(bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .enumerate()
+        .fold(FNV_OFFSET_BASIS, |hash, (index, byte)| {
+            let value = if (HEADER_CHECKSUM_OFFSET..HEADER_CHECKSUM_OFFSET + 8).contains(&index) {
+                0
+            } else {
+                *byte
+            };
+            (hash ^ u64::from(value)).wrapping_mul(FNV_PRIME)
+        })
+}
+
+fn align_store_offset(offset: usize) -> usize {
+    (offset + STORE_ALIGNMENT - 1) & !(STORE_ALIGNMENT - 1)
+}
+
+fn project_v2_store_to_v1(bytes: &[u8]) -> Vec<u8> {
+    assert_eq!(read_u16_at(bytes, HEADER_VERSION_OFFSET), V2_STORE_VERSION);
+
+    let satellite_count = read_u32_at(bytes, HEADER_SAT_COUNT_OFFSET) as usize;
+    let index_offset = read_u64_at(bytes, HEADER_INDEX_OFFSET_OFFSET) as usize;
+    let data_offset = read_u64_at(bytes, HEADER_DATA_OFFSET_OFFSET) as usize;
+    let mut legacy = bytes[..data_offset].to_vec();
+
+    for satellite_index in 0..satellite_count {
+        let record_offset = index_offset + satellite_index * SAT_INDEX_RECORD_LEN;
+        let original_record = &bytes[record_offset..record_offset + SAT_INDEX_RECORD_LEN];
+        let position_count = read_u32_at(original_record, SAT_POSITION_COUNT_OFFSET) as usize;
+        let clock_node_count = read_u32_at(original_record, SAT_CLOCK_NODE_COUNT_OFFSET) as usize;
+        let clock_arc_count = read_u32_at(original_record, SAT_CLOCK_ARC_COUNT_OFFSET) as usize;
+        let original_data_offset = read_u64_at(original_record, SAT_DATA_OFFSET_OFFSET) as usize;
+        let original_data_len = read_u64_at(original_record, SAT_DATA_LEN_OFFSET) as usize;
+        let original_data_end = original_data_offset + original_data_len;
+        let original_accuracy_start =
+            read_u64_at(original_record, SAT_POS_KZ_OFFSET) as usize + position_count * 8;
+        let accuracy_record_count = position_count * 3 + clock_node_count;
+        let removed_accuracy_len = accuracy_record_count * ACCURACY_VALUE_RECORD_LEN;
+        let original_accuracy_end = original_accuracy_start + removed_accuracy_len;
+        assert!(original_accuracy_start >= original_data_offset);
+        assert!(original_accuracy_end <= original_data_end);
+
+        let new_data_offset = align_store_offset(legacy.len());
+        legacy.resize(new_data_offset, 0);
+        legacy.extend_from_slice(&bytes[original_data_offset..original_accuracy_start]);
+        legacy.extend_from_slice(&bytes[original_accuracy_end..original_data_end]);
+        let new_data_len = original_data_len - removed_accuracy_len;
+
+        let relocate_offset = |original_offset: usize| {
+            assert!(
+                original_offset < original_accuracy_start
+                    || original_offset >= original_accuracy_end
+            );
+            let original_relative = original_offset - original_data_offset;
+            let new_relative = if original_offset < original_accuracy_start {
+                original_relative
+            } else {
+                original_relative - removed_accuracy_len
+            };
+            new_data_offset + new_relative
+        };
+
+        let mut relocated_offsets = Vec::with_capacity(6);
+        for field_offset in [
+            SAT_POS_X_OFFSET,
+            SAT_POS_KX_OFFSET,
+            SAT_POS_KY_OFFSET,
+            SAT_POS_KZ_OFFSET,
+            SAT_CLOCK_NODE_OFFSET,
+            SAT_CLOCK_ARC_OFFSET,
+        ] {
+            relocated_offsets.push((
+                field_offset,
+                relocate_offset(read_u64_at(original_record, field_offset) as usize),
+            ));
+        }
+        for (field_offset, relocated_offset) in relocated_offsets {
+            write_u64_at(
+                &mut legacy,
+                record_offset + field_offset,
+                relocated_offset as u64,
+            );
+        }
+        write_u64_at(
+            &mut legacy,
+            record_offset + SAT_DATA_OFFSET_OFFSET,
+            new_data_offset as u64,
+        );
+        write_u64_at(
+            &mut legacy,
+            record_offset + SAT_DATA_LEN_OFFSET,
+            new_data_len as u64,
+        );
+
+        let original_arc_offset = read_u64_at(original_record, SAT_CLOCK_ARC_OFFSET) as usize;
+        for arc_index in 0..clock_arc_count {
+            let original_arc_record = original_arc_offset + arc_index * CLOCK_ARC_RECORD_LEN;
+            let relocated_arc_record = relocate_offset(original_arc_record);
+            for field_offset in CLOCK_ARC_ARRAY_OFFSETS {
+                let original_array_offset =
+                    read_u64_at(bytes, original_arc_record + field_offset) as usize;
+                write_u64_at(
+                    &mut legacy,
+                    relocated_arc_record + field_offset,
+                    relocate_offset(original_array_offset) as u64,
+                );
+            }
+        }
+
+        let payload_checksum = fnv1a64(&legacy[new_data_offset..new_data_offset + new_data_len]);
+        write_u64_at(
+            &mut legacy,
+            record_offset + SAT_CHECKSUM_OFFSET,
+            payload_checksum,
+        );
+    }
+
+    write_u16_at(&mut legacy, HEADER_VERSION_OFFSET, V1_STORE_VERSION);
+    let legacy_total_len = legacy.len() as u64;
+    write_u64_at(&mut legacy, HEADER_TOTAL_LEN_OFFSET, legacy_total_len);
+    write_u64_at(&mut legacy, HEADER_CHECKSUM_OFFSET, 0);
+    let checksum = legacy_v1_checksum64(&legacy);
+    write_u64_at(&mut legacy, HEADER_CHECKSUM_OFFSET, checksum);
+    legacy
+}
+
 /// Open `bytes` on the verified path and on the attested path, the attested
 /// claim being the checksum the header declares.
 fn open_both_ways(
@@ -403,8 +581,7 @@ fn precise_interpolant_store_carries_a_non_default_gap_threshold() {
     let default_bytes = PreciseEphemerisInterpolant::from_sp3(&gapped_sp3())
         .to_mmap_store_bytes()
         .expect("default artifact");
-    // A default-policy artifact leaves the header field zero, so its bytes are
-    // what they were before the field existed.
+    // V2 encodes the default gap policy with a zero-valued header field.
     assert!(
         default_bytes[HEADER_GAP_THRESHOLD_FACTOR_OFFSET..STORE_HEADER_LEN]
             .iter()
@@ -470,11 +647,10 @@ fn precise_interpolant_store_rejects_an_unusable_gap_threshold() {
     }
 }
 
-/// Default-policy artifacts are byte-identical to those written before the
-/// header carried a gap threshold factor. Lengths and checksums computed at
-/// 2ddaf0b, the last commit without the field, on the same fixtures.
+/// Project V2 default-policy artifacts to legacy V1 layout and compare against
+/// the V1 pins captured at 2ddaf0b, before V2 accuracy blocks were added.
 #[test]
-fn default_policy_artifacts_are_byte_identical_to_those_written_before_the_header_field() {
+fn default_policy_v2_projects_to_pinned_legacy_v1_artifacts() {
     let pins = [
         (
             "tests/fixtures/sp3/GAP_G01_20201760000_15M.sp3",
@@ -496,18 +672,69 @@ fn default_policy_artifacts_are_byte_identical_to_those_written_before_the_heade
             Sp3InterpolationOptions::default()
         );
         let bytes = sp3.precise_interpolant_store_bytes().expect("artifact");
-        assert_eq!(bytes.len(), len, "{fixture}: length");
+        assert_eq!(read_u16_at(&bytes, HEADER_VERSION_OFFSET), V2_STORE_VERSION);
+        let current = MmapPreciseEphemerisInterpolant::from_vec(bytes.clone()).expect("open V2");
         assert_eq!(
-            precise_interpolant_store_checksum64(&bytes),
-            checksum,
-            "{fixture}: checksum"
+            current.interpolation_options(),
+            Sp3InterpolationOptions::default()
         );
-        // And such an artifact opens as the default policy, which is also how
-        // one written before the field existed opens.
-        let mapped = MmapPreciseEphemerisInterpolant::from_vec(bytes).expect("open");
+
+        let legacy_bytes = project_v2_store_to_v1(&bytes);
+        assert_eq!(
+            read_u16_at(&legacy_bytes, HEADER_VERSION_OFFSET),
+            V1_STORE_VERSION
+        );
+        assert_eq!(legacy_bytes.len(), len, "{fixture}: legacy V1 length");
+        assert_eq!(
+            legacy_v1_checksum64(&legacy_bytes),
+            checksum,
+            "{fixture}: legacy V1 checksum"
+        );
+        assert_eq!(
+            precise_interpolant_store_checksum64(&legacy_bytes),
+            checksum,
+            "{fixture}: reader checksum agrees with the legacy pin"
+        );
+        let mapped = MmapPreciseEphemerisInterpolant::from_vec(legacy_bytes)
+            .expect("open legacy V1 artifact with unknown accuracy");
         assert_eq!(
             mapped.interpolation_options(),
             Sp3InterpolationOptions::default()
         );
+        let satellite = mapped.satellites()[0];
+        let epoch = sp3.epochs_j2000_seconds()[0];
+        assert_eq!(
+            sidereon_core::positioning::EphemerisSource::ephemeris_variance_m2(
+                &mapped, satellite, epoch, epoch
+            ),
+            0.0,
+            "{fixture}: V1 accuracy is unknown and retains the zero-variance fallback"
+        );
     }
+}
+
+#[test]
+fn projected_v1_preserves_a_non_default_gap_threshold() {
+    let mut v2_bytes = PreciseEphemerisInterpolant::from_sp3(&gapped_sp3())
+        .to_mmap_store_bytes()
+        .expect("default V2 artifact");
+    write_u64_at(
+        &mut v2_bytes,
+        HEADER_GAP_THRESHOLD_FACTOR_OFFSET,
+        13.0_f64.to_bits(),
+    );
+    let v2_checksum = precise_interpolant_store_checksum64(&v2_bytes);
+    write_u64_at(&mut v2_bytes, HEADER_CHECKSUM_OFFSET, v2_checksum);
+
+    let v1_bytes = project_v2_store_to_v1(&v2_bytes);
+    assert_eq!(
+        read_u16_at(&v1_bytes, HEADER_VERSION_OFFSET),
+        V1_STORE_VERSION
+    );
+    let mapped = MmapPreciseEphemerisInterpolant::from_vec(v1_bytes)
+        .expect("open projected V1 with non-default gap policy");
+    assert_eq!(
+        mapped.interpolation_options(),
+        Sp3InterpolationOptions::new(13.0).expect("valid gap policy")
+    );
 }

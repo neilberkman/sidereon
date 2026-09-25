@@ -1879,6 +1879,7 @@ pub(crate) fn residual_unweighted(
 
 /// [`residual_unweighted`] with the satellites of `placement` placed from its
 /// pseudoranges ([`SatModelEnv::placement_pseudoranges_m`]).
+#[allow(clippy::too_many_arguments)]
 fn residual_unweighted_placed(
     eph: &dyn EphemerisSource,
     used: &[GnssSatelliteId],

@@ -3942,12 +3942,12 @@ impl<'a> SsrCorrectedEphemeris<'a> {
                     self.broadcast
                         .glonass_ssr_state(sat, orbit.iode, t_j2000_s, selection_j2000_s)
                 },
-                |_epoch| {
+                |epoch| {
                     self.broadcast.glonass_ssr_state_at_query(
                         sat,
                         orbit.iode,
-                        epoch_query.unwrap(),
-                        selection_query.unwrap_or_else(|| epoch_query.unwrap()),
+                        epoch,
+                        selection_query.unwrap_or(epoch),
                     )
                 },
             );
@@ -4349,10 +4349,10 @@ impl<'a> SsrCorrectedEphemeris<'a> {
 
     fn broadcast_fallback_allowed(&self, sat: GnssSatelliteId) -> bool {
         self.fallback.on_missing_correction == MissingCorrectionAction::FallBackToBroadcast
-            && !self
+            && self
                 .store
                 .orbit(sat)
-                .is_some_and(|orbit| orbit.reference_point == SsrReferencePoint::CenterOfMass)
+                .is_none_or(|orbit| orbit.reference_point != SsrReferencePoint::CenterOfMass)
     }
 
     fn satellite_pco_to_apc(

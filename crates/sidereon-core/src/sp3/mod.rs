@@ -298,6 +298,149 @@ pub struct Sp3ClockRecord {
     pub flags: Sp3Flags,
 }
 
+/// One decoded SP3 accuracy quantity, expressed in the SI units of its field.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum Sp3AccuracyValue {
+    /// A finite, non-negative value in the units documented by its accessor.
+    Known(f64),
+    /// The record field was blank or had no declared exponent.
+    Unknown,
+    /// The SP3 per-record exponent used its field-width sentinel.
+    TooLarge,
+    /// The exponent was ordinary, but its declared base cannot define a deviation.
+    InvalidBase,
+    /// The exponent and base overflowed or underflowed the representable result.
+    Overflow,
+}
+
+impl Sp3AccuracyValue {
+    /// Square a known standard deviation, returning variance in the squared SI
+    /// units of its field. Zero remains a known zero; non-known outcomes remain
+    /// typed, while a non-finite or positively underflowed square is
+    /// [`Sp3AccuracyValue::Overflow`].
+    pub fn variance(self) -> Self {
+        match self {
+            Self::Known(sigma) => {
+                if sigma == 0.0 {
+                    return Self::Known(0.0);
+                }
+                let variance = sigma * sigma;
+                if variance.is_finite() && variance > 0.0 {
+                    Self::Known(variance)
+                } else {
+                    Self::Overflow
+                }
+            }
+            other => other,
+        }
+    }
+}
+
+/// Decoded P-record position and clock standard deviations.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct Sp3PositionClockAccuracy {
+    /// X, Y, and Z standard deviations in metres.
+    pub position_sigma_m: [Sp3AccuracyValue; 3],
+    /// Clock standard deviation converted to metres.
+    pub clock_sigma_m: Sp3AccuracyValue,
+}
+
+impl Sp3PositionClockAccuracy {
+    /// Position-component variances in square metres.
+    pub fn position_variance_m2(self) -> [Sp3AccuracyValue; 3] {
+        self.position_sigma_m.map(Sp3AccuracyValue::variance)
+    }
+
+    /// Clock variance in square metres.
+    pub fn clock_variance_m2(self) -> Sp3AccuracyValue {
+        self.clock_sigma_m.variance()
+    }
+}
+
+/// Decoded V-record velocity and clock-rate standard deviations.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct Sp3VelocityAccuracy {
+    /// X, Y, and Z velocity standard deviations in metres per second.
+    pub velocity_sigma_m_s: [Sp3AccuracyValue; 3],
+    /// Clock-rate standard deviation converted to metres per second.
+    pub clock_rate_sigma_m_s: Sp3AccuracyValue,
+}
+
+impl Sp3VelocityAccuracy {
+    /// Velocity-component variances in square metres per second squared.
+    pub fn velocity_variance_m2_s2(self) -> [Sp3AccuracyValue; 3] {
+        self.velocity_sigma_m_s.map(Sp3AccuracyValue::variance)
+    }
+
+    /// Clock-rate variance in square metres per second squared.
+    pub fn clock_rate_variance_m2_s2(self) -> Sp3AccuracyValue {
+        self.clock_rate_sigma_m_s.variance()
+    }
+}
+
+/// Effective uncertainty decoded from a retained P/V record pair.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct Sp3RecordAccuracy {
+    /// Accuracy carried by the P record, absent when no P accuracy group was retained.
+    pub p: Option<Sp3PositionClockAccuracy>,
+    /// Accuracy carried by the V record, absent when no V accuracy group was retained.
+    pub v: Option<Sp3VelocityAccuracy>,
+}
+
+/// Parsed signed exponent codes and the `%f` bases used to interpret them.
+///
+/// This exposes the numeric fields, not their original whitespace or byte
+/// padding. Use it when callers need the source basis, signed exponent, blank,
+/// or sentinel rather than only the decoded standard deviation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct Sp3AccuracyCodeGroup {
+    /// X, Y, and Z signed exponent codes; `None` preserves a blank field.
+    pub axis_exponents: [Option<i16>; 3],
+    /// Clock or clock-rate signed exponent; `None` preserves a blank field.
+    pub clock_exponent: Option<i16>,
+    /// Position/velocity base from the source `%f` record.
+    pub position_velocity_base: Option<f64>,
+    /// Clock/clock-rate base from the source `%f` record.
+    pub clock_rate_base: Option<f64>,
+}
+
+/// Raw P/V exponent groups for one retained satellite record.
+///
+/// `None` means that record group was not retained; `Some` with blank
+/// exponents means the record group was retained but its accuracy fields were
+/// blank. This distinction is preserved by [`Sp3::record_accuracy_codes`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct Sp3RawRecordAccuracy {
+    /// P-record exponent codes and their source bases.
+    pub p: Option<Sp3AccuracyCodeGroup>,
+    /// V-record exponent codes and their source bases.
+    pub v: Option<Sp3AccuracyCodeGroup>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Sp3AccuracyBase {
+    position_velocity: Option<f64>,
+    clock_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StoredAccuracyCodeGroup {
+    basis_index: usize,
+    exponents: [Option<i16>; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Sp3RecordAccuracyCodes {
+    p: Option<StoredAccuracyCodeGroup>,
+    v: Option<StoredAccuracyCodeGroup>,
+}
+
 /// Prediction status aggregated over every satellite record at one SP3 epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sp3EpochPrediction {
@@ -443,6 +586,10 @@ pub struct Sp3 {
     /// Retains records where orbit coordinates are absent (`0.0, 0.0, 0.0`) but a
     /// valid clock estimate was present.
     clock_records: Vec<BTreeMap<GnssSatelliteId, Sp3ClockRecord>>,
+    /// `epoch_index -> satellite -> retained P/V accuracy codes and source basis`.
+    record_accuracy_codes: Vec<BTreeMap<GnssSatelliteId, Sp3RecordAccuracyCodes>>,
+    /// Interned `%f` basis pairs referenced by retained accuracy code groups.
+    accuracy_bases: Vec<Sp3AccuracyBase>,
     /// `epoch_index -> (satellite -> native-unit node)`. Parallel to
     /// [`Sp3::epochs`]; populated **only** from genuine position records. The
     /// interpolator fits its spline over these (km/us straight from the ASCII,
@@ -482,6 +629,8 @@ impl PartialEq for Sp3 {
             && self.epoch_j2000_s == other.epoch_j2000_s
             && self.states == other.states
             && self.clock_records == other.clock_records
+            && self.record_accuracy_codes == other.record_accuracy_codes
+            && self.accuracy_bases == other.accuracy_bases
             && self.interp_raw == other.interp_raw
             && self.comments == other.comments
             && self.skipped_records == other.skipped_records
@@ -615,6 +764,121 @@ impl Sp3 {
         self.clock_records
             .get(epoch_index)
             .ok_or(Error::EpochOutOfRange)
+    }
+
+    /// Return the parsed signed P/V accuracy exponents and each group's source bases.
+    ///
+    /// Blank exponent columns remain `None`; zero and signed exponents are kept
+    /// verbatim, including the field-width sentinels 99 and 999. The bases are
+    /// the exact parsed `%f` values associated with those codes, even after a
+    /// merge of products with different bases.
+    pub fn record_accuracy_codes(
+        &self,
+        sat: GnssSatelliteId,
+        epoch_index: usize,
+    ) -> Result<Sp3RawRecordAccuracy> {
+        let epoch = self
+            .record_accuracy_codes
+            .get(epoch_index)
+            .ok_or(Error::EpochOutOfRange)?;
+        if !self
+            .states
+            .get(epoch_index)
+            .is_some_and(|states| states.contains_key(&sat))
+            && !self
+                .clock_records
+                .get(epoch_index)
+                .is_some_and(|records| records.contains_key(&sat))
+        {
+            return Err(Error::UnknownSatellite(sat));
+        }
+        let codes = epoch.get(&sat).copied().unwrap_or_default();
+        Ok(Sp3RawRecordAccuracy {
+            p: codes.p.map(|group| self.public_accuracy_codes(group)),
+            v: codes.v.map(|group| self.public_accuracy_codes(group)),
+        })
+    }
+
+    /// Return SI standard deviations decoded from the retained record codes.
+    ///
+    /// Use [`Sp3::record_accuracy_codes`] to inspect the original signed codes
+    /// and source bases. A missing P or V group is `None`; blank fields in a
+    /// present group decode as [`Sp3AccuracyValue::Unknown`]. This accessor
+    /// reports standard deviations, not variances.
+    pub fn record_accuracy(
+        &self,
+        sat: GnssSatelliteId,
+        epoch_index: usize,
+    ) -> Result<Sp3RecordAccuracy> {
+        let epoch = self
+            .record_accuracy_codes
+            .get(epoch_index)
+            .ok_or(Error::EpochOutOfRange)?;
+        if !self
+            .states
+            .get(epoch_index)
+            .is_some_and(|states| states.contains_key(&sat))
+            && !self
+                .clock_records
+                .get(epoch_index)
+                .is_some_and(|records| records.contains_key(&sat))
+        {
+            return Err(Error::UnknownSatellite(sat));
+        }
+        let codes = epoch.get(&sat).copied().unwrap_or_default();
+        Ok(Sp3RecordAccuracy {
+            p: codes
+                .p
+                .map(|group| self.decode_position_clock_accuracy(group)),
+            v: codes.v.map(|group| self.decode_velocity_accuracy(group)),
+        })
+    }
+
+    fn public_accuracy_codes(&self, group: StoredAccuracyCodeGroup) -> Sp3AccuracyCodeGroup {
+        let basis = self.accuracy_bases[group.basis_index];
+        Sp3AccuracyCodeGroup {
+            axis_exponents: [group.exponents[0], group.exponents[1], group.exponents[2]],
+            clock_exponent: group.exponents[3],
+            position_velocity_base: basis.position_velocity,
+            clock_rate_base: basis.clock_rate,
+        }
+    }
+
+    fn decode_position_clock_accuracy(
+        &self,
+        group: StoredAccuracyCodeGroup,
+    ) -> Sp3PositionClockAccuracy {
+        let basis = self.accuracy_bases[group.basis_index];
+        Sp3PositionClockAccuracy {
+            position_sigma_m: [
+                decode_accuracy(group.exponents[0], 99, basis.position_velocity, 1.0e-3),
+                decode_accuracy(group.exponents[1], 99, basis.position_velocity, 1.0e-3),
+                decode_accuracy(group.exponents[2], 99, basis.position_velocity, 1.0e-3),
+            ],
+            clock_sigma_m: decode_accuracy(
+                group.exponents[3],
+                999,
+                basis.clock_rate,
+                crate::constants::C_M_S * 1.0e-12,
+            ),
+        }
+    }
+
+    fn decode_velocity_accuracy(&self, group: StoredAccuracyCodeGroup) -> Sp3VelocityAccuracy {
+        let basis = self.accuracy_bases[group.basis_index];
+        Sp3VelocityAccuracy {
+            velocity_sigma_m_s: [
+                decode_accuracy(group.exponents[0], 99, basis.position_velocity, 1.0e-7),
+                decode_accuracy(group.exponents[1], 99, basis.position_velocity, 1.0e-7),
+                decode_accuracy(group.exponents[2], 99, basis.position_velocity, 1.0e-7),
+            ],
+            clock_rate_sigma_m_s: decode_accuracy(
+                group.exponents[3],
+                999,
+                basis.clock_rate,
+                crate::constants::C_M_S * 1.0e-16,
+            ),
+        }
     }
 
     /// Aggregate the per-record SP3 orbit/clock prediction flags by epoch and
@@ -878,6 +1142,7 @@ struct Parser {
     epoch_j2000_s: Vec<f64>,
     states: Vec<BTreeMap<GnssSatelliteId, Sp3State>>,
     clock_records: Vec<BTreeMap<GnssSatelliteId, Sp3ClockRecord>>,
+    record_accuracy_codes: Vec<BTreeMap<GnssSatelliteId, Sp3RecordAccuracyCodes>>,
     interp_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>>,
     epoch_position_tokens: Vec<Vec<String>>,
     epoch_velocity_tokens: Vec<Vec<String>>,
@@ -927,6 +1192,7 @@ impl Parser {
             epoch_j2000_s: Vec::new(),
             states: Vec::new(),
             clock_records: Vec::new(),
+            record_accuracy_codes: Vec::new(),
             interp_raw: Vec::new(),
             epoch_position_tokens: Vec::new(),
             epoch_velocity_tokens: Vec::new(),
@@ -1366,6 +1632,7 @@ impl Parser {
         self.epoch_j2000_s.push(epoch_j2000_s);
         self.states.push(BTreeMap::new());
         self.clock_records.push(BTreeMap::new());
+        self.record_accuracy_codes.push(BTreeMap::new());
         self.interp_raw.push(BTreeMap::new());
         self.epoch_position_tokens.push(Vec::new());
         self.epoch_velocity_tokens.push(Vec::new());
@@ -1440,6 +1707,16 @@ impl Parser {
                 };
                 let idx = self.clock_records.len() - 1;
                 self.clock_records[idx].insert(sat, clock_rec);
+                self.record_accuracy_codes[idx].insert(
+                    sat,
+                    Sp3RecordAccuracyCodes {
+                        p: Some(StoredAccuracyCodeGroup {
+                            basis_index: 0,
+                            exponents: parse_accuracy_codes(line)?,
+                        }),
+                        v: None,
+                    },
+                );
             }
             return Ok(());
         }
@@ -1459,6 +1736,16 @@ impl Parser {
         };
         let idx = self.states.len() - 1;
         self.states[idx].insert(sat, state);
+        self.record_accuracy_codes[idx].insert(
+            sat,
+            Sp3RecordAccuracyCodes {
+                p: Some(StoredAccuracyCodeGroup {
+                    basis_index: 0,
+                    exponents: parse_accuracy_codes(line)?,
+                }),
+                v: None,
+            },
+        );
         // Keep the native-unit node for the interpolation path (see RawNode):
         // the spline must fit the file's own km/us, not the km->m->km round trip.
         self.interp_raw[idx].insert(
@@ -1524,12 +1811,26 @@ impl Parser {
         let clock_rate_s_s = clock_rate_raw.map(|rate| rate * CLOCK_RATE_TO_S_PER_S);
 
         let idx = self.states.len() - 1;
+        let retained_record =
+            self.states[idx].contains_key(&sat) || self.clock_records[idx].contains_key(&sat);
+        let v_accuracy_codes = if retained_record {
+            Some(parse_accuracy_codes(line)?)
+        } else {
+            None
+        };
         if let Some(state) = self.states[idx].get_mut(&sat) {
             if !missing_velocity {
                 state.velocity = Some(velocity);
             }
             if clock_rate_s_s.is_some() {
                 state.clock_rate_s_s = clock_rate_s_s;
+            }
+            if let Some(exponents) = v_accuracy_codes {
+                self.record_accuracy_codes[idx].entry(sat).or_default().v =
+                    Some(StoredAccuracyCodeGroup {
+                        basis_index: 0,
+                        exponents,
+                    });
             }
         } else if let Some(clock_rec) = self.clock_records[idx].get_mut(&sat) {
             if !missing_velocity {
@@ -1538,6 +1839,13 @@ impl Parser {
             if clock_rate_s_s.is_some() {
                 clock_rec.clock_rate_s_s = clock_rate_s_s;
                 clock_rec.clock_rate_raw = clock_rate_raw;
+            }
+            if let Some(exponents) = v_accuracy_codes {
+                self.record_accuracy_codes[idx].entry(sat).or_default().v =
+                    Some(StoredAccuracyCodeGroup {
+                        basis_index: 0,
+                        exponents,
+                    });
             }
         } else {
             // A V-record always follows its P-record for the same satellite
@@ -1600,6 +1908,10 @@ impl Parser {
         satellite_accuracy_codes.truncate(self.sat_list.len());
         satellite_accuracy_codes.resize(self.sat_list.len(), 0);
         let skipped_records = self.diagnostics.skips.len();
+        let accuracy_bases = vec![Sp3AccuracyBase {
+            position_velocity: self.pos_vel_base,
+            clock_rate: self.clock_rate_base,
+        }];
 
         let header = Sp3Header {
             version,
@@ -1643,6 +1955,8 @@ impl Parser {
             epoch_j2000_s: self.epoch_j2000_s,
             states: self.states,
             clock_records: self.clock_records,
+            record_accuracy_codes: self.record_accuracy_codes,
+            accuracy_bases,
             interp_raw: self.interp_raw,
             interpolation: Sp3InterpolationOptions::default(),
             comments: self.comments,
@@ -1757,6 +2071,142 @@ fn parse_clock_us(line: &str) -> Result<Option<f64>> {
     .map(Some)
 }
 
+fn parse_accuracy_codes(line: &str) -> Result<[Option<i16>; 4]> {
+    let mut exponents = [None; 4];
+    for (index, (start, end)) in [(61, 63), (64, 66), (67, 69), (70, 73)]
+        .into_iter()
+        .enumerate()
+    {
+        let raw = field(line, start, end).trim();
+        if !raw.is_empty() {
+            exponents[index] = Some(
+                validate::strict_int::<i16>(raw, "record_accuracy_exponent")
+                    .map_err(|error| map_field_error(error, line))?,
+            );
+        }
+    }
+    Ok(exponents)
+}
+
+fn decode_accuracy(
+    exponent: Option<i16>,
+    too_large_code: i16,
+    base: Option<f64>,
+    unit_scale: f64,
+) -> Sp3AccuracyValue {
+    let Some(exponent) = exponent else {
+        return Sp3AccuracyValue::Unknown;
+    };
+    if exponent == too_large_code {
+        return Sp3AccuracyValue::TooLarge;
+    }
+    let Some(base) = base.filter(|value| value.is_finite() && *value > 0.0) else {
+        return Sp3AccuracyValue::InvalidBase;
+    };
+    let native_sigma = base.powi(i32::from(exponent));
+    let sigma = if native_sigma.is_finite() && native_sigma > 0.0 {
+        native_sigma * unit_scale
+    } else {
+        scaled_integer_power(base, exponent, unit_scale)
+    };
+    if !sigma.is_finite() || sigma <= 0.0 {
+        Sp3AccuracyValue::Overflow
+    } else {
+        Sp3AccuracyValue::Known(sigma)
+    }
+}
+
+fn scaled_integer_power(base: f64, exponent: i16, unit_scale: f64) -> f64 {
+    let power = i32::from(exponent).unsigned_abs();
+    let (mut factor_mantissa, mut factor_exponent) = normalized_binary(base);
+    if exponent < 0 {
+        factor_mantissa = factor_mantissa.recip();
+        factor_exponent = -factor_exponent;
+        if factor_mantissa < 1.0 {
+            factor_mantissa *= 2.0;
+            factor_exponent -= 1;
+        }
+    }
+    let mut result = (1.0, 0_i32);
+    let mut factor = (factor_mantissa, factor_exponent);
+    let mut remaining_power = power;
+    while remaining_power != 0 {
+        if remaining_power & 1 != 0 {
+            result = multiply_normalized(result, factor);
+        }
+        remaining_power >>= 1;
+        if remaining_power != 0 {
+            factor = multiply_normalized(factor, factor);
+        }
+    }
+    let scaled = multiply_normalized(result, normalized_binary(unit_scale));
+    scale_normalized_binary(scaled.0, scaled.1)
+}
+
+fn normalized_binary(value: f64) -> (f64, i32) {
+    let mut bits = value.to_bits();
+    let mut binary_exponent = ((bits >> 52) & 0x7ff) as i32;
+    if binary_exponent == 0 {
+        let scaled = value * 18_014_398_509_481_984.0;
+        bits = scaled.to_bits();
+        binary_exponent = (((bits >> 52) & 0x7ff) as i32) - 54 - 1023;
+    } else {
+        binary_exponent -= 1023;
+    }
+    let mantissa_bits = (1023_u64 << 52) | (bits & ((1_u64 << 52) - 1));
+    (f64::from_bits(mantissa_bits), binary_exponent)
+}
+
+fn multiply_normalized(left: (f64, i32), right: (f64, i32)) -> (f64, i32) {
+    let product = left.0 * right.0;
+    if product >= 4.0 {
+        (product * 0.25, left.1 + right.1 + 2)
+    } else if product >= 2.0 {
+        (product * 0.5, left.1 + right.1 + 1)
+    } else {
+        (product, left.1 + right.1)
+    }
+}
+
+fn scale_normalized_binary(mantissa: f64, exponent: i32) -> f64 {
+    if exponent >= -1022 {
+        if exponent > 1023 {
+            return f64::INFINITY;
+        }
+        return mantissa * 2.0_f64.powi(exponent);
+    }
+
+    let shift = (-1022 - exponent) as u32;
+    if shift > 53 {
+        return 0.0;
+    }
+    let bits = mantissa.to_bits();
+    let significand = (1_u64 << 52) | (bits & ((1_u64 << 52) - 1));
+    let quotient = significand >> shift;
+    let remainder = significand & ((1_u64 << shift) - 1);
+    let halfway = 1_u64 << (shift - 1);
+    let rounded = if remainder > halfway || (remainder == halfway && quotient & 1 != 0) {
+        quotient + 1
+    } else {
+        quotient
+    };
+    f64::from_bits(rounded)
+}
+
+fn intern_accuracy_base(bases: &mut Vec<Sp3AccuracyBase>, basis: Sp3AccuracyBase) -> usize {
+    let key = |value: Option<f64>| value.map(f64::to_bits);
+    if let Some(index) = bases.iter().position(|existing| {
+        key(existing.position_velocity) == key(basis.position_velocity)
+            && key(existing.clock_rate) == key(basis.clock_rate)
+    }) {
+        index
+    } else {
+        let index = bases.len();
+        bases.push(basis);
+        index
+    }
+}
+
 /// Read one `%f` standard-deviation base column.
 ///
 /// A blank field is "no base declared". A present one must be a finite number,
@@ -1863,6 +2313,7 @@ pub use exact::{
     parse_exact_sp3, validate_exact_sp3, ExactSp3Coverage, ExactSp3Request, ExactSp3ValidationError,
 };
 pub use grid::Sp3EpochGrid;
+pub(crate) use interp::precise_accuracy_variance_m2;
 pub use interp::{Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR};
 pub use interpolant::{PreciseEphemerisInterpolant, PreciseInterpolantError};
 pub use interpolant_store::{
@@ -1874,8 +2325,8 @@ pub use provenance::{
     SP3_MERGE_INPUT_ID_PREFIX, SP3_MERGE_INPUT_SCHEMA_VERSION,
 };
 pub use samples::{
-    sp3_ecef_state_to_eci, PreciseEphemerisSample, PreciseEphemerisSamples,
-    PreciseEphemerisStateSample, PreciseSamplesError,
+    sp3_ecef_state_to_eci, PreciseEphemerisAccuracySample, PreciseEphemerisSample,
+    PreciseEphemerisSamples, PreciseEphemerisStateSample, PreciseSamplesError,
 };
 pub use verify::{
     compare_position_series, InterpolationComparison, InterpolationDivergence, ReferenceState,
@@ -1885,3 +2336,7 @@ pub use write::Sp3WriteError;
 #[cfg(all(test, sidereon_repo_tests))]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests;
+
+#[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod accuracy_tests;

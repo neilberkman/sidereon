@@ -30,7 +30,8 @@ use super::grid::{
 };
 use super::interp::{precise_node_j2000_seconds_from_instant, Sp3InterpolationOptions};
 use super::{
-    RawNode, Sp3, Sp3ClockRecord, Sp3DataType, Sp3Flags, Sp3Header, Sp3State, TerminalRecordState,
+    intern_accuracy_base, RawNode, Sp3, Sp3AccuracyBase, Sp3ClockRecord, Sp3DataType, Sp3Flags,
+    Sp3Header, Sp3RecordAccuracyCodes, Sp3State, StoredAccuracyCodeGroup, TerminalRecordState,
 };
 use crate::constants::{DAYS_PER_JULIAN_YEAR, GPS_EPOCH_TO_J2000_S, KM_TO_M, SECONDS_PER_DAY};
 use crate::frame::{ItrfPositionM, ItrfVelocityMS};
@@ -1262,6 +1263,7 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
         header_tick,
         cells.out_ticks.len(),
         &cells.all_sats,
+        &cells.position_header_sources,
         epoch_interval_s,
     )?;
     let (merged, mut report, continuity_selection) =
@@ -1289,6 +1291,9 @@ struct MergeCellOutput {
     out_ticks: Vec<i128>,
     out_states: Vec<BTreeMap<GnssSatelliteId, Sp3State>>,
     out_clock_records: Vec<BTreeMap<GnssSatelliteId, Sp3ClockRecord>>,
+    out_accuracy_codes: Vec<BTreeMap<GnssSatelliteId, Sp3RecordAccuracyCodes>>,
+    accuracy_bases: Vec<Sp3AccuracyBase>,
+    position_header_sources: BTreeMap<GnssSatelliteId, Option<usize>>,
     out_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>>,
     all_sats: BTreeSet<GnssSatelliteId>,
     report: MergeReport,
@@ -1327,6 +1332,8 @@ fn emit_merged_product(
         out_ticks,
         out_states,
         out_clock_records,
+        out_accuracy_codes,
+        accuracy_bases,
         out_raw,
         report,
         continuity_selection,
@@ -1355,6 +1362,8 @@ fn emit_merged_product(
         epoch_j2000_s: out_epoch_j2000_s,
         states: out_states,
         clock_records: out_clock_records,
+        record_accuracy_codes: out_accuracy_codes,
+        accuracy_bases,
         interp_raw: out_raw,
         interpolation: Sp3InterpolationOptions::default(),
         comments: vec![format!("MERGED from {} SP3 products", sources.len())],
@@ -1371,6 +1380,7 @@ fn synthesize_merge_header(
     first_tick: i128,
     epoch_count: usize,
     all_sats: &BTreeSet<GnssSatelliteId>,
+    position_header_sources: &BTreeMap<GnssSatelliteId, Option<usize>>,
     epoch_interval_s: f64,
 ) -> Result<MergeHeaderOutput> {
     // Base the non-epoch metadata on a source product, but derive the first-epoch
@@ -1397,16 +1407,18 @@ fn synthesize_merge_header(
     let satellite_accuracy_codes = satellites
         .iter()
         .map(|sat| {
-            sources[base_idx]
-                .header
-                .satellites
-                .iter()
-                .position(|base_sat| base_sat == sat)
-                .and_then(|idx| {
-                    sources[base_idx]
+            position_header_sources
+                .get(sat)
+                .copied()
+                .flatten()
+                .and_then(|source_index| sources.get(source_index))
+                .and_then(|source| {
+                    source
                         .header
-                        .satellite_accuracy_codes
-                        .get(idx)
+                        .satellites
+                        .iter()
+                        .position(|source_sat| source_sat == sat)
+                        .and_then(|index| source.header.satellite_accuracy_codes.get(index))
                         .copied()
                 })
                 .unwrap_or(0)
@@ -1502,6 +1514,10 @@ fn emit_merge_cells(
         Vec::with_capacity(epoch_keys.len());
     let mut out_clock_records: Vec<BTreeMap<GnssSatelliteId, Sp3ClockRecord>> =
         Vec::with_capacity(epoch_keys.len());
+    let mut out_accuracy_codes: Vec<BTreeMap<GnssSatelliteId, Sp3RecordAccuracyCodes>> =
+        Vec::with_capacity(epoch_keys.len());
+    let mut accuracy_bases = Vec::new();
+    let mut position_header_sources: BTreeMap<GnssSatelliteId, Option<usize>> = BTreeMap::new();
     let mut out_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>> = Vec::with_capacity(epoch_keys.len());
     let mut report = MergeReport {
         frame_reconciliations,
@@ -1516,6 +1532,7 @@ fn emit_merge_cells(
         let node_key = precise_node_j2000_seconds_from_instant(&epoch).map(|node| node as i64);
         let mut states: BTreeMap<GnssSatelliteId, Sp3State> = BTreeMap::new();
         let mut clock_records: BTreeMap<GnssSatelliteId, Sp3ClockRecord> = BTreeMap::new();
+        let mut accuracy_codes: BTreeMap<GnssSatelliteId, Sp3RecordAccuracyCodes> = BTreeMap::new();
         let mut raws: BTreeMap<GnssSatelliteId, RawNode> = BTreeMap::new();
 
         // Satellites present at this epoch in any source, after any requested
@@ -1885,6 +1902,27 @@ fn emit_merge_cells(
             }
 
             if let Some((position_m, pos_members, pos_selection)) = pos_result {
+                retain_position_header_source(
+                    &mut position_header_sources,
+                    sat,
+                    pos_selection.selected_source(),
+                );
+                let position_accuracy = pos_selection.selected_source().and_then(|source| {
+                    selected_accuracy_group(sources, epoch_index, key, sat, source)
+                });
+                let clock_accuracy = clk_selection
+                    .as_ref()
+                    .and_then(CellSelection::selected_source)
+                    .and_then(|source| {
+                        selected_accuracy_group(sources, epoch_index, key, sat, source)
+                    });
+                if let Some(codes) = combine_selected_accuracy_groups(
+                    position_accuracy,
+                    clock_accuracy,
+                    &mut accuracy_bases,
+                ) {
+                    accuracy_codes.insert(sat, codes);
+                }
                 // Per-cell agreement: dispersion of the accepted consensus members
                 // about the combined value actually written below.
                 let (position_rms_m, position_max_m) =
@@ -2024,6 +2062,18 @@ fn emit_merge_cells(
                     );
                 }
 
+                let clock_accuracy = clk_selection
+                    .as_ref()
+                    .and_then(CellSelection::selected_source)
+                    .and_then(|source| {
+                        selected_accuracy_group(sources, epoch_index, key, sat, source)
+                    });
+                if let Some(codes) =
+                    combine_selected_accuracy_groups(None, clock_accuracy, &mut accuracy_bases)
+                {
+                    accuracy_codes.insert(sat, codes);
+                }
+
                 all_sats.insert(sat);
                 let clock_us = match preserved_source_raw_clock_us(
                     sources,
@@ -2062,6 +2112,7 @@ fn emit_merge_cells(
         out_ticks.push(key);
         out_states.push(states);
         out_clock_records.push(clock_records);
+        out_accuracy_codes.push(accuracy_codes);
         out_raw.push(raws);
     }
 
@@ -2086,11 +2137,29 @@ fn emit_merge_cells(
         out_ticks,
         out_states,
         out_clock_records,
+        out_accuracy_codes,
+        accuracy_bases,
+        position_header_sources,
         out_raw,
         all_sats,
         report,
         continuity_selection,
     })
+}
+
+fn retain_position_header_source(
+    sources_by_satellite: &mut BTreeMap<GnssSatelliteId, Option<usize>>,
+    sat: GnssSatelliteId,
+    source: Option<usize>,
+) {
+    sources_by_satellite
+        .entry(sat)
+        .and_modify(|retained| {
+            if *retained != source {
+                *retained = None;
+            }
+        })
+        .or_insert(source);
 }
 
 struct MergeTiming {
@@ -2105,6 +2174,52 @@ struct MergeTiming {
     /// source carrying it.
     epoch_keys: BTreeMap<i128, Instant>,
     dropped: Vec<DroppedInputEpoch>,
+}
+
+fn selected_accuracy_group(
+    sources: &[Sp3],
+    epoch_index: &[BTreeMap<i128, usize>],
+    key: i128,
+    sat: GnssSatelliteId,
+    source_index: usize,
+) -> Option<(StoredAccuracyCodeGroup, Sp3AccuracyBase)> {
+    let source = sources.get(source_index)?;
+    let source_epoch = *epoch_index.get(source_index)?.get(&key)?;
+    let source_codes = source.record_accuracy_codes.get(source_epoch)?.get(&sat)?;
+    let group = source_codes.p?;
+    let basis = *source.accuracy_bases.get(group.basis_index)?;
+    Some((group, basis))
+}
+
+fn combine_selected_accuracy_groups(
+    position: Option<(StoredAccuracyCodeGroup, Sp3AccuracyBase)>,
+    clock: Option<(StoredAccuracyCodeGroup, Sp3AccuracyBase)>,
+    output_bases: &mut Vec<Sp3AccuracyBase>,
+) -> Option<Sp3RecordAccuracyCodes> {
+    if position.is_none() && clock.is_none() {
+        return None;
+    }
+    let mut exponents = [None; 4];
+    let mut basis = Sp3AccuracyBase {
+        position_velocity: None,
+        clock_rate: None,
+    };
+    if let Some((group, source_basis)) = position {
+        exponents[..3].copy_from_slice(&group.exponents[..3]);
+        basis.position_velocity = source_basis.position_velocity;
+    }
+    if let Some((group, source_basis)) = clock {
+        exponents[3] = group.exponents[3];
+        basis.clock_rate = source_basis.clock_rate;
+    }
+    let basis_index = intern_accuracy_base(output_bases, basis);
+    Some(Sp3RecordAccuracyCodes {
+        p: Some(StoredAccuracyCodeGroup {
+            basis_index,
+            exponents,
+        }),
+        v: None,
+    })
 }
 
 /// Consume raw SP3 sources and merge options, validate their combinability, and
@@ -2171,7 +2286,7 @@ fn prepare_merge_timing(sources: &[Sp3], opts: &MergeOptions) -> Result<MergeTim
                 return Err(Error::InvalidInput(format!(
                     "merge input {idx} epochs lie on no grid: its steps differ and are not all whole multiples of its declared {} s interval",
                     source.header.epoch_interval_s
-                )))
+                )));
             }
             None => {}
         }
@@ -3320,7 +3435,9 @@ mod tests {
     use crate::error::Error;
     use crate::frame::ItrfPositionM;
     use crate::id::{GnssSatelliteId, GnssSystem};
-    use crate::sp3::Sp3DataType;
+    use crate::sp3::{
+        Sp3AccuracyBase, Sp3DataType, Sp3RecordAccuracyCodes, StoredAccuracyCodeGroup,
+    };
     use sha2::{Digest, Sha256};
     use std::collections::BTreeSet;
 
@@ -5463,9 +5580,46 @@ mod tests {
         assert_eq!(reparsed.clock_records, merged.clock_records);
         assert_eq!(reparsed.states, merged.states);
         assert_eq!(reparsed.header.satellites, merged.header.satellites);
+
+        for accuracy_codes in merged
+            .record_accuracy_codes
+            .iter()
+            .flat_map(|epoch| epoch.values())
+        {
+            for group in [accuracy_codes.p, accuracy_codes.v].into_iter().flatten() {
+                assert_eq!(
+                    group.exponents, [None; 4],
+                    "fixture must not normalize away known accuracy exponents"
+                );
+            }
+        }
+
+        let mut canonical_wire_product = merged.clone();
+        canonical_wire_product.accuracy_bases = vec![Sp3AccuracyBase {
+            position_velocity: canonical_wire_product.header.pos_vel_base,
+            clock_rate: canonical_wire_product.header.clock_rate_base,
+        }];
+        canonical_wire_product.record_accuracy_codes = vec![canonical_wire_product
+            .header
+            .satellites
+            .iter()
+            .copied()
+            .map(|satellite| {
+                (
+                    satellite,
+                    Sp3RecordAccuracyCodes {
+                        p: Some(StoredAccuracyCodeGroup {
+                            basis_index: 0,
+                            exponents: [None; 4],
+                        }),
+                        v: None,
+                    },
+                )
+            })
+            .collect()];
         assert_eq!(
-            reparsed, merged,
-            "full product equality across write/read round trip"
+            reparsed, canonical_wire_product,
+            "full product equality against independently constructed SP3 wire metadata"
         );
     }
 

@@ -1138,6 +1138,11 @@ fn writer_emits_velocity_records_for_missing_velocity_cells() {
     sp3.states[0]
         .remove(&absent_sat)
         .expect("fixture absent-sat state");
+    sp3.record_accuracy_codes[0].remove(&absent_sat);
+    sp3.record_accuracy_codes[0]
+        .get_mut(&missing_velocity)
+        .expect("fixture velocity accuracy record")
+        .v = None;
 
     let text = sp3.to_sp3_string().expect("serialize SP3 product");
     let lines: Vec<_> = text.lines().collect();
@@ -3150,6 +3155,7 @@ fn test_writer_refuses_a_product_whose_stored_arrays_disagree() {
     epochless.epochs.clear();
     epochless.states.clear();
     epochless.clock_records.clear();
+    epochless.record_accuracy_codes.clear();
     epochless.interp_raw.clear();
     epochless.epoch_j2000_s.clear();
     let text = epochless

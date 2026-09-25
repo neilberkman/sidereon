@@ -54,7 +54,7 @@ use crate::sp3::interp::{
     precise_node_j2000_seconds_from_instant, PreciseQuery, PreciseSatSeries,
     Sp3InterpolationOptions,
 };
-use crate::sp3::{Sp3, Sp3State};
+use crate::sp3::{Sp3, Sp3AccuracyValue, Sp3State};
 use crate::{Error, Result};
 
 /// One precise-ephemeris sample: a satellite's ECEF position (and optional
@@ -83,6 +83,42 @@ pub struct PreciseEphemerisSample {
     /// the clock interpolation arc here (a clock reset takes effect at this
     /// epoch), matching [`super::Sp3Flags::clock_event`]. Defaults to `false`.
     pub clock_event: bool,
+}
+
+/// Accuracy metadata paired with one [`PreciseEphemerisSample`].
+///
+/// This sidecar keeps existing sample constructors source-compatible. Position
+/// variances are aligned with position nodes; clock variance is used only when
+/// the paired sample carries a clock. User-created samples without a sidecar
+/// have unknown accuracy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct PreciseEphemerisAccuracySample {
+    /// Satellite and epoch identity paired with the corresponding sample.
+    pub sat: GnssSatelliteId,
+    /// Epoch identity paired with the corresponding sample.
+    pub epoch: Instant,
+    /// ECEF position variances in square meters, one per axis.
+    pub position_variance_m2: [Sp3AccuracyValue; 3],
+    /// Clock variance in square meters, unknown when unavailable.
+    pub clock_variance_m2: Sp3AccuracyValue,
+}
+
+impl PreciseEphemerisAccuracySample {
+    /// Pair explicit variance outcomes with one sample identity.
+    pub fn new(
+        sat: GnssSatelliteId,
+        epoch: Instant,
+        position_variance_m2: [Sp3AccuracyValue; 3],
+        clock_variance_m2: Sp3AccuracyValue,
+    ) -> Self {
+        Self {
+            sat,
+            epoch,
+            position_variance_m2,
+            clock_variance_m2,
+        }
+    }
 }
 
 impl PreciseEphemerisSample {
@@ -187,6 +223,7 @@ pub fn sp3_ecef_state_to_eci(
 
 /// Validation failure building a [`PreciseEphemerisSamples`] source.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PreciseSamplesError {
     /// No samples were supplied.
     Empty,
@@ -200,6 +237,10 @@ pub enum PreciseSamplesError {
     EpochNotRepresentable(GnssSatelliteId),
     /// A sample position or clock value was not finite.
     NonFiniteSample(GnssSatelliteId),
+    /// Accuracy sidecars do not have one matching identity per sample.
+    AccuracySamplesMismatch,
+    /// A known accuracy variance is negative or non-finite.
+    InvalidAccuracyValue(GnssSatelliteId),
 }
 
 impl core::fmt::Display for PreciseSamplesError {
@@ -223,6 +264,18 @@ impl core::fmt::Display for PreciseSamplesError {
                 )
             }
             Self::NonFiniteSample(sat) => write!(f, "satellite {sat} has a non-finite sample"),
+            Self::AccuracySamplesMismatch => {
+                write!(
+                    f,
+                    "accuracy sidecars do not match the precise-ephemeris samples"
+                )
+            }
+            Self::InvalidAccuracyValue(sat) => {
+                write!(
+                    f,
+                    "satellite {sat} has a negative or non-finite accuracy variance"
+                )
+            }
         }
     }
 }
@@ -302,6 +355,9 @@ impl PreciseEphemerisSamples {
             series.kx.push(sample.position_ecef_m[0] / KM_TO_M);
             series.ky.push(sample.position_ecef_m[1] / KM_TO_M);
             series.kz.push(sample.position_ecef_m[2] / KM_TO_M);
+            series
+                .position_variance_m2
+                .push([Sp3AccuracyValue::Unknown; 3]);
             if let Some(clock_s) = sample.clock_s {
                 // A finite `clock_s` can still overflow to a non-finite value in
                 // native microseconds (`clock_s / US_TO_S`); the shared clock
@@ -315,6 +371,7 @@ impl PreciseEphemerisSamples {
                 // interpolator splits the clock arc at an `E` reset exactly as
                 // the SP3 path does (see `interp::interpolate_clock`).
                 series.clk.push((xi, clock_us, sample.clock_event));
+                series.clock_variance_m2.push(Sp3AccuracyValue::Unknown);
             }
         }
 
@@ -335,6 +392,56 @@ impl PreciseEphemerisSamples {
             interpolation: Sp3InterpolationOptions::default(),
             nodes: grouped,
         })
+    }
+
+    /// Build a source from samples and identity-aligned accuracy sidecars.
+    ///
+    /// The sidecar sequence must have the same length and `(sat, epoch)` order
+    /// as `samples`. Existing constructors remain unchanged and continue to
+    /// represent accuracy as unknown.
+    pub fn from_samples_with_accuracy(
+        samples: impl IntoIterator<Item = PreciseEphemerisSample>,
+        accuracy: impl IntoIterator<Item = PreciseEphemerisAccuracySample>,
+    ) -> core::result::Result<Self, PreciseSamplesError> {
+        let samples: Vec<_> = samples.into_iter().collect();
+        let accuracy: Vec<_> = accuracy.into_iter().collect();
+        if samples.len() != accuracy.len()
+            || samples
+                .iter()
+                .zip(&accuracy)
+                .any(|(sample, sidecar)| sample.sat != sidecar.sat || sample.epoch != sidecar.epoch)
+        {
+            return Err(PreciseSamplesError::AccuracySamplesMismatch);
+        }
+        for sidecar in &accuracy {
+            if sidecar
+                .position_variance_m2
+                .iter()
+                .chain(std::iter::once(&sidecar.clock_variance_m2))
+                .any(|value| matches!(value, Sp3AccuracyValue::Known(value) if !value.is_finite() || *value < 0.0))
+            {
+                return Err(PreciseSamplesError::InvalidAccuracyValue(sidecar.sat));
+            }
+        }
+
+        let mut source = Self::from_samples(samples.iter().copied())?;
+        let mut position_indices = BTreeMap::<GnssSatelliteId, usize>::new();
+        let mut clock_indices = BTreeMap::<GnssSatelliteId, usize>::new();
+        for (sample, sidecar) in samples.iter().zip(accuracy) {
+            let series = source
+                .nodes
+                .get_mut(&sample.sat)
+                .ok_or(PreciseSamplesError::AccuracySamplesMismatch)?;
+            let position_index = position_indices.entry(sample.sat).or_default();
+            series.position_variance_m2[*position_index] = sidecar.position_variance_m2;
+            *position_index += 1;
+            if sample.clock_s.is_some() {
+                let clock_index = clock_indices.entry(sample.sat).or_default();
+                series.clock_variance_m2[*clock_index] = sidecar.clock_variance_m2;
+                *clock_index += 1;
+            }
+        }
+        Ok(source)
     }
 
     /// The time scale every sample epoch is expressed in.
@@ -484,6 +591,37 @@ impl Sp3 {
                         position_ecef_m: state.position.as_array(),
                         clock_s: state.clock_s,
                         clock_event: state.flags.clock_event,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Extract record accuracy paired with [`Sp3::precise_ephemeris_samples`].
+    ///
+    /// The returned sequence has the same `(sat, epoch)` order. Missing and
+    /// blank codes remain typed unknown outcomes; V-record accuracy is not part
+    /// of the SPP position/clock variance model.
+    pub fn precise_ephemeris_accuracy_samples(&self) -> Vec<PreciseEphemerisAccuracySample> {
+        let mut out = Vec::new();
+        for (epoch_index, &epoch) in self.epochs.iter().enumerate() {
+            if let Ok(states) = self.states_at(epoch_index) {
+                for &sat in states.keys() {
+                    let p_accuracy = self
+                        .record_accuracy(sat, epoch_index)
+                        .ok()
+                        .and_then(|accuracy| accuracy.p);
+                    out.push(PreciseEphemerisAccuracySample {
+                        sat,
+                        epoch,
+                        position_variance_m2: p_accuracy
+                            .map_or([Sp3AccuracyValue::Unknown; 3], |record| {
+                                record.position_variance_m2()
+                            }),
+                        clock_variance_m2: p_accuracy.map_or(Sp3AccuracyValue::Unknown, |record| {
+                            record.clock_variance_m2()
+                        }),
                     });
                 }
             }
