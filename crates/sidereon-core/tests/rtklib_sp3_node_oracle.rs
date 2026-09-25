@@ -203,6 +203,8 @@ fn static_fixture_epochs(baseline: &Value) -> [StaticEpoch; 2] {
         met: SurfaceMet::default(),
         robust: None,
         pseudorange_code: PseudorangeCode::SingleFrequency,
+        qzss_clock: Default::default(),
+        troposphere_model: Default::default(),
     };
     let epoch = StaticEpoch::from_solve_inputs(inputs);
     [epoch.clone(), epoch]

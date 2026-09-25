@@ -39,7 +39,7 @@ pub use eop::{
     CoverageError, DegradeReason, LeapSecondTable, TimeScaleInputErrorKind, Ut1Provenance,
     Validated, ValidityMode,
 };
-pub use exact::ExactEpoch;
+pub use exact::{ExactEpoch, ExactEpochQuery};
 pub use model::{
     Duration, GnssWeekTow, Instant, InstantRepr, JulianDateSplit, TimeModelError, TimeScale,
     SECONDS_PER_WEEK,

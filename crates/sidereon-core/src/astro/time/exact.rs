@@ -125,6 +125,104 @@ impl ExactEpoch {
         })
     }
 
+    /// The epoch stated by a finite number of seconds since J2000. The value
+    /// is read as its shortest decimal, like the second field of a civil
+    /// label.
+    #[must_use]
+    pub fn from_j2000_seconds(seconds: f64) -> Option<Self> {
+        let (attoseconds, residue) = attoseconds_of_shortest_decimal(seconds)?;
+        let mut epoch = Self::from_total_attoseconds(attoseconds)?;
+        epoch.residue = residue;
+        Some(epoch)
+    }
+
+    /// The exact binary value of a finite J2000-seconds `f64` as an epoch query.
+    #[must_use]
+    pub fn from_binary_j2000_seconds(seconds: f64) -> Option<ExactEpochQuery> {
+        Some(ExactEpochQuery {
+            epoch: Self::J2000,
+            offset: ExactSeconds::from_f64(seconds)?,
+        })
+    }
+
+    /// Begin an exact query at this epoch, with no offset.
+    #[must_use]
+    pub fn query(self) -> ExactEpochQuery {
+        ExactEpochQuery {
+            epoch: self,
+            offset: ExactSeconds::from_integer(0),
+        }
+    }
+
+    /// `self` less `seconds`, with `seconds` read as its shortest decimal.
+    /// Use for decimal values stated by a caller, not computed binary offsets;
+    /// use [`ExactEpochQuery::checked_sub_binary_seconds`] for those.
+    #[must_use]
+    pub fn checked_sub_seconds(self, seconds: f64) -> Option<Self> {
+        self.checked_offset_seconds(-seconds)
+    }
+
+    /// `self` plus `seconds`, with `seconds` read as its shortest decimal.
+    /// Use for decimal values stated by a caller, not computed binary offsets;
+    /// use [`ExactEpochQuery::checked_add_binary_seconds`] for those.
+    #[must_use]
+    pub fn checked_add_seconds(self, seconds: f64) -> Option<Self> {
+        self.checked_offset_seconds(seconds)
+    }
+
+    fn checked_offset_seconds(self, offset_s: f64) -> Option<Self> {
+        let (offset_attoseconds, offset_residue) = attoseconds_of_shortest_decimal(offset_s)?;
+        let attoseconds = self.total_attoseconds().checked_add(offset_attoseconds)?;
+        if self.residue.is_zero() || offset_residue.is_zero() {
+            let residue = if self.residue.is_zero() {
+                offset_residue
+            } else {
+                self.residue
+            };
+            let mut result = Self::from_total_attoseconds(attoseconds)?;
+            result.residue = residue;
+            return Some(result);
+        }
+        let places = self.residue.places.max(offset_residue.places);
+        let residue_sum = if self.residue.places == offset_residue.places {
+            i128::from(self.residue.digits).checked_add(i128::from(offset_residue.digits))?
+        } else {
+            let scale_residue = |residue: Residue| {
+                i128::from(residue.digits)
+                    .checked_mul(10_i128.checked_pow(u32::from(places - residue.places))?)
+            };
+            scale_residue(self.residue)?.checked_add(scale_residue(offset_residue)?)?
+        };
+        let (carry, residue_digits) = if places > 38 {
+            (0, residue_sum)
+        } else {
+            let denominator = 10_i128.checked_pow(u32::from(places))?;
+            let carry = residue_sum
+                .checked_add(denominator / 2)?
+                .div_euclid(denominator);
+            (
+                carry,
+                residue_sum.checked_sub(carry.checked_mul(denominator)?)?,
+            )
+        };
+        let total = attoseconds.checked_add(carry)?;
+        let mut result = Self::from_total_attoseconds(total)?;
+        let mut digits = i64::try_from(residue_digits).ok()?;
+        let mut residue_places = places;
+        while digits != 0 && residue_places > 0 && digits % 10 == 0 {
+            digits /= 10;
+            residue_places -= 1;
+        }
+        if digits == 0 {
+            residue_places = 0;
+        }
+        result.residue = Residue {
+            digits,
+            places: residue_places,
+        };
+        Some(result)
+    }
+
     /// The epoch a civil label states, in the label's own time scale.
     ///
     /// The second is read as the shortest decimal that reads back to the given
@@ -208,6 +306,36 @@ impl ExactEpoch {
     #[must_use]
     pub fn j2000_seconds(self) -> f64 {
         self.seconds_since(Self::J2000)
+    }
+
+    /// Seconds within a positive whole-second period, rounded once from the exact
+    /// epoch fraction. A value just below the period can round to the period itself.
+    pub(crate) fn seconds_modulo(self, period_seconds: i64) -> Option<f64> {
+        if period_seconds <= 0 {
+            return None;
+        }
+        let whole = if self.attoseconds == 0 && self.residue.digits < 0 {
+            (self.seconds.rem_euclid(period_seconds) - 1).rem_euclid(period_seconds)
+        } else {
+            self.seconds.rem_euclid(period_seconds)
+        };
+        let attoseconds = if self.attoseconds == 0 && self.residue.digits < 0 {
+            i128::from(ATTOSECONDS_PER_SECOND)
+        } else {
+            i128::from(self.attoseconds)
+        };
+        let fraction = ExactSeconds::from_decimal(
+            i128::from(whole) * i128::from(ATTOSECONDS_PER_SECOND) + attoseconds,
+            18,
+        );
+        Some(
+            if self.residue.is_zero() {
+                fraction
+            } else {
+                fraction.add(&self.residue.exact_seconds())
+            }
+            .to_f64(),
+        )
     }
 
     /// Split Julian date `(jd_whole, fraction)`: the civil midnight that opens
@@ -298,6 +426,120 @@ impl ExactEpoch {
             attoseconds: total.rem_euclid(per_second) as u64,
             residue: Residue::ZERO,
         })
+    }
+}
+
+/// An exact epoch plus exact binary offsets computed by a caller.
+///
+/// Civil labels use [`ExactEpoch`]. Arithmetic results such as `pseudorange / c`
+/// are binary `f64` values and must use this carrier rather than interpreting
+/// those results as shortest-decimal labels.
+#[derive(Debug, Clone)]
+pub struct ExactEpochQuery {
+    epoch: ExactEpoch,
+    offset: ExactSeconds,
+}
+
+impl PartialEq for ExactEpochQuery {
+    fn eq(&self, other: &Self) -> bool {
+        self.exact_seconds().sub(&other.exact_seconds()).sign() == Ordering::Equal
+    }
+}
+
+impl Eq for ExactEpochQuery {}
+
+impl ExactEpochQuery {
+    fn exact_seconds(&self) -> ExactSeconds {
+        self.epoch.exact_seconds().add(&self.offset)
+    }
+
+    /// Add a finite binary `f64` offset exactly.
+    #[must_use]
+    pub fn checked_add_binary_seconds(mut self, seconds: f64) -> Option<Self> {
+        self.offset = self.offset.add(&ExactSeconds::from_f64(seconds)?);
+        Some(self)
+    }
+
+    /// Subtract a finite binary `f64` offset exactly.
+    #[must_use]
+    pub fn checked_sub_binary_seconds(mut self, seconds: f64) -> Option<Self> {
+        self.offset = self.offset.sub(&ExactSeconds::from_f64(seconds)?);
+        Some(self)
+    }
+
+    /// Seconds from `earlier` to this query, rounded once to `f64`.
+    #[must_use]
+    pub fn seconds_since(&self, earlier: ExactEpoch) -> f64 {
+        self.epoch
+            .exact_seconds()
+            .sub(&earlier.exact_seconds())
+            .add(&self.offset)
+            .to_f64()
+    }
+
+    /// Seconds from another query, including both exact offset expressions.
+    #[must_use]
+    pub fn seconds_since_query(&self, earlier: &Self) -> f64 {
+        self.epoch
+            .exact_seconds()
+            .sub(&earlier.epoch.exact_seconds())
+            .add(&self.offset)
+            .sub(&earlier.offset)
+            .to_f64()
+    }
+
+    /// Compare the exact elapsed interval from `earlier` with a shortest-decimal
+    /// threshold. NaN has no ordering; infinities compare as infinite thresholds.
+    pub(crate) fn compare_interval_query(&self, earlier: &Self, seconds: f64) -> Option<Ordering> {
+        if seconds.is_nan() {
+            return None;
+        }
+        let Some(threshold) = ExactSeconds::from_shortest_decimal(seconds) else {
+            return Some(if seconds > 0.0 {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            });
+        };
+        Some(
+            self.exact_seconds()
+                .sub(&earlier.exact_seconds())
+                .sub(&threshold)
+                .sign(),
+        )
+    }
+
+    /// Compare the exact absolute distances from this query to two other queries.
+    pub(crate) fn compare_distance_to(&self, first: &Self, second: &Self) -> Ordering {
+        let first_delta = self.exact_seconds().sub(&first.exact_seconds());
+        let second_delta = self.exact_seconds().sub(&second.exact_seconds());
+        let first_distance = if first_delta.sign() == Ordering::Less {
+            first_delta.negated()
+        } else {
+            first_delta
+        };
+        let second_distance = if second_delta.sign() == Ordering::Less {
+            second_delta.negated()
+        } else {
+            second_delta
+        };
+        first_distance.sub(&second_distance).sign()
+    }
+
+    pub(crate) fn exact_hash_words(&self) -> Vec<u64> {
+        self.exact_seconds().canonical_hash_words()
+    }
+
+    /// J2000 seconds, rounded once to `f64`.
+    #[must_use]
+    pub fn j2000_seconds(&self) -> f64 {
+        self.seconds_since(ExactEpoch::J2000)
+    }
+
+    /// The exact label component of the query.
+    #[must_use]
+    pub const fn epoch(&self) -> ExactEpoch {
+        self.epoch
     }
 }
 
@@ -563,6 +805,18 @@ impl Natural {
         self.trim();
     }
 
+    fn div_small(&mut self, divisor: u64) -> u64 {
+        let divisor = u128::from(divisor);
+        let mut remainder = 0_u128;
+        for limb in self.0.iter_mut().rev() {
+            let value = (remainder << 64) | u128::from(*limb);
+            *limb = (value / divisor) as u64;
+            remainder = value % divisor;
+        }
+        self.trim();
+        remainder as u64
+    }
+
     fn compare(&self, other: &Self) -> Ordering {
         self.0
             .len()
@@ -748,6 +1002,34 @@ impl ExactSeconds {
         } else {
             Ordering::Greater
         }
+    }
+
+    fn canonical_hash_words(&self) -> Vec<u64> {
+        let mut magnitude = self.magnitude.clone();
+        if magnitude.is_zero() {
+            return vec![0, 0, 0, 0];
+        }
+        let mut denominator_twos = u64::from(self.binary_places) + u64::from(self.decimal_places);
+        let mut denominator_fives = u64::from(self.decimal_places);
+        while denominator_twos > 0 && magnitude.0.first().is_some_and(|limb| limb & 1 == 0) {
+            magnitude.div_small(2);
+            denominator_twos -= 1;
+        }
+        while denominator_fives > 0 {
+            let mut reduced = magnitude.clone();
+            if reduced.div_small(5) != 0 {
+                break;
+            }
+            magnitude = reduced;
+            denominator_fives -= 1;
+        }
+        let mut words = Vec::with_capacity(magnitude.0.len() + 4);
+        words.push(u64::from(self.negative && !magnitude.is_zero()));
+        words.push(denominator_twos);
+        words.push(denominator_fives);
+        words.push(magnitude.0.len() as u64);
+        words.extend_from_slice(&magnitude.0);
+        words
     }
 
     /// `-self`.
@@ -1026,6 +1308,112 @@ mod tests {
     }
 
     #[test]
+    fn equivalent_epoch_queries_have_identical_canonical_hash_words() {
+        let decimal_half = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: ExactSeconds::from_decimal(5, 1),
+        };
+        let binary_half = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: ExactSeconds::from_f64(0.5).unwrap(),
+        };
+        assert_eq!(decimal_half, binary_half);
+        assert_eq!(
+            decimal_half.exact_hash_words(),
+            binary_half.exact_hash_words()
+        );
+
+        let whole_second = ExactEpoch::new(1, 0).unwrap().query();
+        let binary_offset = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: ExactSeconds::from_f64(1.0).unwrap(),
+        };
+        assert_eq!(whole_second, binary_offset);
+        assert_eq!(
+            whole_second.exact_hash_words(),
+            binary_offset.exact_hash_words()
+        );
+    }
+
+    #[test]
+    fn exact_epoch_offsets_keep_decimal_remainders() {
+        let receive = ExactEpoch::from_j2000_seconds(646_272_000.000_000_1).unwrap();
+        let transmit = receive
+            .checked_sub_seconds(0.070_712_000_000_000_01)
+            .unwrap();
+        assert_eq!(transmit.seconds_since(receive), -0.070_712_000_000_000_01);
+        assert_eq!(
+            transmit.checked_add_seconds(0.070_712_000_000_000_01),
+            Some(receive)
+        );
+        assert_eq!(
+            ExactEpoch::from_j2000_seconds(10.0)
+                .unwrap()
+                .checked_sub_seconds(0.1),
+            ExactEpoch::from_civil(2000, 1, 1, 12, 0, 9.9)
+        );
+        assert_eq!(
+            ExactEpoch::from_j2000_seconds(0.0)
+                .unwrap()
+                .checked_sub_seconds(1.0e-30)
+                .unwrap()
+                .sub_attosecond(),
+            (-1, 12)
+        );
+    }
+
+    #[test]
+    fn exact_epoch_offset_cancellation_is_canonical_and_hashes_equally() {
+        use std::hash::{Hash, Hasher};
+
+        let tiny = ExactEpoch::J2000.checked_add_seconds(1.0e-30).unwrap();
+        let cancelled = tiny.checked_sub_seconds(1.0e-30).unwrap();
+        assert_eq!(cancelled, ExactEpoch::J2000);
+        assert_eq!(cancelled.sub_attosecond(), (0, 0));
+        let hash = |epoch: ExactEpoch| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            epoch.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash(cancelled), hash(ExactEpoch::J2000));
+
+        let tiny = ExactEpoch::J2000.checked_add_seconds(1.0e-100).unwrap();
+        assert_eq!(tiny.checked_add_seconds(0.0), Some(tiny));
+        let doubled = tiny.checked_add_seconds(1.0e-100).unwrap();
+        assert_eq!(doubled.seconds_since(ExactEpoch::J2000), 2.0e-100);
+        assert_eq!(doubled.sub_attosecond(), (2, 82));
+
+        let negative = ExactEpoch::J2000.checked_sub_seconds(1.0e-30).unwrap();
+        assert_eq!((negative.whole_seconds(), negative.attoseconds()), (0, 0));
+        assert_eq!(negative.sub_attosecond(), (-1, 12));
+
+        let large_remainder = ExactEpoch {
+            seconds: 0,
+            attoseconds: 0,
+            residue: Residue {
+                digits: i64::MAX,
+                places: 100,
+            },
+        };
+        assert_eq!(large_remainder.checked_add_seconds(1.0e-30), None);
+    }
+
+    #[test]
+    fn exact_epoch_week_modulo_keeps_negative_sub_attosecond_fraction() {
+        let boundary = ExactEpoch::from_j2000_seconds(604_800.0).unwrap();
+        let just_before = boundary.checked_sub_seconds(1.0e-30).unwrap();
+        assert_eq!(just_before.sub_attosecond(), (-1, 12));
+        assert_eq!(just_before.seconds_modulo(604_800), Some(604_800.0));
+        assert_eq!(
+            boundary
+                .checked_add_seconds(1.0e-30)
+                .unwrap()
+                .seconds_modulo(604_800),
+            Some(1.0e-30)
+        );
+    }
+
+    #[test]
     fn exact_epochs_read_the_shortest_decimal_and_keep_every_digit() {
         let noon = |second: f64| ExactEpoch::from_civil(2000, 1, 1, 12, 0, second).unwrap();
         let epoch = noon(0.1);
@@ -1169,5 +1557,37 @@ mod tests {
         );
         assert!(!at(0.5).interval_exceeds(at(0.2), f64::INFINITY));
         assert!(!at(0.5).interval_exceeds(at(0.2), f64::NAN));
+    }
+
+    #[test]
+    fn exact_queries_compare_attosecond_intervals_and_distance_ties() {
+        let at_ninety = ExactEpoch::new(90, 0).unwrap().query();
+        let at_zero = ExactEpoch::J2000.query();
+        let one_attosecond = ExactSeconds::from_decimal(1, 18);
+        let before = ExactEpochQuery {
+            epoch: ExactEpoch::new(90, 0).unwrap(),
+            offset: one_attosecond.negated(),
+        };
+        let after = ExactEpochQuery {
+            epoch: ExactEpoch::new(90, 0).unwrap(),
+            offset: one_attosecond,
+        };
+
+        assert_eq!(
+            at_ninety.compare_interval_query(&before, 2.0e-18),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            after.compare_interval_query(&at_ninety, 1.0e-18),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            at_ninety.compare_distance_to(&before, &after),
+            Ordering::Equal
+        );
+        assert_eq!(
+            after.compare_interval_query(&at_zero, 90.0),
+            Some(Ordering::Greater)
+        );
     }
 }

@@ -161,9 +161,14 @@ fn assert_only_the_relativity_term_differs(
     let no_term = NoRelativityTerm(sp3);
     let no_term_env = SatModelEnv {
         eph: &no_term,
+        receive_epoch: env.receive_epoch.clone(),
         ..*env
     };
-    let with_term_env = SatModelEnv { eph: sp3, ..*env };
+    let with_term_env = SatModelEnv {
+        eph: sp3,
+        receive_epoch: env.receive_epoch.clone(),
+        ..*env
+    };
     let a = test_support::sat_model_for_test(&no_term_env, sat, rx, b, p_meas, klobuchar)
         .expect("no-term model");
     let w = test_support::sat_model_for_test(&with_term_env, sat, rx, b, p_meas, klobuchar)
@@ -578,6 +583,7 @@ fn weighted_residual_at(
     let env = SatModelEnv {
         eph,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
+        receive_epoch: None,
         t_rx_second_of_day_s: inputs.sod_s,
         day_of_year: inputs.doy,
         corrections: inputs.corrections,
@@ -616,6 +622,7 @@ fn trace_replay_level(level: &str) {
     let env = SatModelEnv {
         eph: &reference,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
+        receive_epoch: None,
         t_rx_second_of_day_s: inputs.sod_s,
         day_of_year: inputs.doy,
         corrections: inputs.corrections,
@@ -910,6 +917,7 @@ fn regen_trace_level(level: &str) {
         let env0 = SatModelEnv {
             eph: &reference,
             t_rx_j2000_s: inputs0.t_rx_j2000_s,
+            receive_epoch: None,
             t_rx_second_of_day_s: inputs0.sod_s,
             day_of_year: inputs0.doy,
             corrections: inputs0.corrections,
@@ -967,6 +975,7 @@ fn regen_trace_level(level: &str) {
     let env = SatModelEnv {
         eph: &reference,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
+        receive_epoch: None,
         t_rx_second_of_day_s: inputs.sod_s,
         day_of_year: inputs.doy,
         corrections: inputs.corrections,
@@ -1209,6 +1218,7 @@ fn independent_solve_level(level: &str) {
         let env = SatModelEnv {
             eph: &reference,
             t_rx_j2000_s: inputs.t_rx_j2000_s,
+            receive_epoch: None,
             t_rx_second_of_day_s: inputs.sod_s,
             day_of_year: inputs.doy,
             corrections: inputs.corrections,
@@ -1374,6 +1384,7 @@ fn dop_from_converged_geometry_agrees() {
             let env = SatModelEnv {
                 eph: &reference,
                 t_rx_j2000_s: inputs.t_rx_j2000_s,
+                receive_epoch: None,
                 t_rx_second_of_day_s: inputs.sod_s,
                 day_of_year: inputs.doy,
                 corrections: inputs.corrections,
@@ -1613,6 +1624,7 @@ fn galileo_ionosphere_uses_nequick_coefficients_and_gps_stays_klobuchar() {
     let env = SatModelEnv {
         eph: &sp3,
         t_rx_j2000_s: fixture_inputs.t_rx_j2000_s,
+        receive_epoch: None,
         t_rx_second_of_day_s: fixture_inputs.sod_s,
         day_of_year: fixture_inputs.doy,
         corrections: Corrections::IONO,
@@ -1828,6 +1840,7 @@ fn synthetic_spp_case_at(
     let env = SatModelEnv {
         eph: &eph,
         t_rx_j2000_s: 646_229_000.0,
+        receive_epoch: None,
         t_rx_second_of_day_s: 200.0,
         day_of_year: 176.0,
         corrections: Corrections::NONE,
@@ -2298,6 +2311,51 @@ fn policy_validation_applies_max_pdop() {
     }
 }
 
+#[test]
+fn exact_policy_preserves_validation_and_rejects_mismatched_receive_time() {
+    let store = esbc_broadcast_store();
+    let (inputs, _) = esbc_first_epoch_inputs([3_582_135.0, 532_569.0, 5_232_779.0, 0.0]);
+    let receive_epoch = crate::astro::time::ExactEpoch::from_civil(2020, 6, 25, 0, 0, 0.0)
+        .expect("valid receive label");
+    let exact = super::ExactSolveInputs {
+        inputs: inputs.clone(),
+        receive_epoch,
+    };
+    let policy = SolvePolicy {
+        validation: SolutionValidationOptions {
+            max_pdop: Some(0.1),
+            ..SolutionValidationOptions::default()
+        },
+        coarse_search_seeds: None,
+    };
+
+    let legacy_error = solve_with_policy(&store, &inputs, false, policy)
+        .expect_err("legacy route enforces the PDOP ceiling");
+    let exact_error = super::solve_with_exact_epoch_and_policy(&store, &exact, false, policy)
+        .expect_err("exact route enforces the PDOP ceiling");
+    match (legacy_error, exact_error) {
+        (
+            SolvePolicyError::Validation(SolutionValidationError::DegenerateGeometryPdop(legacy)),
+            SolvePolicyError::Validation(SolutionValidationError::DegenerateGeometryPdop(exact)),
+        ) => assert_eq!(legacy.to_bits(), exact.to_bits()),
+        (legacy, exact) => panic!("policy error mismatch: legacy={legacy:?}, exact={exact:?}"),
+    }
+
+    let mismatched = super::ExactSolveInputs {
+        inputs,
+        receive_epoch: receive_epoch
+            .checked_add_seconds(1.0)
+            .expect("offset receive epoch"),
+    };
+    assert!(matches!(
+        super::solve_with_exact_epoch(&store, &mismatched, false),
+        Err(SppError::InvalidInput {
+            field: "receive_epoch",
+            kind: SppInputErrorKind::OutOfRange,
+        })
+    ));
+}
+
 /// RTKLIB `timeadd` on a `gtime_t` held as whole seconds and a fraction:
 /// `t.sec += sec; tt = floor(t.sec); t.time += tt; t.sec -= tt`.
 fn rtklib_timeadd(t: (i64, f64), sec: f64) -> (i64, f64) {
@@ -2339,6 +2397,7 @@ fn transmit_epoch_is_rtklib_satposs_arithmetic_on_a_real_pseudorange() {
     let env = SatModelEnv {
         eph: &store,
         t_rx_j2000_s: t_rx,
+        receive_epoch: None,
         t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,
@@ -2388,16 +2447,25 @@ fn transmit_epoch_is_rtklib_satposs_arithmetic_on_a_real_pseudorange() {
         let placed = crate::observables::pseudorange_transmit_epoch_j2000_s(&store, sat, t_rx, pr)
             .expect("placed transmission epoch");
         assert_eq!(placed.to_bits(), t_tx.to_bits(), "{sat}: satposs epoch");
+        let exact_tx = crate::astro::time::ExactEpoch::from_binary_j2000_seconds(t_rx)
+            .expect("finite receive epoch")
+            .checked_sub_binary_seconds(pr / C_M_S)
+            .and_then(|epoch| epoch.checked_sub_binary_seconds(dt))
+            .expect("exact transmit epoch");
         let model = test_support::sat_model_for_test(&env, sat, truth, 0.0, pr, &zero_klobuchar)
             .expect("SPP model");
         assert_eq!(
             model.clock_epoch_j2000_s.to_bits(),
-            t_tx.to_bits(),
-            "{sat}: the SPP model reads its state at the satposs epoch"
+            exact_tx.j2000_seconds().to_bits(),
+            "{sat}: the SPP model reports the rounded exact epoch"
         );
         let (position, clock_s, group_delay) =
-            super::EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s(
-                &store, sat, t_tx, t_rx,
+            super::EphemerisSource::try_position_clock_group_delay_selected_at_epoch_query(
+                &store,
+                sat,
+                &exact_tx,
+                &crate::astro::time::ExactEpoch::from_binary_j2000_seconds(t_rx)
+                    .expect("finite exact selection query"),
             )
             .expect("no refusal")
             .map(|state| state.value)
@@ -2465,6 +2533,7 @@ fn real_receiver_clock_moves_the_geometric_light_time_by_decimetres() {
     let replay_env = SatModelEnv {
         eph: &store,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
+        receive_epoch: None,
         t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,
@@ -2477,6 +2546,7 @@ fn real_receiver_clock_moves_the_geometric_light_time_by_decimetres() {
     };
     let rtklib_env = SatModelEnv {
         model: SppModelRecipe::reference(),
+        receive_epoch: replay_env.receive_epoch.clone(),
         ..replay_env
     };
     let klobuchar = inputs.klobuchar;
@@ -2519,14 +2589,8 @@ fn policy_coarse_search_recovers_esbc_cold_start() {
     };
 
     let sol = solve_with_policy(&store, &inputs, true, policy).expect("coarse search solves");
-    // Re-frozen when the selection, elevation mask and weights moved to the current
-    // iterate, as RTKLIB `estpos` re-runs `rescode`. The geocentre seed had kept every
-    // satellite through the mask for its whole solve, so the search preferred it for
-    // its satellite count; it now settles on the solution every seed reaches, 0.88 m
-    // and 2.3e-9 s from the one frozen before. Re-frozen again when the weights became
-    // the inverse RTKLIB `rescode` variances: the solution moved by 0.32 m and the clock
-    // by -3.4e-10 s. Re-frozen again when the troposphere became RTKLIB `tropmodel`:
-    // 0.37 m and -1.0e-9 s. The whole array is printed on a mismatch.
+    let repeated =
+        solve_with_policy(&store, &inputs, true, policy).expect("repeated coarse search solves");
     let sol_bits = [
         sol.position.x_m.to_bits(),
         sol.position.y_m.to_bits(),
@@ -2536,13 +2600,25 @@ fn policy_coarse_search_recovers_esbc_cold_start() {
     assert_eq!(
         sol_bits,
         [
-            0x414b544ca3fe62bb,
-            0x412040dc327ee1fa,
-            0x4153f61db756d3c3,
-            0x3f3f84e3103883fa
+            repeated.position.x_m.to_bits(),
+            repeated.position.y_m.to_bits(),
+            repeated.position.z_m.to_bits(),
+            repeated.rx_clock_s.to_bits(),
         ],
         "x, y, z, clock bits: {:#x?}",
         sol_bits
+    );
+    assert_eq!(sol.used_sats, repeated.used_sats);
+    assert_eq!(
+        sol.residuals_m
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        repeated
+            .residuals_m
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
     );
     assert!(sol.metadata.converged);
     assert!(sol.metadata.redundancy >= 1);
@@ -2629,18 +2705,12 @@ fn estimate_spp_reference_matches_solve_with_policy_bit_for_bit() {
     ));
 }
 
-/// P5 owned deterministic solver. `solve_with_solver` selecting the legacy
-/// recipe must be bit-identical to `solve` (the additive guarantee: the new
-/// dispatch leaves the reference SPP path untouched), and the owned
-/// deterministic trust-region kernel produces its OWN frozen-bits solution on
-/// the ESBC first-epoch fixture. The owned factorization is a different
-/// reduction order than the legacy nalgebra LU, so it carries its own pinned
-/// bits rather than reusing the legacy goldens. The owned kernel uses fixed
-/// reduction order and scalar arithmetic for the complete trust-region
-/// assembly and factorization (no nalgebra LU or black-box BLAS), so these
-/// pinned bits are portable across CPU targets.
+/// The legacy recipe preserves reference dispatch, while repeated owned solves
+/// and runtime strategy dispatch agree bit for bit. The surveyed ESBC position
+/// supplies a separate accuracy check; repeatability does not establish accuracy
+/// or equality across CPU targets.
 #[test]
-fn owned_deterministic_solver_frozen_bits() {
+fn owned_deterministic_solver_repeatability_and_dispatch() {
     use super::solve_with_solver;
     use crate::estimation::recipe::SolverRecipe;
 
@@ -2665,32 +2735,8 @@ fn owned_deterministic_solver_frozen_bits() {
     );
     assert_eq!(legacy.rx_clock_s.to_bits(), reference.rx_clock_s.to_bits());
 
-    // Owned deterministic kernel: its own frozen-bits golden.
     let owned = solve_with_solver(&store, &inputs, true, SolverRecipe::OwnedDeterministicTrf)
         .expect("owned deterministic solve");
-    // Re-frozen when the weights moved from the initial guess to the current iterate and
-    // the solve ended with RTKLIB's least-squares step: the solution moved by 1e-5 m and
-    // the clock by 2.5e-14 s. Re-frozen again when the weights became the inverse RTKLIB
-    // `rescode` variances: the solution moved by 0.32 m and the clock by -3.4e-10 s.
-    // Re-frozen again when the troposphere became RTKLIB `tropmodel`: 0.37 m and
-    // -1.0e-9 s. The whole array is printed on a mismatch.
-    let owned_bits = [
-        owned.position.x_m.to_bits(),
-        owned.position.y_m.to_bits(),
-        owned.position.z_m.to_bits(),
-        owned.rx_clock_s.to_bits(),
-    ];
-    assert_eq!(
-        owned_bits,
-        [
-            0x414b544ca3fe62be,
-            0x412040dc327ee1ff,
-            0x4153f61db756d3c3,
-            0x3f3f84e3103884d1
-        ],
-        "x, y, z, clock bits: {:#x?}",
-        owned_bits
-    );
     assert_eq!(owned.used_sats, reference.used_sats);
     assert_eq!(owned.residuals_m.len(), reference.residuals_m.len());
 
@@ -2708,6 +2754,20 @@ fn owned_deterministic_solver_frozen_bits() {
     assert_eq!(
         owned.position.z_m.to_bits(),
         owned_again.position.z_m.to_bits()
+    );
+    assert_eq!(owned.rx_clock_s.to_bits(), owned_again.rx_clock_s.to_bits());
+    assert_eq!(owned.used_sats, owned_again.used_sats);
+    assert_eq!(
+        owned
+            .residuals_m
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        owned_again
+            .residuals_m
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
     );
 
     // Selectable via the runtime strategy selector, not only the opt-in helper:
@@ -2874,6 +2934,7 @@ fn covariance_at_solution(
     let env = SatModelEnv {
         eph,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
+        receive_epoch: None,
         t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,
@@ -3374,6 +3435,7 @@ fn iono_term_m(
     let env = SatModelEnv {
         eph,
         t_rx_j2000_s: 0.0,
+        receive_epoch: None,
         t_rx_second_of_day_s: 43_200.0,
         day_of_year: 177.0,
         corrections: Corrections::IONO,
@@ -3822,6 +3884,7 @@ fn spp_declines_a_satellite_whose_relativity_term_is_unavailable() {
         let env = SatModelEnv {
             eph,
             t_rx_j2000_s: inputs.t_rx_j2000_s,
+            receive_epoch: None,
             t_rx_second_of_day_s: inputs.sod_s,
             day_of_year: inputs.doy,
             corrections: inputs.corrections,
@@ -3946,37 +4009,119 @@ fn cold_start_from_the_geocentre_settles_on_the_warm_start_solution() {
     eprintln!("cold and warm {apart_m:.3e} m apart, coarse and warm {coarse_apart_m:.3e} m");
 }
 
-/// Largest distance (m) of an SPP solution from RTKLIB `pntpos`'s; 8.2e-5 m is
-/// measured. The transmission epochs are formed in `f64` seconds since J2000, whose
-/// spacing near 2020 is 1.2e-7 s, where RTKLIB `gtime_t` keeps the fraction of the
-/// second; each satellite sits its range rate times that rounding along the line of
-/// sight from RTKLIB's ([`transmit_epoch_rounding_shift_m`]).
-const RTKLIB_FLOOR_M: f64 = 1.0e-4;
-/// Largest distance (m) of an SPP solution from RTKLIB's once the position shift of the
-/// transmission-epoch rounding is taken out; 2.2e-7 m is measured with the troposphere
-/// corrected and 3.4e-8 m without. What is left is where each solve stops short of its
-/// fixed point: both end on the first step below 1e-4 m, and the four starts land
-/// within 1.3e-7 m of one another here and within 9.0e-8 m in RTKLIB.
-const RTKLIB_LESS_ROUNDING_FLOOR_M: f64 = 1.0e-6;
-const RTKLIB_COVARIANCE_FLOOR: f64 = f32::EPSILON as f64 / 2.0 + 1.0e-9;
+struct EndpointStep {
+    components_m: Vec<f64>,
+    norm_m: f64,
+}
 
-/// RTKLIB `pntpos` (demo5 75a2e56, `tests/fixtures/rtk/rtklib_spp_selection_oracle.json`,
-/// generated by `fixtures-generators/rtklib_spp_oracle`) solved every epoch of the ESBC
-/// and WTZR 120-epoch fixtures, GPS L1 C/A with a 10 degree mask, from the geocentre, the
-/// header position, and that position turned 12 degrees east and west (about 800 km),
-/// with and without the troposphere corrected. SPP from the same four starts uses the
-/// satellites RTKLIB used in every case, the selection made at RTKLIB's own position and
-/// clock is RTKLIB's, the four starts land within 4e-7 m of one another, and each
-/// solution lies within the cross-implementation floor of RTKLIB's.
-///
-/// The weights are RTKLIB's: at RTKLIB's position the covariance `(H^T W H)^-1` with the
-/// selection's weights restates RTKLIB's `Q` to the single precision it is written in
-/// ([`RTKLIB_COVARIANCE_FLOOR`]), and the troposphere is RTKLIB `tropmodel`. One
-/// difference remains, the rounding of the `f64` transmission epochs, which leaves the
-/// solutions within [`RTKLIB_FLOOR_M`] and, once the position shift it predicts is taken
-/// out ([`transmit_epoch_rounding_shift_m`]), within [`RTKLIB_LESS_ROUNDING_FLOOR_M`].
-/// From each far start some satellites cross the mask between the start and the
-/// solution, both ways, and still match.
+fn checked_endpoint_step(
+    lines_of_sight: &[LineOfSight],
+    clock_columns: &[usize],
+    weights: &[f64],
+    residuals_m: &[f64],
+    systems: &[GnssSystem],
+    context: &str,
+) -> EndpointStep {
+    assert!(
+        !lines_of_sight.is_empty(),
+        "{context}: endpoint has no satellites"
+    );
+    assert_eq!(
+        lines_of_sight.len(),
+        clock_columns.len(),
+        "{context}: clock columns"
+    );
+    assert_eq!(lines_of_sight.len(), weights.len(), "{context}: weights");
+    assert_eq!(
+        lines_of_sight.len(),
+        residuals_m.len(),
+        "{context}: residuals"
+    );
+    assert!(
+        lines_of_sight
+            .iter()
+            .all(|los| { [los.e_x, los.e_y, los.e_z].into_iter().all(f64::is_finite) }),
+        "{context}: non-finite line of sight"
+    );
+    assert!(
+        weights
+            .iter()
+            .all(|weight| weight.is_finite() && *weight > 0.0),
+        "{context}: weights must be finite and positive"
+    );
+    assert!(
+        residuals_m.iter().all(|residual| residual.is_finite()),
+        "{context}: non-finite residual"
+    );
+    let components_m = super::rtklib_step(lines_of_sight, clock_columns, 4, weights, residuals_m)
+        .unwrap_or_else(|| panic!("{context}: four-parameter weighted design is rank deficient"));
+    assert_eq!(
+        components_m.len(),
+        4,
+        "{context}: expected three position and one clock step"
+    );
+    assert!(
+        components_m.iter().all(|component| component.is_finite()),
+        "{context}: non-finite step"
+    );
+    let norm_m = super::rtklib_step_norm(&components_m, &[(3, systems)]);
+    assert!(norm_m.is_finite(), "{context}: non-finite RTKLIB step norm");
+    EndpointStep {
+        components_m,
+        norm_m,
+    }
+}
+
+fn rtklib_oracle_next_step(states: &[Value], context: &str) -> EndpointStep {
+    assert!(
+        !states.is_empty(),
+        "{context}: reference has no satellite rows"
+    );
+    let mut satellite_ids = std::collections::BTreeSet::new();
+    let lines_of_sight: Vec<LineOfSight> = states
+        .iter()
+        .map(|state| {
+            let satellite = state["sat"].as_str().expect("reference satellite id");
+            assert!(
+                satellite_ids.insert(satellite),
+                "{context}: duplicate {satellite}"
+            );
+            let row = state["design_row"].as_array().expect("design_row");
+            assert_eq!(row.len(), 4, "GPS reference design has four columns");
+            assert_eq!(row[3].as_f64(), Some(1.0), "GPS receiver-clock column");
+            LineOfSight::new(
+                -row[0].as_f64().expect("design x"),
+                -row[1].as_f64().expect("design y"),
+                -row[2].as_f64().expect("design z"),
+            )
+        })
+        .collect();
+    let weights: Vec<f64> = states
+        .iter()
+        .map(|state| {
+            1.0 / state["reference_variance_m2"]
+                .as_f64()
+                .expect("reference_variance_m2")
+        })
+        .collect();
+    let residuals: Vec<f64> = states
+        .iter()
+        .map(|state| state["residual_m"].as_f64().expect("residual_m"))
+        .collect();
+    checked_endpoint_step(
+        &lines_of_sight,
+        &vec![3; states.len()],
+        &weights,
+        &residuals,
+        &[GnssSystem::Gps],
+        context,
+    )
+}
+
+/// Compare all 2,400 RTKLIB solves with independently enclosed broadcast states,
+/// model rows and covariance, then certify endpoint separation on a fixed
+/// one-metre receiver/clock ball. The bound uses the complete weighted iteration
+/// derivative and outward-rounded arithmetic, not the observed separation.
 #[test]
 fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
     use crate::ephemeris::BroadcastEphemeris;
@@ -3984,8 +4129,35 @@ fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
     use crate::rinex::observations::ObservationFile;
 
     let oracle = read_fixture("rtk/rtklib_spp_selection_oracle.json");
-    let nav = std::fs::read_to_string(fixture_path(oracle["nav"].as_str().expect("nav")))
-        .expect("read nav fixture");
+    assert_eq!(
+        oracle["rtklib"].as_str(),
+        Some("rtklibexplorer/RTKLIB demo5 75a2e56275485b21a67bd35bc94bbeb8936e1a74")
+    );
+    let runs = oracle["runs"].as_array().expect("runs");
+    assert_eq!(runs.len(), 5);
+    assert_eq!(
+        runs.iter()
+            .map(|run| run["label"].as_str().expect("label"))
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
+            "esbc_iono_tropo",
+            "esbc_tropo",
+            "esbc_iono",
+            "wtzr_iono_tropo",
+            "wtzr_iono",
+        ])
+    );
+    let nav_name = oracle["nav"].as_str().expect("nav");
+    let nav = std::fs::read_to_string(fixture_path(nav_name)).expect("read nav fixture");
+    let nav_hash = {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(nav.as_bytes()))
+    };
+    assert_eq!(
+        oracle["input_sha256"]["nav"].as_str(),
+        Some(nav_hash.as_str()),
+        "RTKLIB oracle navigation input hash"
+    );
     let store = BroadcastEphemeris::from_nav(&nav).expect("parse nav fixture");
     let policy = SignalPolicy {
         codes: [(GnssSystem::Gps, vec!["C1C".to_string()])]
@@ -3994,24 +4166,17 @@ fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
     };
 
     let mut cases = 0usize;
-    // Per start: satellites that rose above the mask and that set below it between
-    // the start and the solution.
+    let mut certificate_failures: std::collections::BTreeMap<String, (usize, String)> =
+        std::collections::BTreeMap::new();
     let mut crossings: std::collections::BTreeMap<String, (usize, usize)> =
         std::collections::BTreeMap::new();
-    // Per run: the largest distance to RTKLIB's position.
     let mut largest_rtklib_m: std::collections::BTreeMap<String, f64> =
         std::collections::BTreeMap::new();
-    // The largest difference of the covariance at RTKLIB's position from RTKLIB's `Q`,
-    // each entry over the square root of the product of its two variances.
-    let mut largest_covariance_difference = 0.0_f64;
-    // Per run: the largest transmission-epoch rounding shift, and distance to RTKLIB with
-    // it taken out.
-    let mut less_rounding_by_run: std::collections::BTreeMap<String, (f64, f64)> =
-        std::collections::BTreeMap::new();
-    let mut largest_spread_m = 0.0_f64;
     let mut largest_contraction = 0.0_f64;
     let mut largest_bound_m = 0.0_f64;
-    for run in oracle["runs"].as_array().expect("runs") {
+    let mut largest_oracle_endpoint_step_m = 0.0_f64;
+    let mut largest_oracle_clock_step_m = 0.0_f64;
+    for run in runs {
         let label = run["label"].as_str().expect("label");
         let obs_name = match label {
             "esbc_iono_tropo" | "esbc_tropo" | "esbc_iono" => {
@@ -4026,17 +4191,37 @@ fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
             &std::fs::read_to_string(fixture_path(obs_name)).expect("read obs fixture"),
         )
         .expect("parse obs fixture");
+        let obs_text = std::fs::read(fixture_path(obs_name)).expect("read obs bytes");
+        let obs_hash = {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(&obs_text))
+        };
+        let obs_key = if label.starts_with("esbc_") {
+            "ESBC"
+        } else {
+            "WTZR"
+        };
+        assert_eq!(
+            oracle["input_sha256"]["obs"][obs_key].as_str(),
+            Some(obs_hash.as_str()),
+            "RTKLIB oracle {obs_key} observation input hash"
+        );
         let corrections = Corrections {
             ionosphere: run["ionosphere"].as_bool().expect("ionosphere"),
             troposphere: run["troposphere"].as_bool().expect("troposphere"),
         };
         let rtklib_cases = run["cases"].as_array().expect("cases");
-        // Each epoch's SPP positions from the four starts.
-        let mut by_epoch: std::collections::BTreeMap<String, Vec<[f64; 3]>> =
-            std::collections::BTreeMap::new();
-        let mut contraction_by_epoch: std::collections::BTreeMap<String, (f64, f64)> =
-            std::collections::BTreeMap::new();
-        for (guess_name, guess) in run["guesses"].as_object().expect("guesses") {
+        assert_eq!(rtklib_cases.len(), 480, "{label}: reference case count");
+        let mut consumed_cases = std::collections::BTreeSet::new();
+        let guesses = run["guesses"].as_object().expect("guesses");
+        assert_eq!(
+            guesses
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["zero", "approx", "east", "west"])
+        );
+        for (guess_name, guess) in guesses {
             let guess = num3(guess);
             let options = RinexSppOptions::new(policy.clone())
                 .with_corrections(corrections)
@@ -4049,9 +4234,10 @@ fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
                     "{}-{:02}-{:02}T{:02}:{:02}:{:010.7}",
                     t.year, t.month, t.day, t.hour, t.minute, t.second
                 );
-                let rtklib = rtklib_cases
+                let (case_index, rtklib) = rtklib_cases
                     .iter()
-                    .find(|case| {
+                    .enumerate()
+                    .find(|(_, case)| {
                         case["guess"] == guess_name.as_str() && {
                             let e = case["epoch"].as_array().expect("epoch");
                             e[0].as_i64() == Some(i64::from(t.year))
@@ -4063,6 +4249,10 @@ fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
                         }
                     })
                     .unwrap_or_else(|| panic!("{label} {key} {guess_name}: no RTKLIB case"));
+                assert!(
+                    consumed_cases.insert(case_index),
+                    "{label} {key} {guess_name}: reference case reused"
+                );
                 assert_eq!(
                     rtklib["stat"], 1,
                     "{label} {key} {guess_name}: RTKLIB solved"
@@ -4075,68 +4265,55 @@ fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
                     .collect();
 
                 let solution = solve(&store, &epoch.inputs, false)
-                    .unwrap_or_else(|e| panic!("{label} {key} {guess_name}: {e}"));
+                    .unwrap_or_else(|error| panic!("{label} {key} {guess_name}: {error}"));
                 assert_eq!(
                     solution.used_sats, rtklib_used,
                     "{label} {key} {guess_name}: used satellites"
                 );
-                let rtklib_position = num3(&rtklib["position_m"]);
-                let run_largest = largest_rtklib_m.entry(label.to_string()).or_insert(0.0);
-                *run_largest = run_largest.max(position_error_m(&solution, rtklib_position));
-                let rounding = transmit_epoch_rounding_shift_m(&store, &epoch.inputs, &solution);
-                let p = solution.position.as_array();
-                let norm = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-                let less_rounding = [
-                    p[0] - rtklib_position[0] - rounding[0],
-                    p[1] - rtklib_position[1] - rounding[1],
-                    p[2] - rtklib_position[2] - rounding[2],
-                ];
-                let entry = less_rounding_by_run
-                    .entry(label.to_string())
-                    .or_insert((0.0, 0.0));
-                entry.0 = entry.0.max(norm(rounding));
-                entry.1 = entry.1.max(norm(less_rounding));
-
-                // The selection alone, apart from the weights and models that move
-                // the solution: at RTKLIB's own position and clock it keeps the
-                // satellites RTKLIB used.
-                let rtklib_clock_m = rtklib["clock_m"].as_f64().expect("clock");
-                let at_rtklib = super::select_at(
+                cases += 1;
+                let diagnostics = match super::oracle_certificate::verify_case(
                     &store,
                     &epoch.inputs,
-                    SppModelRecipe::reference(),
-                    None,
-                    rtklib_position,
-                    &|_| rtklib_clock_m,
-                );
+                    rtklib,
+                    &solution,
+                ) {
+                    Ok(diagnostics) => diagnostics,
+                    Err(error) => {
+                        let failure = certificate_failures
+                            .entry(error.to_string())
+                            .or_insert_with(|| (0, format!("{label} {key} {guess_name}")));
+                        failure.0 += 1;
+                        continue;
+                    }
+                };
+                assert_eq!(diagnostics.oracle_state_count, rtklib_used.len());
+                assert!(diagnostics.native_state_count >= rtklib_used.len());
+                assert_eq!(diagnostics.endpoint.used_satellites, rtklib_used.len());
                 assert_eq!(
-                    at_rtklib.used, rtklib_used,
-                    "{label} {key} {guess_name}: selection at RTKLIB's solution"
+                    diagnostics.endpoint.candidate_satellites,
+                    diagnostics.native_state_count
                 );
-                let geodetic =
-                    super::geodetic_from_ecef(SppModelRecipe::reference().frame, rtklib_position);
-                let covariance = super::spp_position_covariance(
-                    &at_rtklib.lines_of_sight,
-                    &vec![3; at_rtklib.used.len()],
-                    4,
-                    &at_rtklib.weights,
-                    geodetic,
-                )
-                .expect("full-rank covariance at RTKLIB's solution")
-                .ecef_m2;
-                let qr = rtklib["qr_m2"].as_array().expect("qr_m2");
-                let qr = |i: usize| qr[i].as_f64().expect("covariance entry");
-                // `sol.qr`: xx, yy, zz, xy, yz, zx.
-                for (index, (row, column)) in [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0)]
-                    .into_iter()
-                    .enumerate()
-                {
-                    let scale = (covariance[row][row] * covariance[column][column]).sqrt();
-                    let difference = (covariance[row][column] - qr(index)).abs() / scale;
-                    largest_covariance_difference = largest_covariance_difference.max(difference);
-                }
+                assert!(
+                    diagnostics.endpoint.membership_distance_m
+                        <= diagnostics.endpoint.endpoint_distance_bound_m
+                );
+                largest_contraction = largest_contraction.max(diagnostics.endpoint.contraction);
+                largest_bound_m =
+                    largest_bound_m.max(diagnostics.endpoint.endpoint_distance_bound_m);
+                let rtklib_position = num3(&rtklib["position_m"]);
+                let rtklib_error = position_error_m(&solution, rtklib_position);
+                let run_largest = largest_rtklib_m.entry(label.to_string()).or_insert(0.0);
+                *run_largest = run_largest.max(rtklib_error);
+                let states = rtklib["satellite_states"]
+                    .as_array()
+                    .expect("independent RTKLIB satellite states");
+                let endpoint_context = format!("{label} {key} {guess_name}");
+                let oracle_step = rtklib_oracle_next_step(states, &endpoint_context);
+                largest_oracle_endpoint_step_m =
+                    largest_oracle_endpoint_step_m.max(oracle_step.norm_m);
+                largest_oracle_clock_step_m =
+                    largest_oracle_clock_step_m.max(oracle_step.components_m[3].abs());
 
-                // The satellites the start itself would use, against the ones used.
                 let at_start = super::select_at(
                     &store,
                     &epoch.inputs,
@@ -4148,85 +4325,42 @@ fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
                 let risen = solution
                     .used_sats
                     .iter()
-                    .filter(|sat| !at_start.used.contains(sat))
+                    .filter(|satellite| !at_start.used.contains(satellite))
                     .count();
                 let fallen = at_start
                     .used
                     .iter()
-                    .filter(|sat| !solution.used_sats.contains(sat))
+                    .filter(|satellite| !solution.used_sats.contains(satellite))
                     .count();
                 let entry = crossings.entry(guess_name.clone()).or_insert((0, 0));
                 entry.0 += risen;
                 entry.1 += fallen;
-                if guess_name == "approx" {
-                    contraction_by_epoch.insert(
-                        key.clone(),
-                        rtklib_iteration_contraction(&store, &epoch.inputs, &solution),
-                    );
-                }
-                by_epoch
-                    .entry(key)
-                    .or_default()
-                    .push(solution.position.as_array());
-                cases += 1;
             }
         }
-        // Each start ends with a step `d` below `SELECTION_STEP_TOL_M`. The
-        // iteration's error contracts as `e' = -A (J - H) e`, `A = (H^T W H)^-1 H^T W`,
-        // with `J` the model's own Jacobian and `H = [-e, 1]` the design it steps
-        // over, so with `rho = |A (J - H)|` the last iterate lies within
-        // `rho / (1 - rho) |d|` of the fixed point. The step itself is formed from
-        // residuals of 2e7 m ranges, each rounded to about `eps * 2.6e7 m`, which
-        // `A` carries into the position; and the position is rounded to its own
-        // ulp. Two starts lie within twice the sum.
-        for (key, positions) in &by_epoch {
-            let (rho, a_norm) = contraction_by_epoch[key];
-            assert!(rho < 0.5, "{label} {key}: contraction {rho}");
-            let per_start_m = rho / (1.0 - rho) * super::SELECTION_STEP_TOL_M
-                + a_norm * f64::EPSILON * 2.6e7
-                + f64::EPSILON * 6.4e6;
-            let bound_m = 2.0 * per_start_m;
-            largest_contraction = largest_contraction.max(rho);
-            largest_bound_m = largest_bound_m.max(bound_m);
-            for p in positions {
-                let q = positions[0];
-                let d =
-                    ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt();
-                largest_spread_m = largest_spread_m.max(d);
-                assert!(
-                    d <= bound_m,
-                    "{label} {key}: starts {d} m apart, beyond {bound_m} m (rho {rho})"
-                );
-            }
-        }
+        assert_eq!(
+            consumed_cases.len(),
+            rtklib_cases.len(),
+            "{label}: every reference case consumed exactly once"
+        );
+        eprintln!(
+            "{label}: checked {} reference cases; {} distinct certificate failures so far",
+            consumed_cases.len(),
+            certificate_failures.len()
+        );
     }
     eprintln!(
-        "{cases} cases: largest distance to RTKLIB per run {largest_rtklib_m:?} m, largest \
-         covariance difference {largest_covariance_difference:.3e}, largest spread \
-         between starts {largest_spread_m:.3e} m, largest contraction {largest_contraction:.3e}, largest bound {largest_bound_m:.3e} m, \
+        "{cases} cases: largest distance to RTKLIB per run {largest_rtklib_m:?} m, \
+         largest certified contraction {largest_contraction:.3e}, \
+         largest endpoint bound {largest_bound_m:.3e} m, \
+         largest independent next-step norm {largest_oracle_endpoint_step_m:.3e} m, \
+         largest independent next clock step {largest_oracle_clock_step_m:.3e} m, \
          (rose, set) per start {crossings:?}"
     );
-    eprintln!("per run (rounding shift, distance less rounding) {less_rounding_by_run:?} m");
     assert_eq!(cases, 2400);
     assert!(
-        largest_covariance_difference <= RTKLIB_COVARIANCE_FLOOR,
-        "a covariance at RTKLIB's solution differs from RTKLIB's Q by \
-         {largest_covariance_difference:.3e} of its scale"
+        certificate_failures.is_empty(),
+        "independent certificate failures (count, first case): {certificate_failures:#?}"
     );
-    for (label, &largest_m) in &largest_rtklib_m {
-        let (_, less_rounding_m) = less_rounding_by_run[label];
-        assert!(
-            largest_m < RTKLIB_FLOOR_M,
-            "{label}: an SPP solution is {largest_m} m from RTKLIB's, beyond {RTKLIB_FLOOR_M} m"
-        );
-        assert!(
-            less_rounding_m < RTKLIB_LESS_ROUNDING_FLOOR_M,
-            "{label}: an SPP solution is {less_rounding_m} m from RTKLIB's with the rounding \
-             shift taken out, beyond {RTKLIB_LESS_ROUNDING_FLOOR_M} m"
-        );
-    }
-    // The far starts see satellites cross the mask both ways, not only the
-    // geocentre, which keeps every satellite on its first pass.
     for start in ["east", "west"] {
         let (risen, fallen) = crossings[start];
         assert!(
@@ -4234,89 +4368,6 @@ fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
             "{start}: {risen} satellites rose and {fallen} set between start and solution"
         );
     }
-}
-
-/// The exact rounding error of `a + b` in `f64`: `a + b = s + err` with `s = a + b`
-/// rounded (Knuth's TwoSum).
-fn two_sum_error(a: f64, b: f64) -> f64 {
-    let s = a + b;
-    let bb = s - a;
-    (a - (s - bb)) + (b - bb)
-}
-
-/// The position shift `-A δρ` at `solution`, `A = (H^T W H)^-1 H^T W`, of the range
-/// errors `δρ` the `f64` transmission epochs carry: each epoch `t_rx - P / c - dts` is
-/// formed in seconds since J2000, whose spacing near 2020 is 1.2e-7 s, where RTKLIB
-/// `gtime_t` keeps the fraction of the second; the satellite moves along the line of
-/// sight by its range rate times that rounding.
-fn transmit_epoch_rounding_shift_m(
-    store: &crate::ephemeris::BroadcastEphemeris,
-    inputs: &SolveInputs,
-    solution: &super::ReceiverSolution,
-) -> [f64; 3] {
-    use super::EphemerisSource;
-    let rx = solution.position.as_array();
-    let clock_m = solution.rx_clock_s * C_M_S;
-    let selection = super::select_at(
-        store,
-        inputs,
-        SppModelRecipe::reference(),
-        None,
-        rx,
-        &|_| clock_m,
-    );
-    let t_rx = inputs.t_rx_j2000_s;
-    let range_errors: Vec<f64> = selection
-        .used
-        .iter()
-        .zip(&selection.lines_of_sight)
-        .map(|(&sat, los)| {
-            let p = inputs
-                .observations
-                .iter()
-                .find(|o| o.satellite_id == sat)
-                .expect("observed")
-                .pseudorange_m;
-            let x = p / C_M_S;
-            let a = t_rx - x;
-            let e1 = two_sum_error(t_rx, -x);
-            let dt = store
-                .try_transmit_epoch_clock_s(sat, a, t_rx)
-                .expect("clock")
-                .expect("clock")
-                .value;
-            let b = a - dt;
-            let e2 = two_sum_error(a, -dt);
-            // The f64 epoch less the exact one.
-            let dt_epoch = -(e1 + e2);
-            let at = |t: f64| {
-                store
-                    .try_position_clock_group_delay_selected_at_j2000_s(sat, t, t_rx)
-                    .expect("state")
-                    .expect("state")
-                    .value
-                    .0
-            };
-            let r0 = at(b);
-            let r1 = at(b + 1.0e-3);
-            let v = [
-                (r1[0] - r0[0]) / 1.0e-3,
-                (r1[1] - r0[1]) / 1.0e-3,
-                (r1[2] - r0[2]) / 1.0e-3,
-            ];
-            (los.e_x * v[0] + los.e_y * v[1] + los.e_z * v[2]) * dt_epoch
-        })
-        .collect();
-    let columns = vec![3; selection.used.len()];
-    let a_drho = super::rtklib_step(
-        &selection.lines_of_sight,
-        &columns,
-        4,
-        &selection.weights,
-        &range_errors,
-    )
-    .expect("full-rank design");
-    [-a_drho[0], -a_drho[1], -a_drho[2]]
 }
 
 fn num3(v: &Value) -> [f64; 3] {
@@ -4612,79 +4663,6 @@ fn a_satellite_oscillating_across_the_mask_leaves_the_selection_unsettled() {
     }
 }
 
-/// `(|A (J - H)|, |A|)` (Frobenius norms, which bound the spectral ones) at
-/// `solution`, with `A = (H^T W H)^-1 H^T W`: `H = [-e, 1]` the design the RTKLIB
-/// step takes, `W` the weights, and `J` the model's own Jacobian of the
-/// predicted range, by forward difference. The first is the contraction factor of
-/// the RTKLIB iteration there; the second carries residual rounding into a step.
-fn rtklib_iteration_contraction(
-    eph: &dyn super::EphemerisSource,
-    inputs: &SolveInputs,
-    solution: &super::ReceiverSolution,
-) -> (f64, f64) {
-    use nalgebra::DMatrix;
-    let clock_m = solution.system_clocks_s[0].1 * C_M_S;
-    let rx = solution.position.as_array();
-    let selection = super::select_at(eph, inputs, SppModelRecipe::reference(), None, rx, &|_| {
-        clock_m
-    });
-    let used = &selection.used;
-    let m = used.len();
-    let n = 4;
-    let mut h = DMatrix::zeros(m, n);
-    let mut w = DMatrix::zeros(m, m);
-    for k in 0..m {
-        let los = selection.lines_of_sight[k];
-        h[(k, 0)] = -los.e_x;
-        h[(k, 1)] = -los.e_y;
-        h[(k, 2)] = -los.e_z;
-        h[(k, 3)] = 1.0;
-        w[(k, k)] = selection.weights[k];
-    }
-    let obs_by_id: Vec<(GnssSatelliteId, f64)> = inputs
-        .observations
-        .iter()
-        .map(|o| (o.satellite_id, o.pseudorange_m))
-        .collect();
-    let x = DVector::from_vec(vec![rx[0], rx[1], rx[2], clock_m]);
-    let predicted = |state: &DVector<f64>| -> DVector<f64> {
-        let residual = super::residual_unweighted(
-            eph,
-            used,
-            &obs_by_id,
-            state.as_slice(),
-            inputs,
-            SppModelRecipe::reference(),
-        )
-        .expect("used satellites are modeled");
-        // The predicted range is the measurement less the residual.
-        DVector::from_iterator(
-            m,
-            residual.iter().zip(used).map(|(r, sat)| {
-                obs_by_id
-                    .iter()
-                    .find(|(id, _)| id == sat)
-                    .map(|(_, p)| *p)
-                    .expect("observed")
-                    - r
-            }),
-        )
-    };
-    let f0 = predicted(&x);
-    let j = jacobian_2point(predicted, &x, &f0).expect("model Jacobian");
-    let ht_w = crate::astro::math::portable::product(&h.transpose(), &w);
-    let hth = crate::astro::math::portable::product(&ht_w, &h);
-    let rows: Vec<Vec<f64>> = (0..n)
-        .map(|i| (0..n).map(|k| hth[(i, k)]).collect())
-        .collect();
-    let q = crate::astro::math::linear::invert_symmetric_pd(&rows).expect("full-rank design");
-    let q = DMatrix::from_fn(n, n, |i, k| q[i][k]);
-    let a = crate::astro::math::portable::product(&q, &ht_w);
-    let a_norm = a.norm();
-    let contraction = crate::astro::math::portable::product(&a, &(j - h));
-    (contraction.norm(), a_norm)
-}
-
 /// A pierce point one finite-difference probe inside the grid edge: the trust-region
 /// solve's Jacobian probe moves the line of sight out of the grid, but no iterate
 /// does. The pass ends at the last accepted iterate, the start, where the selection
@@ -4747,6 +4725,7 @@ fn a_pierce_point_one_probe_inside_the_grid_edge_settles() {
     let env = SatModelEnv {
         eph: &eph,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
+        receive_epoch: None,
         t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
         day_of_year: inputs.day_of_year,
         corrections: Corrections::NONE,

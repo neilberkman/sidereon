@@ -426,6 +426,23 @@ impl SbasGeoState {
         self.state_after(t_j2000_s - self.t0_j2000_s)
     }
 
+    /// Propagate from the stored reference epoch using the exact epoch difference.
+    pub fn state_at_exact_epoch(
+        &self,
+        epoch: crate::astro::time::ExactEpoch,
+    ) -> Option<([f64; 3], f64)> {
+        self.state_at_epoch_query(&epoch.query())
+    }
+
+    /// Propagate from the stored binary reference epoch to an exact epoch query.
+    pub fn state_at_epoch_query(
+        &self,
+        epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<([f64; 3], f64)> {
+        let reference = crate::astro::time::ExactEpoch::from_binary_j2000_seconds(self.t0_j2000_s)?;
+        Some(self.state_after(epoch.seconds_since_query(&reference)))
+    }
+
     /// Propagate the ECEF position and clock `dt` seconds from the reference epoch.
     pub(crate) fn state_after(&self, dt: f64) -> ([f64; 3], f64) {
         let dt2 = dt * dt;
@@ -671,6 +688,17 @@ impl SbasCorrectionStore {
             .then_some(&timed.value)
     }
 
+    pub(crate) fn fresh_fast_at_epoch_query(
+        &self,
+        geo: GnssSatelliteId,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<&SbasFastCorrection> {
+        let timed = self.partitions.get(&geo)?.fast.get(&sat)?;
+        self.fresh_at_epoch_query(timed.epoch_j2000_s, epoch)
+            .then_some(&timed.value)
+    }
+
     /// Variance (m²) of the fresh fast correction for `sat` at `t_j2000_s`, as RTKLIB
     /// `sbsfastcorr` states it: `varfcorr` of the UDREI (the DO-229 UDRE variance) plus
     /// the degradation `degfcorr(ai) t² / 2`, with `t` the time since the correction's
@@ -697,6 +725,31 @@ impl SbasCorrectionStore {
         Some(udre_variance_m2 + fast_degradation_factor(ai) * t * t / 2.0)
     }
 
+    pub(crate) fn fast_correction_variance_at_epoch_query(
+        &self,
+        geo: GnssSatelliteId,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<f64> {
+        let fast = self.fresh_fast_at_epoch_query(geo, sat, epoch)?;
+        let partition = self.partitions.get(&geo)?;
+        let message_epoch_j2000_s = partition
+            .fast_message_epoch_j2000_s
+            .get(&sat)
+            .copied()
+            .unwrap_or(fast.t_of_j2000_s - partition.system_latency_s);
+        let message_epoch =
+            crate::astro::time::ExactEpoch::from_binary_j2000_seconds(message_epoch_j2000_s)?;
+        let elapsed_s = epoch.seconds_since_query(&message_epoch) + partition.system_latency_s;
+        let ai = partition
+            .fast_degradation_ai
+            .get(&sat)
+            .copied()
+            .unwrap_or(0);
+        let udre_variance_m2 = udre_variance_m2_for_udrei(fast.udrei).unwrap_or(0.0);
+        Some(udre_variance_m2 + fast_degradation_factor(ai) * elapsed_s * elapsed_s / 2.0)
+    }
+
     pub(crate) fn fresh_long_term(
         &self,
         geo: GnssSatelliteId,
@@ -706,6 +759,17 @@ impl SbasCorrectionStore {
         let p = self.partitions.get(&geo)?;
         let timed = p.long_term.get(&sat)?;
         self.fresh(timed.epoch_j2000_s, t_j2000_s)
+            .then_some(&timed.value)
+    }
+
+    pub(crate) fn fresh_long_term_at_epoch_query(
+        &self,
+        geo: GnssSatelliteId,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<&SbasLongTermCorrection> {
+        let timed = self.partitions.get(&geo)?.long_term.get(&sat)?;
+        self.fresh_at_epoch_query(timed.epoch_j2000_s, epoch)
             .then_some(&timed.value)
     }
 
@@ -730,10 +794,42 @@ impl SbasCorrectionStore {
             .then_some(&timed.value)
     }
 
+    pub(crate) fn fresh_geo_nav_at_epoch_query(
+        &self,
+        geo: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<&SbasGeoState> {
+        let timed = self.partitions.get(&geo)?.geo_nav.as_ref()?;
+        self.fresh_at_epoch_query(timed.epoch_j2000_s, epoch)
+            .then_some(&timed.value)
+    }
+
     pub(crate) fn is_disabled(&self, geo: GnssSatelliteId, t_j2000_s: f64) -> bool {
         self.partitions
             .get(&geo)
             .is_some_and(|p| p.is_disabled(t_j2000_s))
+    }
+
+    pub(crate) fn is_disabled_at_epoch_query(
+        &self,
+        geo: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> bool {
+        let Some(deadline) = self
+            .partitions
+            .get(&geo)
+            .and_then(|partition| partition.disabled_until_j2000_s)
+        else {
+            return false;
+        };
+        let Some(deadline) = crate::astro::time::ExactEpoch::from_binary_j2000_seconds(deadline)
+        else {
+            return false;
+        };
+        matches!(
+            epoch.compare_interval_query(&deadline, 0.0),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        )
     }
 
     pub(crate) fn is_withdrawn(&self, geo: GnssSatelliteId, sat: GnssSatelliteId) -> bool {
@@ -765,6 +861,26 @@ impl SbasCorrectionStore {
 
     fn fresh(&self, source_j2000_s: f64, t_j2000_s: f64) -> bool {
         (t_j2000_s - source_j2000_s).abs() <= self.policy.max_staleness_s
+    }
+
+    fn fresh_at_epoch_query(
+        &self,
+        source_j2000_s: f64,
+        epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> bool {
+        let Some(source) =
+            crate::astro::time::ExactEpoch::from_binary_j2000_seconds(source_j2000_s)
+        else {
+            return false;
+        };
+        let interval_s = self.policy.max_staleness_s;
+        matches!(
+            epoch.compare_interval_query(&source, interval_s),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        ) && matches!(
+            source.compare_interval_query(epoch, interval_s),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        )
     }
 }
 
@@ -1922,6 +2038,159 @@ mod tests {
 
     fn gps(prn: u8) -> GnssSatelliteId {
         GnssSatelliteId::new(GnssSystem::Gps, prn).expect("valid GPS PRN")
+    }
+
+    #[test]
+    fn geo_exact_query_preserves_binary_reference_epoch() {
+        let t0_j2000_s = 123_456_789.123_456_79;
+        let state = SbasGeoState {
+            position_ecef_m: [1.0, 2.0, 3.0],
+            velocity_ecef_m_s: [4.0, 5.0, 6.0],
+            acceleration_ecef_m_s2: [0.0; 3],
+            clock_offset_s: 7.0,
+            clock_drift_s_s: 1.0,
+            t0_j2000_s,
+            ura_index: 0,
+        };
+        let epoch = crate::astro::time::ExactEpoch::from_binary_j2000_seconds(t0_j2000_s)
+            .expect("finite binary epoch");
+
+        let (position, clock) = state
+            .state_at_epoch_query(&epoch)
+            .expect("binary reference epoch is finite");
+
+        assert_eq!(position, state.position_ecef_m);
+        assert_eq!(clock, state.clock_offset_s);
+    }
+
+    #[test]
+    fn exact_freshness_covers_fast_long_term_and_geo_with_sub_ulp_queries() {
+        let reference_seconds = 646_272_000_i64;
+        let reference_j2000_s = reference_seconds as f64;
+        let geo = geo();
+        let sat = gps(1);
+        let mut store = SbasCorrectionStore::new()
+            .with_policy(crate::staleness::StalenessPolicy::seconds(90.0));
+        let partition = store.partitions.entry(geo).or_default();
+        partition.fast.insert(
+            sat,
+            Timed {
+                value: SbasFastCorrection {
+                    prc_m: 1.0,
+                    rrc_m_s: 0.0,
+                    udrei: 0,
+                    t_of_j2000_s: reference_j2000_s,
+                    iodf: 0,
+                },
+                epoch_j2000_s: reference_j2000_s,
+            },
+        );
+        partition.long_term.insert(
+            sat,
+            Timed {
+                value: SbasLongTermCorrection {
+                    iode: 0,
+                    delta_ecef_m: [0.0; 3],
+                    delta_ecef_rate_m_s: [0.0; 3],
+                    delta_af0_s: 0.0,
+                    delta_af1_s_s: 0.0,
+                    t0_j2000_s: reference_j2000_s,
+                },
+                epoch_j2000_s: reference_j2000_s,
+            },
+        );
+        partition.geo_nav = Some(Timed {
+            value: SbasGeoState {
+                position_ecef_m: [1.0, 2.0, 3.0],
+                velocity_ecef_m_s: [0.0; 3],
+                acceleration_ecef_m_s2: [0.0; 3],
+                clock_offset_s: 0.0,
+                clock_drift_s_s: 0.0,
+                t0_j2000_s: reference_j2000_s,
+                ura_index: 0,
+            },
+            epoch_j2000_s: reference_j2000_s,
+        });
+
+        let at_limit = crate::astro::time::ExactEpoch::new(reference_seconds + 90, 0)
+            .expect("valid limit epoch")
+            .query();
+        let twenty_ns_past = crate::astro::time::ExactEpoch::new(reference_seconds + 90, 0)
+            .expect("valid 20 ns boundary")
+            .query()
+            .checked_add_binary_seconds(20.0e-9)
+            .expect("finite offset");
+        let one_attosecond_past = crate::astro::time::ExactEpoch::new(reference_seconds + 90, 1)
+            .expect("valid one-attosecond boundary")
+            .query();
+        let twenty_ns_before = crate::astro::time::ExactEpoch::new(reference_seconds - 90, 0)
+            .expect("valid 20 ns boundary")
+            .query()
+            .checked_sub_binary_seconds(20.0e-9)
+            .expect("finite offset");
+        assert_eq!(twenty_ns_past.j2000_seconds(), at_limit.j2000_seconds());
+        assert_eq!(twenty_ns_before.j2000_seconds(), reference_j2000_s - 90.0);
+        assert!(store
+            .fresh_fast_at_epoch_query(geo, sat, &at_limit)
+            .is_some());
+        assert!(store
+            .fresh_long_term_at_epoch_query(geo, sat, &at_limit)
+            .is_some());
+        assert!(store.fresh_geo_nav_at_epoch_query(geo, &at_limit).is_some());
+        for query in [&twenty_ns_past, &one_attosecond_past] {
+            assert!(store.fresh_fast_at_epoch_query(geo, sat, query).is_none());
+            assert!(store
+                .fresh_long_term_at_epoch_query(geo, sat, query)
+                .is_none());
+            assert!(store.fresh_geo_nav_at_epoch_query(geo, query).is_none());
+        }
+        assert!(store
+            .fresh_fast_at_epoch_query(geo, sat, &twenty_ns_before)
+            .is_none());
+        assert!(store
+            .fresh_long_term_at_epoch_query(geo, sat, &twenty_ns_before)
+            .is_none());
+        assert!(store
+            .fresh_geo_nav_at_epoch_query(geo, &twenty_ns_before)
+            .is_none());
+
+        let twenty_seconds_before = crate::astro::time::ExactEpoch::new(reference_seconds - 20, 0)
+            .expect("valid earlier query")
+            .query();
+        assert!(store
+            .fresh_fast_at_epoch_query(geo, sat, &twenty_seconds_before)
+            .is_some());
+        assert!(store
+            .fresh_long_term_at_epoch_query(geo, sat, &twenty_seconds_before)
+            .is_some());
+        assert!(store
+            .fresh_geo_nav_at_epoch_query(geo, &twenty_seconds_before)
+            .is_some());
+    }
+
+    #[test]
+    fn disabled_deadline_uses_exact_inclusive_comparison() {
+        let deadline_seconds = 646_272_000_i64;
+        let deadline =
+            crate::astro::time::ExactEpoch::new(deadline_seconds, 0).expect("valid deadline");
+        let geo = geo();
+        let mut store = SbasCorrectionStore::new();
+        store
+            .partitions
+            .entry(geo)
+            .or_default()
+            .disabled_until_j2000_s = Some(deadline.j2000_seconds());
+
+        let exactly_at_deadline = deadline.query();
+        let one_attosecond_after = crate::astro::time::ExactEpoch::new(deadline_seconds, 1)
+            .expect("valid offset query")
+            .query();
+        assert_eq!(
+            exactly_at_deadline.j2000_seconds(),
+            one_attosecond_after.j2000_seconds()
+        );
+        assert!(store.is_disabled_at_epoch_query(geo, &exactly_at_deadline));
+        assert!(!store.is_disabled_at_epoch_query(geo, &one_attosecond_after));
     }
 
     fn mask_message() -> SbasMessage {

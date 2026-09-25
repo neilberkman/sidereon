@@ -3,15 +3,18 @@
 use std::collections::BTreeMap;
 
 use crate::astro::time::model::{Instant, TimeScale};
+use crate::astro::time::ExactEpochQuery;
 use crate::id::GnssSatelliteId;
 use crate::observables::{
     ObservableEphemerisSource, ObservableState, ObservableStateBatch, ObservablesError,
 };
 use crate::sp3::interp::{
     fit_clock_spline_arcs, gather_sp3_precise_series, instant_to_j2000_seconds,
-    interpolate_precise_position, interpolate_precise_state,
-    interpolate_precise_state_with_clock_arcs, ClockSplineArc, PreciseQuery, PreciseSatSeries,
-    Sp3InterpolationOptions,
+    interpolate_precise_position, interpolate_precise_position_at_epoch_query,
+    interpolate_precise_state, interpolate_precise_state_at_epoch_query,
+    interpolate_precise_state_with_clock_arcs,
+    interpolate_precise_state_with_clock_arcs_at_epoch_query, ClockSplineArc, PreciseQuery,
+    PreciseSatSeries, Sp3InterpolationOptions,
 };
 use crate::sp3::{
     PreciseEphemerisSample, PreciseEphemerisSamples, PreciseSamplesError, Sp3, Sp3State,
@@ -179,6 +182,38 @@ impl PreciseEphemerisInterpolant {
         }
     }
 
+    /// Interpolate `sat` at an exact query in this interpolant's source time system.
+    pub fn position_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        query: &ExactEpochQuery,
+    ) -> Result<Sp3State> {
+        static EMPTY_F64: [f64; 0] = [];
+        static EMPTY_CLK: [(f64, f64, bool); 0] = [];
+        match self.nodes.get(&sat) {
+            Some(fitted) => interpolate_precise_state_with_clock_arcs_at_epoch_query(
+                sat,
+                &fitted.series.x,
+                &fitted.series.kx,
+                &fitted.series.ky,
+                &fitted.series.kz,
+                &fitted.clock_arcs,
+                query,
+                self.interpolation.gap_threshold_factor(),
+            ),
+            None => interpolate_precise_state_at_epoch_query(
+                sat,
+                &EMPTY_F64,
+                &EMPTY_F64,
+                &EMPTY_F64,
+                &EMPTY_F64,
+                &EMPTY_CLK,
+                query,
+                self.interpolation.gap_threshold_factor(),
+            ),
+        }
+    }
+
     /// Position of `sat` 1 ms after `t_j2000_s`, the second position RTKLIB `peph2pos`
     /// interpolates to form the satellite velocity.
     pub(crate) fn position_after_ephpos_step(
@@ -197,6 +232,28 @@ impl PreciseEphemerisInterpolant {
             self.interpolation.gap_threshold_factor(),
         )
         .map(|(x, y, z)| [x, y, z])
+    }
+
+    pub(crate) fn position_after_ephpos_step_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        query: &ExactEpochQuery,
+    ) -> Result<[f64; 3]> {
+        let stepped = query
+            .clone()
+            .checked_add_binary_seconds(crate::rinex_nav::EPHPOS_STEP_S)
+            .ok_or(Error::EpochOutOfRange)?;
+        let fitted = self.nodes.get(&sat).ok_or(Error::UnknownSatellite(sat))?;
+        interpolate_precise_position_at_epoch_query(
+            sat,
+            &fitted.series.x,
+            &fitted.series.kx,
+            &fitted.series.ky,
+            &fitted.series.kz,
+            &stepped,
+            self.interpolation.gap_threshold_factor(),
+        )
+        .map(|(x_m, y_m, z_m)| [x_m, y_m, z_m])
     }
 
     /// Interpolate the state of `sat` at an arbitrary [`Instant`].

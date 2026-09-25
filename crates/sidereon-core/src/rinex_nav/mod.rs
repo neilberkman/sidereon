@@ -31,7 +31,7 @@
 #![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod store;
-pub(crate) use store::ura_variance_m2;
+pub(crate) use store::{exact_record_deltas, ura_variance_m2};
 pub use store::{BroadcastStore, NavMessagePreference};
 
 mod write;
@@ -152,6 +152,28 @@ pub(crate) fn query_native_time(sat: GnssSatelliteId, t_j2000_s: f64) -> Option<
             ),
             is_beidou_geo(sat),
         )),
+        _ => None,
+    }
+}
+
+pub(crate) fn query_native_exact_time(
+    sat: GnssSatelliteId,
+    epoch: crate::astro::time::ExactEpoch,
+) -> Option<(f64, f64, bool)> {
+    let gps_epoch = epoch.checked_add_seconds(J2000_GPS_SECONDS_OF_WEEK as f64)?;
+    let gps_sow = gps_epoch.seconds_modulo(SECONDS_PER_WEEK as i64)?;
+    match sat.system {
+        GnssSystem::Gps | GnssSystem::Galileo | GnssSystem::Qzss | GnssSystem::Navic => {
+            Some((epoch.j2000_seconds(), gps_sow, false))
+        }
+        GnssSystem::BeiDou => {
+            let bdt_epoch = gps_epoch.checked_sub_seconds(crate::constants::GPST_MINUS_BDT_S)?;
+            Some((
+                epoch.j2000_seconds() - crate::constants::GPST_MINUS_BDT_S,
+                bdt_epoch.seconds_modulo(SECONDS_PER_WEEK as i64)?,
+                is_beidou_geo(sat),
+            ))
+        }
         _ => None,
     }
 }

@@ -1,15 +1,17 @@
 //! Broadcast-store selection and SPP source adapter.
 
 use crate::broadcast::{
-    satellite_position_ecef_at_tk_unchecked, satellite_state, satellite_state_cnav,
-    satellite_state_cnav_unchecked, satellite_state_unchecked, time_from_reference_s, CnavRates,
-    SatelliteState,
+    satellite_clock_bias_at_delta_unchecked, satellite_position_ecef_at_tk_unchecked,
+    satellite_state, satellite_state_at_deltas_unchecked, satellite_state_cnav,
+    satellite_state_cnav_unchecked, satellite_state_unchecked, time_from_reference_delta_s,
+    time_from_reference_s, CnavRates, SatelliteState,
 };
 use crate::constants::{HALF_WEEK_S, SECONDS_PER_WEEK};
 use crate::error::{Error, Result as CoreResult};
 use crate::glonass;
 use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::spp::EphemerisSource;
+use std::cmp::Ordering;
 
 use super::{
     cnav_ura_nominal_m, gps_minus_utc_at_utc_j2000_s, is_beidou_geo, keplerian_max_dtoe_s,
@@ -20,6 +22,7 @@ use super::{
 };
 use super::{ephpos_stepped_tk, query_native_time, toe_native_j2000_s};
 use crate::astro::time::model::GnssWeekTow;
+use crate::astro::time::{ExactEpoch, ExactEpochQuery};
 
 /// Which navigation-message generation a store prefers when a GPS/QZSS
 /// satellite has both legacy and CNAV-family records.
@@ -268,6 +271,14 @@ impl BroadcastStore {
         self.select(sat, t_native_s)
     }
 
+    pub(crate) fn select_record_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Option<&BroadcastRecord> {
+        self.select_exact(sat, selection_epoch)
+    }
+
     /// Broadcast group delay, seconds, of the record selected for `sat` at `t_j2000_s`,
     /// the one [`EphemerisSource::position_clock_at_j2000_s`] evaluates, for the
     /// single-frequency user of its message: GPS, QZSS and NavIC LNAV TGD, Galileo I/NAV
@@ -415,6 +426,21 @@ impl BroadcastStore {
         })
     }
 
+    pub(crate) fn select_by_iode_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Option<&BroadcastRecord> {
+        self.first_valid_exact(sat, selection_epoch, |record| {
+            record.issue_of_data
+                == Some(BroadcastIssue {
+                    issue: u32::from(iode),
+                    message: NavMessage::GpsLnav,
+                })
+        })
+    }
+
     /// Evaluate a matching issue-specific broadcast record at `t`.
     pub fn state_by_iode_at(
         &self,
@@ -455,6 +481,23 @@ impl BroadcastStore {
         let position = state.orbit.position().ok()?;
         Some((
             position.as_array(),
+            satposs_clock_s(&state),
+            Some(rec.broadcast_clock_group_delay_s()),
+        ))
+    }
+
+    pub(crate) fn state_group_delay_by_iode_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        let rec = self.select_by_iode_at_epoch_query(sat, iode, selection_epoch)?;
+        let (_, _, is_geo) = super::query_native_exact_time(sat, epoch.epoch())?;
+        let state = evaluate_record_at_epoch_query(rec, epoch, is_geo)?;
+        Some((
+            state.orbit.position().ok()?.as_array(),
             satposs_clock_s(&state),
             Some(rec.broadcast_clock_group_delay_s()),
         ))
@@ -502,6 +545,53 @@ impl BroadcastStore {
         })
     }
 
+    pub(crate) fn select_by_issue_low_bits_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        low_bits: u32,
+        bits: u32,
+        nav_message: NavMessage,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Option<&BroadcastRecord> {
+        let mask = 1_u32.checked_shl(bits)?.checked_sub(1)?;
+        self.first_valid_exact(sat, selection_epoch, |record| {
+            record.message == nav_message
+                && record.issue_of_data.is_some_and(|issue| {
+                    issue.message == nav_message && issue.issue & mask == low_bits
+                })
+        })
+    }
+
+    pub(crate) fn select_by_issue_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        issue: BroadcastIssue,
+        nav_message: NavMessage,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Option<&BroadcastRecord> {
+        if issue.message != nav_message {
+            return None;
+        }
+        self.first_valid_exact(sat, selection_epoch, |record| {
+            record.message == nav_message && record.issue_of_data == Some(issue)
+        })
+    }
+
+    pub(crate) fn select_by_beidou_ssr_iod_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        iod: u32,
+        nav_message: NavMessage,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Option<&BroadcastRecord> {
+        if sat.system != GnssSystem::BeiDou {
+            return None;
+        }
+        self.first_valid_exact(sat, selection_epoch, |record| {
+            record.message == nav_message && beidou_ssr_iod(record) == Some(iod)
+        })
+    }
+
     /// Position, velocity and clock of the GLONASS record for `sat` whose `tb`, the 15-min
     /// index of its reference epoch in UTC + 3 h, equals `iode`, as RTKLIB `satpos_ssr`
     /// forms them for a GLONASS SSR correction: `selgeph` by that issue (RTKLIB `readrnx`
@@ -531,6 +621,28 @@ impl BroadcastStore {
             return None;
         }
         let tk = t_j2000_s - rec.toe_gpst_j2000_s();
+        let state0 = glonass_state0(rec);
+        let start = glonass::propagate(state0, rec.acc_m_s2, tk).ok()?;
+        let end = glonass::propagate(state0, rec.acc_m_s2, ephpos_stepped_tk(tk)).ok()?;
+        let velocity =
+            difference_velocity([start[0], start[1], start[2]], [end[0], end[1], end[2]]);
+        let clock = glonass::position_clock_offset_s(rec.clk_bias, rec.gamma_n, tk);
+        Some(([start[0], start[1], start[2]], velocity, clock))
+    }
+
+    pub(crate) fn glonass_ssr_state_at_query(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u32,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Option<([f64; 3], [f64; 3], f64)> {
+        let rec = self.select_glonass_by_issue_at_epoch_query(sat, iode, selection_epoch)?;
+        if self.exclude_unusable && !rec.is_healthy() {
+            return None;
+        }
+        let reference = exact_glonass_gpst_epoch_query(rec)?;
+        let tk = epoch.seconds_since_query(&reference);
         let state0 = glonass_state0(rec);
         let start = glonass::propagate(state0, rec.acc_m_s2, tk).ok()?;
         let end = glonass::propagate(state0, rec.acc_m_s2, ephpos_stepped_tk(tk)).ok()?;
@@ -586,6 +698,46 @@ impl BroadcastStore {
         (!self.exclude_unusable || !keplerian_excluded(record)).then_some(record)
     }
 
+    fn select_exact(
+        &self,
+        sat: GnssSatelliteId,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Option<&BroadcastRecord> {
+        let mut preferred: Option<usize> = None;
+        let mut fallback: Option<usize> = None;
+        for &record_index in &self.selection {
+            let record = &self.records[record_index];
+            if record.satellite_id != sat || !record_within_exact_limit(record, selection_epoch) {
+                continue;
+            }
+            let slot = if self.is_preferred_family(record) {
+                &mut preferred
+            } else {
+                &mut fallback
+            };
+            let better = match *slot {
+                None => true,
+                Some(current_index) => {
+                    let current = &self.records[current_index];
+                    let candidate_epoch = exact_week_tow_epoch(record.toe)?.query();
+                    let current_epoch = exact_week_tow_epoch(current.toe)?.query();
+                    match selection_epoch.compare_distance_to(&candidate_epoch, &current_epoch) {
+                        Ordering::Less => true,
+                        Ordering::Equal => {
+                            cnav_tie_rank(record.message) <= cnav_tie_rank(current.message)
+                        }
+                        Ordering::Greater => false,
+                    }
+                }
+            };
+            if better {
+                *slot = Some(record_index);
+            }
+        }
+        let record = &self.records[preferred.or(fallback)?];
+        (!self.exclude_unusable || !keplerian_excluded(record)).then_some(record)
+    }
+
     /// The first candidate for `sat` in selection order within the system's limit (a
     /// Galileo record only after its `toe`) that `matches`, as RTKLIB `seleph` returns a
     /// record for a given issue.
@@ -604,6 +756,24 @@ impl BroadcastStore {
                 r.satellite_id == sat
                     && matches(r)
                     && distance_within(r, t_native_s, tmax).is_some()
+            })?;
+        (!self.exclude_unusable || !keplerian_health_excluded(record)).then_some(record)
+    }
+
+    fn first_valid_exact(
+        &self,
+        sat: GnssSatelliteId,
+        selection_epoch: &ExactEpochQuery,
+        matches: impl Fn(&BroadcastRecord) -> bool,
+    ) -> Option<&BroadcastRecord> {
+        let record = self
+            .selection
+            .iter()
+            .map(|&record_index| &self.records[record_index])
+            .find(|record| {
+                record.satellite_id == sat
+                    && matches(record)
+                    && record_within_exact_limit(record, selection_epoch)
             })?;
         (!self.exclude_unusable || !keplerian_health_excluded(record)).then_some(record)
     }
@@ -668,6 +838,57 @@ impl BroadcastStore {
             return None;
         }
         Some((rec, t_j2000_s - rec.toe_gpst_j2000_s()))
+    }
+
+    fn select_glonass_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Option<&GlonassRecord> {
+        let mut best: Option<usize> = None;
+        for &record_index in &self.glonass_selection {
+            let record = &self.glonass[record_index];
+            if record.satellite_id != sat
+                || !glonass_record_within_exact_limit(record, selection_epoch, GLONASS_MAX_AGE_S)
+            {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some(current_index) => {
+                    let candidate_epoch = exact_glonass_gpst_epoch_query(record)?;
+                    let current_epoch =
+                        exact_glonass_gpst_epoch_query(&self.glonass[current_index])?;
+                    selection_epoch.compare_distance_to(&candidate_epoch, &current_epoch)
+                        != Ordering::Greater
+                }
+            };
+            if better {
+                best = Some(record_index);
+            }
+        }
+        let record = &self.glonass[best?];
+        if self.exclude_unusable && !record.is_healthy() {
+            return None;
+        }
+        Some(record)
+    }
+
+    fn select_glonass_by_issue_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u32,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Option<&GlonassRecord> {
+        self.glonass_selection
+            .iter()
+            .map(|&record_index| &self.glonass[record_index])
+            .find(|record| {
+                record.satellite_id == sat
+                    && glonass_tb(record) == Some(iode)
+                    && glonass_record_within_exact_limit(record, selection_epoch, GLONASS_MAX_AGE_S)
+            })
+            .filter(|record| !self.exclude_unusable || record.is_healthy())
     }
 
     /// The SBAS record for `sat` RTKLIB `selseph` selects at the GPS-time query
@@ -744,6 +965,89 @@ impl BroadcastStore {
         let clock = record.af0_s + record.af1_s_s * t;
         Some((position, velocity, clock))
     }
+
+    pub(crate) fn sbas_ssr_state_at_query(
+        &self,
+        sat: GnssSatelliteId,
+        issue: u32,
+        igs_ssr: bool,
+        epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Option<([f64; 3], [f64; 3], f64)> {
+        if sat.system != GnssSystem::Sbas {
+            return None;
+        }
+        let mut best: Option<usize> = None;
+        for &record_index in &self.sbas_selection {
+            let record = &self.sbas[record_index];
+            if record.satellite_id != sat
+                || !sbas_record_within_exact_limit(record, selection_epoch, SBAS_MAX_AGE_S)
+                || !sbas_issue_matches_exact(record, issue, igs_ssr)
+            {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some(current_index) => {
+                    let candidate_epoch = exact_sbas_epoch_query(record)?;
+                    let current_epoch = exact_sbas_epoch_query(&self.sbas[current_index])?;
+                    selection_epoch.compare_distance_to(&candidate_epoch, &current_epoch)
+                        != Ordering::Greater
+                }
+            };
+            if better {
+                best = Some(record_index);
+            }
+        }
+        let record = &self.sbas[best?];
+        if self.exclude_unusable && sbas_excluded(record) {
+            return None;
+        }
+        let reference = exact_sbas_epoch_query(record)?;
+        let elapsed_s = epoch.seconds_since_query(&reference);
+        let stepped_s = epoch
+            .clone()
+            .checked_add_binary_seconds(EPHPOS_STEP_S)?
+            .seconds_since_query(&reference);
+        let position = record.position_at(elapsed_s);
+        let next_position = record.position_at(stepped_s);
+        let velocity = difference_velocity(position, next_position);
+        let clock = record.af0_s + record.af1_s_s * elapsed_s;
+        Some((position, velocity, clock))
+    }
+
+    fn select_sbas_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Option<&SbasRecord> {
+        let mut best: Option<usize> = None;
+        for &record_index in &self.sbas_selection {
+            let record = &self.sbas[record_index];
+            if record.satellite_id != sat
+                || !sbas_record_within_exact_limit(record, selection_epoch, SBAS_MAX_AGE_S)
+            {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some(current_index) => {
+                    let candidate_epoch = exact_sbas_epoch_query(record)?;
+                    let current_epoch = exact_sbas_epoch_query(&self.sbas[current_index])?;
+                    selection_epoch.compare_distance_to(&candidate_epoch, &current_epoch)
+                        != Ordering::Greater
+                }
+            };
+            if better {
+                best = Some(record_index);
+            }
+        }
+        let record = &self.sbas[best?];
+        if self.exclude_unusable && sbas_excluded(record) {
+            return None;
+        }
+        Some(record)
+    }
 }
 
 fn sbas_issue_matches(record: &SbasRecord, issue: u32, igs_ssr: bool) -> bool {
@@ -756,6 +1060,30 @@ fn sbas_issue_matches(record: &SbasRecord, issue: u32, igs_ssr: bool) -> bool {
     let t0_sow = (record.t0_j2000_s().rem_euclid(SECONDS_PER_WEEK) + J2000_GPS_SECONDS_OF_WEEK)
         .rem_euclid(SECONDS_PER_WEEK);
     (t0_sow / 16.0).floor() as u32 % 512 == issue
+}
+
+fn sbas_issue_matches_exact(record: &SbasRecord, issue: u32, igs_ssr: bool) -> bool {
+    if igs_ssr {
+        return issue <= u32::from(u8::MAX) && record.iodn == Some(f64::from(issue));
+    }
+    if issue > 0x1FF {
+        return false;
+    }
+    let Some(epoch) = ExactEpoch::from_civil(
+        record.epoch.year,
+        i32::from(record.epoch.month),
+        i32::from(record.epoch.day),
+        i32::from(record.epoch.hour),
+        i32::from(record.epoch.minute),
+        record.epoch.second,
+    ) else {
+        return false;
+    };
+    let before_whole_second = epoch.attoseconds() == 0 && epoch.sub_attosecond().0 < 0;
+    let whole_sow = (epoch.whole_seconds().rem_euclid(604_800) - i64::from(before_whole_second)
+        + J2000_GPS_SECONDS_OF_WEEK as i64)
+        .rem_euclid(604_800);
+    (whole_sow / 16) as u32 % 512 == issue
 }
 
 /// RTKLIB `MAX_VAR_EPH`: the largest ephemeris variance `satexclude` accepts, m².
@@ -1259,6 +1587,138 @@ fn evaluate_record_unchecked(rec: &BroadcastRecord, sow: f64, is_geo: bool) -> S
     }
 }
 
+fn exact_week_tow_epoch(time: GnssWeekTow) -> Option<ExactEpoch> {
+    let epoch_offset_s = match time.system {
+        crate::astro::time::TimeScale::Bdt => crate::constants::BDS_EPOCH_MINUS_GPS_EPOCH_S as i64,
+        _ => 0,
+    };
+    let whole_s = i64::from(time.week) * SECONDS_PER_WEEK as i64 + epoch_offset_s
+        - crate::constants::GPS_EPOCH_TO_J2000_S as i64;
+    ExactEpoch::from_j2000_seconds(whole_s as f64)?.checked_add_seconds(time.tow_s)
+}
+
+fn exact_selection_epoch(selection_j2000_s: f64) -> Option<ExactEpochQuery> {
+    ExactEpoch::from_binary_j2000_seconds(selection_j2000_s)
+}
+
+fn within_exact_interval(
+    query: &ExactEpochQuery,
+    reference: &ExactEpochQuery,
+    limit_s: f64,
+) -> Option<bool> {
+    let direction = query.compare_interval_query(reference, 0.0)?;
+    if direction == Ordering::Less {
+        Some(reference.compare_interval_query(query, limit_s)? != Ordering::Greater)
+    } else {
+        Some(query.compare_interval_query(reference, limit_s)? != Ordering::Greater)
+    }
+}
+
+fn record_within_exact_limit(record: &BroadcastRecord, selection_epoch: &ExactEpochQuery) -> bool {
+    let native_selection_epoch = if record.toe.system == crate::astro::time::TimeScale::Bdt {
+        let Some(epoch) = selection_epoch
+            .clone()
+            .checked_sub_binary_seconds(f64::from(crate::constants::GPST_MINUS_BDT_S))
+        else {
+            return false;
+        };
+        epoch
+    } else {
+        selection_epoch.clone()
+    };
+    let Some(reference) = exact_week_tow_epoch(record.toe).map(ExactEpoch::query) else {
+        return false;
+    };
+    if record.satellite_id.system == GnssSystem::Galileo
+        && native_selection_epoch
+            .compare_interval_query(&reference, 0.0)
+            .is_none_or(|direction| direction != Ordering::Greater)
+    {
+        return false;
+    }
+    within_exact_interval(
+        &native_selection_epoch,
+        &reference,
+        keplerian_max_dtoe_s(record.satellite_id.system),
+    )
+    .unwrap_or(false)
+}
+
+fn exact_glonass_gpst_epoch_query(record: &GlonassRecord) -> Option<ExactEpochQuery> {
+    ExactEpoch::from_binary_j2000_seconds(record.toe_utc_j2000_s)?
+        .checked_add_binary_seconds(gps_minus_utc_at_utc_j2000_s(record.toe_utc_j2000_s))
+}
+
+fn glonass_record_within_exact_limit(
+    record: &GlonassRecord,
+    selection_epoch: &ExactEpochQuery,
+    limit_s: f64,
+) -> bool {
+    exact_glonass_gpst_epoch_query(record)
+        .and_then(|reference| within_exact_interval(selection_epoch, &reference, limit_s))
+        .unwrap_or(false)
+}
+
+fn exact_sbas_epoch_query(record: &SbasRecord) -> Option<ExactEpochQuery> {
+    ExactEpoch::from_civil(
+        record.epoch.year,
+        i32::from(record.epoch.month),
+        i32::from(record.epoch.day),
+        i32::from(record.epoch.hour),
+        i32::from(record.epoch.minute),
+        record.epoch.second,
+    )
+    .map(ExactEpoch::query)
+}
+
+fn sbas_record_within_exact_limit(
+    record: &SbasRecord,
+    selection_epoch: &ExactEpochQuery,
+    limit_s: f64,
+) -> bool {
+    exact_sbas_epoch_query(record)
+        .and_then(|reference| within_exact_interval(selection_epoch, &reference, limit_s))
+        .unwrap_or(false)
+}
+
+pub(crate) fn exact_record_deltas(
+    epoch: &crate::astro::time::ExactEpochQuery,
+    record: &BroadcastRecord,
+) -> Option<(f64, f64)> {
+    let toe = exact_week_tow_epoch(record.toe)?;
+    let toc = exact_week_tow_epoch(record.toc)?;
+    let epoch = if record.toe.system == crate::astro::time::TimeScale::Bdt {
+        epoch
+            .clone()
+            .checked_sub_binary_seconds(f64::from(crate::constants::GPST_MINUS_BDT_S))?
+    } else {
+        epoch.clone()
+    };
+    Some((
+        time_from_reference_delta_s(epoch.seconds_since(toe)),
+        time_from_reference_delta_s(epoch.seconds_since(toc)),
+    ))
+}
+
+fn evaluate_record_at_epoch_query(
+    record: &BroadcastRecord,
+    epoch: &crate::astro::time::ExactEpochQuery,
+    is_geo: bool,
+) -> Option<SatelliteState> {
+    let (tk_s, toc_delta_s) = exact_record_deltas(epoch, record)?;
+    let rates = record.cnav.map(cnav_rates);
+    Some(satellite_state_at_deltas_unchecked(
+        &record.elements,
+        rates.as_ref(),
+        &record.clock,
+        &record.constants(),
+        tk_s,
+        toc_delta_s,
+        record.broadcast_clock_group_delay_s(),
+        is_geo && rates.is_none(),
+    ))
+}
+
 const fn cnav_tie_rank(message: NavMessage) -> u8 {
     match message {
         NavMessage::GpsCnav2 | NavMessage::QzssCnav2 => 1,
@@ -1461,6 +1921,82 @@ impl EphemerisSource for BroadcastStore {
             .map(crate::astro::time::Validated::ok))
     }
 
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>>
+    {
+        let selection_epoch =
+            exact_selection_epoch(selection_j2000_s).ok_or(Error::EpochOutOfRange)?;
+        self.try_position_clock_group_delay_selected_at_epoch_query(
+            sat,
+            &epoch.query(),
+            &selection_epoch,
+        )
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> crate::Result<Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>>
+    {
+        let state = match sat.system {
+            GnssSystem::Gps
+            | GnssSystem::Galileo
+            | GnssSystem::Qzss
+            | GnssSystem::BeiDou
+            | GnssSystem::Navic => {
+                let Some(record) = self.select_record_at_epoch_query(sat, selection_epoch) else {
+                    return Ok(None);
+                };
+                let (_, _, is_geo) = super::query_native_exact_time(sat, epoch.epoch())
+                    .ok_or(Error::EpochOutOfRange)?;
+                let state = evaluate_record_at_epoch_query(record, epoch, is_geo)
+                    .ok_or(Error::EpochOutOfRange)?;
+                let Some(position) = state.orbit.position().ok() else {
+                    return Ok(None);
+                };
+                Some((
+                    position.as_array(),
+                    satposs_clock_s(&state),
+                    Some(record.broadcast_clock_group_delay_s()),
+                ))
+            }
+            GnssSystem::Glonass => {
+                let Some(record) = self.select_glonass_at_epoch_query(sat, selection_epoch) else {
+                    return Ok(None);
+                };
+                let toe = exact_glonass_gpst_epoch_query(record).ok_or(Error::EpochOutOfRange)?;
+                let tk = epoch.seconds_since_query(&toe);
+                let state = glonass::propagate(glonass_state0(record), record.acc_m_s2, tk).ok();
+                state.map(|state| {
+                    (
+                        [state[0], state[1], state[2]],
+                        glonass::position_clock_offset_s(record.clk_bias, record.gamma_n, tk),
+                        record.single_frequency_group_delay_s(),
+                    )
+                })
+            }
+            GnssSystem::Sbas => {
+                let Some(record) = self.select_sbas_at_epoch_query(sat, selection_epoch) else {
+                    return Ok(None);
+                };
+                let t0 = exact_sbas_epoch_query(record).ok_or(Error::EpochOutOfRange)?;
+                let tk = epoch.seconds_since_query(&t0);
+                Some((
+                    record.position_at(tk),
+                    record.af0_s + record.af1_s_s * tk,
+                    None,
+                ))
+            }
+        };
+        Ok(state.map(crate::astro::time::Validated::ok))
+    }
+
     /// [`BroadcastStore::transmit_epoch_clock_s`]: the clock polynomial alone, as RTKLIB
     /// `ephclk` reads it.
     fn try_transmit_epoch_clock_s(
@@ -1475,6 +2011,67 @@ impl EphemerisSource for BroadcastStore {
         )
     }
 
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        let selection_epoch =
+            exact_selection_epoch(selection_j2000_s).ok_or(Error::EpochOutOfRange)?;
+        self.try_transmit_epoch_clock_at_epoch_query(sat, &epoch.query(), &selection_epoch)
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        let clock = match sat.system {
+            GnssSystem::Gps
+            | GnssSystem::Galileo
+            | GnssSystem::Qzss
+            | GnssSystem::BeiDou
+            | GnssSystem::Navic => {
+                let Some(record) = self.select_record_at_epoch_query(sat, selection_epoch) else {
+                    return Ok(None);
+                };
+                let (_, toc_delta_s) =
+                    exact_record_deltas(epoch, record).ok_or(Error::EpochOutOfRange)?;
+                Some(satellite_clock_bias_at_delta_unchecked(
+                    &record.clock,
+                    toc_delta_s,
+                ))
+            }
+            GnssSystem::Glonass => {
+                let Some(record) = self.select_glonass_at_epoch_query(sat, selection_epoch) else {
+                    return Ok(None);
+                };
+                let reference =
+                    exact_glonass_gpst_epoch_query(record).ok_or(Error::EpochOutOfRange)?;
+                Some(crate::glonass::clock_offset_s(
+                    record.clk_bias,
+                    record.gamma_n,
+                    epoch.seconds_since_query(&reference),
+                ))
+            }
+            GnssSystem::Sbas => {
+                let Some(record) = self.select_sbas_at_epoch_query(sat, selection_epoch) else {
+                    return Ok(None);
+                };
+                let reference = exact_sbas_epoch_query(record).ok_or(Error::EpochOutOfRange)?;
+                let ts = epoch.seconds_since_query(&reference);
+                let mut time = ts;
+                for _ in 0..2 {
+                    time = ts - (record.af0_s + record.af1_s_s * time);
+                }
+                Some(record.af0_s + record.af1_s_s * time)
+            }
+        };
+        Ok(clock.map(crate::astro::time::Validated::ok))
+    }
+
     /// [`BroadcastStore::ephemeris_variance_m2`] of the record selected at
     /// `selection_j2000_s`, or `0.0` where no record is selected.
     fn ephemeris_variance_m2(
@@ -1484,6 +2081,25 @@ impl EphemerisSource for BroadcastStore {
         selection_j2000_s: f64,
     ) -> f64 {
         BroadcastStore::ephemeris_variance_m2(self, sat, selection_j2000_s).unwrap_or(0.0)
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        _state_epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> f64 {
+        match sat.system {
+            GnssSystem::Glonass => self
+                .select_glonass_at_epoch_query(sat, selection_epoch)
+                .map_or(0.0, |_| ERREPH_GLO_M * ERREPH_GLO_M),
+            GnssSystem::Sbas => self
+                .select_sbas_at_epoch_query(sat, selection_epoch)
+                .map_or(0.0, sbas_variance_m2),
+            _ => self
+                .select_record_at_epoch_query(sat, selection_epoch)
+                .map_or(0.0, keplerian_variance_m2),
+        }
     }
 }
 
@@ -1518,4 +2134,490 @@ fn glonass_tb(record: &GlonassRecord) -> Option<u32> {
 /// subtracting the group delay from it gives `dt_clock_total_s` bit for bit.
 fn satposs_clock_s(state: &SatelliteState) -> f64 {
     state.clock.dt_clock_poly_s + state.clock.dt_rel_s
+}
+
+#[cfg(test)]
+mod exact_epoch_tests {
+    use super::{
+        exact_selection_epoch, exact_week_tow_epoch, within_exact_interval, BroadcastStore,
+    };
+    use crate::astro::time::{ExactEpoch, GnssWeekTow, TimeScale};
+    use crate::broadcast::{ClockPolynomial, KeplerianElements};
+    use crate::id::{GnssSatelliteId, GnssSystem};
+    use crate::rinex_nav::{
+        BroadcastGroupDelays, BroadcastIssue, BroadcastRecord, GlonassRecord, NavEpoch, NavMessage,
+        SbasRecord, StatedNavFields,
+    };
+
+    fn gps_selection_record(toe_sow: f64, issue: u32) -> BroadcastRecord {
+        let message = NavMessage::GpsLnav;
+        BroadcastRecord {
+            satellite_id: GnssSatelliteId::new(GnssSystem::Gps, 30).expect("valid satellite id"),
+            message,
+            issue_of_data: Some(BroadcastIssue { issue, message }),
+            week: 2111,
+            toe: GnssWeekTow::new(TimeScale::Gpst, 2111, toe_sow).expect("valid toe"),
+            toc: GnssWeekTow::new(TimeScale::Gpst, 2111, toe_sow).expect("valid toc"),
+            elements: KeplerianElements {
+                sqrt_a: 5153.0,
+                e: 0.001,
+                m0: 0.0,
+                delta_n: 0.0,
+                omega0: 0.0,
+                i0: 0.9,
+                omega: 0.0,
+                omega_dot: 0.0,
+                idot: 0.0,
+                cuc: 0.0,
+                cus: 0.0,
+                crc: 0.0,
+                crs: 0.0,
+                cic: 0.0,
+                cis: 0.0,
+                toe_sow,
+            },
+            clock: ClockPolynomial {
+                af0: 0.0,
+                af1: 0.0,
+                af2: 0.0,
+                toc_sow: toe_sow,
+            },
+            group_delays: BroadcastGroupDelays::default(),
+            cnav: None,
+            sv_health: 0.0,
+            sv_accuracy_m: Some(2.0),
+            fit_interval_s: None,
+            stated: StatedNavFields::default(),
+        }
+    }
+
+    fn glonass_selection_record(toe_utc_j2000_s: f64) -> GlonassRecord {
+        GlonassRecord {
+            satellite_id: GnssSatelliteId::new(GnssSystem::Glonass, 1).expect("valid satellite id"),
+            toe_utc_j2000_s,
+            epoch_utc_j2000_s: toe_utc_j2000_s,
+            pos_m: [0.0; 3],
+            vel_m_s: [0.0; 3],
+            acc_m_s2: [0.0; 3],
+            clk_bias: 0.0,
+            gamma_n: 0.0,
+            sv_health: 0.0,
+            freq_channel: 0,
+            stated_freq_channel: 0,
+            message_frame_time_s: None,
+            age_days: None,
+            status_flags: None,
+            l1_l2_group_delay_field_s: None,
+            urai: None,
+            health_flags: None,
+        }
+    }
+
+    fn sbas_selection_record() -> SbasRecord {
+        SbasRecord {
+            satellite_id: GnssSatelliteId::new(GnssSystem::Sbas, 20).expect("valid satellite id"),
+            epoch: NavEpoch {
+                year: 2000,
+                month: 1,
+                day: 1,
+                hour: 12,
+                minute: 0,
+                second: 0.0,
+            },
+            af0_s: 0.0,
+            af1_s_s: 0.0,
+            message_frame_time_s: None,
+            pos_m: [0.0; 3],
+            vel_m_s: [0.0; 3],
+            acc_m_s2: [0.0; 3],
+            health: 0.0,
+            ura_m: None,
+            iodn: None,
+        }
+    }
+
+    #[test]
+    fn exact_igs_galileo_issue_uses_low_bits_after_but_not_at_toe() {
+        let mut record = gps_selection_record(120_000.0, 0x123);
+        record.satellite_id = GnssSatelliteId::new(GnssSystem::Galileo, 1).unwrap();
+        record.message = NavMessage::GalileoInav;
+        record.issue_of_data = Some(BroadcastIssue {
+            issue: 0x123,
+            message: NavMessage::GalileoInav,
+        });
+        let satellite = record.satellite_id;
+        let toe = exact_week_tow_epoch(record.toe).unwrap().query();
+        let after = toe.clone().checked_add_binary_seconds(1.0e-18).unwrap();
+        assert_eq!(
+            toe.j2000_seconds().to_bits(),
+            after.j2000_seconds().to_bits()
+        );
+        let store = BroadcastStore::new(vec![record]).unwrap();
+        assert!(store
+            .select_by_issue_low_bits_at_epoch_query(
+                satellite,
+                0x23,
+                8,
+                NavMessage::GalileoInav,
+                &toe,
+            )
+            .is_none());
+        let selected = store
+            .select_by_issue_low_bits_at_epoch_query(
+                satellite,
+                0x23,
+                8,
+                NavMessage::GalileoInav,
+                &after,
+            )
+            .unwrap();
+        assert_eq!(selected.issue_of_data.unwrap().issue, 0x123);
+        assert!(store
+            .select_by_issue_low_bits_at_epoch_query(
+                satellite,
+                0x24,
+                8,
+                NavMessage::GalileoInav,
+                &after,
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn exact_sbas_ssr_selection_keeps_age_boundary_and_local_transmit_time() {
+        let mut record = sbas_selection_record();
+        record.epoch.year = 2020;
+        record.pos_m = [1.0, 2.0, 3.0];
+        record.vel_m_s = [1_000.0, 0.0, 0.0];
+        record.af1_s_s = 1.0e-5;
+        record.iodn = Some(7.0);
+        let satellite = record.satellite_id;
+        let reference = super::exact_sbas_epoch_query(&record).unwrap();
+        let transmit = reference
+            .clone()
+            .checked_add_binary_seconds(20.0e-9)
+            .unwrap();
+        assert_eq!(
+            reference.j2000_seconds().to_bits(),
+            transmit.j2000_seconds().to_bits()
+        );
+        let at_limit = reference.clone().checked_add_binary_seconds(360.0).unwrap();
+        let past_limit = at_limit
+            .clone()
+            .checked_add_binary_seconds(1.0e-18)
+            .unwrap();
+        assert_eq!(
+            at_limit.j2000_seconds().to_bits(),
+            past_limit.j2000_seconds().to_bits()
+        );
+        let native_issue = (0..512)
+            .find(|&issue| super::sbas_issue_matches_exact(&record, issue, false))
+            .unwrap();
+        let mut store = BroadcastStore::new(Vec::new()).unwrap();
+        store.sbas = vec![record];
+        store.sbas_selection = vec![0];
+        store.exclude_unusable = true;
+        for (issue, igs_ssr) in [(native_issue, false), (7, true)] {
+            let state = store
+                .sbas_ssr_state_at_query(satellite, issue, igs_ssr, &transmit, &at_limit)
+                .unwrap();
+            assert_eq!(state.0, [1.0 + 1_000.0 * 20.0e-9, 2.0, 3.0]);
+            assert_eq!(state.2.to_bits(), (1.0e-5_f64 * 20.0e-9).to_bits());
+            assert!(store
+                .sbas_ssr_state_at_query(satellite, issue, igs_ssr, &transmit, &past_limit)
+                .is_none());
+        }
+        store.sbas[0].health = 1.0;
+        assert!(store
+            .sbas_ssr_state_at_query(satellite, 7, true, &transmit, &reference)
+            .is_none());
+    }
+
+    #[test]
+    fn exact_native_sbas_issue_does_not_round_across_a_sixteen_second_boundary() {
+        let mut record = sbas_selection_record();
+        record.epoch.year = 2020;
+        record.epoch.second = 16.0 - 1.0e-9;
+        let before = (0..512)
+            .find(|&issue| super::sbas_issue_matches_exact(&record, issue, false))
+            .unwrap();
+        let rounded_before = record.t0_j2000_s();
+        record.epoch.second = 16.0;
+        assert_eq!(rounded_before.to_bits(), record.t0_j2000_s().to_bits());
+        assert!(super::sbas_issue_matches_exact(
+            &record,
+            (before + 1) % 512,
+            false
+        ));
+        assert!(!super::sbas_issue_matches_exact(&record, before, false));
+    }
+
+    #[test]
+    fn exact_week_tow_difference_keeps_fraction_across_week_boundary() {
+        let reference =
+            exact_week_tow_epoch(GnssWeekTow::new(TimeScale::Gpst, 2200, 604_799.9).unwrap())
+                .unwrap();
+        let query =
+            exact_week_tow_epoch(GnssWeekTow::new(TimeScale::Gpst, 2201, 0.0).unwrap()).unwrap();
+        assert_eq!(query.seconds_since(reference), 0.1);
+
+        let just_before = query.checked_sub_seconds(1.0e-30).unwrap();
+        assert_eq!(just_before.seconds_since(query), -1.0e-30);
+        assert!(just_before < ExactEpoch::from_j2000_seconds(query.j2000_seconds()).unwrap());
+    }
+
+    #[test]
+    fn exact_record_selection_keeps_twenty_nanoseconds_before_midpoint() {
+        let early = gps_selection_record(0.0, 1);
+        let late = gps_selection_record(7_200.0, 2);
+        let sat = early.satellite_id;
+        let midpoint = exact_week_tow_epoch(
+            GnssWeekTow::new(TimeScale::Gpst, 2111, 3_600.0).expect("valid midpoint"),
+        )
+        .expect("midpoint epoch");
+        let selection_epoch = midpoint
+            .query()
+            .checked_sub_binary_seconds(20.0e-9)
+            .expect("finite offset");
+        assert_eq!(
+            selection_epoch.j2000_seconds().to_bits(),
+            midpoint.j2000_seconds().to_bits()
+        );
+        let store = BroadcastStore::new(vec![early, late]).expect("valid store");
+        let selected_exact = store
+            .select_record_at_epoch_query(sat, &selection_epoch)
+            .expect("exact selection");
+        let selected_rounded = store
+            .select_record_at(sat, selection_epoch.j2000_seconds())
+            .expect("rounded selection");
+        assert_eq!(selected_exact.issue_of_data.expect("issue").issue, 1);
+        assert_eq!(selected_rounded.issue_of_data.expect("issue").issue, 2);
+        let selected_tie = store
+            .select_record_at_epoch_query(sat, &midpoint.query())
+            .expect("exact tie selection");
+        assert_eq!(selected_tie.issue_of_data.expect("issue").issue, 2);
+    }
+
+    #[test]
+    fn exact_variance_uses_the_record_selected_before_rounded_midpoint() {
+        let mut early = gps_selection_record(0.0, 1);
+        early.sv_accuracy_m = Some(2.0);
+        let mut late = gps_selection_record(7_200.0, 2);
+        late.sv_accuracy_m = Some(20.0);
+        let sat = early.satellite_id;
+        let early_variance = super::keplerian_variance_m2(&early);
+        let late_variance = super::keplerian_variance_m2(&late);
+        assert_ne!(early_variance, late_variance);
+
+        let midpoint = exact_week_tow_epoch(
+            GnssWeekTow::new(TimeScale::Gpst, 2111, 3_600.0).expect("valid midpoint"),
+        )
+        .expect("midpoint epoch");
+        let selection_epoch = midpoint
+            .query()
+            .checked_sub_binary_seconds(20.0e-9)
+            .expect("finite offset");
+        let store = BroadcastStore::new(vec![early, late]).expect("valid store");
+
+        assert_eq!(
+            crate::spp::EphemerisSource::ephemeris_variance_at_epoch_query(
+                &store,
+                sat,
+                &selection_epoch,
+                &selection_epoch,
+            ),
+            early_variance
+        );
+        assert_eq!(
+            store.ephemeris_variance_m2(sat, selection_epoch.j2000_seconds()),
+            Some(late_variance)
+        );
+    }
+
+    #[test]
+    fn exact_selection_age_limit_distinguishes_one_attosecond() {
+        let reference = ExactEpoch::new(1_000_000_000, 0)
+            .expect("reference epoch")
+            .query();
+        let at_limit = ExactEpoch::new(1_000_000_090, 0)
+            .expect("limit epoch")
+            .query();
+        let twenty_nanoseconds_inside = at_limit
+            .clone()
+            .checked_sub_binary_seconds(20.0e-9)
+            .expect("finite offset");
+        let one_attosecond_past = ExactEpoch::new(1_000_000_090, 1)
+            .expect("one-attosecond-past epoch")
+            .query();
+        assert_eq!(
+            at_limit.j2000_seconds().to_bits(),
+            one_attosecond_past.j2000_seconds().to_bits()
+        );
+        assert_eq!(
+            at_limit.j2000_seconds().to_bits(),
+            twenty_nanoseconds_inside.j2000_seconds().to_bits()
+        );
+        assert!(within_exact_interval(&twenty_nanoseconds_inside, &reference, 90.0).unwrap());
+        assert!(within_exact_interval(&at_limit, &reference, 90.0).unwrap());
+        assert!(!within_exact_interval(&one_attosecond_past, &reference, 90.0).unwrap());
+    }
+
+    #[test]
+    fn galileo_exact_selection_requires_toe_and_includes_age_limit() {
+        let mut record = gps_selection_record(7_200.0, 1);
+        record.satellite_id = GnssSatelliteId::new(GnssSystem::Galileo, 1).unwrap();
+        record.message = NavMessage::GalileoInav;
+        record.toe = GnssWeekTow::new(TimeScale::Gst, 2111, 7_200.0).unwrap();
+        record.toc = record.toe;
+
+        let toe = exact_week_tow_epoch(record.toe).unwrap().query();
+        let just_before_toe = toe
+            .clone()
+            .checked_sub_binary_seconds(1.0e-18)
+            .expect("finite offset");
+        let just_after_toe = toe
+            .clone()
+            .checked_add_binary_seconds(1.0e-18)
+            .expect("finite offset");
+        assert!(!super::record_within_exact_limit(&record, &just_before_toe));
+        assert!(super::record_within_exact_limit(&record, &just_after_toe));
+
+        let at_age_limit = toe
+            .clone()
+            .checked_add_binary_seconds(14_400.0)
+            .expect("finite offset");
+        let past_age_limit = at_age_limit
+            .clone()
+            .checked_add_binary_seconds(1.0e-18)
+            .expect("finite offset");
+        assert!(super::record_within_exact_limit(&record, &at_age_limit));
+        assert!(!super::record_within_exact_limit(&record, &past_age_limit));
+    }
+
+    #[test]
+    fn exact_glonass_and_sbas_age_limits_include_boundary_but_not_one_attosecond_past() {
+        let glonass = glonass_selection_record(0.0);
+        let glonass_reference = super::exact_glonass_gpst_epoch_query(&glonass).unwrap();
+        let glonass_limit = glonass_reference
+            .clone()
+            .checked_add_binary_seconds(1_800.0)
+            .unwrap();
+        let glonass_inside = ExactEpoch::new(1_812, ExactEpoch::ATTOSECONDS_PER_SECOND - 1)
+            .unwrap()
+            .query();
+        let glonass_past = ExactEpoch::new(1_813, 1).unwrap().query();
+        assert!(super::glonass_record_within_exact_limit(
+            &glonass,
+            &glonass_inside,
+            1_800.0
+        ));
+        assert!(super::glonass_record_within_exact_limit(
+            &glonass,
+            &glonass_limit,
+            1_800.0
+        ));
+        assert!(!super::glonass_record_within_exact_limit(
+            &glonass,
+            &glonass_past,
+            1_800.0
+        ));
+
+        let sbas = sbas_selection_record();
+        let sbas_reference = super::exact_sbas_epoch_query(&sbas).unwrap();
+        let sbas_limit = sbas_reference
+            .clone()
+            .checked_add_binary_seconds(360.0)
+            .unwrap();
+        let sbas_inside = ExactEpoch::new(359, ExactEpoch::ATTOSECONDS_PER_SECOND - 1)
+            .unwrap()
+            .query();
+        let sbas_past = ExactEpoch::new(360, 1).unwrap().query();
+        assert!(super::sbas_record_within_exact_limit(
+            &sbas,
+            &sbas_inside,
+            360.0
+        ));
+        assert!(super::sbas_record_within_exact_limit(
+            &sbas,
+            &sbas_limit,
+            360.0
+        ));
+        assert!(!super::sbas_record_within_exact_limit(
+            &sbas, &sbas_past, 360.0
+        ));
+    }
+
+    #[test]
+    fn exact_issue_selection_preserves_beidou_iod_modulo_and_full_issue() {
+        let mut record = gps_selection_record(172_799.0, 0x1_2345);
+        record.satellite_id = GnssSatelliteId::new(GnssSystem::BeiDou, 1).unwrap();
+        record.message = NavMessage::BeidouD1;
+        record.issue_of_data = Some(BroadcastIssue {
+            issue: 0x1_2345,
+            message: NavMessage::BeidouD1,
+        });
+        record.toe = GnssWeekTow::new(TimeScale::Bdt, 2111, 172_799.0).unwrap();
+        record.toc = record.toe;
+
+        assert_eq!(super::beidou_ssr_iod(&record), Some(239));
+        let query = exact_week_tow_epoch(record.toe).unwrap().query();
+        let store = BroadcastStore::new(vec![record]).expect("valid store");
+        assert!(store
+            .select_by_issue_at_epoch_query(
+                GnssSatelliteId::new(GnssSystem::BeiDou, 1).unwrap(),
+                BroadcastIssue {
+                    issue: 0x1_2345,
+                    message: NavMessage::BeidouD1,
+                },
+                NavMessage::BeidouD1,
+                &query,
+            )
+            .is_some());
+        assert!(store
+            .select_by_issue_at_epoch_query(
+                GnssSatelliteId::new(GnssSystem::BeiDou, 1).unwrap(),
+                BroadcastIssue {
+                    issue: 0x2345,
+                    message: NavMessage::BeidouD1,
+                },
+                NavMessage::BeidouD1,
+                &query,
+            )
+            .is_none());
+        assert!(store
+            .select_by_beidou_ssr_iod_at_epoch_query(
+                GnssSatelliteId::new(GnssSystem::BeiDou, 1).unwrap(),
+                239,
+                NavMessage::BeidouD1,
+                &query,
+            )
+            .is_some());
+        assert!(store
+            .select_by_beidou_ssr_iod_at_epoch_query(
+                GnssSatelliteId::new(GnssSystem::BeiDou, 1).unwrap(),
+                0x1_00ef,
+                NavMessage::BeidouD1,
+                &query,
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn binary_selection_epoch_keeps_the_input_f64_value() {
+        let binary_epoch = 1_000_000_000.1_f64;
+        let reference = ExactEpoch::new(1_000_000_000, 0)
+            .expect("reference epoch")
+            .query();
+        let exact_binary = exact_selection_epoch(binary_epoch).expect("finite binary epoch");
+        let decimal = ExactEpoch::from_j2000_seconds(binary_epoch)
+            .expect("finite decimal epoch")
+            .query();
+        let binary_delta = exact_binary.seconds_since_query(&reference);
+        let decimal_delta = decimal.seconds_since_query(&reference);
+        assert_eq!(
+            binary_delta.to_bits(),
+            (binary_epoch - 1_000_000_000.0).to_bits()
+        );
+        assert_ne!(binary_delta.to_bits(), decimal_delta.to_bits());
+    }
 }

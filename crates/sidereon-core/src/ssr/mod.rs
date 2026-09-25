@@ -848,6 +848,21 @@ impl HasExclusionMarker {
         t_j2000_s >= self.ref_epoch_j2000_s
             && t_j2000_s <= self.ref_epoch_j2000_s + self.validity_interval_s
     }
+
+    fn is_active_at_epoch_query(&self, epoch: &crate::astro::time::ExactEpochQuery) -> bool {
+        let Some(reference) =
+            crate::astro::time::ExactEpoch::from_binary_j2000_seconds(self.ref_epoch_j2000_s)
+        else {
+            return false;
+        };
+        matches!(
+            epoch.compare_interval_query(&reference, 0.0),
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+        ) && matches!(
+            epoch.compare_interval_query(&reference, self.validity_interval_s),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -2773,6 +2788,17 @@ impl SsrCorrectionStore {
             .is_some_and(|ex| ex.is_active(t_j2000_s))
     }
 
+    fn is_satellite_excluded_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> bool {
+        self.corrections
+            .get(&sat)
+            .and_then(|entry| entry.exclusion)
+            .is_some_and(|exclusion| exclusion.is_active_at_epoch_query(epoch))
+    }
+
     /// HAS do-not-use exclusion marker for a satellite, if present (test inspection helper).
     #[cfg(test)]
     fn has_exclusion(&self, sat: GnssSatelliteId) -> Option<&HasExclusionMarker> {
@@ -2997,6 +3023,12 @@ enum RtcmAgeLimit {
     HighRateClock,
 }
 
+#[derive(Clone, Copy)]
+struct CorrectionEpochQuery<'a> {
+    j2000_seconds: f64,
+    exact: Option<&'a crate::astro::time::ExactEpochQuery>,
+}
+
 /// Behavior when a correction is missing or stale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MissingCorrectionAction {
@@ -3190,6 +3222,17 @@ pub trait SsrCorrectionSource {
         let _ = (sat, t_j2000_s, selection_j2000_s);
         None
     }
+
+    /// [`Self::correction_size_refusal`] with exact state and selection epochs.
+    /// The default adapts scalar-only sources; built-in SSR sources retain both queries.
+    fn correction_size_refusal_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<SsrCorrectionSize> {
+        self.correction_size_refusal(sat, epoch.j2000_seconds(), selection_epoch.j2000_seconds())
+    }
 }
 
 impl SsrCorrectionSource for SsrCorrectedEphemeris<'_> {
@@ -3220,6 +3263,20 @@ impl SsrCorrectionSource for SsrCorrectedEphemeris<'_> {
         selection_j2000_s: f64,
     ) -> Option<SsrCorrectionSize> {
         SsrCorrectedEphemeris::correction_size_refusal(self, sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn correction_size_refusal_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<SsrCorrectionSize> {
+        SsrCorrectedEphemeris::correction_size_refusal_at_epoch_query(
+            self,
+            sat,
+            epoch,
+            selection_epoch,
+        )
     }
 }
 
@@ -3252,6 +3309,16 @@ impl SsrCorrectionSource for SsrCorrectedEphemerisOwned {
     ) -> Option<SsrCorrectionSize> {
         self.borrowed()
             .correction_size_refusal(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn correction_size_refusal_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<SsrCorrectionSize> {
+        self.borrowed()
+            .correction_size_refusal_at_epoch_query(sat, epoch, selection_epoch)
     }
 }
 
@@ -3578,7 +3645,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         if self.store.is_satellite_excluded(sat, t_j2000_s) {
             return Ok(Validated::ok(None));
         }
-        match self.ssr_corrected_state(sat, t_j2000_s, selection_j2000_s) {
+        match self.ssr_corrected_state(sat, t_j2000_s, selection_j2000_s, None, None) {
             Ok(state) => Ok(Validated {
                 value: Some((state.position_m, state.clock_s, state.group_delay_s)),
                 degraded: state.ut1_degraded,
@@ -3592,6 +3659,47 @@ impl<'a> SsrCorrectedEphemeris<'a> {
                 t_j2000_s,
                 selection_j2000_s,
             ))),
+        }
+    }
+
+    /// [`Self::corrected_state_with_group_delay_checked_selected`] at an exact epoch query.
+    pub fn corrected_state_with_group_delay_checked_selected_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Result<Validated<Option<PositionClockGroupDelay>>> {
+        let t_j2000_s = epoch.j2000_seconds();
+        if self.store.is_satellite_excluded_at_epoch_query(sat, epoch) {
+            return Ok(Validated::ok(None));
+        }
+        let selection_j2000_s = selection_epoch.j2000_seconds();
+        match self.ssr_corrected_state(
+            sat,
+            t_j2000_s,
+            selection_j2000_s,
+            Some(epoch),
+            Some(selection_epoch),
+        ) {
+            Ok(state) => Ok(Validated {
+                value: Some((state.position_m, state.clock_s, state.group_delay_s)),
+                degraded: state.ut1_degraded,
+            }),
+            Err(SsrStateUnavailable::Ut1OutsideCoverage(reason)) => {
+                Err(Error::Ut1OutsideCoverage(reason))
+            }
+            Err(SsrStateUnavailable::CorrectionExceedsLimit(_)) => Ok(Validated::ok(None)),
+            Err(_) if self.broadcast_fallback_allowed(sat) => self
+                .broadcast
+                .try_position_clock_group_delay_selected_at_epoch_query(sat, epoch, selection_epoch)
+                .map(|value| match value {
+                    Some(value) => Validated {
+                        value: Some(value.value),
+                        degraded: value.degraded,
+                    },
+                    None => Validated::ok(None),
+                }),
+            Err(_) => Ok(Validated::ok(None)),
         }
     }
 
@@ -3620,7 +3728,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         if self.store.is_satellite_excluded(sat, t_j2000_s) {
             return Err(SsrStateUnavailable::ExcludedByHas);
         }
-        self.ssr_corrected_state(sat, t_j2000_s, t_j2000_s)
+        self.ssr_corrected_state(sat, t_j2000_s, t_j2000_s, None, None)
             .map(|state| state.solution)
     }
 
@@ -3638,7 +3746,29 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         if self.store.is_satellite_excluded(sat, t_j2000_s) {
             return None;
         }
-        match self.ssr_corrected_state(sat, t_j2000_s, selection_j2000_s) {
+        match self.ssr_corrected_state(sat, t_j2000_s, selection_j2000_s, None, None) {
+            Err(SsrStateUnavailable::CorrectionExceedsLimit(size)) => Some(size),
+            _ => None,
+        }
+    }
+
+    /// [`Self::correction_size_refusal`] at the exact state and selection epochs.
+    pub fn correction_size_refusal_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<SsrCorrectionSize> {
+        if self.store.is_satellite_excluded_at_epoch_query(sat, epoch) {
+            return None;
+        }
+        match self.ssr_corrected_state(
+            sat,
+            epoch.j2000_seconds(),
+            selection_epoch.j2000_seconds(),
+            Some(epoch),
+            Some(selection_epoch),
+        ) {
             Err(SsrStateUnavailable::CorrectionExceedsLimit(size)) => Some(size),
             _ => None,
         }
@@ -3723,7 +3853,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         if self.store.is_satellite_excluded(sat, t_j2000_s) {
             return VelocitySource::None;
         }
-        match self.ssr_corrected_state(sat, t_j2000_s, selection_j2000_s) {
+        match self.ssr_corrected_state(sat, t_j2000_s, selection_j2000_s, None, None) {
             Ok(_) => return VelocitySource::Ssr,
             Err(SsrStateUnavailable::Ut1OutsideCoverage(reason)) => {
                 return VelocitySource::Ut1Refused(reason)
@@ -3750,7 +3880,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         selection_j2000_s: f64,
     ) -> Option<[f64; 3]> {
         let orbit = self.store.orbit(sat)?;
-        self.ssr_broadcast_state(sat, orbit, t_j2000_s, selection_j2000_s)
+        self.ssr_broadcast_state(sat, orbit, t_j2000_s, selection_j2000_s, None, None)
             .ok()
             .map(|state| state.velocity_m_s)
     }
@@ -3775,31 +3905,54 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         orbit: &SsrOrbitCorrection,
         t_j2000_s: f64,
         selection_j2000_s: f64,
+        epoch_query: Option<&crate::astro::time::ExactEpochQuery>,
+        selection_query: Option<&crate::astro::time::ExactEpochQuery>,
     ) -> std::result::Result<SsrBroadcastState, SsrStateUnavailable> {
         use SsrStateUnavailable as Unavailable;
         if sat.system == GnssSystem::Sbas {
-            let (r, v, clock_s) = self
-                .broadcast
-                .sbas_ssr_state(
+            let broadcast_state = if let Some(epoch) = epoch_query {
+                self.broadcast.sbas_ssr_state_at_query(
+                    sat,
+                    orbit.iode,
+                    orbit.nav_message == SsrNavigationMessage::IgsSsr,
+                    epoch,
+                    selection_query.unwrap_or(epoch),
+                )
+            } else {
+                self.broadcast.sbas_ssr_state(
                     sat,
                     orbit.iode,
                     orbit.nav_message == SsrNavigationMessage::IgsSsr,
                     t_j2000_s,
                     selection_j2000_s,
                 )
+            };
+            let (position_m, velocity_m_s, clock_s) = broadcast_state
                 .ok_or(Unavailable::NoMatchingBroadcastRecord { iode: orbit.iode })?;
             return Ok(SsrBroadcastState {
-                position_m: r,
-                velocity_m_s: v,
+                position_m,
+                velocity_m_s,
                 clock_s,
                 group_delay_s: None,
             });
         }
         if sat.system == GnssSystem::Glonass {
-            let (r, v, clock_s) = self
-                .broadcast
-                .glonass_ssr_state(sat, orbit.iode, t_j2000_s, selection_j2000_s)
-                .ok_or(Unavailable::NoMatchingBroadcastRecord { iode: orbit.iode })?;
+            let glonass_state = epoch_query.map_or_else(
+                || {
+                    self.broadcast
+                        .glonass_ssr_state(sat, orbit.iode, t_j2000_s, selection_j2000_s)
+                },
+                |_epoch| {
+                    self.broadcast.glonass_ssr_state_at_query(
+                        sat,
+                        orbit.iode,
+                        epoch_query.unwrap(),
+                        selection_query.unwrap_or_else(|| epoch_query.unwrap()),
+                    )
+                },
+            );
+            let (r, v, clock_s) =
+                glonass_state.ok_or(Unavailable::NoMatchingBroadcastRecord { iode: orbit.iode })?;
             return Ok(SsrBroadcastState {
                 position_m: r,
                 velocity_m_s: v,
@@ -3810,7 +3963,36 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         let nav_message = ssr_nav_message(sat).ok_or(Unavailable::NoBroadcastModel)?;
         let (sow, is_geo) =
             ssr_seconds_of_week(sat, t_j2000_s).ok_or(Unavailable::NoBroadcastModel)?;
-        let record = if sat.system == GnssSystem::BeiDou {
+        let record = if let Some(selection_query) = selection_query {
+            if sat.system == GnssSystem::BeiDou {
+                self.broadcast.select_by_beidou_ssr_iod_at_epoch_query(
+                    sat,
+                    orbit.iode & 0xFF,
+                    nav_message,
+                    selection_query,
+                )
+            } else if sat.system == GnssSystem::Galileo
+                && orbit.nav_message == SsrNavigationMessage::IgsSsr
+            {
+                self.broadcast.select_by_issue_low_bits_at_epoch_query(
+                    sat,
+                    orbit.iode,
+                    8,
+                    nav_message,
+                    selection_query,
+                )
+            } else {
+                self.broadcast.select_by_issue_at_epoch_query(
+                    sat,
+                    BroadcastIssue {
+                        issue: orbit.iode,
+                        message: nav_message,
+                    },
+                    nav_message,
+                    selection_query,
+                )
+            }
+        } else if sat.system == GnssSystem::BeiDou {
             self.broadcast.select_by_beidou_ssr_iod_at(
                 sat,
                 orbit.iode & 0xFF,
@@ -3837,13 +4019,25 @@ impl<'a> SsrCorrectedEphemeris<'a> {
                 .select_by_issue_at(sat, issue, nav_message, selection_j2000_s)
         }
         .ok_or(Unavailable::NoMatchingBroadcastRecord { iode: orbit.iode })?;
-        let (r, v) = broadcast_position_velocity(record, sow, is_geo)
-            .ok_or(Unavailable::InvalidBroadcastState)?;
+        let (r, v, tk_clock_s) = if let Some(epoch_query) = epoch_query {
+            let (tk_s, toc_delta_s) = crate::rinex_nav::exact_record_deltas(epoch_query, record)
+                .ok_or(Unavailable::InvalidBroadcastState)?;
+            let (r, v) = broadcast_position_velocity_at_tk(record, tk_s, is_geo)
+                .ok_or(Unavailable::InvalidBroadcastState)?;
+            (r, v, toc_delta_s)
+        } else {
+            let (r, v) = broadcast_position_velocity(record, sow, is_geo)
+                .ok_or(Unavailable::InvalidBroadcastState)?;
+            (
+                r,
+                v,
+                crate::broadcast::time_from_reference_s(sow, record.clock.toc_sow),
+            )
+        };
 
         // Satellite clock by the clock parameters, then the relativity correction
         // (RTKLIB `satpos_ssr`; HAS SIS ICD Eq. 24). `tk` is not iterated, as
         // `satpos_ssr` evaluates it.
-        let tk_clock_s = crate::broadcast::time_from_reference_s(sow, record.clock.toc_sow);
         let mut clock_s = record.clock.af0
             + record.clock.af1 * tk_clock_s
             + record.clock.af2 * tk_clock_s * tk_clock_s;
@@ -3871,6 +4065,8 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
         selection_j2000_s: f64,
+        epoch_query: Option<&crate::astro::time::ExactEpochQuery>,
+        selection_query: Option<&crate::astro::time::ExactEpochQuery>,
     ) -> std::result::Result<SsrAppliedState, SsrStateUnavailable> {
         use SsrStateUnavailable as Unavailable;
         let gate = Ut1Gate::new(self.ut1_validity);
@@ -3894,7 +4090,10 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         }
         if !self.correction_fresh(
             orbit.solution.source,
-            t_j2000_s,
+            CorrectionEpochQuery {
+                j2000_seconds: t_j2000_s,
+                exact: epoch_query,
+            },
             orbit.ref_epoch_j2000_s,
             orbit.transmitted_epoch_j2000_s,
             orbit.update_interval_s,
@@ -3904,7 +4103,10 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         }
         if !self.correction_fresh(
             clock.solution.source,
-            t_j2000_s,
+            CorrectionEpochQuery {
+                j2000_seconds: t_j2000_s,
+                exact: epoch_query,
+            },
             clock.ref_epoch_j2000_s,
             clock.transmitted_epoch_j2000_s,
             clock.update_interval_s,
@@ -3916,18 +4118,35 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             return Err(Unavailable::RegionalProviderNotAllowed);
         }
 
-        let dt_orbit = t_j2000_s - orbit.ref_epoch_j2000_s;
+        let dt_orbit = if let Some(query) = epoch_query {
+            let reference =
+                crate::astro::time::ExactEpoch::from_binary_j2000_seconds(orbit.ref_epoch_j2000_s)
+                    .ok_or(Unavailable::InvalidBroadcastState)?;
+            query.seconds_since_query(&reference)
+        } else {
+            t_j2000_s - orbit.ref_epoch_j2000_s
+        };
         let radial = orbit.radial_m + orbit.radial_rate_m_s * dt_orbit;
         let along = orbit.along_m + orbit.along_rate_m_s * dt_orbit;
         let cross = orbit.cross_m + orbit.cross_rate_m_s * dt_orbit;
-        let dt_clock = t_j2000_s - clock.ref_epoch_j2000_s;
+        let dt_clock = if let Some(query) = epoch_query {
+            let reference =
+                crate::astro::time::ExactEpoch::from_binary_j2000_seconds(clock.ref_epoch_j2000_s)
+                    .ok_or(Unavailable::InvalidBroadcastState)?;
+            query.seconds_since_query(&reference)
+        } else {
+            t_j2000_s - clock.ref_epoch_j2000_s
+        };
         let mut dclock_m =
             clock.c0_m + clock.c1_m_s * dt_clock + clock.c2_m_s2 * dt_clock * dt_clock;
         if let Some(high_rate) = clock.high_rate {
             if high_rate_matches(clock, &high_rate)
                 && self.correction_fresh(
                     high_rate.solution.source,
-                    t_j2000_s,
+                    CorrectionEpochQuery {
+                        j2000_seconds: t_j2000_s,
+                        exact: epoch_query,
+                    },
                     high_rate.ref_epoch_j2000_s,
                     high_rate.transmitted_epoch_j2000_s,
                     high_rate.update_interval_s,
@@ -3954,7 +4173,14 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             velocity_m_s: v,
             mut clock_s,
             group_delay_s,
-        } = self.ssr_broadcast_state(sat, orbit, t_j2000_s, selection_j2000_s)?;
+        } = self.ssr_broadcast_state(
+            sat,
+            orbit,
+            t_j2000_s,
+            selection_j2000_s,
+            epoch_query,
+            selection_query,
+        )?;
 
         let (er, ea, ec) = velocity_aligned_basis(r, v).ok_or(Unavailable::DegenerateOrbitFrame)?;
         // RTKLIB `satpos_ssr`: rs[i]+=-(er[i]*deph[0]+ea[i]*deph[1]+ec[i]*deph[2])+dant[i];
@@ -4022,12 +4248,13 @@ impl<'a> SsrCorrectedEphemeris<'a> {
     fn correction_fresh(
         &self,
         source: SsrSource,
-        t_j2000_s: f64,
+        epoch: CorrectionEpochQuery<'_>,
         ref_epoch_j2000_s: f64,
         transmitted_epoch_j2000_s: f64,
         update_interval_s: f64,
         rtcm_limit: RtcmAgeLimit,
     ) -> bool {
+        let t_j2000_s = epoch.j2000_seconds;
         let cap_s = self.staleness.max_staleness_s;
         match source {
             SsrSource::GalileoHas => {
@@ -4038,18 +4265,55 @@ impl<'a> SsrCorrectedEphemeris<'a> {
                 {
                     return false;
                 }
-                t_j2000_s >= ref_epoch_j2000_s
-                    && t_j2000_s <= ref_epoch_j2000_s + cap_s.min(update_interval_s)
+                match epoch.exact {
+                    Some(query) => {
+                        let Some(reference) =
+                            crate::astro::time::ExactEpoch::from_binary_j2000_seconds(
+                                ref_epoch_j2000_s,
+                            )
+                        else {
+                            return false;
+                        };
+                        matches!(
+                            query.compare_interval_query(&reference, 0.0),
+                            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+                        ) && matches!(
+                            query.compare_interval_query(&reference, cap_s.min(update_interval_s)),
+                            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                        )
+                    }
+                    None => {
+                        t_j2000_s >= ref_epoch_j2000_s
+                            && t_j2000_s <= ref_epoch_j2000_s + cap_s.min(update_interval_s)
+                    }
+                }
             }
             SsrSource::RtcmSsr | SsrSource::IgsSsr => {
                 if !t_j2000_s.is_finite() || !transmitted_epoch_j2000_s.is_finite() {
                     return false;
                 }
-                let age_s = (t_j2000_s - transmitted_epoch_j2000_s).abs();
                 match rtcm_limit {
-                    RtcmAgeLimit::OrbitClock => age_s <= cap_s.min(RTCM_SSR_MAX_AGE_S),
+                    RtcmAgeLimit::OrbitClock => exact_symmetric_interval_fresh(
+                        epoch.exact,
+                        t_j2000_s,
+                        transmitted_epoch_j2000_s,
+                        cap_s.min(RTCM_SSR_MAX_AGE_S),
+                        true,
+                    ),
                     RtcmAgeLimit::HighRateClock => {
-                        age_s < RTCM_SSR_HIGH_RATE_CLOCK_MAX_AGE_S && age_s <= cap_s
+                        exact_symmetric_interval_fresh(
+                            epoch.exact,
+                            t_j2000_s,
+                            transmitted_epoch_j2000_s,
+                            RTCM_SSR_HIGH_RATE_CLOCK_MAX_AGE_S,
+                            false,
+                        ) && exact_symmetric_interval_fresh(
+                            epoch.exact,
+                            t_j2000_s,
+                            transmitted_epoch_j2000_s,
+                            cap_s,
+                            true,
+                        )
                     }
                 }
             }
@@ -4069,26 +4333,26 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         t_j2000_s: f64,
         selection_j2000_s: f64,
     ) -> Option<([f64; 3], f64, Option<f64>)> {
-        if self
-            .store
-            .orbit(sat)
-            .is_some_and(|orbit| orbit.reference_point == SsrReferencePoint::CenterOfMass)
-        {
+        if !self.broadcast_fallback_allowed(sat) {
             return None;
         }
-        if self.fallback.on_missing_correction == MissingCorrectionAction::FallBackToBroadcast {
-            EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s(
-                self.broadcast,
-                sat,
-                t_j2000_s,
-                selection_j2000_s,
-            )
-            .ok()
-            .flatten()
-            .map(|state| state.value)
-        } else {
-            None
-        }
+        EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s(
+            self.broadcast,
+            sat,
+            t_j2000_s,
+            selection_j2000_s,
+        )
+        .ok()
+        .flatten()
+        .map(|state| state.value)
+    }
+
+    fn broadcast_fallback_allowed(&self, sat: GnssSatelliteId) -> bool {
+        self.fallback.on_missing_correction == MissingCorrectionAction::FallBackToBroadcast
+            && !self
+                .store
+                .orbit(sat)
+                .is_some_and(|orbit| orbit.reference_point == SsrReferencePoint::CenterOfMass)
     }
 
     fn satellite_pco_to_apc(
@@ -4112,6 +4376,44 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         let ts = gate.admit(ts).ok()?;
         let sun_ecef_m = sun_moon_ecef(&ts).ok()?.sun;
         satellite_body_pco_to_ecef(pco_body_m, sat_position_ecef_m, sun_ecef_m)
+    }
+}
+
+fn exact_symmetric_interval_fresh(
+    epoch_query: Option<&crate::astro::time::ExactEpochQuery>,
+    t_j2000_s: f64,
+    reference_j2000_s: f64,
+    interval_s: f64,
+    inclusive: bool,
+) -> bool {
+    match epoch_query {
+        Some(query) => {
+            let Some(reference) =
+                crate::astro::time::ExactEpoch::from_binary_j2000_seconds(reference_j2000_s)
+            else {
+                return false;
+            };
+            let upper_forward = query.compare_interval_query(&reference, interval_s);
+            let upper_backward = reference.compare_interval_query(query, interval_s);
+            match (upper_forward, upper_backward) {
+                (Some(forward), Some(backward)) if inclusive => {
+                    forward != std::cmp::Ordering::Greater
+                        && backward != std::cmp::Ordering::Greater
+                }
+                (Some(forward), Some(backward)) => {
+                    forward == std::cmp::Ordering::Less && backward == std::cmp::Ordering::Less
+                }
+                _ => false,
+            }
+        }
+        None => {
+            let age_s = (t_j2000_s - reference_j2000_s).abs();
+            if inclusive {
+                age_s <= interval_s
+            } else {
+                age_s < interval_s
+            }
+        }
     }
 }
 
@@ -4179,6 +4481,36 @@ impl EphemerisSource for SsrCorrectedEphemeris<'_> {
         ))
     }
 
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>> {
+        let selection_epoch =
+            crate::astro::time::ExactEpoch::from_binary_j2000_seconds(selection_j2000_s)
+                .ok_or(Error::EpochOutOfRange)?;
+        self.try_position_clock_group_delay_selected_at_epoch_query(
+            sat,
+            &epoch.query(),
+            &selection_epoch,
+        )
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>> {
+        let checked = self.corrected_state_with_group_delay_checked_selected_query(
+            sat,
+            epoch,
+            selection_epoch,
+        )?;
+        Ok(Validated::transpose(checked))
+    }
+
     /// The broadcast clock polynomial of the store this source corrects: RTKLIB
     /// `satposs` places the transmission epoch with `ephclk` for the SSR ephemeris
     /// options too.
@@ -4206,9 +4538,12 @@ impl EphemerisSource for SsrCorrectedEphemeris<'_> {
         if self.store.is_satellite_excluded(sat, t_j2000_s) {
             return 0.0;
         }
-        match self.ssr_corrected_state(sat, t_j2000_s, selection_j2000_s) {
+        match self.ssr_corrected_state(sat, t_j2000_s, selection_j2000_s, None, None) {
             Ok(_) => ssr_ura_variance_m2(self.store.ura_index(sat)),
-            Err(SsrStateUnavailable::Ut1OutsideCoverage(_)) => 0.0,
+            Err(
+                SsrStateUnavailable::Ut1OutsideCoverage(_)
+                | SsrStateUnavailable::CorrectionExceedsLimit(_),
+            ) => 0.0,
             Err(_) => {
                 if self
                     .broadcast_fallback_with_group_delay(sat, t_j2000_s, selection_j2000_s)
@@ -4225,6 +4560,78 @@ impl EphemerisSource for SsrCorrectedEphemeris<'_> {
                 }
             }
         }
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> f64 {
+        if self
+            .store
+            .is_satellite_excluded_at_epoch_query(sat, state_epoch)
+        {
+            return 0.0;
+        }
+        let state_j2000_s = state_epoch.j2000_seconds();
+        let selection_j2000_s = selection_epoch.j2000_seconds();
+        match self.ssr_corrected_state(
+            sat,
+            state_j2000_s,
+            selection_j2000_s,
+            Some(state_epoch),
+            Some(selection_epoch),
+        ) {
+            Ok(_) => ssr_ura_variance_m2(self.store.ura_index(sat)),
+            Err(
+                SsrStateUnavailable::Ut1OutsideCoverage(_)
+                | SsrStateUnavailable::CorrectionExceedsLimit(_),
+            ) => 0.0,
+            Err(_)
+                if self.broadcast_fallback_allowed(sat)
+                    && self
+                        .broadcast
+                        .try_position_clock_group_delay_selected_at_epoch_query(
+                            sat,
+                            state_epoch,
+                            selection_epoch,
+                        )
+                        .ok()
+                        .flatten()
+                        .is_some() =>
+            {
+                self.broadcast
+                    .ephemeris_variance_at_epoch_query(sat, state_epoch, selection_epoch)
+            }
+            Err(_) => 0.0,
+        }
+    }
+
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>> {
+        let selection_epoch =
+            crate::astro::time::ExactEpoch::from_binary_j2000_seconds(selection_j2000_s)
+                .ok_or(Error::EpochOutOfRange)?;
+        self.broadcast.try_transmit_epoch_clock_at_epoch_query(
+            sat,
+            &epoch.query(),
+            &selection_epoch,
+        )
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Result<Option<Validated<f64>>> {
+        self.broadcast
+            .try_transmit_epoch_clock_at_epoch_query(sat, epoch, selection_epoch)
     }
 }
 
@@ -4459,6 +4866,17 @@ impl SsrCorrectedEphemerisOwned {
             .correction_size_refusal(sat, t_j2000_s, selection_j2000_s)
     }
 
+    /// See [`SsrCorrectedEphemeris::correction_size_refusal_at_epoch_query`].
+    pub fn correction_size_refusal_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<SsrCorrectionSize> {
+        self.borrowed()
+            .correction_size_refusal_at_epoch_query(sat, epoch, selection_epoch)
+    }
+
     /// See [`SsrCorrectedEphemeris::corrected_state_checked`].
     pub fn corrected_state_checked(
         &self,
@@ -4648,6 +5066,26 @@ impl EphemerisSource for SsrCorrectedEphemerisOwned {
             .try_position_clock_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
     }
 
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>> {
+        self.borrowed()
+            .try_position_clock_group_delay_selected_at_exact_epoch(sat, epoch, selection_j2000_s)
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>> {
+        self.borrowed()
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, epoch, selection_epoch)
+    }
+
     fn try_transmit_epoch_clock_s(
         &self,
         sat: GnssSatelliteId,
@@ -4666,6 +5104,35 @@ impl EphemerisSource for SsrCorrectedEphemerisOwned {
     ) -> f64 {
         self.borrowed()
             .ephemeris_variance_m2(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> f64 {
+        self.borrowed()
+            .ephemeris_variance_at_epoch_query(sat, state_epoch, selection_epoch)
+    }
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>> {
+        self.borrowed()
+            .try_transmit_epoch_clock_at_exact_epoch(sat, epoch, selection_j2000_s)
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Result<Option<Validated<f64>>> {
+        self.borrowed()
+            .try_transmit_epoch_clock_at_epoch_query(sat, epoch, selection_epoch)
     }
 }
 
@@ -5109,6 +5576,14 @@ fn broadcast_position_velocity(
     is_geo: bool,
 ) -> Option<([f64; 3], [f64; 3])> {
     let tk = crate::broadcast::time_from_reference_s(sow, record.elements.toe_sow);
+    broadcast_position_velocity_at_tk(record, tk, is_geo)
+}
+
+fn broadcast_position_velocity_at_tk(
+    record: &crate::rinex_nav::BroadcastRecord,
+    tk: f64,
+    is_geo: bool,
+) -> Option<([f64; 3], [f64; 3])> {
     let position = |tk_s: f64| -> Option<[f64; 3]> {
         crate::broadcast::satellite_position_ecef_at_tk_unchecked(
             &record.elements,
@@ -5558,6 +6033,22 @@ mod tests {
             let corrected = source
                 .corrected_state(sat, query_j2000_s)
                 .expect("matching SBAS issue applies corrections");
+            let exact_query =
+                crate::astro::time::ExactEpoch::from_binary_j2000_seconds(query_j2000_s).unwrap();
+            let exact_state = source
+                .try_position_clock_group_delay_selected_at_epoch_query(
+                    sat,
+                    &exact_query,
+                    &exact_query,
+                )
+                .expect("exact SBAS query is accepted")
+                .expect("exact SBAS issue applies corrections")
+                .value;
+            assert_eq!(
+                exact_state.0.map(f64::to_bits),
+                corrected.0.map(f64::to_bits)
+            );
+            assert_eq!(exact_state.1.to_bits(), corrected.1.to_bits());
             let plain = broadcast
                 .position_clock_at_j2000_s(sat, query_j2000_s)
                 .expect("plain SBAS state");
@@ -6011,9 +6502,21 @@ mod tests {
         let state = |message: &SsrMessage| {
             let mut store = SsrCorrectionStore::new();
             store.ingest_ssr(message, week).expect("ingest");
-            SsrCorrectedEphemeris::new(&broadcast, &store)
+            let source = SsrCorrectedEphemeris::new(&broadcast, &store);
+            let scalar_state = source
                 .corrected_state(sat, t)
-                .map(|(position, clock)| (position.map(f64::to_bits), clock.to_bits()))
+                .map(|(position, clock)| (position.map(f64::to_bits), clock.to_bits()));
+            let exact_query = crate::astro::time::ExactEpoch::from_binary_j2000_seconds(t).unwrap();
+            let exact_state = source
+                .try_position_clock_group_delay_selected_at_epoch_query(
+                    sat,
+                    &exact_query,
+                    &exact_query,
+                )
+                .expect("exact Galileo query has no policy refusal")
+                .map(|state| (state.value.0.map(f64::to_bits), state.value.1.to_bits()));
+            assert_eq!(exact_state, scalar_state);
+            exact_state
         };
         let igs = state(&message).expect("the low eight bits name the record");
 
@@ -6972,6 +7475,32 @@ mod tests {
             .expect("broadcast state");
         assert_eq!(got.0.map(f64::to_bits), expected.0.map(f64::to_bits));
         assert_eq!(got.1.to_bits(), expected.1.to_bits());
+
+        let exact_epoch = crate::astro::time::ExactEpoch::from_binary_j2000_seconds(t)
+            .expect("finite exact epoch");
+        let strict_exact = strict
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, &exact_epoch, &exact_epoch)
+            .expect("strict exact query");
+        assert!(strict_exact.is_none());
+        assert_eq!(
+            strict.ephemeris_variance_at_epoch_query(sat, &exact_epoch, &exact_epoch),
+            0.0
+        );
+        let expected_exact = broadcast
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, &exact_epoch, &exact_epoch)
+            .expect("broadcast exact query")
+            .expect("broadcast exact state")
+            .value;
+        let fallback_exact = fallback
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, &exact_epoch, &exact_epoch)
+            .expect("fallback exact query")
+            .expect("fallback exact state")
+            .value;
+        assert_eq!(fallback_exact, expected_exact);
+        assert_eq!(
+            fallback.ephemeris_variance_at_epoch_query(sat, &exact_epoch, &exact_epoch),
+            broadcast.ephemeris_variance_at_epoch_query(sat, &exact_epoch, &exact_epoch)
+        );
     }
 
     /// An RTCM SSR orbit and clock correction applies while its age from the
@@ -7061,6 +7590,54 @@ mod tests {
             );
         }
 
+        let exact_limit = crate::astro::time::ExactEpoch::from_binary_j2000_seconds(
+            orbit.transmitted_epoch_j2000_s,
+        )
+        .expect("finite SSR epoch")
+        .checked_add_binary_seconds(90.0)
+        .expect("finite age offset");
+        let exact_late = exact_limit
+            .clone()
+            .checked_add_binary_seconds(20.0e-9)
+            .expect("finite excess age");
+        assert_eq!(exact_late.j2000_seconds(), exact_limit.j2000_seconds());
+        assert!(strict.correction_fresh(
+            orbit.solution.source,
+            CorrectionEpochQuery {
+                j2000_seconds: exact_limit.j2000_seconds(),
+                exact: Some(&exact_limit),
+            },
+            orbit.ref_epoch_j2000_s,
+            orbit.transmitted_epoch_j2000_s,
+            orbit.update_interval_s,
+            RtcmAgeLimit::OrbitClock,
+        ));
+        assert!(!strict.correction_fresh(
+            orbit.solution.source,
+            CorrectionEpochQuery {
+                j2000_seconds: exact_late.j2000_seconds(),
+                exact: Some(&exact_late),
+            },
+            orbit.ref_epoch_j2000_s,
+            orbit.transmitted_epoch_j2000_s,
+            orbit.update_interval_s,
+            RtcmAgeLimit::OrbitClock,
+        ));
+        let twenty_seconds_before = crate::astro::time::ExactEpoch::from_binary_j2000_seconds(
+            orbit.transmitted_epoch_j2000_s,
+        )
+        .expect("finite SSR epoch")
+        .checked_sub_binary_seconds(20.0)
+        .expect("finite earlier query");
+        assert!(strict
+            .try_position_clock_group_delay_selected_at_epoch_query(
+                sat,
+                &twenty_seconds_before,
+                &twenty_seconds_before,
+            )
+            .expect("valid exact query")
+            .is_some());
+
         // A store cap below 90 s binds first; one above it does not extend the limit.
         let tight = store_with_cap(30.0);
         let tight_source = SsrCorrectedEphemeris::new(&broadcast, &tight);
@@ -7084,6 +7661,98 @@ mod tests {
             .expect("broadcast state");
         assert_eq!(got.0.map(f64::to_bits), expected.0.map(f64::to_bits));
         assert_eq!(got.1.to_bits(), expected.1.to_bits());
+    }
+
+    #[test]
+    fn exact_query_freshness_compares_age_before_absolute_epoch_rounding() {
+        let reference_seconds = 646_272_000_i64;
+        let reference_j2000_s = reference_seconds as f64;
+        let at_orbit_limit = crate::astro::time::ExactEpoch::new(reference_seconds + 90, 0)
+            .expect("valid orbit limit")
+            .query();
+        let twenty_ns_past = crate::astro::time::ExactEpoch::new(reference_seconds + 90, 0)
+            .expect("valid 20 ns boundary")
+            .query()
+            .checked_add_binary_seconds(20.0e-9)
+            .expect("finite offset");
+        let one_attosecond_past = crate::astro::time::ExactEpoch::new(reference_seconds + 90, 1)
+            .expect("valid one-attosecond boundary")
+            .query();
+        assert_eq!(twenty_ns_past.j2000_seconds(), reference_j2000_s + 90.0);
+        assert!(exact_symmetric_interval_fresh(
+            Some(&at_orbit_limit),
+            at_orbit_limit.j2000_seconds(),
+            reference_j2000_s,
+            90.0,
+            true,
+        ));
+        let twenty_seconds_early = crate::astro::time::ExactEpoch::new(reference_seconds - 20, 0)
+            .expect("valid in-window earlier query")
+            .query();
+        assert!(exact_symmetric_interval_fresh(
+            Some(&twenty_seconds_early),
+            twenty_seconds_early.j2000_seconds(),
+            reference_j2000_s,
+            90.0,
+            true,
+        ));
+        let twenty_ns_before = crate::astro::time::ExactEpoch::new(reference_seconds - 90, 0)
+            .expect("valid 20 ns boundary")
+            .query()
+            .checked_sub_binary_seconds(20.0e-9)
+            .expect("finite offset");
+        assert_eq!(twenty_ns_before.j2000_seconds(), reference_j2000_s - 90.0);
+        assert!(!exact_symmetric_interval_fresh(
+            Some(&twenty_ns_before),
+            twenty_ns_before.j2000_seconds(),
+            reference_j2000_s,
+            90.0,
+            true,
+        ));
+        for query in [&twenty_ns_past, &one_attosecond_past] {
+            assert!(!exact_symmetric_interval_fresh(
+                Some(query),
+                query.j2000_seconds(),
+                reference_j2000_s,
+                90.0,
+                true,
+            ));
+        }
+
+        let at_high_rate_limit = crate::astro::time::ExactEpoch::new(reference_seconds + 10, 0)
+            .expect("valid high-rate limit")
+            .query();
+        let just_inside_high_rate_limit =
+            crate::astro::time::ExactEpoch::new(reference_seconds + 10, 0)
+                .expect("valid high-rate boundary")
+                .query()
+                .checked_sub_binary_seconds(1.0e-18)
+                .expect("finite offset");
+        let just_outside_high_rate_limit =
+            crate::astro::time::ExactEpoch::new(reference_seconds + 10, 1)
+                .expect("valid high-rate boundary")
+                .query();
+        assert!(!exact_symmetric_interval_fresh(
+            Some(&at_high_rate_limit),
+            at_high_rate_limit.j2000_seconds(),
+            reference_j2000_s,
+            10.0,
+            false,
+        ));
+        assert!(exact_symmetric_interval_fresh(
+            Some(&just_inside_high_rate_limit),
+            just_inside_high_rate_limit.j2000_seconds(),
+            reference_j2000_s,
+            10.0,
+            false,
+        ));
+        assert!(!exact_symmetric_interval_fresh(
+            Some(&just_outside_high_rate_limit),
+            just_outside_high_rate_limit.j2000_seconds(),
+            reference_j2000_s,
+            10.0,
+            false,
+        ));
     }
 
     #[test]
@@ -7932,6 +8601,26 @@ mod tests {
                 regional: RegionalPolicy::DeclineRegional,
             });
         assert!(fallback.corrected_state(sat, t).is_none());
+        let exact_epoch = crate::astro::time::ExactEpoch::from_binary_j2000_seconds(t)
+            .expect("finite exact epoch");
+        assert!(
+            fallback
+                .try_position_clock_group_delay_selected_at_epoch_query(
+                    sat,
+                    &exact_epoch,
+                    &exact_epoch,
+                )
+                .expect("CoM exact query")
+                .is_none()
+        );
+        assert_eq!(
+            no_attitude.ephemeris_variance_at_epoch_query(sat, &exact_epoch, &exact_epoch),
+            0.0
+        );
+        assert_eq!(
+            fallback.ephemeris_variance_at_epoch_query(sat, &exact_epoch, &exact_epoch),
+            0.0
+        );
 
         let nominal = SsrCorrectedEphemeris::new(&broadcast, &store)
             .with_staleness(StalenessPolicy::seconds(60.0))
@@ -8035,6 +8724,86 @@ mod tests {
         assert_eq!(
             source.observable_state_at_j2000_s(sat, t),
             Err(ObservablesError::NoEphemeris)
+        );
+    }
+
+    #[test]
+    fn exact_regional_decline_and_fallback_follow_policy() {
+        let nav_text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ssr/BRDC00WRD_S_20261820000_G30_G31.rnx"
+        ))
+        .expect("read NAV fixture");
+        let broadcast = BroadcastEphemeris::from_nav(&nav_text).expect("parse NAV fixture");
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        let t = ssr_j2000(REAL_SSR_EPOCH_TOW_S);
+        let mut store = real_gps_ssr_store();
+        store
+            .corrections
+            .get_mut(&sat)
+            .and_then(|corrections| corrections.orbit.as_mut())
+            .expect("regional orbit correction")
+            .crs_regional = true;
+        let provider_id = store
+            .orbit(sat)
+            .expect("stored regional orbit")
+            .solution
+            .provider_id;
+        let exact_epoch = crate::astro::time::ExactEpoch::from_binary_j2000_seconds(t)
+            .expect("finite exact epoch");
+
+        let strict = SsrCorrectedEphemeris::new(&broadcast, &store);
+        assert!(
+            strict
+                .try_position_clock_group_delay_selected_at_epoch_query(
+                    sat,
+                    &exact_epoch,
+                    &exact_epoch,
+                )
+                .expect("regional strict query")
+                .is_none()
+        );
+        assert_eq!(
+            strict.ephemeris_variance_at_epoch_query(sat, &exact_epoch, &exact_epoch),
+            0.0
+        );
+
+        let fallback =
+            SsrCorrectedEphemeris::new(&broadcast, &store).with_fallback(SsrFallbackPolicy {
+                on_missing_correction: MissingCorrectionAction::FallBackToBroadcast,
+                regional: RegionalPolicy::DeclineRegional,
+            });
+        let fallback_state = fallback
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, &exact_epoch, &exact_epoch)
+            .expect("regional fallback query")
+            .expect("regional broadcast fallback")
+            .value;
+        let broadcast_state = broadcast
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, &exact_epoch, &exact_epoch)
+            .expect("broadcast exact query")
+            .expect("broadcast exact state")
+            .value;
+        assert_eq!(fallback_state, broadcast_state);
+        assert_eq!(
+            fallback.ephemeris_variance_at_epoch_query(sat, &exact_epoch, &exact_epoch),
+            broadcast.ephemeris_variance_at_epoch_query(sat, &exact_epoch, &exact_epoch)
+        );
+
+        let allowed =
+            SsrCorrectedEphemeris::new(&broadcast, &store).allow_regional_provider(provider_id);
+        assert!(
+            allowed
+                .try_position_clock_group_delay_selected_at_epoch_query(
+                    sat,
+                    &exact_epoch,
+                    &exact_epoch,
+                )
+                .expect("allowed regional query")
+                .is_some()
+        );
+        assert_eq!(
+            allowed.ephemeris_variance_at_epoch_query(sat, &exact_epoch, &exact_epoch),
+            allowed.ephemeris_variance_m2(sat, t, t)
         );
     }
 
@@ -8789,6 +9558,27 @@ mod tests {
         // Exclusion is active; both decline.
         let t_end = t_ref + 60.0;
         assert!(store.is_satellite_excluded(sat, t_end));
+        let exact_reference = crate::astro::time::ExactEpoch::from_binary_j2000_seconds(t_ref)
+            .expect("finite HAS reference epoch");
+        let exact_end = exact_reference
+            .clone()
+            .checked_add_binary_seconds(60.0)
+            .expect("finite HAS end epoch");
+        let one_attosecond_before_reference = exact_reference
+            .checked_sub_binary_seconds(1.0e-18)
+            .expect("finite pre-reference query");
+        let one_attosecond_after_end = exact_end
+            .clone()
+            .checked_add_binary_seconds(1.0e-18)
+            .expect("finite post-expiry query");
+        assert!(!store.is_satellite_excluded_at_epoch_query(sat, &one_attosecond_before_reference));
+        assert!(store.is_satellite_excluded_at_epoch_query(sat, &exact_end));
+        assert_eq!(exact_end.j2000_seconds(), (t_ref + 60.0));
+        assert_eq!(
+            exact_end.j2000_seconds(),
+            one_attosecond_after_end.j2000_seconds()
+        );
+        assert!(!store.is_satellite_excluded_at_epoch_query(sat, &one_attosecond_after_end));
         assert!(strict.corrected_state(sat, t_end).is_none());
         assert!(fallback.corrected_state(sat, t_end).is_none());
 
@@ -16607,6 +17397,153 @@ mod tests {
                 assert_eq!(source.corrected_state(sat, t), None);
             }
         }
+    }
+
+    #[test]
+    fn exact_clock_size_diagnostic_tracks_high_rate_freshness_and_policy() {
+        let broadcast = g30_g31_broadcast();
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        let transmission_epoch = ssr_j2000(REAL_SSR_EPOCH_TOW_S);
+        let iode = g30_iode(&broadcast, transmission_epoch);
+        let store = rtcm_g30_sized_store(iode, [10_000, 0, 0], 2_000_000, Some(997_925));
+        let strict =
+            SsrCorrectedEphemeris::new(&broadcast, &store).with_fallback(SsrFallbackPolicy {
+                on_missing_correction: MissingCorrectionAction::FallBackToBroadcast,
+                regional: RegionalPolicy::DeclineRegional,
+            });
+        let exact_transmission =
+            crate::astro::time::ExactEpoch::from_binary_j2000_seconds(transmission_epoch)
+                .expect("finite transmission epoch");
+        let exact_fresh = exact_transmission
+            .clone()
+            .checked_add_binary_seconds(10.0)
+            .expect("finite high-rate limit")
+            .checked_sub_binary_seconds(1.0e-9)
+            .expect("finite epoch inside high-rate limit");
+        let exact_stale = exact_transmission
+            .checked_add_binary_seconds(10.0)
+            .expect("finite high-rate limit");
+        assert_eq!(
+            exact_fresh.j2000_seconds().to_bits(),
+            exact_stale.j2000_seconds().to_bits(),
+            "exact queries straddle the freshness boundary despite sharing rounded seconds"
+        );
+
+        let refusal = strict
+            .correction_size_refusal_at_epoch_query(sat, &exact_fresh, &exact_fresh)
+            .expect("fresh high-rate clock makes the sum exceed MAXCCORSSR");
+        assert!(refusal.clock_exceeds_limit());
+        assert_eq!(
+            SsrCorrectionSource::correction_size_refusal_at_epoch_query(
+                &strict,
+                sat,
+                &exact_fresh,
+                &exact_fresh,
+            ),
+            Some(refusal)
+        );
+        let owned_strict =
+            SsrCorrectedEphemerisOwned::new(Arc::new(g30_g31_broadcast()), Arc::new(store.clone()))
+                .with_fallback(SsrFallbackPolicy {
+                    on_missing_correction: MissingCorrectionAction::FallBackToBroadcast,
+                    regional: RegionalPolicy::DeclineRegional,
+                });
+        assert_eq!(
+            owned_strict.correction_size_refusal_at_epoch_query(sat, &exact_fresh, &exact_fresh,),
+            Some(refusal)
+        );
+        assert_eq!(
+            strict
+                .try_position_clock_group_delay_selected_at_epoch_query(
+                    sat,
+                    &exact_fresh,
+                    &exact_fresh,
+                )
+                .expect("valid exact query"),
+            None,
+            "strict size refusal does not use the configured broadcast fallback"
+        );
+        assert_eq!(
+            EphemerisSource::ephemeris_variance_m2(
+                &strict,
+                sat,
+                transmission_epoch,
+                transmission_epoch,
+            ),
+            0.0
+        );
+        assert_eq!(
+            EphemerisSource::ephemeris_variance_at_epoch_query(
+                &strict,
+                sat,
+                &exact_fresh,
+                &exact_fresh,
+            ),
+            0.0
+        );
+
+        assert_eq!(
+            strict.correction_size_refusal_at_epoch_query(sat, &exact_stale, &exact_stale),
+            None,
+            "high-rate clock at its exclusive ten-second limit is stale"
+        );
+        assert!(
+            strict
+                .try_position_clock_group_delay_selected_at_epoch_query(
+                    sat,
+                    &exact_stale,
+                    &exact_stale,
+                )
+                .expect("valid exact query")
+                .is_some()
+        );
+
+        let lenient = strict.with_correction_size_policy(SsrCorrectionSizePolicy::Lenient);
+        assert_eq!(
+            owned_strict
+                .with_correction_size_policy(SsrCorrectionSizePolicy::Lenient)
+                .correction_size_refusal_at_epoch_query(sat, &exact_fresh, &exact_fresh),
+            None
+        );
+        assert_eq!(
+            lenient.correction_size_refusal_at_epoch_query(sat, &exact_fresh, &exact_fresh),
+            None,
+            "lenient policy applies rather than refuses the oversized correction"
+        );
+        assert_eq!(
+            SsrCorrectionSource::correction_size_refusal_at_epoch_query(
+                &lenient,
+                sat,
+                &exact_fresh,
+                &exact_fresh,
+            ),
+            None
+        );
+        assert!(
+            lenient
+                .try_position_clock_group_delay_selected_at_epoch_query(
+                    sat,
+                    &exact_fresh,
+                    &exact_fresh,
+                )
+                .expect("valid exact query")
+                .is_some()
+        );
+        assert_eq!(lenient.oversized_corrections().len(), 1);
+
+        let lenient_stale = SsrCorrectedEphemeris::new(&broadcast, &store)
+            .with_correction_size_policy(SsrCorrectionSizePolicy::Lenient);
+        assert!(
+            lenient_stale
+                .try_position_clock_group_delay_selected_at_epoch_query(
+                    sat,
+                    &exact_stale,
+                    &exact_stale,
+                )
+                .expect("valid exact query")
+                .is_some()
+        );
+        assert!(lenient_stale.oversized_corrections().is_empty());
     }
 
     /// The lenient policy applies an oversized correction exactly as a correction within

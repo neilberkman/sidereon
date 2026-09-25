@@ -44,6 +44,7 @@
 
 use super::*;
 use crate::astro::time::model::{GnssWeekTow, TimeScale};
+use crate::astro::time::ExactEpoch;
 use crate::broadcast::{
     satellite_state, satellite_state_cnav, ClockPolynomial, CnavRates, KeplerianElements,
 };
@@ -290,6 +291,7 @@ fn spp_solves_from_broadcast_glonass() {
         let env = SatModelEnv {
             eph: &store,
             t_rx_j2000_s: t_rx,
+            receive_epoch: None,
             t_rx_second_of_day_s: sod,
             day_of_year: doy,
             corrections: corr,
@@ -397,6 +399,7 @@ fn beidou_uses_its_own_klobuchar_coefficients() {
         let env = SatModelEnv {
             eph: &store,
             t_rx_j2000_s: t_rx,
+            receive_epoch: None,
             t_rx_second_of_day_s: sod,
             day_of_year: doy,
             corrections: Corrections::IONO,
@@ -978,6 +981,7 @@ fn spp_solves_from_broadcast_gps() {
         let env = SatModelEnv {
             eph: &store,
             t_rx_j2000_s: t_rx,
+            receive_epoch: None,
             t_rx_second_of_day_s: sod,
             day_of_year: doy,
             corrections: corr,
@@ -1404,6 +1408,7 @@ fn synthetic_spp_inputs(store: &BroadcastStore) -> crate::spp::SolveInputs {
         let env = SatModelEnv {
             eph: store,
             t_rx_j2000_s: t_rx,
+            receive_epoch: None,
             t_rx_second_of_day_s: sod,
             day_of_year: doy,
             corrections,
@@ -4006,6 +4011,7 @@ fn mixed_constellation_solve_recovers_the_receiver() {
         let env = SatModelEnv {
             eph: &store,
             t_rx_j2000_s: t_rx,
+            receive_epoch: None,
             t_rx_second_of_day_s: sod,
             day_of_year: doy,
             corrections: corr,
@@ -4168,6 +4174,7 @@ fn mixed_constellation_solve_recovers_a_nonzero_inter_system_bias() {
         let env = SatModelEnv {
             eph: &store,
             t_rx_j2000_s: t_rx,
+            receive_epoch: None,
             t_rx_second_of_day_s: sod,
             day_of_year: doy,
             corrections: corr,
@@ -4288,6 +4295,7 @@ fn mixed_solve_recovers_with_gps_galileo_and_beidou() {
         let env = SatModelEnv {
             eph: &store,
             t_rx_j2000_s: t_rx,
+            receive_epoch: None,
             t_rx_second_of_day_s: sod,
             day_of_year: doy,
             corrections: corr,
@@ -4411,6 +4419,7 @@ fn ionosphere_correction_is_applied_to_beidou_b1i() {
         let env = SatModelEnv {
             eph: &store,
             t_rx_j2000_s: t_rx,
+            receive_epoch: None,
             t_rx_second_of_day_s: sod,
             day_of_year: doy,
             corrections: corr,
@@ -7212,4 +7221,68 @@ fn placement_reads_the_record_selected_at_the_reception_epoch() {
         placed_epoch.to_bits(),
         (clock_epoch - expected_clock).to_bits()
     );
+}
+#[test]
+fn exact_native_seconds_of_week_preserves_boundary_remainders_and_bdt_offset() {
+    let gps = GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap();
+    let beidou = GnssSatelliteId::new(GnssSystem::BeiDou, 1).unwrap();
+    let at_bdt_boundary = ExactEpoch::from_civil(2000, 1, 2, 0, 0, 0.0)
+        .unwrap()
+        .checked_add_seconds(14.0)
+        .unwrap();
+    let just_before = at_bdt_boundary.checked_sub_seconds(1.0e-30).unwrap();
+
+    let (_, gps_sow, _) = query_native_exact_time(gps, just_before).unwrap();
+    let (_, bdt_sow, _) = query_native_exact_time(beidou, just_before).unwrap();
+    assert_eq!(gps_sow, 14.0);
+    assert_eq!(bdt_sow, 604_800.0);
+
+    let (_, bdt_sow, _) = query_native_exact_time(beidou, at_bdt_boundary).unwrap();
+    assert_eq!(bdt_sow, 0.0);
+}
+
+#[test]
+fn exact_beidou_state_and_clock_use_the_bdt_native_epoch() {
+    let store = BroadcastStore::from_nav(&brdc_gop_text()).expect("parse BRDC00GOP");
+    let sat = GnssSatelliteId::new(GnssSystem::BeiDou, 1).unwrap();
+    let epoch = ExactEpoch::from_civil(2021, 1, 1, 0, 0, 0.0)
+        .unwrap()
+        .checked_add_seconds(14.0)
+        .unwrap();
+    let selection = epoch.j2000_seconds();
+    let selected_record = store
+        .select_record_at(sat, selection)
+        .expect("C01 record at 2021-01-01 00:00 BDT");
+    assert_eq!(
+        selected_record.toe.system,
+        crate::astro::time::TimeScale::Bdt
+    );
+    assert_eq!(selected_record.toe.week, 782);
+    assert_eq!(selected_record.toe.tow_s, 432_000.0);
+    let expected = crate::spp::EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s(
+        &store, sat, selection, selection,
+    )
+    .expect("legacy BDT-native state")
+    .expect("legacy state")
+    .value;
+    let exact =
+        crate::spp::EphemerisSource::try_position_clock_group_delay_selected_at_exact_epoch(
+            &store, sat, epoch, selection,
+        )
+        .expect("exact query")
+        .expect("exact state")
+        .value;
+    assert_eq!(exact.0.map(f64::to_bits), expected.0.map(f64::to_bits));
+    let expected_clock =
+        crate::spp::EphemerisSource::try_transmit_epoch_clock_s(&store, sat, selection, selection)
+            .expect("legacy BDT-native clock")
+            .expect("legacy clock")
+            .value;
+    let exact_clock = crate::spp::EphemerisSource::try_transmit_epoch_clock_at_exact_epoch(
+        &store, sat, epoch, selection,
+    )
+    .expect("exact clock query")
+    .expect("exact clock")
+    .value;
+    assert_eq!(exact_clock.to_bits(), expected_clock.to_bits());
 }
