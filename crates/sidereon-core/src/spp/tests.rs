@@ -5067,7 +5067,7 @@ fn a_pierce_point_one_probe_inside_the_grid_edge_settles() {
 }
 
 // ---------------------------------------------------------------------------
-// RAIM FDE over a self-consistent set.
+// RAIM FDE and robust reweighting over a self-consistent set.
 // ---------------------------------------------------------------------------
 
 /// The eight GPS satellites of the L0 trace epoch the consistent scenario uses.
@@ -5226,6 +5226,40 @@ fn fde_spp_recovers_a_fault_on_every_satellite_of_the_consistent_set() {
                 "{satellite} {bias_m} m: {error_m} m from the consistent solution"
             );
         }
+    }
+}
+
+/// The default Huber budget runs the reweighting to its settled fixed point on
+/// ordinary faults: +300 m on each satellite of the consistent set ends
+/// `SelectionSettled`, bit-identical to a solve with an effectively unbounded
+/// budget.
+#[test]
+fn robust_default_budget_settles_on_single_faults() {
+    let eph = sp3();
+    let (clean, _) = consistent_l0_scenario(&eph);
+    for prn in CONSISTENT_PRNS {
+        let satellite = gps_sat(prn);
+        let mut inputs = with_bias(&clean, satellite, 300.0);
+        inputs.robust = Some(RobustConfig::default());
+        let default = solve(&eph, &inputs, false).expect("robust solve");
+        eprintln!(
+            "robust +300 m on {satellite}: {} outer solves, status {:?}",
+            default.metadata.outer_iterations + 1,
+            default.metadata.status
+        );
+        assert_eq!(
+            default.metadata.status,
+            Status::SelectionSettled,
+            "{satellite}: the default budget must settle"
+        );
+        assert!(default.metadata.converged, "{satellite}");
+
+        inputs.robust = Some(RobustConfig {
+            max_outer: 10_000,
+            ..RobustConfig::default()
+        });
+        let unbounded = solve(&eph, &inputs, false).expect("robust solve");
+        assert_solution_bits_eq(&default, &unbounded);
     }
 }
 
