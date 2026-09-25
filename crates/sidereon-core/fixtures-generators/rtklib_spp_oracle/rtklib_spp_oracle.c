@@ -17,6 +17,10 @@
  * `sol->rr`, the initial position given here, and from a zero receiver clock.
  *
  * usage: rtklib_spp_oracle <label> <obs> <nav> <iono 0|1> <tropo 0|1>
+ *        rtklib_spp_oracle fde <label> <obs> <nav> <iono 0|1> <tropo 0|1> <stride>
+ *
+ * The `fde` form runs RTKLIB's RAIM fault detection and exclusion, `raim_fde`, on
+ * faulted copies of every <stride>-th epoch (see `run_fde` below).
  *
  * Options: GPS only, L1 C/A (`-GL1C`), broadcast ephemeris, 10 degree elevation
  * mask, broadcast Klobuchar ionosphere when <iono> is 1 and Saastamoinen troposphere
@@ -264,6 +268,330 @@ static void print_used_states(const obsd_t *obs, int observation_count, gtime_t 
     printf("]");
 }
 
+/* ---------------------------------------------------------------------------
+ * RAIM FDE oracle.
+ *
+ * For every <stride>-th epoch, the unmodified `pntpos` first solves the epoch from
+ * the header's approximate position; then, for each satellite it used and each
+ * bias in `fde_biases_m`, a copy of the epoch with that bias added to the
+ * satellite's L1 pseudorange is handed to RTKLIB's own `raim_fde`, with the
+ * satellite states `pntpos` computes (`satposs`). demo5's `pntpos` reaches
+ * `raim_fde` only when `estpos` fails, because `valsol`'s chi-square rejection is
+ * commented out, so `raim_fde` is called directly: its exclusion is the reference,
+ * not whether demo5 would have run it.
+ *
+ * `raim_fde` keeps no record of which satellite it removed or of the final
+ * least-squares state. A replay of its loop, running the unmodified `estpos` in
+ * the same order with the same shared solution state, recovers both; the replay's
+ * result must equal `raim_fde`'s bit for bit (position, clock, used satellites) or
+ * the run fails. Each case records the fault, the excluded satellite, every
+ * candidate's residual RMS, and the chosen solution in the same form as a
+ * selection case. No message is recorded: `raim_fde` copies its candidate
+ * buffer, which a successful `estpos` leaves unwritten, into `msg`.
+ * ------------------------------------------------------------------------- */
+
+#define FDE_BIAS_COUNT 2
+static const double fde_biases_m[FDE_BIAS_COUNT] = {5000.0, 300.0};
+
+typedef struct {
+    int valid;
+    int state_valid;
+    int columns;
+    double design[(MAXOBS + NX) * NX];
+    double covariance[NX * NX];
+    double receiver_state[NX];
+    double step[NX];
+    double tracked[NX];
+} lsq_capture_t;
+
+static lsq_capture_t fde_best_capture;
+
+static void save_capture(lsq_capture_t *capture)
+{
+    capture->valid = captured_lsq_valid;
+    capture->state_valid = captured_lsq_state_valid;
+    capture->columns = captured_lsq_columns;
+    memcpy(capture->design, captured_lsq_design, sizeof(capture->design));
+    memcpy(capture->covariance, captured_lsq_covariance, sizeof(capture->covariance));
+    memcpy(capture->receiver_state, captured_lsq_receiver_state,
+           sizeof(capture->receiver_state));
+    memcpy(capture->step, captured_lsq_step, sizeof(capture->step));
+    memcpy(capture->tracked, tracked_receiver_state, sizeof(capture->tracked));
+}
+
+static void restore_capture(const lsq_capture_t *capture)
+{
+    captured_lsq_valid = capture->valid;
+    captured_lsq_state_valid = capture->state_valid;
+    captured_lsq_columns = capture->columns;
+    memcpy(captured_lsq_design, capture->design, sizeof(capture->design));
+    memcpy(captured_lsq_covariance, capture->covariance, sizeof(capture->covariance));
+    memcpy(captured_lsq_receiver_state, capture->receiver_state,
+           sizeof(capture->receiver_state));
+    memcpy(captured_lsq_step, capture->step, sizeof(capture->step));
+    memcpy(tracked_receiver_state, capture->tracked, sizeof(capture->tracked));
+}
+
+static void snr_like_pntpos(const obsd_t *obs, int n, ssat_t *ssat)
+{
+    int i;
+    memset(ssat, 0, sizeof(ssat_t) * MAXSAT);
+    for (i = 0; i < n; i++) ssat[obs[i].sat - 1].snr_rover[0] = obs[i].SNR[0];
+}
+
+/* Check the replayed final least-squares state against the returned solution, as
+ * the selection oracle does after `pntpos`. */
+static int verify_capture(const sol_t *sol)
+{
+    int k;
+    double tracked_clock_s = tracked_receiver_state[3] / CLIGHT;
+    if (!captured_lsq_valid || !captured_lsq_state_valid) return 0;
+    for (k = 0; k < 3; k++) {
+        if (memcmp(&tracked_receiver_state[k], &sol->rr[k], sizeof(double)) != 0) return 0;
+    }
+    if (memcmp(&tracked_clock_s, &sol->dtr[0], sizeof(double)) != 0) return 0;
+    for (k = 0; k < NX; k++) {
+        double replayed = captured_lsq_receiver_state[k] + captured_lsq_step[k];
+        if (memcmp(&replayed, &tracked_receiver_state[k], sizeof(double)) != 0) return 0;
+    }
+    return (float)captured_lsq_covariance[0] == sol->qr[0] &&
+           (float)captured_lsq_covariance[1 + NX] == sol->qr[1] &&
+           (float)captured_lsq_covariance[2 + 2 * NX] == sol->qr[2] &&
+           (float)captured_lsq_covariance[1] == sol->qr[3] &&
+           (float)captured_lsq_covariance[2 + NX] == sol->qr[4] &&
+           (float)captured_lsq_covariance[2] == sol->qr[5];
+}
+
+static void fde_case(const obsd_t *obs, int n, int faulted, double bias_m,
+                     const nav_t *nav, const prcopt_t *opt, int first)
+{
+    static obsd_t obs_e[MAXOBS];
+    static double rs[MAXOBS * 6], dts[MAXOBS * 2], var[MAXOBS];
+    static double rs_e[MAXOBS * 6], dts_e[MAXOBS * 2], vare_e[MAXOBS];
+    static double azel_e[MAXOBS * 2], resp_e[MAXOBS];
+    static double azel_r[MAXOBS * 2], resp_r[MAXOBS];
+    static int svh[MAXOBS], svh_e[MAXOBS], vsat_e[MAXOBS], vsat_r[MAXOBS];
+    static int best_vsat[MAXOBS];
+    static double candidate_rms[MAXOBS];
+    static int candidate_status[MAXOBS];
+    static ssat_t ssat[MAXSAT], ssat_out[MAXSAT];
+    sol_t sol_e = {{0}}, best_sol = {{0}}, sol_r = {{0}};
+    double rms = 100.0, rms_e, ep[6], receiver_geodetic[3];
+    char msg_e[128] = "", msg_r[128] = "", id[8];
+    int i, j, k, nvsat, best = -1, stat, used = 0;
+
+    snr_like_pntpos(obs, n, ssat);
+    satposs(obs[0].time, obs, n, nav, opt->sateph, rs, dts, var, svh);
+
+    /* The loop of `raim_fde`, replayed. */
+    for (i = 0; i < n; i++) {
+        for (j = k = 0; j < n; j++) {
+            if (j == i) continue;
+            obs_e[k] = obs[j];
+            matcpy(rs_e + 6 * k, rs + 6 * j, 6, 1);
+            matcpy(dts_e + 2 * k, dts + 2 * j, 2, 1);
+            vare_e[k] = var[j];
+            svh_e[k++] = svh[j];
+        }
+        memset(tracked_receiver_state, 0, sizeof(tracked_receiver_state));
+        for (k = 0; k < 3; k++) tracked_receiver_state[k] = sol_e.rr[k];
+        captured_lsq_valid = 0;
+        captured_lsq_state_valid = 0;
+        candidate_rms[i] = 0.0;
+        if (!estpos(obs_e, n - 1, rs_e, dts_e, vare_e, svh_e, nav, opt, ssat, &sol_e, azel_e,
+                    vsat_e, resp_e, msg_e)) {
+            candidate_status[i] = 0;
+            continue;
+        }
+        for (j = nvsat = 0, rms_e = 0.0; j < n - 1; j++) {
+            if (!vsat_e[j]) continue;
+            rms_e += SQR(resp_e[j]);
+            nvsat++;
+        }
+        if (nvsat < 5) {
+            candidate_status[i] = 1;
+            continue;
+        }
+        rms_e = sqrt(rms_e / nvsat);
+        candidate_status[i] = 2;
+        candidate_rms[i] = rms_e;
+        if (rms_e > rms) continue;
+        for (j = k = 0; j < n; j++) {
+            if (j == i) continue;
+            best_vsat[j] = vsat_e[k++];
+        }
+        best_vsat[i] = 0;
+        best = i;
+        best_sol = sol_e;
+        rms = rms_e;
+        save_capture(&fde_best_capture);
+    }
+
+    /* RTKLIB's own `raim_fde` on the same inputs. */
+    sol_r.time = obs[0].time;
+    memset(azel_r, 0, sizeof(azel_r));
+    memset(vsat_r, 0, sizeof(vsat_r));
+    stat = raim_fde(obs, n, rs, dts, var, svh, nav, opt, ssat, &sol_r, azel_r, vsat_r,
+                    resp_r, msg_r);
+    if (stat != (best >= 0)) {
+        fprintf(stderr, "raim_fde status differs from its replay\n");
+        exit(1);
+    }
+    if (stat) {
+        if (memcmp(sol_r.rr, best_sol.rr, 3 * sizeof(double)) != 0 ||
+            memcmp(&sol_r.dtr[0], &best_sol.dtr[0], sizeof(double)) != 0) {
+            fprintf(stderr, "raim_fde solution differs from its replay\n");
+            exit(1);
+        }
+        for (j = 0; j < n; j++) {
+            if (vsat_r[j] != best_vsat[j]) {
+                fprintf(stderr, "raim_fde used satellites differ from its replay\n");
+                exit(1);
+            }
+        }
+        restore_capture(&fde_best_capture);
+        if (!verify_capture(&best_sol)) {
+            fprintf(stderr, "replayed raim_fde least-squares capture does not replay\n");
+            exit(1);
+        }
+    }
+
+    time2epoch(obs[0].time, ep);
+    satno2id(obs[faulted].sat, id);
+    printf("%s  {\"epoch\": [%d, %d, %d, %d, %d, %.7f], \"fault\": {\"sat\": \"%s\", "
+           "\"bias_m\": %.17g}, \"stat\": %d, ",
+           first ? "" : ",\n", (int)ep[0], (int)ep[1], (int)ep[2], (int)ep[3], (int)ep[4],
+           ep[5], id, bias_m, stat);
+    printf("\"candidates\": [");
+    for (i = 0; i < n; i++) {
+        satno2id(obs[i].sat, id);
+        printf("%s{\"sat\": \"%s\", \"status\": \"%s\", \"rms_m\": %.17g}", i ? ", " : "", id,
+               candidate_status[i] == 2 ? "solved"
+               : candidate_status[i] == 1 ? "too_few_satellites"
+                                          : "failed",
+               candidate_rms[i]);
+    }
+    printf("]");
+    if (!stat) {
+        printf(", \"excluded\": null}");
+        return;
+    }
+    satno2id(obs[best].sat, id);
+    printf(", \"excluded\": \"%s\", \"position_m\": ", id);
+    print_position(best_sol.rr);
+    ecef2pos(best_sol.rr, receiver_geodetic);
+    printf(", \"geodetic_rad_m\": [%.17g, %.17g, %.17g]", receiver_geodetic[0],
+           receiver_geodetic[1], receiver_geodetic[2]);
+    printf(", \"qr_m2\": [%.9g, %.9g, %.9g, %.9g, %.9g, %.9g]", best_sol.qr[0],
+           best_sol.qr[1], best_sol.qr[2], best_sol.qr[3], best_sol.qr[4], best_sol.qr[5]);
+    print_captured_lsq();
+    printf(", \"clock_m\": %.17g, \"used\": [", best_sol.dtr[0] * CLIGHT);
+    for (j = k = 0; j < n; j++) {
+        if (j == best) continue;
+        obs_e[k++] = obs[j];
+    }
+    snr_like_pntpos(obs_e, n - 1, ssat_out);
+    for (j = 0; j < n; j++) {
+        if (vsat_r[j]) ssat_out[obs[j].sat - 1].vs = 1;
+    }
+    for (k = 0; k < MAXSAT; k++) {
+        if (!ssat_out[k].vs) continue;
+        satno2id(k + 1, id);
+        printf("%s\"%s\"", used++ ? ", " : "", id);
+    }
+    printf("]");
+    print_used_states(obs_e, n - 1, obs[0].time, nav, opt, &best_sol, ssat_out);
+    printf("}");
+}
+
+static int run_fde(int argc, char **argv)
+{
+    obs_t obs = {0};
+    nav_t nav = {0};
+    sta_t sta = {{0}};
+    prcopt_t opt = prcopt_default;
+    int i, k, n, epoch_index, stride, first = 1;
+
+    if (argc != 8 || (stride = atoi(argv[7])) <= 0) {
+        fprintf(stderr, "usage: %s fde <label> <obs> <nav> <iono 0|1> <tropo 0|1> <stride>\n",
+                argv[0]);
+        return 2;
+    }
+    if (readrnx(argv[3], 1, "-GL1C", &obs, NULL, &sta) <= 0) {
+        fprintf(stderr, "cannot read %s\n", argv[3]);
+        return 1;
+    }
+    if (readrnx(argv[4], 1, "", NULL, &nav, NULL) <= 0) {
+        fprintf(stderr, "cannot read %s\n", argv[4]);
+        return 1;
+    }
+    sortobs(&obs);
+    uniqnav(&nav);
+
+    opt.mode = PMODE_SINGLE;
+    opt.navsys = SYS_GPS;
+    opt.nf = 1;
+    opt.elmin = 10.0 * D2R;
+    opt.sateph = EPHOPT_BRDC;
+    opt.ionoopt = argv[5][0] == '1' ? IONOOPT_BRDC : IONOOPT_OFF;
+    opt.tropopt = argv[6][0] == '1' ? TROPOPT_SAAS : TROPOPT_OFF;
+    opt.posopt[4] = 1;
+
+    printf("{\"label\": \"%s\", \"ionosphere\": %s, \"troposphere\": %s, \"stride\": %d,\n",
+           argv[2], opt.ionoopt == IONOOPT_BRDC ? "true" : "false",
+           opt.tropopt == TROPOPT_SAAS ? "true" : "false", stride);
+    printf(" \"guess\": ");
+    print_position(sta.pos);
+    printf(", \"biases_m\": [");
+    for (k = 0; k < FDE_BIAS_COUNT; k++) printf("%s%.17g", k ? ", " : "", fde_biases_m[k]);
+    printf("],\n \"cases\": [\n");
+
+    for (i = epoch_index = 0; i < obs.n; i += n, epoch_index++) {
+        obsd_t epoch[MAXOBS];
+        sol_t sol = {{0}};
+        ssat_t ssat[MAXSAT];
+        char msg[128] = "";
+        int m = 0, faulted, b;
+        for (n = 1; i + n < obs.n && timediff(obs.data[i + n].time, obs.data[i].time) == 0.0;
+             n++) {
+        }
+        if (epoch_index % stride != 0) continue;
+        for (k = 0; k < n; k++) {
+            if (satsys(obs.data[i + k].sat, NULL) != SYS_GPS || m >= MAXOBS) continue;
+            epoch[m++] = obs.data[i + k];
+        }
+        if (m < 6) {
+            fprintf(stderr, "epoch %d has %d GPS observations, fewer than raim_fde needs\n",
+                    epoch_index, m);
+            return 1;
+        }
+        memset(ssat, 0, sizeof(ssat));
+        for (k = 0; k < 3; k++) sol.rr[k] = sta.pos[k];
+        if (!pntpos(epoch, m, &nav, &opt, &sol, NULL, ssat, msg)) {
+            fprintf(stderr, "clean epoch %d does not solve: %s\n", epoch_index, msg);
+            return 1;
+        }
+        for (faulted = 0; faulted < m; faulted++) {
+            if (!ssat[epoch[faulted].sat - 1].vs) continue;
+            if (epoch[faulted].P[0] == 0.0) {
+                fprintf(stderr, "used satellite without an L1 pseudorange\n");
+                return 1;
+            }
+            for (b = 0; b < FDE_BIAS_COUNT; b++) {
+                obsd_t faulted_epoch[MAXOBS];
+                memcpy(faulted_epoch, epoch, sizeof(obsd_t) * m);
+                faulted_epoch[faulted].P[0] += fde_biases_m[b];
+                fde_case(faulted_epoch, m, faulted, fde_biases_m[b], &nav, &opt, first);
+                first = 0;
+            }
+        }
+    }
+    printf("\n ]}\n");
+    freeobs(&obs);
+    freenav(&nav, 0xFF);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     obs_t obs = {0};
@@ -274,6 +602,7 @@ int main(int argc, char **argv)
     double guesses[4][3] = {{0}};
     int i, j, k, n, first_case = 1;
 
+    if (argc >= 2 && strcmp(argv[1], "fde") == 0) return run_fde(argc, argv);
     if (argc != 6) {
         fprintf(stderr, "usage: %s <label> <obs> <nav> <iono 0|1> <tropo 0|1>\n", argv[0]);
         return 2;

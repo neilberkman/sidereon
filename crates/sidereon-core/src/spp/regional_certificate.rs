@@ -404,6 +404,7 @@ mod tests {
                 .collect(),
             rejected: Vec::new(),
             weights: vec![1.0; 6],
+            variances_m2: vec![1.0; 6],
             lines_of_sight: vec![
                 LineOfSight::new(1.0, 0.0, 0.0),
                 LineOfSight::new(-1.0, 0.0, 0.0),

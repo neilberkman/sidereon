@@ -2571,7 +2571,7 @@ mod tests {
         };
         let mut fde = quality::FdeOptions::new(quality::RaimOptions::default(), 0);
         fde.raim = quality::RaimOptions::default();
-        fde.max_iterations = 0;
+        fde.max_exclusions = 0;
         let mut options =
             quality::FdeSppOptions::new(fde.clone(), quality::SolutionValidationOptions::default());
         options.fde = fde;

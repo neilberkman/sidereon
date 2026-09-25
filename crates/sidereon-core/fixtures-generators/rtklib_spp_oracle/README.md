@@ -1,4 +1,4 @@
-# RTKLIB SPP selection oracle
+# RTKLIB SPP selection and RAIM FDE oracles
 
 `generate.sh` writes `crates/sidereon-core/tests/fixtures/rtk/rtklib_spp_selection_oracle.json` by running the pinned RTKLIB `pntpos` implementation over the checked-in ESBC and WTZR observation fixtures. Each run records four initial receiver positions for each observation epoch, including RTKLIB's solution, covariance, used satellites, and satellite-state inputs. At each returned solution, the helper reevaluates unmodified RTKLIB `rescode` to record aligned residuals, design rows, and effective variances at that exact receiver state; it does not reuse the pre-update `ssat.resp` values.
 
@@ -32,4 +32,12 @@ The script verifies the checkout revision and refuses a dirty RTKLIB `src` tree.
 - Runs: ESBC with ionosphere/troposphere, troposphere only, and ionosphere only; WTZR with ionosphere/troposphere and ionosphere only.
 - Initial states: geocentre, the RINEX approximate position, and that position rotated 12 degrees east or west.
 
-The C oracle runs with GPS L1 C/A, broadcast ephemerides, a 10-degree elevation mask, and no RAIM exclusion. The helper compiles the pinned, unmodified `pntpos.c` into its own translation unit to call its static `rescode` at each returned solution; `pntpos.c` is therefore omitted from the separate object list. JSON records its commit identifier and hashes the NAV/OBS inputs; the generator source and compiler are not included in those input hashes.
+The selection runs use GPS L1 C/A, broadcast ephemerides, a 10-degree elevation mask, and no RAIM exclusion. The helper compiles the pinned, unmodified `pntpos.c` into its own translation unit to call its static `rescode` at each returned solution; `pntpos.c` is therefore omitted from the separate object list. JSON records its commit identifier and hashes the NAV/OBS inputs; the generator source and compiler are not included in those input hashes.
+
+## RAIM FDE oracle
+
+`generate.sh` also writes `crates/sidereon-core/tests/fixtures/rtk/rtklib_spp_fde_oracle.json` from `rtklib_spp_oracle fde`. It takes every twelfth epoch of the ESBC fixture with the ionosphere and troposphere corrected, solves it with the unmodified `pntpos` from the approximate position, and then, for each satellite that solve used, adds +5000 m and then +300 m to that satellite's L1 pseudorange and hands the faulted epoch to RTKLIB's own `raim_fde` with the `satposs` states `pntpos` would compute.
+
+demo5's `pntpos` reaches `raim_fde` only when `estpos` fails, because `valsol`'s chi-square rejection is commented out, so the oracle calls `raim_fde` directly. Its exclusion is the reference, not whether demo5 would have run it.
+
+`raim_fde` does not report which satellite it removed or its final least-squares state. The helper replays its loop, calling the unmodified `estpos` in the same order with the same shared solution state, and requires the replay to equal `raim_fde`'s result bit for bit (position, clock and used satellites) before it records the excluded satellite, every candidate's status and residual RMS, and the chosen solution in the same form as a selection case, including the captured least-squares state and the satellite rows at the solution. The Rust test `fde_spp_matches_rtklib_raim_fde_on_faulted_epochs` requires `fde_spp` to exclude the same satellite in every case and certifies its solution against RTKLIB's with the selection oracle's endpoint certificate.

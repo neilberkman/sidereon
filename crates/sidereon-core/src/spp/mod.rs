@@ -384,6 +384,19 @@ pub struct ReceiverSolution {
     /// Post-fit residuals in meters, in `used_sats` order (unweighted
     /// `P_meas - P_hat`).
     pub residuals_m: Vec<f64>,
+    /// The pseudorange error variance of each used satellite, square metres, in
+    /// `used_sats` order: the RTKLIB `rescode` variance the solve weighted the
+    /// satellite by (ephemeris, code-bias, ionosphere, troposphere and code-error
+    /// terms), taken at the selection the solution reports. Residual chi-square
+    /// fault detection standardizes `residuals_m` by these, as RTKLIB `valsol`
+    /// forms `sum (v / sigma)^2`.
+    pub pseudorange_variances_m2: Vec<f64>,
+    /// The weight each used satellite carried in the reported solve, in
+    /// `used_sats` order, inverse square metres: `1 / pseudorange_variances_m2`
+    /// on the least-squares path, and that inverse variance times the final Huber
+    /// factor on the robust path. `position_covariance` is `(H^T W H)^-1` with
+    /// these weights.
+    pub weights: Vec<f64>,
     /// The satellites that contributed to the solve, ascending id order.
     pub used_sats: Vec<GnssSatelliteId>,
     /// The excluded satellites, each with its reason.
@@ -1855,6 +1868,10 @@ pub(crate) struct Selection {
     /// pseudorange variance ([`pseudorange_variance_m2`]) at the state the selection was
     /// made at.
     pub weights: Vec<f64>,
+    /// The pseudorange variance ([`pseudorange_variance_m2`]) per used satellite,
+    /// index-aligned to `used`, square metres: the value `weights` inverts, kept
+    /// as computed.
+    pub variances_m2: Vec<f64>,
     /// Unit line of sight from the receiver to the satellite position the range
     /// is formed from, per used satellite, index-aligned to `used`.
     pub lines_of_sight: Vec<LineOfSight>,
@@ -1929,6 +1946,7 @@ fn select_at_with_query_memo(
     let mut used = Vec::new();
     let mut rejected = Vec::new();
     let mut weights = Vec::new();
+    let mut variances_m2 = Vec::new();
     let mut lines_of_sight = Vec::new();
     let mut residuals_m = Vec::new();
 
@@ -2033,6 +2051,7 @@ fn select_at_with_query_memo(
         );
         used.push(sat);
         weights.push(1.0 / variance_m2);
+        variances_m2.push(variance_m2);
         lines_of_sight.push(line_of_sight(model.sat_rot_ecef_m, rx_ecef_m));
         residuals_m.push(ob.pseudorange_m - model.p_hat_m);
     }
@@ -2041,6 +2060,7 @@ fn select_at_with_query_memo(
         used,
         rejected,
         weights,
+        variances_m2,
         lines_of_sight,
         residuals_m,
     }
@@ -2997,6 +3017,7 @@ struct FinalSet {
     used: Vec<GnssSatelliteId>,
     rejected: Vec<RejectedSat>,
     weights: Vec<f64>,
+    variances_m2: Vec<f64>,
     lines_of_sight: Vec<LineOfSight>,
     residuals_m: Vec<f64>,
 }
@@ -3162,6 +3183,7 @@ fn solve_tracked(
         used: settled.used,
         rejected: settled.rejected,
         weights: settled.weights,
+        variances_m2: settled.variances_m2,
         lines_of_sight: settled.lines_of_sight,
         residuals_m: settled.residuals_m,
     };
@@ -3258,6 +3280,7 @@ fn solve_tracked(
                             used: next.used.clone(),
                             rejected: next.rejected.clone(),
                             weights: next.weights.clone(),
+                            variances_m2: next.variances_m2.clone(),
                             lines_of_sight: next.lines_of_sight.clone(),
                             residuals_m: next.residuals_m.clone(),
                         };
@@ -3294,6 +3317,7 @@ fn solve_tracked(
                         used: sel.used,
                         rejected: sel.rejected,
                         weights: eff,
+                        variances_m2: sel.variances_m2,
                         lines_of_sight,
                         residuals_m,
                     },
@@ -3306,6 +3330,7 @@ fn solve_tracked(
                         used: next.used.clone(),
                         rejected: next.rejected.clone(),
                         weights: next.weights.clone(),
+                        variances_m2: next.variances_m2.clone(),
                         lines_of_sight: next.lines_of_sight.clone(),
                         residuals_m: next.residuals_m.clone(),
                     },
@@ -3433,6 +3458,8 @@ fn solve_tracked(
         system_tdops,
         position_covariance,
         residuals_m: final_set.residuals_m,
+        pseudorange_variances_m2: final_set.variances_m2,
+        weights: final_set.weights,
         used_sats: final_set.used,
         rejected_sats: final_set.rejected,
         geometry_quality,

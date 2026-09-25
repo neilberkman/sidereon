@@ -334,6 +334,21 @@ fn assert_solution_bits_eq(left: &super::ReceiverSolution, right: &super::Receiv
             .map(|value| value.to_bits())
             .collect::<Vec<_>>()
     );
+    for (left, right) in [
+        (
+            &left.pseudorange_variances_m2,
+            &right.pseudorange_variances_m2,
+        ),
+        (&left.weights, &right.weights),
+    ] {
+        assert_eq!(
+            left.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            right
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
     assert_eq!(left.used_sats, right.used_sats);
     assert_eq!(left.rejected_sats, right.rejected_sats);
     assert_eq!(left.geometry_quality, right.geometry_quality);
@@ -5049,4 +5064,319 @@ fn a_pierce_point_one_probe_inside_the_grid_edge_settles() {
     assert!(solution.rejected_sats.is_empty());
     assert_eq!(solution.metadata.status, Status::SelectionSettled);
     assert!(position_error_m(&solution, receiver) < 1.0e-6);
+}
+
+// ---------------------------------------------------------------------------
+// RAIM FDE over a self-consistent set.
+// ---------------------------------------------------------------------------
+
+/// The eight GPS satellites of the L0 trace epoch the consistent scenario uses.
+/// G08 carries a redundancy number of about 0.17 in this geometry: most of a
+/// fault on it goes into the position and clock, and what reaches the
+/// residuals is spread over the other seven.
+const CONSISTENT_PRNS: [u8; 8] = [8, 10, 16, 18, 20, 21, 26, 27];
+
+fn gps_sat(prn: u8) -> GnssSatelliteId {
+    GnssSatelliteId::new(GnssSystem::Gps, prn).expect("valid GPS satellite")
+}
+
+/// The L0 trace epoch reduced to [`CONSISTENT_PRNS`], with no atmospheric
+/// corrections, and its pseudoranges made self-consistent: each round subtracts
+/// the post-fit residuals of the solve from the pseudoranges, and the rounds stop
+/// when the largest residual no longer falls. Returns the consistent inputs and
+/// their solution, which is the truth the faulted cases are measured against.
+fn consistent_l0_scenario(eph: &crate::sp3::Sp3) -> (SolveInputs, super::ReceiverSolution) {
+    let doc = read_fixture("spp_trace_L0_minimal.json");
+    let mut inputs = solve_inputs(&load_inputs(&doc, "L0_minimal"));
+    inputs.observations.retain(|ob| {
+        ob.satellite_id.system == GnssSystem::Gps && CONSISTENT_PRNS.contains(&ob.satellite_id.prn)
+    });
+    assert_eq!(inputs.observations.len(), CONSISTENT_PRNS.len());
+
+    let largest = |solution: &super::ReceiverSolution| {
+        solution
+            .residuals_m
+            .iter()
+            .fold(0.0_f64, |acc, residual| acc.max(residual.abs()))
+    };
+    let mut best = solve(eph, &inputs, false).expect("L0 subset solves");
+    let mut best_inputs = inputs.clone();
+    for _ in 0..30 {
+        assert_eq!(best.used_sats.len(), CONSISTENT_PRNS.len());
+        let mut next = best_inputs.clone();
+        for ob in &mut next.observations {
+            let index = best
+                .used_sats
+                .iter()
+                .position(|sat| *sat == ob.satellite_id)
+                .expect("every satellite is used");
+            ob.pseudorange_m -= best.residuals_m[index];
+        }
+        let solution = solve(eph, &next, false).expect("consistent subset solves");
+        if largest(&solution) >= largest(&best) {
+            break;
+        }
+        best = solution;
+        best_inputs = next;
+    }
+    // The consistent set fits to the solver's own step tolerance; a residual
+    // left above a micrometre would mean the construction did not converge.
+    assert!(
+        largest(&best) < 1.0e-6,
+        "largest residual {} m",
+        largest(&best)
+    );
+    (best_inputs, best)
+}
+
+fn with_bias(inputs: &SolveInputs, satellite: GnssSatelliteId, bias_m: f64) -> SolveInputs {
+    let mut faulted = inputs.clone();
+    faulted
+        .observations
+        .iter_mut()
+        .find(|ob| ob.satellite_id == satellite)
+        .expect("faulted satellite is observed")
+        .pseudorange_m += bias_m;
+    faulted
+}
+
+fn without(inputs: &SolveInputs, satellite: GnssSatelliteId) -> SolveInputs {
+    let mut subset = inputs.clone();
+    subset
+        .observations
+        .retain(|ob| ob.satellite_id != satellite);
+    subset
+}
+
+/// Distance bound, metres, between the solve of a consistent seven-satellite
+/// subset and the consistent eight-satellite truth. Both solve the same
+/// zero-residual system, so both stop within one final step of the same fixed
+/// point; the step that ends a solve is below 1e-4 m and Gauss-Newton at zero
+/// residual contracts it quadratically (by about the step over the 2e7 m
+/// satellite range). What is left is f64 rounding of 6e6 m coordinates (about
+/// 1e-9 m per operation) through the solve, far below this bound.
+const CONSISTENT_RECOVERY_BOUND_M: f64 = 1.0e-6;
+
+/// +5000 m on G08: the largest weighted residual of the faulted solve sits on a
+/// healthy satellite, so removing it (the former rule) kept the fault and
+/// ended unresolved. RTKLIB's leave-one-out rule removes G08 and recovers the
+/// consistent position.
+#[test]
+fn fde_spp_excludes_a_low_redundancy_fault_the_largest_residual_hides() {
+    use crate::quality::{fde_spp, raim_for_solution, FdeSppOptions, RaimOptions};
+
+    let eph = sp3();
+    let (clean, truth) = consistent_l0_scenario(&eph);
+    let g08 = gps_sat(8);
+    let faulted = with_bias(&clean, g08, 5_000.0);
+
+    let flagged = solve(&eph, &faulted, false).expect("faulted set solves");
+    let detection = raim_for_solution(&flagged, &RaimOptions::default()).expect("raim");
+    assert!(detection.fault_detected);
+    assert_ne!(detection.worst_sat.as_deref(), Some("G08"));
+
+    let result = fde_spp(&eph, &faulted, false, &FdeSppOptions::default())
+        .expect("the fault on G08 is identified");
+    assert_eq!(result.excluded, vec!["G08".to_string()]);
+    assert_eq!(result.iterations, 1);
+    assert!(!result.raim.fault_detected);
+    assert!(result.raim.testable);
+    assert_solution_bits_eq(
+        &result.solution,
+        &solve(&eph, &without(&faulted, g08), false).expect("solve without G08"),
+    );
+    let error_m = position_error_m(&result.solution, truth.position.as_array());
+    assert!(
+        error_m < CONSISTENT_RECOVERY_BOUND_M,
+        "recovered position is {error_m} m from the consistent solution"
+    );
+}
+
+/// A fault on each satellite of the consistent set, at three sizes, is
+/// excluded and the consistent position recovered. Every satellite is
+/// identifiable here: with eight satellites and four parameters, each
+/// seven-satellite subset keeps three degrees of freedom, so a fault left in
+/// any subset shows in its residuals while the subset without the faulted
+/// satellite fits exactly.
+#[test]
+fn fde_spp_recovers_a_fault_on_every_satellite_of_the_consistent_set() {
+    use crate::quality::{fde_spp, FdeSppOptions};
+
+    let eph = sp3();
+    let (clean, truth) = consistent_l0_scenario(&eph);
+    for prn in CONSISTENT_PRNS {
+        let satellite = gps_sat(prn);
+        for bias_m in [5_000.0, 300.0, -300.0] {
+            let faulted = with_bias(&clean, satellite, bias_m);
+            let result = fde_spp(&eph, &faulted, false, &FdeSppOptions::default())
+                .unwrap_or_else(|error| panic!("{satellite} {bias_m} m: {error:?}"));
+            assert_eq!(
+                result.excluded,
+                vec![satellite.to_string()],
+                "{satellite} {bias_m} m"
+            );
+            assert!(!result.raim.fault_detected, "{satellite} {bias_m} m");
+            assert_solution_bits_eq(
+                &result.solution,
+                &solve(&eph, &without(&faulted, satellite), false).expect("leave-one-out"),
+            );
+            let error_m = position_error_m(&result.solution, truth.position.as_array());
+            assert!(
+                error_m < CONSISTENT_RECOVERY_BOUND_M,
+                "{satellite} {bias_m} m: {error_m} m from the consistent solution"
+            );
+        }
+    }
+}
+
+/// `fde_spp` against RTKLIB demo5's own `raim_fde` on real data: every twelfth
+/// ESBC epoch with each used satellite faulted by +5000 m and by +300 m. In
+/// every case core's detection fires, `fde_spp` excludes the satellite RTKLIB
+/// excludes, and its solution is certified against RTKLIB's with the
+/// selection oracle's independent endpoint certificate.
+#[test]
+fn fde_spp_matches_rtklib_raim_fde_on_faulted_epochs() {
+    use crate::ephemeris::BroadcastEphemeris;
+    use crate::positioning::{spp_inputs_from_rinex_obs, RinexSppOptions};
+    use crate::quality::{
+        fde_spp, raim_for_solution, FdeError, FdeSppOptions, FdeUnresolvedReason, RaimOptions,
+    };
+    use crate::rinex::observations::ObservationFile;
+
+    let oracle = read_fixture("rtk/rtklib_spp_fde_oracle.json");
+    assert_eq!(
+        oracle["rtklib"].as_str(),
+        Some("rtklibexplorer/RTKLIB demo5 75a2e56275485b21a67bd35bc94bbeb8936e1a74")
+    );
+    let sha256 = |bytes: &[u8]| {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(bytes))
+    };
+    let nav_name = oracle["nav"].as_str().expect("nav");
+    let nav = std::fs::read_to_string(fixture_path(nav_name)).expect("read nav fixture");
+    assert_eq!(
+        oracle["input_sha256"]["nav"].as_str(),
+        Some(sha256(nav.as_bytes()).as_str())
+    );
+    let obs_name = oracle["obs"].as_str().expect("obs");
+    let obs_text = std::fs::read_to_string(fixture_path(obs_name)).expect("read obs fixture");
+    assert_eq!(
+        oracle["input_sha256"]["obs"].as_str(),
+        Some(sha256(obs_text.as_bytes()).as_str())
+    );
+    let store = BroadcastEphemeris::from_nav(&nav).expect("parse nav fixture");
+    let obs = ObservationFile::parse(&obs_text).expect("parse obs fixture");
+
+    let run = &oracle["run"];
+    assert_eq!(run["label"].as_str(), Some("esbc_iono_tropo"));
+    assert_eq!(run["ionosphere"].as_bool(), Some(true));
+    assert_eq!(run["troposphere"].as_bool(), Some(true));
+    let stride = run["stride"].as_u64().expect("stride") as usize;
+    let biases: Vec<f64> = run["biases_m"]
+        .as_array()
+        .expect("biases_m")
+        .iter()
+        .map(|bias| bias.as_f64().expect("bias"))
+        .collect();
+    assert_eq!(biases, vec![5000.0, 300.0]);
+    let guess = num3(&run["guess"]);
+    let policy = SignalPolicy {
+        codes: [(GnssSystem::Gps, vec!["C1C".to_string()])]
+            .into_iter()
+            .collect(),
+    };
+    let options = RinexSppOptions::new(policy)
+        .with_corrections(Corrections::IONO_TROPO)
+        .with_initial_guess([guess[0], guess[1], guess[2], 0.0]);
+    let epochs = spp_inputs_from_rinex_obs(&obs, &store, &options).expect("assemble");
+    assert_eq!(epochs.len(), 120);
+
+    let rtklib_cases = run["cases"].as_array().expect("cases");
+    let mut consumed = 0usize;
+    let mut faulted_satellite_excluded = 0usize;
+    let mut certificate_failures: std::collections::BTreeMap<String, (usize, String)> =
+        std::collections::BTreeMap::new();
+    for epoch in epochs.iter().step_by(stride) {
+        let t = &epoch.epoch;
+        let key = format!(
+            "{}-{:02}-{:02}T{:02}:{:02}:{:010.7}",
+            t.year, t.month, t.day, t.hour, t.minute, t.second
+        );
+        let clean = solve(&store, &epoch.inputs, false).expect("clean epoch solves");
+        let epoch_cases: Vec<&Value> = rtklib_cases
+            .iter()
+            .filter(|case| {
+                let e = case["epoch"].as_array().expect("epoch");
+                e[0].as_i64() == Some(i64::from(t.year))
+                    && e[1].as_i64() == Some(i64::from(t.month))
+                    && e[2].as_i64() == Some(i64::from(t.day))
+                    && e[3].as_i64() == Some(i64::from(t.hour))
+                    && e[4].as_i64() == Some(i64::from(t.minute))
+                    && e[5].as_f64() == Some(t.second)
+            })
+            .collect();
+        assert_eq!(
+            epoch_cases.len(),
+            clean.used_sats.len() * biases.len(),
+            "{key}: one RTKLIB case per used satellite and bias"
+        );
+        for case in epoch_cases {
+            consumed += 1;
+            let fault_sat = parse_prn(case["fault"]["sat"].as_str().expect("fault sat"));
+            let bias_m = case["fault"]["bias_m"].as_f64().expect("fault bias");
+            let context = format!("{key} {fault_sat} {bias_m:+} m");
+            assert!(clean.used_sats.contains(&fault_sat), "{context}");
+            let faulted = with_bias(&epoch.inputs, fault_sat, bias_m);
+
+            let flagged = solve(&store, &faulted, false).expect("faulted epoch solves");
+            let detection = raim_for_solution(&flagged, &RaimOptions::default()).expect("raim");
+            assert!(detection.fault_detected, "{context}: detection");
+
+            let (excluded, solution) =
+                match fde_spp(&store, &faulted, false, &FdeSppOptions::default()) {
+                    Ok(result) => (result.excluded, Some(result.solution)),
+                    Err(FdeError::FaultUnresolved(unresolved)) => {
+                        if unresolved.reason == FdeUnresolvedReason::NoAdmissibleExclusion {
+                            (Vec::new(), None)
+                        } else {
+                            (unresolved.excluded, Some(unresolved.solution))
+                        }
+                    }
+                    Err(error) => panic!("{context}: {error:?}"),
+                };
+            let Some(rtklib_excluded) = case["excluded"].as_str() else {
+                assert_eq!(case["stat"], 0, "{context}");
+                assert!(excluded.is_empty(), "{context}: RTKLIB excluded nothing");
+                continue;
+            };
+            assert_eq!(case["stat"], 1, "{context}");
+            assert_eq!(
+                excluded,
+                vec![rtklib_excluded.to_string()],
+                "{context}: excluded satellite"
+            );
+            let excluded_sat = parse_prn(rtklib_excluded);
+            if excluded_sat == fault_sat {
+                faulted_satellite_excluded += 1;
+            }
+            let solution = solution.expect("an exclusion carries its solution");
+            let reduced = without(&faulted, excluded_sat);
+            if let Err(error) =
+                super::oracle_certificate::verify_case(&store, &reduced, case, &solution)
+            {
+                let failure = certificate_failures
+                    .entry(error.to_string())
+                    .or_insert_with(|| (0, context.clone()));
+                failure.0 += 1;
+            }
+        }
+    }
+    assert_eq!(consumed, rtklib_cases.len(), "every RTKLIB case consumed");
+    eprintln!(
+        "{consumed} faulted cases; RTKLIB and core exclude the faulted satellite in {faulted_satellite_excluded}"
+    );
+    assert!(
+        certificate_failures.is_empty(),
+        "certificate failures (count, first case): {certificate_failures:#?}"
+    );
 }
