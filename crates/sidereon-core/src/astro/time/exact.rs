@@ -16,6 +16,9 @@
 //! leaves it.
 
 use std::cmp::Ordering;
+use std::sync::Arc;
+
+use smallvec::SmallVec;
 
 use super::civil::days_in_month;
 use super::scales::julian_day_number;
@@ -141,7 +144,7 @@ impl ExactEpoch {
     pub fn from_binary_j2000_seconds(seconds: f64) -> Option<ExactEpochQuery> {
         Some(ExactEpochQuery {
             epoch: Self::J2000,
-            offset: ExactSeconds::from_f64(seconds)?,
+            offset: Arc::new(ExactSeconds::from_f64(seconds)?),
         })
     }
 
@@ -150,7 +153,7 @@ impl ExactEpoch {
     pub fn query(self) -> ExactEpochQuery {
         ExactEpochQuery {
             epoch: self,
-            offset: ExactSeconds::from_integer(0),
+            offset: Arc::new(ExactSeconds::from_integer(0)),
         }
     }
 
@@ -404,6 +407,9 @@ impl ExactEpoch {
 
     /// The epoch as exact seconds since J2000.
     pub(crate) fn exact_seconds(self) -> ExactSeconds {
+        if self.attoseconds == 0 && self.residue.is_zero() {
+            return ExactSeconds::from_integer(i128::from(self.seconds));
+        }
         let on_grid = ExactSeconds::from_decimal(self.total_attoseconds(), 18);
         if self.residue.is_zero() {
             on_grid
@@ -437,18 +443,41 @@ impl ExactEpoch {
 #[derive(Debug, Clone)]
 pub struct ExactEpochQuery {
     epoch: ExactEpoch,
-    offset: ExactSeconds,
+    offset: Arc<ExactSeconds>,
 }
 
 impl PartialEq for ExactEpochQuery {
     fn eq(&self, other: &Self) -> bool {
-        self.exact_seconds().sub(&other.exact_seconds()).sign() == Ordering::Equal
+        if self.epoch == other.epoch {
+            if Arc::ptr_eq(&self.offset, &other.offset) {
+                return true;
+            }
+            if self.offset.binary_places == other.offset.binary_places
+                && self.offset.decimal_places == other.offset.decimal_places
+            {
+                return self.offset.same_value_at_same_denominator(&other.offset);
+            }
+            if let Some(equal) = self.offset.same_value_at_common_denominator(&other.offset) {
+                return equal;
+            }
+        }
+        self.equals_with_wide_arithmetic(other)
     }
 }
 
 impl Eq for ExactEpochQuery {}
 
 impl ExactEpochQuery {
+    pub(crate) fn shares_representation(&self, other: &Self) -> bool {
+        self.epoch == other.epoch && Arc::ptr_eq(&self.offset, &other.offset)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn equals_with_wide_arithmetic(&self, other: &Self) -> bool {
+        self.exact_seconds().sub(&other.exact_seconds()).sign() == Ordering::Equal
+    }
+
     fn exact_seconds(&self) -> ExactSeconds {
         self.epoch.exact_seconds().add(&self.offset)
     }
@@ -456,20 +485,23 @@ impl ExactEpochQuery {
     /// Add a finite binary `f64` offset exactly.
     #[must_use]
     pub fn checked_add_binary_seconds(mut self, seconds: f64) -> Option<Self> {
-        self.offset = self.offset.add(&ExactSeconds::from_f64(seconds)?);
+        self.offset = Arc::new(self.offset.add(&ExactSeconds::from_f64(seconds)?));
         Some(self)
     }
 
     /// Subtract a finite binary `f64` offset exactly.
     #[must_use]
     pub fn checked_sub_binary_seconds(mut self, seconds: f64) -> Option<Self> {
-        self.offset = self.offset.sub(&ExactSeconds::from_f64(seconds)?);
+        self.offset = Arc::new(self.offset.sub(&ExactSeconds::from_f64(seconds)?));
         Some(self)
     }
 
     /// Seconds from `earlier` to this query, rounded once to `f64`.
     #[must_use]
     pub fn seconds_since(&self, earlier: ExactEpoch) -> f64 {
+        if self.epoch == earlier {
+            return self.offset.to_f64();
+        }
         self.epoch
             .exact_seconds()
             .sub(&earlier.exact_seconds())
@@ -480,6 +512,9 @@ impl ExactEpochQuery {
     /// Seconds from another query, including both exact offset expressions.
     #[must_use]
     pub fn seconds_since_query(&self, earlier: &Self) -> f64 {
+        if self.epoch == earlier.epoch {
+            return self.offset.sub(&earlier.offset).to_f64();
+        }
         self.epoch
             .exact_seconds()
             .sub(&earlier.epoch.exact_seconds())
@@ -491,6 +526,18 @@ impl ExactEpochQuery {
     /// Compare the exact elapsed interval from `earlier` with a shortest-decimal
     /// threshold. NaN has no ordering; infinities compare as infinite thresholds.
     pub(crate) fn compare_interval_query(&self, earlier: &Self, seconds: f64) -> Option<Ordering> {
+        self.compare_interval_seconds(earlier.exact_seconds(), seconds)
+    }
+
+    pub(crate) fn compare_interval_binary_j2000_seconds(
+        &self,
+        earlier_j2000_s: f64,
+        seconds: f64,
+    ) -> Option<Ordering> {
+        self.compare_interval_seconds(ExactSeconds::from_f64(earlier_j2000_s)?, seconds)
+    }
+
+    fn compare_interval_seconds(&self, earlier: ExactSeconds, seconds: f64) -> Option<Ordering> {
         if seconds.is_nan() {
             return None;
         }
@@ -501,12 +548,7 @@ impl ExactEpochQuery {
                 Ordering::Greater
             });
         };
-        Some(
-            self.exact_seconds()
-                .sub(&earlier.exact_seconds())
-                .sub(&threshold)
-                .sign(),
-        )
+        Some(self.exact_seconds().sub(&earlier).sub(&threshold).sign())
     }
 
     /// Compare the exact absolute distances from this query to two other queries.
@@ -665,14 +707,37 @@ fn power_of_two(exponent: i64) -> f64 {
 
 /// A non-negative integer of any width: little-endian 64-bit limbs with no zero
 /// limb at the top (zero has no limbs).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Natural(Vec<u64>);
+#[derive(Debug, Clone, Default, Eq)]
+struct Natural(SmallVec<[u64; 4]>);
+
+impl PartialEq for Natural {
+    fn eq(&self, other: &Self) -> bool {
+        let left = self.0.as_slice();
+        let right = other.0.as_slice();
+        if left.len() != right.len() {
+            return false;
+        }
+        match left.len() {
+            0 => true,
+            1 => left[0] == right[0],
+            2 => left[0] == right[0] && left[1] == right[1],
+            _ => left == right,
+        }
+    }
+}
 
 impl Natural {
     fn from_u128(value: u128) -> Self {
-        let mut natural = Self(vec![value as u64, (value >> 64) as u64]);
-        natural.trim();
-        natural
+        if value == 0 {
+            return Self::default();
+        }
+        let mut limbs = SmallVec::new();
+        limbs.push(value as u64);
+        let upper = (value >> 64) as u64;
+        if upper != 0 {
+            limbs.push(upper);
+        }
+        Self(limbs)
     }
 
     fn to_u128(&self) -> Option<u128> {
@@ -745,7 +810,10 @@ impl Natural {
         }
         let limbs = (bits / 64) as usize;
         let within = (bits % 64) as u32;
-        let mut out = vec![0; limbs];
+        let mut out = SmallVec::new();
+        for _ in 0..limbs {
+            out.push(0);
+        }
         if within == 0 {
             out.extend_from_slice(&self.0);
         } else {
@@ -777,7 +845,7 @@ impl Natural {
         } else {
             (other, self)
         };
-        let mut out = Vec::with_capacity(long.0.len() + 1);
+        let mut out = SmallVec::new();
         let mut carry = false;
         for (index, &limb) in long.0.iter().enumerate() {
             let (sum, first) = limb.overflowing_add(short.0.get(index).copied().unwrap_or(0));
@@ -889,6 +957,82 @@ pub(crate) struct ExactSeconds {
 }
 
 impl ExactSeconds {
+    fn same_representation(&self, other: &Self) -> bool {
+        self.negative == other.negative
+            && self.magnitude == other.magnitude
+            && self.binary_places == other.binary_places
+            && self.decimal_places == other.decimal_places
+    }
+
+    fn same_value_at_same_denominator(&self, other: &Self) -> bool {
+        if self.magnitude.is_zero() || other.magnitude.is_zero() {
+            return self.magnitude.is_zero() && other.magnitude.is_zero();
+        }
+        self.same_representation(other)
+    }
+
+    fn aligned_magnitude_u128(&self, binary_places: u32, decimal_places: u32) -> Option<u128> {
+        let magnitude = self.magnitude.to_u128()?;
+        if magnitude == 0 {
+            return Some(0);
+        }
+        let binary_shift = binary_places.checked_sub(self.binary_places)?;
+        let shifted_magnitude = magnitude.checked_shl(binary_shift)?;
+        if shifted_magnitude.checked_shr(binary_shift)? != magnitude {
+            return None;
+        }
+        let decimal_shift = decimal_places.checked_sub(self.decimal_places)?;
+        if decimal_shift == 0 {
+            return Some(shifted_magnitude);
+        }
+        shifted_magnitude.checked_mul(10_u128.checked_pow(decimal_shift)?)
+    }
+
+    fn same_value_at_common_denominator(&self, other: &Self) -> Option<bool> {
+        if self.magnitude.is_zero() || other.magnitude.is_zero() {
+            return Some(self.magnitude.is_zero() && other.magnitude.is_zero());
+        }
+        if self.negative != other.negative {
+            return Some(false);
+        }
+        if self.decimal_places == other.decimal_places {
+            let self_magnitude = self.magnitude.to_u128()?;
+            let other_magnitude = other.magnitude.to_u128()?;
+            if self.binary_places == other.binary_places {
+                return Some(self_magnitude == other_magnitude);
+            }
+            let (finer_magnitude, binary_shift, coarser_magnitude) =
+                if self.binary_places > other.binary_places {
+                    (
+                        self_magnitude,
+                        self.binary_places - other.binary_places,
+                        other_magnitude,
+                    )
+                } else {
+                    (
+                        other_magnitude,
+                        other.binary_places - self.binary_places,
+                        self_magnitude,
+                    )
+                };
+            if binary_shift >= u128::BITS {
+                return Some(false);
+            }
+            let Some(reduced_magnitude) = finer_magnitude.checked_shr(binary_shift) else {
+                return Some(false);
+            };
+            return Some(
+                reduced_magnitude == coarser_magnitude
+                    && reduced_magnitude.checked_shl(binary_shift) == Some(finer_magnitude),
+            );
+        }
+        let binary_places = self.binary_places.max(other.binary_places);
+        let decimal_places = self.decimal_places.max(other.decimal_places);
+        let left = self.aligned_magnitude_u128(binary_places, decimal_places)?;
+        let right = other.aligned_magnitude_u128(binary_places, decimal_places)?;
+        Some(left == right)
+    }
+
     /// A whole number.
     pub(crate) fn from_integer(value: i128) -> Self {
         Self::from_decimal(value, 0)
@@ -937,6 +1081,9 @@ impl ExactSeconds {
         if !value.is_finite() {
             return None;
         }
+        if value == 0.0 {
+            return Some(Self::from_integer(0));
+        }
         let text = format!("{value}");
         let decimal = ShortestDecimal::parse(&text);
         let mut magnitude = Natural::default();
@@ -964,8 +1111,39 @@ impl ExactSeconds {
 
     /// `self + other`, exactly.
     pub(crate) fn add(&self, other: &Self) -> Self {
+        if self.magnitude.is_zero() {
+            return other.clone();
+        }
+        if other.magnitude.is_zero() {
+            return self.clone();
+        }
         let binary_places = self.binary_places.max(other.binary_places);
         let decimal_places = self.decimal_places.max(other.decimal_places);
+        if let (Some(left), Some(right)) = (
+            self.aligned_magnitude_u128(binary_places, decimal_places),
+            other.aligned_magnitude_u128(binary_places, decimal_places),
+        ) {
+            let (negative, magnitude) = if self.negative == other.negative {
+                let Some(sum) = left.checked_add(right) else {
+                    return self.add_wide(other, binary_places, decimal_places);
+                };
+                (self.negative, sum)
+            } else if left < right {
+                (other.negative, right - left)
+            } else {
+                (self.negative, left - right)
+            };
+            return Self {
+                negative: negative && magnitude != 0,
+                magnitude: Natural::from_u128(magnitude),
+                binary_places,
+                decimal_places,
+            };
+        }
+        self.add_wide(other, binary_places, decimal_places)
+    }
+
+    fn add_wide(&self, other: &Self, binary_places: u32, decimal_places: u32) -> Self {
         let left = self.magnitude_over(binary_places, decimal_places);
         let right = other.magnitude_over(binary_places, decimal_places);
         let (negative, magnitude) = if self.negative == other.negative {
@@ -1250,6 +1428,440 @@ mod tests {
     }
 
     #[test]
+    fn checked_u128_sum_matches_independent_scaled_integer() {
+        let left = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(5),
+            binary_places: 1,
+            decimal_places: 1,
+        };
+        let right = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(3),
+            binary_places: 2,
+            decimal_places: 1,
+        };
+        let sum = left.add(&right);
+        let expected_scaled = 5_u128 * 2 + 3;
+        assert_eq!(sum.magnitude.to_u128(), Some(expected_scaled));
+        assert_eq!(sum.binary_places, 2);
+        assert_eq!(sum.decimal_places, 1);
+        assert_eq!(sum.to_f64(), 13.0 / 40.0);
+
+        let negative = ExactSeconds {
+            negative: true,
+            magnitude: Natural::from_u128(3),
+            binary_places: 3,
+            decimal_places: 0,
+        };
+        let positive = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(1),
+            binary_places: 2,
+            decimal_places: 0,
+        };
+        let difference = negative.add(&positive);
+        assert!(difference.negative);
+        assert_eq!(difference.magnitude.to_u128(), Some(1));
+        assert_eq!(difference.binary_places, 3);
+        assert_eq!(difference.to_f64(), -0.125);
+    }
+
+    #[test]
+    fn checked_u128_overflow_falls_back_to_unbounded_limbs() {
+        let negative_minimum = ExactSeconds::from_integer(i128::MIN);
+        let sum = negative_minimum.add(&negative_minimum);
+        assert!(sum.negative);
+        assert_eq!(sum.magnitude.0.as_slice(), &[0, 0, 1]);
+        assert_eq!(sum.binary_places, 0);
+        assert_eq!(sum.decimal_places, 0);
+
+        let largest = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(u128::MAX),
+            binary_places: 0,
+            decimal_places: 0,
+        };
+        let half = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(1),
+            binary_places: 1,
+            decimal_places: 0,
+        };
+        let sum = largest.add(&half);
+        assert_eq!(sum.magnitude.0.as_slice(), &[u64::MAX, u64::MAX, 1]);
+        assert_eq!(sum.binary_places, 1);
+        assert_eq!(sum.decimal_places, 0);
+    }
+
+    #[test]
+    fn aligned_magnitude_u128_checks_shift_loss_and_skips_zero_decimal_scale() {
+        let unit = ExactSeconds::from_integer(1);
+        assert_eq!(unit.aligned_magnitude_u128(127, 0), Some(1_u128 << 127));
+        assert_eq!(unit.aligned_magnitude_u128(128, 0), None);
+
+        let largest = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(u128::MAX),
+            binary_places: 0,
+            decimal_places: 0,
+        };
+        assert_eq!(largest.aligned_magnitude_u128(0, 0), Some(u128::MAX));
+        assert_eq!(largest.aligned_magnitude_u128(1, 0), None);
+
+        assert_eq!(unit.aligned_magnitude_u128(0, 38), Some(10_u128.pow(38)));
+        assert_eq!(unit.aligned_magnitude_u128(0, 39), None);
+    }
+
+    #[test]
+    fn common_denominator_equality_reduces_binary_scale_without_losing_bits() {
+        let numerator_at_finer_scale = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(1_u128 << 127),
+            binary_places: 127,
+            decimal_places: 2,
+        };
+        let numerator_at_coarser_scale = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(1),
+            binary_places: 0,
+            decimal_places: 2,
+        };
+        assert_eq!(
+            numerator_at_finer_scale.same_value_at_common_denominator(&numerator_at_coarser_scale),
+            Some(true)
+        );
+        assert_eq!(
+            numerator_at_coarser_scale.same_value_at_common_denominator(&numerator_at_finer_scale),
+            Some(true)
+        );
+
+        let exact_half_at_finer_scale = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(2),
+            binary_places: 2,
+            decimal_places: 0,
+        };
+        let exact_half_at_coarser_scale = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(1),
+            binary_places: 1,
+            decimal_places: 0,
+        };
+        assert_eq!(
+            exact_half_at_finer_scale
+                .same_value_at_common_denominator(&exact_half_at_coarser_scale),
+            Some(true)
+        );
+        assert_eq!(
+            exact_half_at_coarser_scale
+                .same_value_at_common_denominator(&exact_half_at_finer_scale),
+            Some(true)
+        );
+
+        let numerator_with_discarded_bit = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(3),
+            binary_places: 2,
+            decimal_places: 0,
+        };
+        assert_eq!(
+            numerator_with_discarded_bit
+                .same_value_at_common_denominator(&exact_half_at_coarser_scale),
+            Some(false)
+        );
+        assert_eq!(
+            exact_half_at_coarser_scale
+                .same_value_at_common_denominator(&numerator_with_discarded_bit),
+            Some(false)
+        );
+
+        let largest_finer_numerator = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(u128::MAX),
+            binary_places: 1,
+            decimal_places: 0,
+        };
+        let largest_coarser_numerator = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(1_u128 << 127),
+            binary_places: 0,
+            decimal_places: 0,
+        };
+        assert_eq!(
+            largest_finer_numerator.same_value_at_common_denominator(&largest_coarser_numerator),
+            Some(false)
+        );
+        assert_eq!(
+            largest_coarser_numerator.same_value_at_common_denominator(&largest_finer_numerator),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn common_denominator_equality_short_circuits_zero_and_sign() {
+        let positive_zero = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(0),
+            binary_places: 9,
+            decimal_places: 3,
+        };
+        let negative_zero = ExactSeconds {
+            negative: true,
+            magnitude: Natural::from_u128(0),
+            binary_places: 0,
+            decimal_places: 0,
+        };
+        assert_eq!(
+            positive_zero.same_value_at_common_denominator(&negative_zero),
+            Some(true)
+        );
+        let nonzero = ExactSeconds::from_f64(0.125).unwrap();
+        assert_eq!(
+            positive_zero.same_value_at_common_denominator(&nonzero),
+            Some(false)
+        );
+        assert_eq!(
+            nonzero.same_value_at_common_denominator(&positive_zero),
+            Some(false)
+        );
+
+        let negative_half_at_finer_scale = ExactSeconds {
+            negative: true,
+            magnitude: Natural::from_u128(2),
+            binary_places: 2,
+            decimal_places: 0,
+        };
+        let negative_half_at_coarser_scale = ExactSeconds {
+            negative: true,
+            magnitude: Natural::from_u128(1),
+            binary_places: 1,
+            decimal_places: 0,
+        };
+        assert_eq!(
+            negative_half_at_finer_scale
+                .same_value_at_common_denominator(&negative_half_at_coarser_scale),
+            Some(true)
+        );
+        assert_eq!(
+            negative_half_at_coarser_scale
+                .same_value_at_common_denominator(&negative_half_at_finer_scale),
+            Some(true)
+        );
+
+        let negative_half = ExactSeconds {
+            negative: true,
+            magnitude: Natural::from_u128(1),
+            binary_places: 1,
+            decimal_places: 0,
+        };
+        let positive_half_at_finer_scale = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(2),
+            binary_places: 2,
+            decimal_places: 0,
+        };
+        assert_eq!(
+            negative_half.same_value_at_common_denominator(&positive_half_at_finer_scale),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn common_denominator_equality_preserves_large_shift_and_wide_fallback() {
+        let one_at_large_binary_scale = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(1),
+            binary_places: 128,
+            decimal_places: 0,
+        };
+        let one = ExactSeconds::from_integer(1);
+        assert_eq!(
+            one_at_large_binary_scale.same_value_at_common_denominator(&one),
+            Some(false)
+        );
+        assert_eq!(
+            one.same_value_at_common_denominator(&one_at_large_binary_scale),
+            Some(false)
+        );
+
+        let wide_integer = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(1).shl(128),
+            binary_places: 1,
+            decimal_places: 0,
+        };
+        let wide_fraction = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(1).shl(127),
+            binary_places: 0,
+            decimal_places: 0,
+        };
+        assert_eq!(
+            wide_integer.same_value_at_common_denominator(&wide_fraction),
+            None
+        );
+        let wide_integer_query = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: Arc::new(wide_integer),
+        };
+        let wide_fraction_query = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: Arc::new(wide_fraction),
+        };
+        assert_eq!(wide_integer_query, wide_fraction_query);
+    }
+
+    #[test]
+    fn exact_query_equality_retains_cross_origin_and_decimal_semantics() {
+        let at_one_second = ExactEpoch::new(1, 0).unwrap().query();
+        let from_j2000 = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: Arc::new(ExactSeconds::from_f64(1.0).unwrap()),
+        };
+        assert_eq!(at_one_second, from_j2000);
+
+        let decimal_tenth = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: Arc::new(ExactSeconds::from_shortest_decimal(0.1).unwrap()),
+        };
+        let binary_tenth = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: Arc::new(ExactSeconds::from_f64(0.1).unwrap()),
+        };
+        assert_ne!(decimal_tenth, binary_tenth);
+    }
+
+    #[test]
+    fn cloned_exact_query_shares_immutable_offset_and_arithmetic_detaches() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ExactEpochQuery>();
+
+        let original = ExactEpoch::from_civil(2026, 9, 25, 12, 30, 0.125)
+            .unwrap()
+            .query();
+        let original_clone = original.clone();
+        assert!(Arc::ptr_eq(&original.offset, &original_clone.offset));
+        assert_eq!(original, original_clone);
+
+        let advanced = original_clone
+            .clone()
+            .checked_add_binary_seconds(0.25)
+            .expect("finite binary increment");
+        assert!(!Arc::ptr_eq(&original.offset, &advanced.offset));
+        assert_eq!(original.j2000_seconds(), original_clone.j2000_seconds());
+        assert_eq!(advanced.seconds_since_query(&original), 0.25);
+
+        let retreated = original
+            .clone()
+            .checked_sub_binary_seconds(0.25)
+            .expect("finite binary decrement");
+        assert_eq!(retreated.seconds_since_query(&original), -0.25);
+        assert_eq!(original, original_clone);
+
+        let independently_built = ExactEpoch::from_civil(2026, 9, 25, 12, 30, 0.125)
+            .unwrap()
+            .query();
+        assert!(!Arc::ptr_eq(&original.offset, &independently_built.offset));
+        assert_eq!(original, independently_built);
+        assert_eq!(format!("{original:?}"), format!("{original_clone:?}"));
+
+        let same_offset_different_epoch = ExactEpochQuery {
+            epoch: ExactEpoch::new(1, 0).unwrap(),
+            offset: original.offset.clone(),
+        };
+        assert!(Arc::ptr_eq(
+            &original.offset,
+            &same_offset_different_epoch.offset
+        ));
+        assert_ne!(original, same_offset_different_epoch);
+        assert!(original.shares_representation(&original_clone));
+        assert!(!original.shares_representation(&independently_built));
+        assert!(!original.shares_representation(&same_offset_different_epoch));
+    }
+
+    #[test]
+    fn exact_query_equality_distinguishes_values_with_the_same_f64_epoch() {
+        let whole = ExactEpoch::new(1_000_000_000, 0).unwrap().query();
+        let advanced = whole
+            .clone()
+            .checked_add_binary_seconds(1.0e-9)
+            .expect("finite binary increment");
+        assert_eq!(
+            whole.j2000_seconds().to_bits(),
+            advanced.j2000_seconds().to_bits()
+        );
+        assert_ne!(whole, advanced);
+    }
+
+    #[test]
+    fn shortest_decimal_signed_zero_avoids_decimal_parsing() {
+        let positive_zero = ExactSeconds::from_shortest_decimal(0.0).unwrap();
+        let negative_zero = ExactSeconds::from_shortest_decimal(-0.0).unwrap();
+        assert!(positive_zero.magnitude.is_zero());
+        assert!(negative_zero.magnitude.is_zero());
+        assert!(!negative_zero.negative);
+        assert_eq!(negative_zero.to_f64().to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn natural_equality_matches_limbs_at_every_storage_width() {
+        for limb_count in 0..=6 {
+            let limbs: Vec<u64> = (0..limb_count).map(|index| index as u64 + 1).collect();
+            let natural = Natural(limbs.iter().copied().collect());
+            let equal = Natural(limbs.iter().copied().collect());
+            assert_eq!(natural, equal);
+            for changed_limb in 0..limb_count {
+                let mut different = equal.clone();
+                different.0[changed_limb] += 1;
+                assert_ne!(natural, different);
+                assert_ne!(different, natural);
+            }
+            let mut longer = equal.clone();
+            longer.0.push(1);
+            assert_ne!(natural, longer);
+            assert_ne!(longer, natural);
+        }
+        let mut spilled_small = Natural(SmallVec::with_capacity(8));
+        spilled_small.0.extend([u64::MAX, u64::MAX]);
+        assert!(spilled_small.0.spilled());
+        assert_eq!(spilled_small, Natural::from_u128(u128::MAX));
+    }
+
+    #[test]
+    fn natural_inline_limbs_spill_and_preserve_carry_borrow_and_shift() {
+        let mut four_limbs = Natural::default();
+        for _ in 0..4 {
+            four_limbs.0.push(u64::MAX);
+        }
+        assert!(!four_limbs.0.spilled());
+
+        let one = Natural::from_u128(1);
+        let carried = four_limbs.add(&one);
+        assert!(carried.0.spilled());
+        assert_eq!(carried.0.as_slice(), &[0, 0, 0, 0, 1]);
+
+        let mut borrowed = carried.clone();
+        borrowed.sub_assign(&one);
+        assert_eq!(borrowed.0.as_slice(), &[u64::MAX; 4]);
+        let mut zero = borrowed.clone();
+        zero.sub_assign(&borrowed);
+        assert!(zero.is_zero());
+        assert_eq!(zero.to_u128(), Some(0));
+
+        let carried_u128 = Natural::from_u128(u128::MAX).add(&one);
+        assert_eq!(carried_u128.0.as_slice(), &[0, 0, 1]);
+        assert_eq!(
+            Natural::from_u128(u128::MAX).shl(1).0.as_slice(),
+            &[u64::MAX - 1, u64::MAX, 1]
+        );
+        let mut shifted_back = Natural::from_u128(u128::MAX).shl(1);
+        shifted_back.shr1();
+        assert_eq!(shifted_back.0.as_slice(), &[u64::MAX, u64::MAX]);
+        assert_eq!(one.shl(256).0.as_slice(), &[0, 0, 0, 0, 1]);
+    }
+
+    #[test]
     fn nearest_ratio_matches_the_decimal_reading() {
         let mut state = 0x1f83_d9ab_fb41_bd6b_u64;
         for _ in 0..40_000 {
@@ -1311,11 +1923,11 @@ mod tests {
     fn equivalent_epoch_queries_have_identical_canonical_hash_words() {
         let decimal_half = ExactEpochQuery {
             epoch: ExactEpoch::J2000,
-            offset: ExactSeconds::from_decimal(5, 1),
+            offset: Arc::new(ExactSeconds::from_decimal(5, 1)),
         };
         let binary_half = ExactEpochQuery {
             epoch: ExactEpoch::J2000,
-            offset: ExactSeconds::from_f64(0.5).unwrap(),
+            offset: Arc::new(ExactSeconds::from_f64(0.5).unwrap()),
         };
         assert_eq!(decimal_half, binary_half);
         assert_eq!(
@@ -1323,15 +1935,174 @@ mod tests {
             binary_half.exact_hash_words()
         );
 
+        let decimal_tenth = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: Arc::new(ExactSeconds::from_shortest_decimal(0.1).unwrap()),
+        };
+        let binary_tenth = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: Arc::new(ExactSeconds::from_f64(0.1).unwrap()),
+        };
+        assert_eq!(
+            decimal_tenth.j2000_seconds().to_bits(),
+            binary_tenth.j2000_seconds().to_bits()
+        );
+        assert_ne!(decimal_tenth, binary_tenth);
+
+        let same_representation = binary_half.clone();
+        assert_eq!(binary_half, same_representation);
+
         let whole_second = ExactEpoch::new(1, 0).unwrap().query();
         let binary_offset = ExactEpochQuery {
             epoch: ExactEpoch::J2000,
-            offset: ExactSeconds::from_f64(1.0).unwrap(),
+            offset: Arc::new(ExactSeconds::from_f64(1.0).unwrap()),
         };
         assert_eq!(whole_second, binary_offset);
         assert_eq!(
             whole_second.exact_hash_words(),
             binary_offset.exact_hash_words()
+        );
+
+        let first_offset = ExactSeconds::from_decimal(1, 1);
+        let second_offset = ExactSeconds::from_decimal(2, 1);
+        let first_query = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: Arc::new(first_offset),
+        };
+        let second_query = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: Arc::new(second_offset),
+        };
+        assert_ne!(first_query, second_query);
+
+        let wide_integer = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(1).shl(127),
+            binary_places: 0,
+            decimal_places: 0,
+        };
+        let wide_fraction = ExactSeconds {
+            negative: false,
+            magnitude: Natural::from_u128(1).shl(128),
+            binary_places: 1,
+            decimal_places: 0,
+        };
+        let wide_integer_query = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: Arc::new(wide_integer),
+        };
+        let wide_fraction_query = ExactEpochQuery {
+            epoch: ExactEpoch::J2000,
+            offset: Arc::new(wide_fraction),
+        };
+        assert_eq!(wide_integer_query, wide_fraction_query);
+    }
+
+    #[test]
+    fn zero_addition_and_whole_second_epochs_keep_minimal_denominators() {
+        let zero = ExactEpoch::J2000.exact_seconds();
+        assert!(zero.magnitude.is_zero());
+        assert_eq!(zero.binary_places, 0);
+        assert_eq!(zero.decimal_places, 0);
+
+        let binary_offset = ExactSeconds::from_f64(0.125).unwrap();
+        let zero_then_binary = zero.add(&binary_offset);
+        assert!(zero_then_binary.same_representation(&binary_offset));
+        let binary_then_zero = binary_offset.add(&zero);
+        assert!(binary_then_zero.same_representation(&binary_offset));
+
+        let whole_second = ExactEpoch::new(646_272_000, 0).unwrap().exact_seconds();
+        assert_eq!(whole_second.magnitude.to_u128(), Some(646_272_000));
+        assert_eq!(whole_second.binary_places, 0);
+        assert_eq!(whole_second.decimal_places, 0);
+        assert_eq!(whole_second.to_f64(), 646_272_000.0);
+
+        let attosecond_epoch = ExactEpoch::new(0, 1).unwrap().exact_seconds();
+        assert_eq!(attosecond_epoch.decimal_places, 18);
+        assert_eq!(attosecond_epoch.to_f64(), 1.0e-18);
+    }
+
+    #[test]
+    fn identical_epoch_difference_shortcuts_match_general_exact_arithmetic() {
+        let receive_epoch = ExactEpoch::new(646_272_000, 500_000_000_000_000_000).unwrap();
+        let wide_offset = ExactSeconds::from_decimal(1_234_567_890_123_456_789, 30)
+            .add(&ExactSeconds::from_f64(0.000_000_000_000_3).unwrap());
+        let single_query = ExactEpochQuery {
+            epoch: receive_epoch,
+            offset: Arc::new(wide_offset.clone()),
+        };
+        let old_seconds_since = receive_epoch
+            .exact_seconds()
+            .sub(&receive_epoch.exact_seconds())
+            .add(&wide_offset)
+            .to_f64();
+        assert_eq!(
+            single_query.seconds_since(receive_epoch).to_bits(),
+            old_seconds_since.to_bits()
+        );
+
+        let earlier_offset = wide_offset.add(&ExactSeconds::from_decimal(1, 40));
+        let later_offset = earlier_offset.add(&ExactSeconds::from_decimal(1, 45));
+        let earlier_query = ExactEpochQuery {
+            epoch: receive_epoch,
+            offset: Arc::new(earlier_offset),
+        };
+        let later_query = ExactEpochQuery {
+            epoch: receive_epoch,
+            offset: Arc::new(later_offset),
+        };
+        let old_query_difference = later_query
+            .epoch
+            .exact_seconds()
+            .sub(&earlier_query.epoch.exact_seconds())
+            .add(&later_query.offset)
+            .sub(&earlier_query.offset)
+            .to_f64();
+        assert_eq!(
+            later_query.seconds_since_query(&earlier_query).to_bits(),
+            old_query_difference.to_bits()
+        );
+
+        let subnormal_offset = ExactSeconds::from_f64(f64::from_bits(1)).unwrap();
+        let zero_offset = ExactSeconds::from_integer(0);
+        let subnormal_query = ExactEpochQuery {
+            epoch: receive_epoch,
+            offset: Arc::new(subnormal_offset.clone()),
+        };
+        let zero_query = ExactEpochQuery {
+            epoch: receive_epoch,
+            offset: Arc::new(zero_offset.clone()),
+        };
+        let old_subnormal_difference = receive_epoch
+            .exact_seconds()
+            .sub(&receive_epoch.exact_seconds())
+            .add(&subnormal_offset)
+            .sub(&zero_offset)
+            .to_f64();
+        assert_eq!(
+            subnormal_query.seconds_since_query(&zero_query).to_bits(),
+            old_subnormal_difference.to_bits()
+        );
+
+        let tiny_offset = ExactSeconds::from_decimal(1, 30);
+        let cancelled_offset = tiny_offset.add(&tiny_offset.negated());
+        let tiny_query = ExactEpochQuery {
+            epoch: receive_epoch,
+            offset: Arc::new(tiny_offset.clone()),
+        };
+        let cancelled_query = ExactEpochQuery {
+            epoch: receive_epoch,
+            offset: Arc::new(cancelled_offset.clone()),
+        };
+        let old_cancelled_difference = receive_epoch
+            .exact_seconds()
+            .sub(&receive_epoch.exact_seconds())
+            .add(&tiny_offset)
+            .sub(&cancelled_offset)
+            .to_f64();
+        assert_eq!(
+            tiny_query.seconds_since_query(&cancelled_query).to_bits(),
+            old_cancelled_difference.to_bits()
         );
     }
 
@@ -1566,11 +2337,11 @@ mod tests {
         let one_attosecond = ExactSeconds::from_decimal(1, 18);
         let before = ExactEpochQuery {
             epoch: ExactEpoch::new(90, 0).unwrap(),
-            offset: one_attosecond.negated(),
+            offset: Arc::new(one_attosecond.negated()),
         };
         let after = ExactEpochQuery {
             epoch: ExactEpoch::new(90, 0).unwrap(),
-            offset: one_attosecond,
+            offset: Arc::new(one_attosecond),
         };
 
         assert_eq!(
@@ -1588,6 +2359,56 @@ mod tests {
         assert_eq!(
             after.compare_interval_query(&at_zero, 90.0),
             Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn binary_epoch_interval_comparison_matches_exact_query_comparison() {
+        let query = ExactEpoch::new(604_800, 0)
+            .unwrap()
+            .query()
+            .checked_add_binary_seconds(-1.0e-30)
+            .unwrap();
+        let node_seconds = [
+            -1.0e12,
+            -0.1,
+            -f64::from_bits(1),
+            0.0,
+            f64::from_bits(1),
+            0.1,
+            604_800.0,
+            1.0e12,
+        ];
+        let thresholds = [
+            -f64::INFINITY,
+            -90.0,
+            -1.0e-30,
+            -0.0,
+            0.0,
+            1.0e-30,
+            90.0,
+            f64::INFINITY,
+            f64::NAN,
+        ];
+
+        for node_s in node_seconds {
+            let node_query = ExactEpoch::from_binary_j2000_seconds(node_s).unwrap();
+            for threshold in thresholds {
+                assert_eq!(
+                    query.compare_interval_binary_j2000_seconds(node_s, threshold),
+                    query.compare_interval_query(&node_query, threshold),
+                    "node={node_s:?}, threshold={threshold:?}"
+                );
+            }
+        }
+
+        assert_eq!(
+            query.compare_interval_binary_j2000_seconds(f64::INFINITY, 0.0),
+            None
+        );
+        assert_eq!(
+            query.compare_interval_binary_j2000_seconds(f64::NEG_INFINITY, 0.0),
+            None
         );
     }
 }
