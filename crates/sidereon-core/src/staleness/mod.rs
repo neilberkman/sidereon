@@ -39,11 +39,13 @@ use std::fmt;
 
 use crate::astro::constants::time::{SECONDS_PER_DAY, SECONDS_PER_DAY_I64};
 use crate::astro::time::model::Instant;
+use crate::astro::time::{ExactEpoch, ExactEpochQuery, Validated};
 use crate::atmosphere::Ionex;
 use crate::ephemeris::{EphemerisSource, Sp3, Sp3State};
 use crate::frame::Wgs84Geodetic;
 use crate::id::GnssSatelliteId;
 use crate::ionex::ionex_slant_delay;
+use crate::spp::{ClockRelativity, PositionClockGroupDelay};
 
 /// Default staleness cap, in whole days.
 ///
@@ -365,6 +367,62 @@ impl EphemerisSource for Sp3Selection<'_> {
         self.sp3.position_clock_at_j2000_s(sat, t_j2000_s)
     }
 
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        EphemerisSource::try_position_clock_group_delay_selected_at_exact_epoch(
+            self.sp3,
+            sat,
+            epoch,
+            selection_j2000_s,
+        )
+    }
+
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        EphemerisSource::try_transmit_epoch_clock_at_exact_epoch(
+            self.sp3,
+            sat,
+            epoch,
+            selection_j2000_s,
+        )
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        EphemerisSource::try_position_clock_group_delay_selected_at_epoch_query(
+            self.sp3,
+            sat,
+            epoch,
+            selection_epoch,
+        )
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        EphemerisSource::try_transmit_epoch_clock_at_epoch_query(
+            self.sp3,
+            sat,
+            epoch,
+            selection_epoch,
+        )
+    }
+
     fn clock_relativity_s(
         &self,
         sat: GnssSatelliteId,
@@ -382,6 +440,15 @@ impl EphemerisSource for Sp3Selection<'_> {
         EphemerisSource::clock_relativity_for_state_s(self.sp3, sat, t_j2000_s, position_m)
     }
 
+    fn clock_relativity_for_state_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        position_m: [f64; 3],
+    ) -> ClockRelativity {
+        EphemerisSource::clock_relativity_for_state_at_epoch_query(self.sp3, sat, epoch, position_m)
+    }
+
     fn ephemeris_variance_m2(
         &self,
         sat: GnssSatelliteId,
@@ -389,6 +456,20 @@ impl EphemerisSource for Sp3Selection<'_> {
         selection_j2000_s: f64,
     ) -> f64 {
         EphemerisSource::ephemeris_variance_m2(self.sp3, sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> f64 {
+        EphemerisSource::ephemeris_variance_at_epoch_query(
+            self.sp3,
+            sat,
+            state_epoch,
+            selection_epoch,
+        )
     }
 }
 

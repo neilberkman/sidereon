@@ -129,12 +129,13 @@ use crate::id::GnssSatelliteId;
 use crate::validate;
 
 use super::{
-    Sp3, Sp3ClockRecord, Sp3DataType, Sp3Flags, Sp3State, Sp3TimeSystem, Sp3Version, BAD_CLOCK_US,
-    CLOCK_RATE_TO_S_PER_S, DM_S_TO_M_S, EPOCH_SECONDS_DECIMALS, EPOCH_SECONDS_WIDTH,
-    LINE2_INTERVAL_DECIMALS, LINE2_INTERVAL_WIDTH, LINE2_MJD_FRACTION_DECIMALS,
-    LINE2_SECONDS_OF_WEEK_DECIMALS, LINE2_SECONDS_OF_WEEK_WIDTH, LINE_PF_CLOCK_RATE_BASE_DECIMALS,
-    LINE_PF_CLOCK_RATE_BASE_WIDTH, LINE_PF_POS_VEL_BASE_DECIMALS, LINE_PF_POS_VEL_BASE_WIDTH,
-    MISSING_POSITION_KM, MISSING_VELOCITY_DM_S, RECORD_VALUE_DECIMALS, RECORD_VALUE_WIDTH,
+    Sp3, Sp3AccuracyBase, Sp3ClockRecord, Sp3DataType, Sp3Flags, Sp3RecordAccuracyCodes, Sp3State,
+    Sp3TimeSystem, Sp3Version, StoredAccuracyCodeGroup, BAD_CLOCK_US, CLOCK_RATE_TO_S_PER_S,
+    DM_S_TO_M_S, EPOCH_SECONDS_DECIMALS, EPOCH_SECONDS_WIDTH, LINE2_INTERVAL_DECIMALS,
+    LINE2_INTERVAL_WIDTH, LINE2_MJD_FRACTION_DECIMALS, LINE2_SECONDS_OF_WEEK_DECIMALS,
+    LINE2_SECONDS_OF_WEEK_WIDTH, LINE_PF_CLOCK_RATE_BASE_DECIMALS, LINE_PF_CLOCK_RATE_BASE_WIDTH,
+    LINE_PF_POS_VEL_BASE_DECIMALS, LINE_PF_POS_VEL_BASE_WIDTH, MISSING_POSITION_KM,
+    MISSING_VELOCITY_DM_S, RECORD_VALUE_DECIMALS, RECORD_VALUE_WIDTH,
 };
 
 /// Maximum SP3 satellite-id slots per `+` / `++` header line.
@@ -282,6 +283,31 @@ pub enum Sp3WriteError {
         decimals: usize,
         /// The value as the product holds it.
         value: f64,
+    },
+    /// A retained record-accuracy code cannot be represented under the output `%f` bases.
+    AccuracyNotRepresentable {
+        /// Satellite whose accuracy field cannot be stated without changing it.
+        sat: GnssSatelliteId,
+        /// Epoch index of the record.
+        epoch_index: usize,
+        /// Accuracy component name.
+        component: &'static str,
+        /// Original signed exponent code, or `None` for absent source basis.
+        exponent: Option<i16>,
+    },
+    /// A retained accuracy group has no matching output record to carry it.
+    AccuracyRecordMismatch {
+        /// Satellite named by the detached accuracy entry.
+        sat: GnssSatelliteId,
+        /// Epoch index of the detached entry.
+        epoch_index: usize,
+    },
+    /// A retained accuracy group refers to no interned `%f` source basis.
+    AccuracyBasisMissing {
+        /// Satellite whose record holds the invalid basis reference.
+        sat: GnssSatelliteId,
+        /// Epoch index of the record.
+        epoch_index: usize,
     },
     /// A calendar year falls outside the four digits the header line-1 and epoch
     /// records reserve for it.
@@ -520,6 +546,23 @@ impl core::fmt::Display for Sp3WriteError {
                 f,
                 "SP3 {field} {value} is finer than its F{columns}.{decimals} field states"
             ),
+            Self::AccuracyNotRepresentable {
+                sat,
+                epoch_index,
+                component,
+                exponent,
+            } => write!(
+                f,
+                "SP3 {component} accuracy for {sat} at epoch {epoch_index} with exponent {exponent:?} cannot be represented by the output bases"
+            ),
+            Self::AccuracyRecordMismatch { sat, epoch_index } => write!(
+                f,
+                "SP3 accuracy record for {sat} at epoch {epoch_index} has no matching output record"
+            ),
+            Self::AccuracyBasisMissing { sat, epoch_index } => write!(
+                f,
+                "SP3 accuracy record for {sat} at epoch {epoch_index} refers to a missing source base"
+            ),
             Self::YearNotRepresentable { epoch_index, year } => write!(
                 f,
                 "SP3 epoch {epoch_index} falls in year {year}, outside the 4-digit year field"
@@ -568,10 +611,7 @@ impl core::fmt::Display for Sp3WriteError {
                 field,
                 epochs,
                 entries,
-            } => write!(
-                f,
-                "SP3 {field} holds {entries} entries for {epochs} epochs"
-            ),
+            } => write!(f, "SP3 {field} holds {entries} entries for {epochs} epochs"),
             Self::UndeclaredSatelliteRecord { sat, epoch_index } => write!(
                 f,
                 "SP3 epoch {epoch_index} holds a record for undeclared satellite {sat}"
@@ -725,6 +765,7 @@ impl Sp3 {
         for (field, entries) in [
             ("satellite states", self.states.len()),
             ("clock records", self.clock_records.len()),
+            ("record accuracy", self.record_accuracy_codes.len()),
             ("interpolation nodes", self.interp_raw.len()),
             ("epoch seconds", self.epoch_j2000_s.len()),
         ] {
@@ -741,6 +782,32 @@ impl Sp3 {
         for (epoch_index, (states, clocks)) in
             self.states.iter().zip(&self.clock_records).enumerate()
         {
+            for (sat, accuracy) in &self.record_accuracy_codes[epoch_index] {
+                if !states.contains_key(sat) && !clocks.contains_key(sat) {
+                    return Err(Sp3WriteError::AccuracyRecordMismatch {
+                        sat: *sat,
+                        epoch_index,
+                    });
+                }
+                if accuracy
+                    .p
+                    .is_some_and(|group| group.basis_index >= self.accuracy_bases.len())
+                    || accuracy
+                        .v
+                        .is_some_and(|group| group.basis_index >= self.accuracy_bases.len())
+                {
+                    return Err(Sp3WriteError::AccuracyBasisMissing {
+                        sat: *sat,
+                        epoch_index,
+                    });
+                }
+                if positions_only && accuracy.v.is_some() {
+                    return Err(Sp3WriteError::AccuracyRecordMismatch {
+                        sat: *sat,
+                        epoch_index,
+                    });
+                }
+            }
             // A record held against a satellite the header never declares would
             // simply not be written: the record loop walks the header list.
             // Report it rather than dropping it.
@@ -969,10 +1036,14 @@ impl Sp3 {
                     sat: *sat,
                     epoch_index: idx,
                 };
+                let accuracy = self.record_accuracy_codes[idx]
+                    .get(sat)
+                    .copied()
+                    .unwrap_or_default();
                 if let Some(state) = states.get(sat) {
-                    write_state_record(out, site, state, with_velocity)?;
+                    write_state_record(out, site, state, with_velocity, accuracy, self)?;
                 } else if let Some(clock_rec) = clock_records.get(sat) {
-                    write_clock_record(out, site, clock_rec, with_velocity)?;
+                    write_clock_record(out, site, clock_rec, with_velocity, accuracy, self)?;
                 } else {
                     let _ = writeln!(
                         out,
@@ -980,7 +1051,7 @@ impl Sp3 {
                         MISSING_POSITION_KM, MISSING_POSITION_KM, MISSING_POSITION_KM, BAD_CLOCK_US
                     );
                     if with_velocity {
-                        write_velocity_record(out, site, None, None, None)?;
+                        write_velocity_record(out, site, None, None, None, None, self)?;
                     }
                 }
             }
@@ -1028,7 +1099,7 @@ impl Sp3 {
         let split = match epoch.repr {
             InstantRepr::JulianDate(split) => split,
             InstantRepr::Nanos(nanos) => {
-                return nanos_calendar(nanos, epoch_index, self.header.time_system)
+                return nanos_calendar(nanos, epoch_index, self.header.time_system);
             }
         };
         // `Sp3::epochs` is public and `JulianDateSplit`'s fields are public, so
@@ -1106,6 +1177,284 @@ struct RecordSite {
     epoch_index: usize,
 }
 
+fn write_accuracy_fields(
+    out: &mut String,
+    site: RecordSite,
+    group: Option<StoredAccuracyCodeGroup>,
+    velocity: bool,
+    product: &Sp3,
+) -> Result<bool, Sp3WriteError> {
+    let Some(group) = group else {
+        return Ok(false);
+    };
+    if group.exponents.iter().all(Option::is_none) {
+        return Ok(false);
+    }
+    let source = product.accuracy_bases[group.basis_index];
+    let target = Sp3AccuracyBase {
+        position_velocity: product.header.pos_vel_base,
+        clock_rate: product.header.clock_rate_base,
+    };
+    let axis_names = if velocity {
+        ["velocity x", "velocity y", "velocity z"]
+    } else {
+        ["position x", "position y", "position z"]
+    };
+    let mut axes = [String::new(), String::new(), String::new()];
+    for index in 0..3 {
+        axes[index] = format_accuracy_exponent(
+            group.exponents[index],
+            99,
+            -9,
+            98,
+            source.position_velocity,
+            target.position_velocity,
+            2,
+            axis_names[index],
+            site,
+        )?;
+    }
+    let clock = format_accuracy_exponent(
+        group.exponents[3],
+        999,
+        -99,
+        998,
+        source.clock_rate,
+        target.clock_rate,
+        3,
+        if velocity { "clock rate" } else { "clock" },
+        site,
+    )?;
+    out.push(' ');
+    out.push_str(&axes[0]);
+    out.push(' ');
+    out.push_str(&axes[1]);
+    out.push(' ');
+    out.push_str(&axes[2]);
+    out.push(' ');
+    out.push_str(&clock);
+    out.push(' ');
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_accuracy_exponent(
+    exponent: Option<i16>,
+    too_large_code: i16,
+    minimum: i16,
+    maximum: i16,
+    source_base: Option<f64>,
+    target_base: Option<f64>,
+    width: usize,
+    component: &'static str,
+    site: RecordSite,
+) -> Result<String, Sp3WriteError> {
+    let Some(exponent) = exponent else {
+        return Ok(" ".repeat(width));
+    };
+    if exponent == too_large_code {
+        return Ok(format!("{exponent:>width$}"));
+    }
+    let same_base = match (source_base, target_base) {
+        (None, None) => true,
+        (Some(source), Some(target)) => source.to_bits() == target.to_bits(),
+        _ => false,
+    };
+    let output_exponent = if same_base {
+        exponent
+    } else {
+        let output_base = target_base.filter(|base| base.is_finite() && *base > 0.0);
+        let source_base = source_base.filter(|base| base.is_finite() && *base > 0.0);
+        match (source_base, output_base) {
+            (Some(source), Some(target)) => exact_reencoded_exponent(
+                source, exponent, target, minimum, maximum,
+            )
+            .ok_or(Sp3WriteError::AccuracyNotRepresentable {
+                sat: site.sat,
+                epoch_index: site.epoch_index,
+                component,
+                exponent: Some(exponent),
+            })?,
+            _ => {
+                return Err(Sp3WriteError::AccuracyNotRepresentable {
+                    sat: site.sat,
+                    epoch_index: site.epoch_index,
+                    component,
+                    exponent: Some(exponent),
+                });
+            }
+        }
+    };
+    if output_exponent < minimum || output_exponent > maximum {
+        return Err(Sp3WriteError::AccuracyNotRepresentable {
+            sat: site.sat,
+            epoch_index: site.epoch_index,
+            component,
+            exponent: Some(exponent),
+        });
+    }
+    Ok(format!("{output_exponent:>width$}"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExactPositiveRational {
+    numerator: u64,
+    denominator: u64,
+    binary_exponent: i32,
+}
+
+impl ExactPositiveRational {
+    fn from_f64(value: f64, reciprocal: bool) -> Option<Self> {
+        if !value.is_finite() || value <= 0.0 {
+            return None;
+        }
+        let bits = value.to_bits();
+        let encoded_exponent = ((bits >> 52) & 0x7ff) as i32;
+        let fraction = bits & ((1_u64 << 52) - 1);
+        let (significand, mut binary_exponent) = if encoded_exponent == 0 {
+            (fraction, -1074)
+        } else {
+            ((1_u64 << 52) | fraction, encoded_exponent - 1023 - 52)
+        };
+        if significand == 0 {
+            return None;
+        }
+        let trailing_zeros = significand.trailing_zeros();
+        let odd_significand = significand >> trailing_zeros;
+        binary_exponent += trailing_zeros as i32;
+        Some(if reciprocal {
+            Self {
+                numerator: 1,
+                denominator: odd_significand,
+                binary_exponent: -binary_exponent,
+            }
+        } else {
+            Self {
+                numerator: odd_significand,
+                denominator: 1,
+                binary_exponent,
+            }
+        })
+    }
+
+    fn exact_root(self, degree: u32) -> Option<Self> {
+        let numerator = exact_integer_root(self.numerator, degree)?;
+        let denominator = exact_integer_root(self.denominator, degree)?;
+        if self.binary_exponent % degree as i32 != 0 {
+            return None;
+        }
+        Some(Self {
+            numerator,
+            denominator,
+            binary_exponent: self.binary_exponent / degree as i32,
+        })
+    }
+
+    fn exactly_equals(self, other: Self) -> bool {
+        self.binary_exponent == other.binary_exponent
+            && u128::from(self.numerator) * u128::from(other.denominator)
+                == u128::from(other.numerator) * u128::from(self.denominator)
+    }
+}
+
+fn exact_integer_root(value: u64, degree: u32) -> Option<u64> {
+    if degree == 0 {
+        return None;
+    }
+    if value == 1 || degree == 1 {
+        return Some(value);
+    }
+    let bit_length = 64 - value.leading_zeros();
+    if degree > bit_length {
+        return None;
+    }
+    let upper_shift = bit_length.div_ceil(degree);
+    let mut low = 1_u64;
+    let mut high = 1_u64 << upper_shift;
+    while low <= high {
+        let candidate = low + (high - low) / 2;
+        match compare_integer_power(candidate, degree, value) {
+            core::cmp::Ordering::Equal => return Some(candidate),
+            core::cmp::Ordering::Less => low = candidate + 1,
+            core::cmp::Ordering::Greater => high = candidate - 1,
+        }
+    }
+    None
+}
+
+fn compare_integer_power(base: u64, exponent: u32, limit: u64) -> core::cmp::Ordering {
+    let limit = u128::from(limit);
+    let base = u128::from(base);
+    let mut value = 1_u128;
+    for _ in 0..exponent {
+        if base != 0 && value > limit / base {
+            return core::cmp::Ordering::Greater;
+        }
+        value *= base;
+    }
+    value.cmp(&limit)
+}
+
+fn exact_reencoded_exponent(
+    source_base: f64,
+    source_exponent: i16,
+    target_base: f64,
+    minimum: i16,
+    maximum: i16,
+) -> Option<i16> {
+    if source_base == 1.0 || source_exponent == 0 {
+        return (minimum..=maximum).contains(&0).then_some(0);
+    }
+    if target_base == 1.0 {
+        return exact_power_is_one(source_base, source_exponent).then_some(0);
+    }
+    let source = ExactPositiveRational::from_f64(source_base, source_exponent < 0)?;
+    (minimum..=maximum).find(|&target_exponent| {
+        exact_accuracy_powers_equal(source, source_exponent, target_base, target_exponent)
+    })
+}
+
+fn exact_power_is_one(base: f64, exponent: i16) -> bool {
+    exponent == 0 || base == 1.0
+}
+
+fn exact_accuracy_powers_equal(
+    source: ExactPositiveRational,
+    source_exponent: i16,
+    target_base: f64,
+    target_exponent: i16,
+) -> bool {
+    if target_exponent == 0 {
+        return exact_power_is_one_from_rational(source, source_exponent);
+    }
+    let Some(target) = ExactPositiveRational::from_f64(target_base, target_exponent < 0) else {
+        return false;
+    };
+    let left_degree = u32::from(source_exponent.unsigned_abs());
+    let right_degree = u32::from(target_exponent.unsigned_abs());
+    let divisor = greatest_common_divisor(left_degree, right_degree);
+    let left_root_degree = right_degree / divisor;
+    let right_root_degree = left_degree / divisor;
+    let Some(left_root) = source.exact_root(left_root_degree) else {
+        return false;
+    };
+    let Some(right_root) = target.exact_root(right_root_degree) else {
+        return false;
+    };
+    left_root.exactly_equals(right_root)
+}
+
+fn exact_power_is_one_from_rational(base: ExactPositiveRational, exponent: i16) -> bool {
+    exponent == 0 || (base.numerator == base.denominator && base.binary_exponent == 0)
+}
+
+fn greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left
+}
+
 /// A `P` record for a satellite the product holds a state for, plus the paired
 /// `V` record for a velocity product.
 fn write_state_record(
@@ -1113,6 +1462,8 @@ fn write_state_record(
     site: RecordSite,
     state: &Sp3State,
     with_velocity: bool,
+    accuracy: Sp3RecordAccuracyCodes,
+    product: &Sp3,
 ) -> Result<(), Sp3WriteError> {
     let p = state.position;
     let x_km = p.x_m / KM_TO_M;
@@ -1137,10 +1488,19 @@ fn write_state_record(
     let clk = clock_column(None, state.clock_s, US_TO_S, "clock", site)?;
     let sat = site.sat;
     let _ = write!(out, "P{sat}{x_km:14.6}{y_km:14.6}{z_km:14.6}{clk:14.6}");
-    write_record_flags(out, state.flags);
+    let accuracy_written = write_accuracy_fields(out, site, accuracy.p, false, product)?;
+    write_record_flags(out, state.flags, accuracy_written);
     out.push('\n');
     if with_velocity {
-        write_velocity_record(out, site, state.velocity, None, state.clock_rate_s_s)?;
+        write_velocity_record(
+            out,
+            site,
+            state.velocity,
+            None,
+            state.clock_rate_s_s,
+            accuracy.v,
+            product,
+        )?;
     }
     Ok(())
 }
@@ -1152,6 +1512,8 @@ fn write_clock_record(
     site: RecordSite,
     record: &Sp3ClockRecord,
     with_velocity: bool,
+    accuracy: Sp3RecordAccuracyCodes,
+    product: &Sp3,
 ) -> Result<(), Sp3WriteError> {
     let clk = clock_column(
         Some(record.clock_us),
@@ -1166,7 +1528,8 @@ fn write_clock_record(
         "P{sat}{:14.6}{:14.6}{:14.6}{clk:14.6}",
         MISSING_POSITION_KM, MISSING_POSITION_KM, MISSING_POSITION_KM,
     );
-    write_record_flags(out, record.flags);
+    let accuracy_written = write_accuracy_fields(out, site, accuracy.p, false, product)?;
+    write_record_flags(out, record.flags, accuracy_written);
     out.push('\n');
     if with_velocity {
         write_velocity_record(
@@ -1175,6 +1538,8 @@ fn write_clock_record(
             record.velocity,
             record.clock_rate_raw,
             record.clock_rate_s_s,
+            accuracy.v,
+            product,
         )?;
     }
     Ok(())
@@ -1188,6 +1553,8 @@ fn write_velocity_record(
     velocity: Option<ItrfVelocityMS>,
     clock_rate_raw: Option<f64>,
     clock_rate_s_s: Option<f64>,
+    accuracy: Option<StoredAccuracyCodeGroup>,
+    product: &Sp3,
 ) -> Result<(), Sp3WriteError> {
     let (vx, vy, vz) = match velocity {
         Some(v) => {
@@ -1225,7 +1592,10 @@ fn write_velocity_record(
         site,
     )?;
     let sat = site.sat;
-    let _ = writeln!(out, "V{sat}{vx:14.6}{vy:14.6}{vz:14.6}{rate:14.6}");
+    let _ = write!(out, "V{sat}{vx:14.6}{vy:14.6}{vz:14.6}{rate:14.6}");
+    let accuracy_written = write_accuracy_fields(out, site, accuracy, true, product)?;
+    write_record_flags(out, Sp3Flags::default(), accuracy_written);
+    out.push('\n');
     Ok(())
 }
 
@@ -1333,7 +1703,7 @@ fn optional_base(
     }
 }
 
-fn write_record_flags(out: &mut String, flags: Sp3Flags) {
+fn write_record_flags(out: &mut String, flags: Sp3Flags, accuracy_written: bool) {
     let last_col = if flags.orbit_predicted {
         Some(79)
     } else if flags.maneuver {
@@ -1349,7 +1719,8 @@ fn write_record_flags(out: &mut String, flags: Sp3Flags) {
         return;
     };
 
-    for col in 60..=last_col {
+    let first_flag_column = if accuracy_written { 74 } else { 60 };
+    for col in first_flag_column..=last_col {
         out.push(match col {
             74 if flags.clock_event => 'E',
             75 if flags.clock_predicted => 'P',

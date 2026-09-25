@@ -1618,7 +1618,7 @@ fn record_within_exact_limit(record: &BroadcastRecord, selection_epoch: &ExactEp
     let native_selection_epoch = if record.toe.system == crate::astro::time::TimeScale::Bdt {
         let Some(epoch) = selection_epoch
             .clone()
-            .checked_sub_binary_seconds(f64::from(crate::constants::GPST_MINUS_BDT_S))
+            .checked_sub_binary_seconds(crate::constants::GPST_MINUS_BDT_S)
         else {
             return false;
         };
@@ -1690,7 +1690,7 @@ pub(crate) fn exact_record_deltas(
     let epoch = if record.toe.system == crate::astro::time::TimeScale::Bdt {
         epoch
             .clone()
-            .checked_sub_binary_seconds(f64::from(crate::constants::GPST_MINUS_BDT_S))?
+            .checked_sub_binary_seconds(crate::constants::GPST_MINUS_BDT_S)?
     } else {
         epoch.clone()
     };
@@ -2137,6 +2137,7 @@ fn satposs_clock_s(state: &SatelliteState) -> f64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod exact_epoch_tests {
     use super::{
         exact_selection_epoch, exact_week_tow_epoch, within_exact_interval, BroadcastStore,

@@ -405,7 +405,7 @@ mod tests {
     fn exact_oracle_time_pair_preserves_binary_fraction() {
         let epoch_query = query_from_rtklib_time(123_456, "3fc8000000000000")
             .expect("finite exact RTKLIB time pair");
-        assert_eq!(epoch_query.seconds_since(ExactEpoch::J2000), 123_456.1875);
+        assert_eq!(epoch_query.seconds_since(ExactEpoch::J2000), 123_456.187_5);
         assert!(query_from_rtklib_time(0, "3ff0000000000000").is_none());
         assert!(query_from_rtklib_time(0, "not-a-float-bits").is_none());
     }

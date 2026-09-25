@@ -74,7 +74,7 @@ use crate::astro::time::{ExactEpoch, ExactEpochQuery};
 use crate::constants::{J2000_JD, KM_TO_M, OMEGA_E_DOT_RAD_S, SECONDS_PER_DAY, US_TO_S};
 use crate::frame::ItrfPositionM;
 use crate::id::GnssSatelliteId;
-use crate::sp3::{Sp3, Sp3State};
+use crate::sp3::{Sp3, Sp3AccuracyValue, Sp3State};
 use crate::tolerances::WHOLE_SECOND_EPS_S;
 use crate::validate;
 use crate::{Error, Result};
@@ -136,8 +136,12 @@ pub(super) struct PreciseSatSeries {
     pub(super) ky: Vec<f64>,
     /// Z position nodes in SP3-native kilometers.
     pub(super) kz: Vec<f64>,
+    /// Per-axis orbit variance outcomes aligned with position nodes.
+    pub(super) position_variance_m2: Vec<[Sp3AccuracyValue; 3]>,
     /// Clock nodes as `(x_seconds, clock_us, clock_event)`.
     pub(super) clk: Vec<(f64, f64, bool)>,
+    /// Clock variance outcomes aligned with clock nodes.
+    pub(super) clock_variance_m2: Vec<Sp3AccuracyValue>,
 }
 
 impl PreciseSatSeries {
@@ -147,7 +151,9 @@ impl PreciseSatSeries {
             kx: Vec::new(),
             ky: Vec::new(),
             kz: Vec::new(),
+            position_variance_m2: Vec::new(),
             clk: Vec::new(),
+            clock_variance_m2: Vec::new(),
         }
     }
 }
@@ -285,6 +291,22 @@ impl Sp3 {
             &series.ky,
             &series.kz,
             &series.clk,
+            query,
+            self.interpolation.gap_threshold_factor(),
+        )
+    }
+
+    pub(crate) fn accuracy_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        query: &ExactEpochQuery,
+    ) -> f64 {
+        let series = gather_sp3_precise_series(self, sat);
+        precise_accuracy_variance_m2(
+            &series.x,
+            &series.position_variance_m2,
+            &series.clk,
+            &series.clock_variance_m2,
             query,
             self.interpolation.gap_threshold_factor(),
         )
@@ -429,9 +451,23 @@ pub(super) fn gather_sp3_precise_series(source: &Sp3, sat: GnssSatelliteId) -> P
         series.kx.push(raw.km[0]);
         series.ky.push(raw.km[1]);
         series.kz.push(raw.km[2]);
+        let accuracy = source
+            .record_accuracy(sat, idx)
+            .ok()
+            .and_then(|record| record.p);
+        series.position_variance_m2.push(
+            accuracy.map_or([Sp3AccuracyValue::Unknown; 3], |record| {
+                record.position_variance_m2()
+            }),
+        );
 
         if let Some(clk_us) = raw.clock_us {
             series.clk.push((xi, clk_us, raw.clock_event));
+            series
+                .clock_variance_m2
+                .push(accuracy.map_or(Sp3AccuracyValue::Unknown, |record| {
+                    record.clock_variance_m2()
+                }));
         }
     }
 
@@ -769,7 +805,7 @@ pub(super) fn interpolate_precise_position_at_epoch_query(
         pos_kz,
         query,
         gap_threshold_factor,
-    );
+    )?;
     if !(x_m.is_finite() && y_m.is_finite() && z_m.is_finite()) {
         return Err(Error::InvalidInput(format!(
             "{sat}: non-finite interpolated position at query {rounded_query}: the selected nodes \
@@ -867,6 +903,164 @@ pub(super) fn query_minus_node_cmp(
 ) -> Option<core::cmp::Ordering> {
     let node_query = ExactEpoch::from_binary_j2000_seconds(node_s)?;
     query.compare_interval_query(&node_query, offset_s)
+}
+
+pub(crate) fn accuracy_node_indices(
+    position_nodes: &[f64],
+    clock_nodes: &[(f64, f64, bool)],
+    query: &ExactEpochQuery,
+) -> (Option<usize>, Option<usize>) {
+    let position_index = if position_nodes.is_empty() {
+        None
+    } else {
+        let mut lower = 0usize;
+        let mut upper = position_nodes.len();
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2;
+            let Some(ordering) = query_minus_node_cmp(query, position_nodes[middle], 0.0) else {
+                return (None, None);
+            };
+            if ordering != core::cmp::Ordering::Greater {
+                upper = middle;
+            } else {
+                lower = middle + 1;
+            }
+        }
+        Some(lower.min(position_nodes.len() - 1).saturating_sub(1))
+    };
+    let clock_index = if clock_nodes.is_empty() {
+        None
+    } else {
+        let mut lower = 0usize;
+        let mut upper = clock_nodes.len();
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2;
+            let Some(ordering) = query_minus_node_cmp(query, clock_nodes[middle].0, 0.0) else {
+                return (None, None);
+            };
+            if ordering != core::cmp::Ordering::Greater {
+                upper = middle;
+            } else {
+                lower = middle + 1;
+            }
+        }
+        let later = lower.min(clock_nodes.len() - 1);
+        let earlier = later.saturating_sub(1);
+        let selected = if earlier == later {
+            later
+        } else {
+            let earlier_epoch = ExactEpoch::from_binary_j2000_seconds(clock_nodes[earlier].0);
+            let later_epoch = ExactEpoch::from_binary_j2000_seconds(clock_nodes[later].0);
+            match (earlier_epoch, later_epoch) {
+                (Some(earlier_epoch), Some(later_epoch)) => {
+                    if query.compare_distance_to(&earlier_epoch, &later_epoch)
+                        == core::cmp::Ordering::Less
+                    {
+                        earlier
+                    } else {
+                        later
+                    }
+                }
+                _ => later,
+            }
+        };
+        Some(selected)
+    };
+    (position_index, clock_index)
+}
+
+/// Evaluate retained SP3 orbit and clock variance at the same record indices
+/// used by RTKLIB's precise-ephemeris error model. Orbit variance combines the
+/// selected node's three axis variances; endpoint extrapolation adds
+/// `5e-7 m/s² * dt² / 2` to orbit sigma. Clock accuracy is retained in metres,
+/// and its node age uses RTKLIB's `1e-3 m/s` growth term.
+pub(crate) fn precise_accuracy_variance_m2(
+    position_nodes: &[f64],
+    position_variances_m2: &[[Sp3AccuracyValue; 3]],
+    clock_nodes: &[(f64, f64, bool)],
+    clock_variances_m2: &[Sp3AccuracyValue],
+    query: &ExactEpochQuery,
+    gap_threshold_factor: f64,
+) -> f64 {
+    let (position_index, clock_index) = accuracy_node_indices(position_nodes, clock_nodes, query);
+    let mut orbit_variance_m2 = 0.0;
+    let mut orbit_variance_known = false;
+    if let Some(index) = position_index {
+        if let Some(variances) = position_variances_m2.get(index) {
+            for variance in variances {
+                match variance {
+                    Sp3AccuracyValue::Known(value) if value.is_finite() && *value >= 0.0 => {
+                        orbit_variance_m2 += *value;
+                        orbit_variance_known = true;
+                    }
+                    Sp3AccuracyValue::TooLarge
+                    | Sp3AccuracyValue::Overflow
+                    | Sp3AccuracyValue::InvalidBase => return f64::INFINITY,
+                    Sp3AccuracyValue::Known(_) => return f64::INFINITY,
+                    Sp3AccuracyValue::Unknown => {}
+                }
+            }
+        }
+    }
+
+    if orbit_variance_known {
+        let mut extrapolation_s = 0.0_f64;
+        if let Ok(window) = select_position_nodes_at_epoch_query(
+            position_nodes.len(),
+            query,
+            gap_threshold_factor,
+            |index| position_nodes[index],
+        ) {
+            if let Some(first) = position_nodes.get(window.start) {
+                if query_minus_node_cmp(query, *first, 0.0) == Some(core::cmp::Ordering::Less) {
+                    if let Some(node_epoch) = ExactEpoch::from_binary_j2000_seconds(*first) {
+                        extrapolation_s =
+                            extrapolation_s.max(query.seconds_since_query(&node_epoch).abs());
+                    }
+                }
+            }
+            if let Some(last) = position_nodes.get(window.end.saturating_sub(1)) {
+                if query_minus_node_cmp(query, *last, 0.0) == Some(core::cmp::Ordering::Greater) {
+                    if let Some(node_epoch) = ExactEpoch::from_binary_j2000_seconds(*last) {
+                        extrapolation_s =
+                            extrapolation_s.max(query.seconds_since_query(&node_epoch).abs());
+                    }
+                }
+            }
+        }
+        if extrapolation_s > 0.0 {
+            let orbit_sigma_m =
+                orbit_variance_m2.sqrt() + 5.0e-7 * extrapolation_s * extrapolation_s / 2.0;
+            orbit_variance_m2 = orbit_sigma_m * orbit_sigma_m;
+        }
+    }
+
+    let clock_variance_m2 = clock_index
+        .and_then(|index| {
+            clock_variances_m2
+                .get(index)
+                .copied()
+                .map(|value| (index, value))
+        })
+        .map_or(0.0, |(index, value)| match value {
+            Sp3AccuracyValue::Known(variance) if variance.is_finite() && variance >= 0.0 => {
+                let node_epoch = ExactEpoch::from_binary_j2000_seconds(clock_nodes[index].0);
+                let elapsed_s =
+                    node_epoch.map_or(0.0, |node| query.seconds_since_query(&node).abs());
+                if elapsed_s > 0.0 {
+                    let sigma_m = variance.sqrt() + 1.0e-3 * elapsed_s;
+                    sigma_m * sigma_m
+                } else {
+                    variance
+                }
+            }
+            Sp3AccuracyValue::Unknown => 0.0,
+            Sp3AccuracyValue::TooLarge
+            | Sp3AccuracyValue::InvalidBase
+            | Sp3AccuracyValue::Overflow
+            | Sp3AccuracyValue::Known(_) => f64::INFINITY,
+        });
+    orbit_variance_m2 + clock_variance_m2
 }
 
 pub(super) fn select_position_nodes_at_epoch_query(
@@ -1476,7 +1670,7 @@ fn interpolate_position_neville_at_epoch_query(
     position_z_km: &[f64],
     query: &ExactEpochQuery,
     gap_threshold_factor: f64,
-) -> (f64, f64, f64) {
+) -> Result<(f64, f64, f64)> {
     let nominal = nominal_positive_spacing(node_seconds).unwrap_or(1.0);
     let window = neville_window_at_epoch_query(
         node_seconds.len(),
@@ -1494,7 +1688,7 @@ fn interpolate_position_neville_at_epoch_query(
     for local_index in 0..window_length {
         let node_index = window_start + local_index;
         let node_query = ExactEpoch::from_binary_j2000_seconds(node_seconds[node_index])
-            .expect("validated SP3 node epoch is representable");
+            .ok_or(Error::EpochOutOfRange)?;
         let offset_s = query.seconds_since_query(&node_query);
         let theta = OMEGA_E_DOT_RAD_S * -offset_s;
         let sine = libm::sin(theta);
@@ -1519,11 +1713,11 @@ fn interpolate_position_neville_at_epoch_query(
         &offsets_s[..window_length],
         &positions_z_km[..window_length],
     );
-    (
+    Ok((
         interpolated_x_km * KM_TO_M,
         interpolated_y_km * KM_TO_M,
         interpolated_z_km * KM_TO_M,
-    )
+    ))
 }
 
 /// Neville's algorithm evaluated at 0, reproducing RTKLIB `rtkcmn.c` interppol
@@ -1898,6 +2092,7 @@ pub(super) fn eval_cubic_spline_for_test(x: &[f64], y: &[f64], query: f64) -> f6
 }
 
 #[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used)]
 mod exact_query_tests {
     use super::*;
 
@@ -1977,14 +2172,14 @@ mod exact_query_tests {
             nodes.len(),
             &inside_lower_edge,
             1.5,
-            |index| nodes[index]
+            |index| { nodes[index] }
         )
         .is_ok());
         assert!(select_position_nodes_at_epoch_query(
             nodes.len(),
             &inside_upper_edge,
             1.5,
-            |index| nodes[index]
+            |index| { nodes[index] }
         )
         .is_ok());
         assert_eq!(

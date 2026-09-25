@@ -356,6 +356,95 @@ mod tests {
     }
 
     #[test]
+    fn cached_point_sine_is_bit_exact_and_reuses_exact_inputs() {
+        let values = [
+            0.0,
+            -0.0,
+            -0.75,
+            0.75,
+            0.5,
+            f64::from_bits(0.5_f64.to_bits() + 1),
+            -0.5,
+            f64::from_bits((-0.5_f64).to_bits() - 1),
+            -PI / 2.0,
+            PI / 2.0,
+            -8.0,
+            8.0,
+        ];
+        POINT_SINE_CACHE.with(|cache| *cache.borrow_mut() = PointSineCache::new());
+
+        for value in values {
+            let expected = Interval::point(value).sin();
+            let first = cached_point_sine(value);
+            assert_eq!(first.lower().to_bits(), expected.lower().to_bits());
+            assert_eq!(first.upper().to_bits(), expected.upper().to_bits());
+            let evaluations_after_miss = POINT_SINE_CACHE.with(|cache| cache.borrow().evaluations);
+            let repeated = cached_point_sine(value);
+            assert_eq!(repeated.lower().to_bits(), expected.lower().to_bits());
+            assert_eq!(repeated.upper().to_bits(), expected.upper().to_bits());
+            assert_eq!(
+                POINT_SINE_CACHE.with(|cache| cache.borrow().evaluations),
+                evaluations_after_miss
+            );
+        }
+    }
+
+    #[test]
+    fn cached_point_sine_collision_evicts_only_the_mismatched_key() {
+        let base_value = 0.125_f64;
+        let mut seen_values = [None; POINT_SINE_CACHE_SLOTS];
+        let mut collision = None;
+        for offset in 0..=POINT_SINE_CACHE_SLOTS {
+            let value = f64::from_bits(base_value.to_bits() + offset as u64);
+            let slot = point_sine_cache_index(value.to_bits());
+            if let Some(previous_value) = seen_values[slot] {
+                collision = Some((previous_value, value));
+                break;
+            }
+            seen_values[slot] = Some(value);
+        }
+        let (first_value, colliding_value) = collision.expect("pigeonhole collision");
+        assert_ne!(first_value.to_bits(), colliding_value.to_bits());
+        assert_eq!(
+            point_sine_cache_index(first_value.to_bits()),
+            point_sine_cache_index(colliding_value.to_bits())
+        );
+        POINT_SINE_CACHE.with(|cache| *cache.borrow_mut() = PointSineCache::new());
+
+        for value in [first_value, colliding_value] {
+            let expected = Interval::point(value).sin();
+            let actual = cached_point_sine(value);
+            assert_eq!(actual.lower().to_bits(), expected.lower().to_bits());
+            assert_eq!(actual.upper().to_bits(), expected.upper().to_bits());
+        }
+        assert_eq!(POINT_SINE_CACHE.with(|cache| cache.borrow().evaluations), 2);
+
+        let expected_collision = Interval::point(colliding_value).sin();
+        let collision_hit = cached_point_sine(colliding_value);
+        assert_eq!(
+            collision_hit.lower().to_bits(),
+            expected_collision.lower().to_bits()
+        );
+        assert_eq!(
+            collision_hit.upper().to_bits(),
+            expected_collision.upper().to_bits()
+        );
+        assert_eq!(POINT_SINE_CACHE.with(|cache| cache.borrow().evaluations), 2);
+
+        let expected_evicted = Interval::point(first_value).sin();
+        let after_eviction = cached_point_sine(first_value);
+        assert_eq!(
+            after_eviction.lower().to_bits(),
+            expected_evicted.lower().to_bits()
+        );
+        assert_eq!(
+            after_eviction.upper().to_bits(),
+            expected_evicted.upper().to_bits()
+        );
+        assert_eq!(POINT_SINE_CACHE.with(|cache| cache.borrow().evaluations), 3);
+    }
+
+    #[test]
     fn western_finite_inverse_longitudes_share_the_principal_branch() {
         let receiver = [-3_194_469.0, -3_194_469.0, 4_487_419.0].map(Interval::point);
         let skyfield = skyfield_geodetic(receiver).unwrap();
@@ -793,6 +882,54 @@ fn asin_interval(value: Interval) -> Result<Interval, CenterCertificateError> {
     Ok(Interval::new(lower.0, upper.1))
 }
 
+const POINT_SINE_CACHE_SLOTS: usize = 256;
+
+struct PointSineCache {
+    entries: [Option<(u64, Interval)>; POINT_SINE_CACHE_SLOTS],
+    evaluations: usize,
+}
+
+impl PointSineCache {
+    const fn new() -> Self {
+        Self {
+            entries: [None; POINT_SINE_CACHE_SLOTS],
+            evaluations: 0,
+        }
+    }
+}
+
+std::thread_local! {
+    static POINT_SINE_CACHE: std::cell::RefCell<PointSineCache> = const {
+        std::cell::RefCell::new(PointSineCache::new())
+    };
+}
+
+fn point_sine_cache_index(bits: u64) -> usize {
+    let mixed = (bits ^ (bits >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    let mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    ((mixed ^ (mixed >> 31)) as usize) & (POINT_SINE_CACHE_SLOTS - 1)
+}
+
+fn cached_point_sine(value: f64) -> Interval {
+    let key = value.to_bits();
+    let slot = point_sine_cache_index(key);
+    if let Some(result) = POINT_SINE_CACHE.with(|cache| {
+        cache.borrow().entries[slot]
+            .filter(|(cached_key, _)| *cached_key == key)
+            .map(|(_, result)| result)
+    }) {
+        return result;
+    }
+
+    let result = Interval::point(value).sin();
+    POINT_SINE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.entries[slot] = Some((key, result));
+        cache.evaluations += 1;
+    });
+    result
+}
+
 fn asin_endpoint(value: f64) -> (f64, f64) {
     if value == 0.0 {
         return (0.0, 0.0);
@@ -808,7 +945,7 @@ fn asin_endpoint(value: f64) -> (f64, f64) {
     let mut upper = core::f64::consts::FRAC_PI_2;
     for _ in 0..64 {
         let midpoint = lower + (upper - lower) * 0.5;
-        let sine = Interval::point(midpoint).sin();
+        let sine = cached_point_sine(midpoint);
         if sine.upper() < value {
             lower = midpoint;
         } else if sine.lower() > value {
@@ -816,8 +953,8 @@ fn asin_endpoint(value: f64) -> (f64, f64) {
         } else {
             let lower_quartile = lower + (midpoint - lower) * 0.5;
             let upper_quartile = midpoint + (upper - midpoint) * 0.5;
-            let lower_sine = Interval::point(lower_quartile).sin();
-            let upper_sine = Interval::point(upper_quartile).sin();
+            let lower_sine = cached_point_sine(lower_quartile);
+            let upper_sine = cached_point_sine(upper_quartile);
             if lower_sine.upper() < value {
                 lower = lower_quartile;
             } else if lower_sine.lower() > value {

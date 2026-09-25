@@ -161,6 +161,75 @@ impl EphemerisSource for ClockWithTerm<'_> {
     ) -> Result<Option<sidereon_core::astro::time::Validated<f64>>, sidereon_core::Error> {
         EphemerisSource::try_transmit_epoch_clock_s(self.0, sat, t_j2000_s, selection_j2000_s)
     }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &sidereon_core::astro::time::ExactEpochQuery,
+        selection_epoch: &sidereon_core::astro::time::ExactEpochQuery,
+    ) -> Result<Option<sidereon_core::astro::time::Validated<f64>>, sidereon_core::Error> {
+        EphemerisSource::try_transmit_epoch_clock_at_epoch_query(
+            self.0,
+            sat,
+            epoch,
+            selection_epoch,
+        )
+    }
+
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        state_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> f64 {
+        EphemerisSource::ephemeris_variance_m2(self.0, sat, state_j2000_s, selection_j2000_s)
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &sidereon_core::astro::time::ExactEpochQuery,
+        selection_epoch: &sidereon_core::astro::time::ExactEpochQuery,
+    ) -> f64 {
+        EphemerisSource::ephemeris_variance_at_epoch_query(
+            self.0,
+            sat,
+            state_epoch,
+            selection_epoch,
+        )
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &sidereon_core::astro::time::ExactEpochQuery,
+        selection_epoch: &sidereon_core::astro::time::ExactEpochQuery,
+    ) -> Result<
+        Option<sidereon_core::astro::time::Validated<([f64; 3], f64, Option<f64>)>>,
+        sidereon_core::Error,
+    > {
+        let Some(state) = EphemerisSource::try_position_clock_group_delay_selected_at_epoch_query(
+            self.0,
+            sat,
+            epoch,
+            selection_epoch,
+        )?
+        else {
+            return Ok(None);
+        };
+        let (position, clock, group_delay) = state.value;
+        let clock = match EphemerisSource::clock_relativity_for_state_at_epoch_query(
+            self.0, sat, epoch, position,
+        ) {
+            sidereon_core::positioning::ClockRelativity::NotApplicable => clock,
+            sidereon_core::positioning::ClockRelativity::Term(term) => clock + term,
+            sidereon_core::positioning::ClockRelativity::Unavailable => return Ok(None),
+        };
+        Ok(Some(sidereon_core::astro::time::Validated {
+            value: (position, clock, group_delay),
+            degraded: state.degraded,
+        }))
+    }
 }
 
 /// Applying the term through the source's `clock_relativity_s` and folding it into the
@@ -185,32 +254,9 @@ fn go_fixture_static_term_through_the_source_equals_the_folded_clock() {
     )
     .expect("static solve with the folded clock");
     assert_eq!(
-        through_source.position.as_array().map(f64::to_bits),
-        folded.position.as_array().map(f64::to_bits)
-    );
-    assert_eq!(
-        through_source
-            .per_epoch_clock
-            .iter()
-            .map(|clock| clock.clock_s.to_bits())
-            .collect::<Vec<_>>(),
-        folded
-            .per_epoch_clock
-            .iter()
-            .map(|clock| clock.clock_s.to_bits())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        through_source
-            .residuals_m
-            .iter()
-            .map(|row| row.residual_m.to_bits())
-            .collect::<Vec<_>>(),
-        folded
-            .residuals_m
-            .iter()
-            .map(|row| row.residual_m.to_bits())
-            .collect::<Vec<_>>()
+        static_result_bit_fields(&through_source),
+        static_result_bit_fields(&folded),
+        "source-applied and folded relativity static-result fields differ"
     );
 }
 

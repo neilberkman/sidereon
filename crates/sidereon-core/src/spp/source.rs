@@ -342,11 +342,9 @@ pub trait EphemerisSource {
     /// (the URA, or the Galileo SISA), the GLONASS `ERREPH_GLO` variance, or the SBAS
     /// URA variance; an SSR-corrected source RTKLIB `var_urassr` of the satellite's SSR
     /// URA; an SBAS-corrected source the variance of the fast correction it applies.
-    /// `0.0` by default: the source states no error. The SP3 and precise-interpolant
-    /// sources keep the default. RTKLIB `peph2pos` forms its variance from the SP3
-    /// records' standard deviations, which [`Sp3`] does not keep, and from the distance
-    /// to the nearest node of its linear clock interpolation, where these sources
-    /// interpolate the clock by spline.
+    /// `0.0` by default: the source states no error. SP3 and precise-interpolant
+    /// sources use retained record accuracies when available and otherwise preserve
+    /// this default. Precise-source clock variance is evaluated in metres.
     fn ephemeris_variance_m2(
         &self,
         _sat: GnssSatelliteId,
@@ -356,10 +354,9 @@ pub trait EphemerisSource {
         0.0
     }
 
-    /// Variance for an exact state query and its exact selection epoch. The
-    /// compatibility adapter rounds both queries once to the scalar API; native
-    /// record-backed sources should override it so state and variance use the
-    /// same selected record.
+    /// Variance for exact state and selection epochs. The compatibility adapter
+    /// rounds both queries once to the scalar API; native precise sources override
+    /// this to select retained record accuracy exactly.
     fn ephemeris_variance_at_epoch_query(
         &self,
         sat: GnssSatelliteId,
@@ -769,6 +766,26 @@ impl EphemerisSource for Sp3 {
         Some((state.position.as_array(), clk))
     }
 
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        state_j2000_s: f64,
+        _selection_j2000_s: f64,
+    ) -> f64 {
+        ExactEpoch::from_binary_j2000_seconds(state_j2000_s)
+            .map(|epoch| self.accuracy_variance_at_epoch_query(sat, &epoch))
+            .unwrap_or(0.0)
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &ExactEpochQuery,
+        _selection_epoch: &ExactEpochQuery,
+    ) -> f64 {
+        self.accuracy_variance_at_epoch_query(sat, state_epoch)
+    }
+
     fn try_position_clock_group_delay_selected_at_exact_epoch(
         &self,
         sat: GnssSatelliteId,
@@ -864,6 +881,26 @@ impl EphemerisSource for PreciseEphemerisInterpolant {
         Some((state.position.as_array(), clk))
     }
 
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        state_j2000_s: f64,
+        _selection_j2000_s: f64,
+    ) -> f64 {
+        ExactEpoch::from_binary_j2000_seconds(state_j2000_s)
+            .map(|epoch| self.accuracy_variance_at_epoch_query(sat, &epoch))
+            .unwrap_or(0.0)
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &ExactEpochQuery,
+        _selection_epoch: &ExactEpochQuery,
+    ) -> f64 {
+        self.accuracy_variance_at_epoch_query(sat, state_epoch)
+    }
+
     fn try_position_clock_group_delay_selected_at_exact_epoch(
         &self,
         sat: GnssSatelliteId,
@@ -957,6 +994,26 @@ impl EphemerisSource for MmapPreciseEphemerisInterpolant<'_> {
         let state = self.position_at_j2000_seconds(sat, t_j2000_s).ok()?;
         let clk = state.clock_s?;
         Some((state.position.as_array(), clk))
+    }
+
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        state_j2000_s: f64,
+        _selection_j2000_s: f64,
+    ) -> f64 {
+        ExactEpoch::from_binary_j2000_seconds(state_j2000_s)
+            .map(|epoch| self.accuracy_variance_at_epoch_query(sat, &epoch))
+            .unwrap_or(0.0)
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &ExactEpochQuery,
+        _selection_epoch: &ExactEpochQuery,
+    ) -> f64 {
+        self.accuracy_variance_at_epoch_query(sat, state_epoch)
     }
 
     fn try_position_clock_group_delay_selected_at_exact_epoch(

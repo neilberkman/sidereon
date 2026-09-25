@@ -160,7 +160,7 @@ pub(crate) fn query_native_exact_time(
     sat: GnssSatelliteId,
     epoch: crate::astro::time::ExactEpoch,
 ) -> Option<(f64, f64, bool)> {
-    let gps_epoch = epoch.checked_add_seconds(J2000_GPS_SECONDS_OF_WEEK as f64)?;
+    let gps_epoch = epoch.checked_add_seconds(J2000_GPS_SECONDS_OF_WEEK)?;
     let gps_sow = gps_epoch.seconds_modulo(SECONDS_PER_WEEK as i64)?;
     match sat.system {
         GnssSystem::Gps | GnssSystem::Galileo | GnssSystem::Qzss | GnssSystem::Navic => {

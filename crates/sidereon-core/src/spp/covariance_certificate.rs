@@ -131,7 +131,7 @@ fn determinant<const SIZE: usize>(matrix: &[[Interval; SIZE]; SIZE]) -> Interval
             }
             let inversions = (used_columns >> (column + 1)).count_ones();
             let term = product.mul(matrix[row][column]);
-            let term = if inversions % 2 == 0 {
+            let term = if inversions.is_multiple_of(2) {
                 term
             } else {
                 term.mul(Interval::point(-1.0))

@@ -2,14 +2,17 @@
 //!
 //! The store is the offline form of [`PreciseEphemerisInterpolant`]: a fixed
 //! header, a sorted satellite index, and one aligned payload per satellite.
-//! Payloads carry SP3-native position nodes and fitted clock spline coefficients
-//! so opening the store validates bytes and builds only lightweight indexes. It
-//! never refits clock splines at open or during evaluation.
+//! Version 2 payloads carry SP3-native position nodes, record-accuracy outcomes,
+//! and fitted clock spline coefficients. Opening validates bytes and builds
+//! lightweight indexes; it never refits clock splines at open or during
+//! evaluation. Version 1 artifacts remain readable and report unknown record
+//! accuracy.
 //!
-//! The header records the source's [`Sp3InterpolationOptions`] gap threshold
+//! Both versions record the source's [`Sp3InterpolationOptions`] gap threshold
 //! factor at bytes 48..56 as a little-endian f64, with all-zero bytes meaning
-//! the default. A default-policy artifact is byte-identical to one written
-//! before the field existed, and such an artifact reads back as the default.
+//! the default. Version 1 artifacts written before that header field existed
+//! contain zeros there and read with the default policy. Version 2 adds
+//! record-accuracy outcomes to the aligned satellite payloads.
 
 use crate::artifact_bytes::{ArtifactBytes, DigestProvenance};
 use std::collections::BTreeMap;
@@ -30,16 +33,18 @@ use crate::sp3::interp::{
     query_minus_node_cmp, select_position_nodes, select_position_nodes_at_epoch_query,
     PreciseQuery, Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR, NEVILLE_POINTS,
 };
-use crate::sp3::{PreciseEphemerisInterpolant, Sp3, Sp3State};
+use crate::sp3::{PreciseEphemerisInterpolant, Sp3, Sp3AccuracyValue, Sp3State};
 use crate::{validate, Error, Result};
 
 const STORE_MAGIC: &[u8; 8] = b"PEMAP001";
-const STORE_VERSION: u16 = 1;
+const STORE_VERSION: u16 = 2;
+const STORE_VERSION_WITHOUT_ACCURACY: u16 = 1;
 const STORE_ALIGNMENT: usize = 4096;
 const STORE_HEADER_LEN: usize = 64;
 const SAT_INDEX_RECORD_LEN: usize = 96;
 const CLOCK_NODE_RECORD_LEN: usize = 24;
 const CLOCK_ARC_RECORD_LEN: usize = 64;
+const ACCURACY_VALUE_RECORD_LEN: usize = 16;
 
 const HEADER_VERSION_OFFSET: usize = 8;
 const HEADER_TIME_SCALE_OFFSET: usize = 10;
@@ -48,9 +53,8 @@ const HEADER_INDEX_OFFSET_OFFSET: usize = 16;
 const HEADER_DATA_OFFSET_OFFSET: usize = 24;
 const HEADER_TOTAL_LEN_OFFSET: usize = 32;
 const HEADER_CHECKSUM_OFFSET: usize = 40;
-/// Gap threshold factor as an f64, or all-zero bytes for the default policy.
-/// A default-policy artifact is therefore byte-identical to one written
-/// before the field existed, and such an artifact reads back as the default.
+/// Gap threshold factor as an f64 in V1 and V2, or all-zero bytes for default.
+/// Pre-field V1 artifacts contain zeros here and read with the default policy.
 const HEADER_GAP_THRESHOLD_FACTOR_OFFSET: usize = 48;
 const HEADER_RESERVED_OFFSET: usize = 56;
 
@@ -358,6 +362,9 @@ struct MmapSeries<'a> {
     pos_kx: F64Array<'a>,
     pos_ky: F64Array<'a>,
     pos_kz: F64Array<'a>,
+    position_variance_m2: Vec<[Sp3AccuracyValue; 3]>,
+    clock_nodes: Vec<(f64, f64, bool)>,
+    clock_variance_m2: Vec<Sp3AccuracyValue>,
     clock_arcs: Vec<MmapClockArc<'a>>,
 }
 
@@ -371,6 +378,9 @@ impl MmapSeries<'_> {
             pos_kx: self.pos_kx.into_static()?,
             pos_ky: self.pos_ky.into_static()?,
             pos_kz: self.pos_kz.into_static()?,
+            position_variance_m2: self.position_variance_m2,
+            clock_nodes: self.clock_nodes,
+            clock_variance_m2: self.clock_variance_m2,
             clock_arcs: self
                 .clock_arcs
                 .into_iter()
@@ -708,6 +718,27 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
         )
     }
 
+    pub(crate) fn accuracy_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        query: &ExactEpochQuery,
+    ) -> f64 {
+        let Some(series) = self.series.get(&sat) else {
+            return 0.0;
+        };
+        let position_nodes: Vec<_> = (0..series.pos_count)
+            .map(|index| series.pos_x.get(self.bytes.as_ref(), index))
+            .collect();
+        crate::sp3::precise_accuracy_variance_m2(
+            &position_nodes,
+            &series.position_variance_m2,
+            &series.clock_nodes,
+            &series.clock_variance_m2,
+            query,
+            self.interpolation.gap_threshold_factor(),
+        )
+    }
+
     /// Position of `sat` 1 ms after `t_j2000_s`, the second position RTKLIB `peph2pos`
     /// interpolates to form the satellite velocity.
     pub(crate) fn position_after_ephpos_step(
@@ -893,6 +924,13 @@ fn build_store(
         let pos_count = series.x.len();
         let clock_node_count = series.clk.len();
         let clock_arc_count = fitted.clock_arcs.len();
+        if series.position_variance_m2.len() != pos_count
+            || series.clock_variance_m2.len() != clock_node_count
+        {
+            return Err(parse_error(format!(
+                "satellite {sat} accuracy arrays do not align with their node arrays"
+            )));
+        }
 
         let pos_x_offset = cursor;
         cursor = add_len(cursor, pos_count, 8)?;
@@ -902,6 +940,13 @@ fn build_store(
         cursor = add_len(cursor, pos_count, 8)?;
         let pos_kz_offset = cursor;
         cursor = add_len(cursor, pos_count, 8)?;
+        let position_accuracy_offset = cursor;
+        let position_accuracy_count = pos_count
+            .checked_mul(3)
+            .ok_or_else(|| parse_error("position accuracy count overflows usize"))?;
+        cursor = add_len(cursor, position_accuracy_count, ACCURACY_VALUE_RECORD_LEN)?;
+        let clock_accuracy_offset = cursor;
+        cursor = add_len(cursor, clock_node_count, ACCURACY_VALUE_RECORD_LEN)?;
         let clock_node_offset = cursor;
         cursor = add_len(cursor, clock_node_count, CLOCK_NODE_RECORD_LEN)?;
         let clock_arc_offset = cursor;
@@ -948,6 +993,8 @@ fn build_store(
             pos_kx_offset,
             pos_ky_offset,
             pos_kz_offset,
+            position_accuracy_offset,
+            clock_accuracy_offset,
             clock_node_offset,
             clock_arc_offset,
             arcs,
@@ -1039,6 +1086,16 @@ fn build_store(
         write_f64_slice(&mut out, layout.pos_kx_offset, &series.kx);
         write_f64_slice(&mut out, layout.pos_ky_offset, &series.ky);
         write_f64_slice(&mut out, layout.pos_kz_offset, &series.kz);
+        write_accuracy_values(
+            &mut out,
+            layout.position_accuracy_offset,
+            series.position_variance_m2.iter().flatten().copied(),
+        );
+        write_accuracy_values(
+            &mut out,
+            layout.clock_accuracy_offset,
+            series.clock_variance_m2.iter().copied(),
+        );
         for (node_idx, &(x, clock_us, event)) in series.clk.iter().enumerate() {
             let node_offset = layout.clock_node_offset + node_idx * CLOCK_NODE_RECORD_LEN;
             let node = &mut out[node_offset..node_offset + CLOCK_NODE_RECORD_LEN];
@@ -1114,6 +1171,8 @@ struct PendingSatLayout {
     pos_kx_offset: usize,
     pos_ky_offset: usize,
     pos_kz_offset: usize,
+    position_accuracy_offset: usize,
+    clock_accuracy_offset: usize,
     clock_node_offset: usize,
     clock_arc_offset: usize,
     arcs: Vec<PendingClockArcLayout>,
@@ -1145,9 +1204,10 @@ fn parse_store<'a>(
         return Err(PreciseInterpolantStoreError::HeaderTruncated { available });
     }
     let version = read_u16(bytes, HEADER_VERSION_OFFSET)?;
-    if version != STORE_VERSION {
+    if version != STORE_VERSION && version != STORE_VERSION_WITHOUT_ACCURACY {
         return Err(PreciseInterpolantStoreError::UnsupportedVersion { version });
     }
+    let has_accuracy = version >= STORE_VERSION;
     // The framing is checked before the checksum: a store cut short fails its
     // checksum too, and would otherwise be reported as corrupt.
     let declared = read_u64(bytes, HEADER_TOTAL_LEN_OFFSET)?;
@@ -1318,6 +1378,25 @@ fn parse_store<'a>(
         let pos_kz = parse_f64_array(bytes, pos_kz_offset, pos_count, sat, "position kz", backing)?;
         cursor = add_len(cursor, pos_count, 8)?;
 
+        let (position_variance_m2, clock_variance_m2) = if has_accuracy {
+            let position_count = pos_count
+                .checked_mul(3)
+                .ok_or_else(|| parse_error("position accuracy count overflows usize"))?;
+            let position_values =
+                parse_accuracy_values(bytes, cursor, position_count, sat, "position accuracy")?;
+            cursor = add_len(cursor, position_count, ACCURACY_VALUE_RECORD_LEN)?;
+            let clock_values =
+                parse_accuracy_values(bytes, cursor, clock_node_count, sat, "clock accuracy")?;
+            cursor = add_len(cursor, clock_node_count, ACCURACY_VALUE_RECORD_LEN)?;
+            let position_variance_m2 = position_values.as_chunks::<3>().0.to_vec();
+            (position_variance_m2, clock_values)
+        } else {
+            (
+                vec![[Sp3AccuracyValue::Unknown; 3]; pos_count],
+                vec![Sp3AccuracyValue::Unknown; clock_node_count],
+            )
+        };
+
         require_offset(sat, "clock nodes", clock_node_offset, cursor)?;
         checked_range(
             bytes,
@@ -1327,6 +1406,7 @@ fn parse_store<'a>(
             "clock nodes",
             sat,
         )?;
+        let mut clock_nodes = Vec::with_capacity(clock_node_count);
         for node_idx in 0..clock_node_count {
             let node_offset = clock_node_offset + node_idx * CLOCK_NODE_RECORD_LEN;
             let node = checked_slice(
@@ -1343,20 +1423,27 @@ fn parse_store<'a>(
                     "satellite {sat} clock node {node_idx} is not finite"
                 )));
             }
-            match node[CLOCK_NODE_EVENT_OFFSET] {
-                0 | 1 => {}
+            let clock_event = match node[CLOCK_NODE_EVENT_OFFSET] {
+                0 => false,
+                1 => true,
                 tag => {
                     return Err(parse_error(format!(
                         "satellite {sat} clock node {node_idx} has invalid event tag {tag}"
                     )));
                 }
-            }
+            };
+            clock_nodes.push((x, clock_us, clock_event));
             ensure_zero(
                 node,
                 CLOCK_NODE_EVENT_OFFSET + 1,
                 CLOCK_NODE_RECORD_LEN,
                 "clock node reserved bytes",
             )?;
+        }
+        if clock_nodes.windows(2).any(|nodes| nodes[1].0 <= nodes[0].0) {
+            return Err(parse_error(format!(
+                "satellite {sat} clock nodes are not strictly increasing"
+            )));
         }
         cursor = add_len(cursor, clock_node_count, CLOCK_NODE_RECORD_LEN)?;
 
@@ -1441,6 +1528,9 @@ fn parse_store<'a>(
                 pos_kx,
                 pos_ky,
                 pos_kz,
+                position_variance_m2,
+                clock_nodes,
+                clock_variance_m2,
                 clock_arcs: arcs,
             },
         );
@@ -1569,7 +1659,7 @@ fn interpolate_mapped_position_at_epoch_query(
         series,
         query,
         gap_threshold_factor,
-    );
+    )?;
     if !(x_m.is_finite() && y_m.is_finite() && z_m.is_finite()) {
         return Err(Error::InvalidInput(format!(
             "non-finite interpolated position at query {rounded_query}: the selected nodes are not \
@@ -1627,7 +1717,7 @@ fn interpolate_mapped_position_neville_at_epoch_query(
     series: &MmapSeries,
     query: &ExactEpochQuery,
     gap_threshold_factor: f64,
-) -> (f64, f64, f64) {
+) -> Result<(f64, f64, f64)> {
     let nominal = nominal_positive_spacing(bytes, series).unwrap_or(1.0);
     let window = neville_window_at_epoch_query(
         series.pos_count,
@@ -1643,7 +1733,7 @@ fn interpolate_mapped_position_neville_at_epoch_query(
     for local_index in 0..window.len() {
         let node_index = window.start + local_index;
         let node_query = ExactEpoch::from_binary_j2000_seconds(series.pos_x.get(bytes, node_index))
-            .expect("validated mapped node epoch is representable");
+            .ok_or(Error::EpochOutOfRange)?;
         let offset_s = query.seconds_since_query(&node_query);
         let theta = OMEGA_E_DOT_RAD_S * -offset_s;
         let sine = libm::sin(theta);
@@ -1659,7 +1749,7 @@ fn interpolate_mapped_position_neville_at_epoch_query(
     let x_km = neville(&offsets_s[..win], &positions_x_km[..win]);
     let y_km = neville(&offsets_s[..win], &positions_y_km[..win]);
     let z_km = neville(&offsets_s[..win], &positions_z_km[..win]);
-    (x_km * KM_TO_M, y_km * KM_TO_M, z_km * KM_TO_M)
+    Ok((x_km * KM_TO_M, y_km * KM_TO_M, z_km * KM_TO_M))
 }
 
 fn interpolate_mapped_clock(bytes: &[u8], series: &MmapSeries, query: f64) -> Option<f64> {
@@ -2204,6 +2294,43 @@ fn read_f64(
     Ok(f64::from_le_bytes(read_array(bytes, offset)?))
 }
 
+fn parse_accuracy_values(
+    bytes: &[u8],
+    offset: usize,
+    count: usize,
+    sat: GnssSatelliteId,
+    region: &'static str,
+) -> core::result::Result<Vec<Sp3AccuracyValue>, PreciseInterpolantStoreError> {
+    checked_range(bytes, offset, count, ACCURACY_VALUE_RECORD_LEN, region, sat)?;
+    let mut values = Vec::with_capacity(count);
+    for index in 0..count {
+        let record_offset = offset + index * ACCURACY_VALUE_RECORD_LEN;
+        let record = checked_slice(
+            bytes,
+            record_offset,
+            ACCURACY_VALUE_RECORD_LEN,
+            region,
+            Some(sat),
+        )?;
+        ensure_zero(record, 1, 8, "accuracy reserved bytes")?;
+        let raw_value = read_f64(record, 8)?;
+        let value = match record[0] {
+            0 if raw_value == 0.0 => Sp3AccuracyValue::Unknown,
+            1 if raw_value.is_finite() && raw_value >= 0.0 => Sp3AccuracyValue::Known(raw_value),
+            2 if raw_value == 0.0 => Sp3AccuracyValue::TooLarge,
+            3 if raw_value == 0.0 => Sp3AccuracyValue::InvalidBase,
+            4 if raw_value == 0.0 => Sp3AccuracyValue::Overflow,
+            tag => {
+                return Err(parse_error(format!(
+                    "satellite {sat} {region} entry {index} has invalid tag/value {tag}/{raw_value}"
+                )));
+            }
+        };
+        values.push(value);
+    }
+    Ok(values)
+}
+
 fn read_array<const N: usize>(
     bytes: &[u8],
     offset: usize,
@@ -2238,5 +2365,426 @@ fn write_f64(bytes: &mut [u8], offset: usize, value: f64) {
 fn write_f64_slice(bytes: &mut [u8], offset: usize, values: &[f64]) {
     for (idx, value) in values.iter().enumerate() {
         write_f64(bytes, offset + idx * 8, *value);
+    }
+}
+
+fn write_accuracy_values(
+    bytes: &mut [u8],
+    offset: usize,
+    values: impl IntoIterator<Item = Sp3AccuracyValue>,
+) {
+    for (index, value) in values.into_iter().enumerate() {
+        let record_offset = offset + index * ACCURACY_VALUE_RECORD_LEN;
+        let (tag, value) = match value {
+            Sp3AccuracyValue::Unknown => (0, 0.0),
+            Sp3AccuracyValue::Known(value) => (1, value),
+            Sp3AccuracyValue::TooLarge => (2, 0.0),
+            Sp3AccuracyValue::InvalidBase => (3, 0.0),
+            Sp3AccuracyValue::Overflow => (4, 0.0),
+        };
+        bytes[record_offset] = tag;
+        write_f64(bytes, record_offset + 8, value);
+    }
+}
+
+#[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod accuracy_store_tests {
+    use super::*;
+    use crate::astro::time::model::{Instant, InstantRepr, JulianDateSplit, TimeScale};
+    use crate::id::GnssSystem;
+    use crate::sp3::{
+        PreciseEphemerisAccuracySample, PreciseEphemerisSample, PreciseEphemerisSamples,
+        Sp3AccuracyValue,
+    };
+
+    fn sample_epoch(seconds: f64) -> Instant {
+        let julian =
+            JulianDateSplit::new(2_451_545.0, seconds / 86_400.0).expect("valid test epoch");
+        Instant {
+            scale: TimeScale::Gpst,
+            repr: InstantRepr::JulianDate(julian),
+        }
+    }
+
+    fn satellite() -> GnssSatelliteId {
+        GnssSatelliteId::new(GnssSystem::Gps, 5).expect("valid satellite")
+    }
+
+    fn accurate_source() -> PreciseEphemerisSamples {
+        let sat = satellite();
+        let samples = [
+            PreciseEphemerisSample::new(
+                sat,
+                sample_epoch(0.0),
+                [20_000_000.0, 14_000_000.0, 21_000_000.0],
+                Some(1.0e-6),
+            ),
+            PreciseEphemerisSample::new(
+                sat,
+                sample_epoch(900.0),
+                [20_000_001.0, 14_000_001.0, 21_000_001.0],
+                Some(2.0e-6),
+            ),
+        ];
+        let accuracy = samples.map(|sample| {
+            PreciseEphemerisAccuracySample::new(
+                sample.sat,
+                sample.epoch,
+                [
+                    Sp3AccuracyValue::Known(4.0),
+                    Sp3AccuracyValue::Known(9.0),
+                    Sp3AccuracyValue::Known(16.0),
+                ],
+                Sp3AccuracyValue::Known(25.0),
+            )
+        });
+        PreciseEphemerisSamples::from_samples_with_accuracy(samples, accuracy)
+            .expect("aligned samples and accuracies")
+    }
+
+    fn accurate_store_bytes() -> Vec<u8> {
+        let source = accurate_source();
+        PreciseEphemerisInterpolant::from_precise_ephemeris_samples(&source)
+            .to_mmap_store_bytes()
+            .expect("serialize store")
+    }
+
+    fn recompute_store_checksums(bytes: &mut [u8]) {
+        let index_offset = read_usize(bytes, HEADER_INDEX_OFFSET_OFFSET).unwrap();
+        let sat_count = read_u32(bytes, HEADER_SAT_COUNT_OFFSET).unwrap() as usize;
+        for index in 0..sat_count {
+            let record_offset = index_offset + index * SAT_INDEX_RECORD_LEN;
+            let record = &bytes[record_offset..record_offset + SAT_INDEX_RECORD_LEN];
+            let data_offset = read_usize(record, SAT_DATA_OFFSET_OFFSET).unwrap();
+            let data_len = read_usize(record, SAT_DATA_LEN_OFFSET).unwrap();
+            let checksum = fnv1a64(&bytes[data_offset..data_offset + data_len]);
+            write_u64(bytes, record_offset + SAT_CHECKSUM_OFFSET, checksum);
+        }
+        write_u64(bytes, HEADER_CHECKSUM_OFFSET, 0);
+        let checksum = artifact_checksum64(bytes);
+        write_u64(bytes, HEADER_CHECKSUM_OFFSET, checksum);
+    }
+
+    fn assert_invalid_accuracy_record(
+        mut bytes: Vec<u8>,
+        record_offset: usize,
+        tag: u8,
+        value: f64,
+        reserved_byte: Option<u8>,
+        case_name: &str,
+    ) {
+        bytes[record_offset] = tag;
+        if let Some(value) = reserved_byte {
+            bytes[record_offset + 1] = value;
+        }
+        write_f64(&mut bytes, record_offset + 8, value);
+        recompute_store_checksums(&mut bytes);
+
+        match MmapPreciseEphemerisInterpolant::from_vec(bytes) {
+            Err(PreciseInterpolantStoreError::Parse { reason }) if reason.contains("accuracy") => {}
+            other => panic!("{case_name} should fail accuracy validation, got {other:?}"),
+        }
+    }
+
+    fn legacy_v1_bytes(mut bytes: Vec<u8>) -> Vec<u8> {
+        let record_start = STORE_HEADER_LEN;
+        let record = &bytes[record_start..record_start + SAT_INDEX_RECORD_LEN];
+        let position_count = read_u32(record, SAT_POS_COUNT_OFFSET).unwrap() as usize;
+        let clock_count = read_u32(record, SAT_CLOCK_NODE_COUNT_OFFSET).unwrap() as usize;
+        let arc_count = read_u32(record, SAT_CLOCK_ARC_COUNT_OFFSET).unwrap() as usize;
+        let position_kz_offset = read_usize(record, SAT_POS_KZ_OFFSET_OFFSET).unwrap();
+        let clock_node_offset = read_usize(record, SAT_CLOCK_NODE_OFFSET_OFFSET).unwrap();
+        let clock_arc_offset = read_usize(record, SAT_CLOCK_ARC_OFFSET_OFFSET).unwrap();
+        let accuracy_offset = position_kz_offset + position_count * 8;
+        let removed_len = (position_count * 3 + clock_count) * ACCURACY_VALUE_RECORD_LEN;
+        let accuracy_end = accuracy_offset + removed_len;
+        let mut legacy = Vec::with_capacity(bytes.len() - removed_len);
+        legacy.extend_from_slice(&bytes[..accuracy_offset]);
+        legacy.extend_from_slice(&bytes[accuracy_end..]);
+
+        write_u16(
+            &mut legacy,
+            HEADER_VERSION_OFFSET,
+            STORE_VERSION_WITHOUT_ACCURACY,
+        );
+        let record = &mut legacy[record_start..record_start + SAT_INDEX_RECORD_LEN];
+        write_u64(
+            record,
+            SAT_CLOCK_NODE_OFFSET_OFFSET,
+            (clock_node_offset - removed_len) as u64,
+        );
+        write_u64(
+            record,
+            SAT_CLOCK_ARC_OFFSET_OFFSET,
+            (clock_arc_offset - removed_len) as u64,
+        );
+        let data_len = read_u64(record, SAT_DATA_LEN_OFFSET).unwrap() as usize;
+        write_u64(record, SAT_DATA_LEN_OFFSET, (data_len - removed_len) as u64);
+        let shifted_arc_offset = clock_arc_offset - removed_len;
+        for arc_index in 0..arc_count {
+            let arc_start = shifted_arc_offset + arc_index * CLOCK_ARC_RECORD_LEN;
+            let arc = &mut legacy[arc_start..arc_start + CLOCK_ARC_RECORD_LEN];
+            for field_offset in [
+                CLOCK_ARC_X_OFFSET_OFFSET,
+                CLOCK_ARC_C0_OFFSET_OFFSET,
+                CLOCK_ARC_C1_OFFSET_OFFSET,
+                CLOCK_ARC_C2_OFFSET_OFFSET,
+                CLOCK_ARC_C3_OFFSET_OFFSET,
+            ] {
+                let offset = read_u64(arc, field_offset).unwrap() as usize;
+                write_u64(arc, field_offset, (offset - removed_len) as u64);
+            }
+        }
+        let total_len = read_u64(&legacy, HEADER_TOTAL_LEN_OFFSET).unwrap() as usize;
+        write_u64(
+            &mut legacy,
+            HEADER_TOTAL_LEN_OFFSET,
+            (total_len - removed_len) as u64,
+        );
+        let data_offset = read_usize(&legacy, record_start + SAT_DATA_OFFSET_OFFSET).unwrap();
+        let legacy_data_len =
+            read_u64(&legacy, record_start + SAT_DATA_LEN_OFFSET).unwrap() as usize;
+        let sat_checksum = fnv1a64(&legacy[data_offset..data_offset + legacy_data_len]);
+        write_u64(
+            &mut legacy[record_start..record_start + SAT_INDEX_RECORD_LEN],
+            SAT_CHECKSUM_OFFSET,
+            sat_checksum,
+        );
+        write_u64(&mut legacy, HEADER_CHECKSUM_OFFSET, 0);
+        let checksum = artifact_checksum64(&legacy);
+        write_u64(&mut legacy, HEADER_CHECKSUM_OFFSET, checksum);
+        bytes.clear();
+        legacy
+    }
+
+    #[test]
+    fn version_two_preserves_accuracy_and_version_one_reads_as_unknown() {
+        let source = accurate_source();
+        let interpolant = PreciseEphemerisInterpolant::from_precise_ephemeris_samples(&source);
+        let bytes = accurate_store_bytes();
+        let current =
+            MmapPreciseEphemerisInterpolant::from_vec(bytes.clone()).expect("read v2 store");
+        let query = ExactEpoch::from_binary_j2000_seconds(0.0).expect("representable query");
+        assert_eq!(
+            current.accuracy_variance_at_epoch_query(satellite(), &query),
+            54.0
+        );
+        assert_eq!(
+            crate::spp::EphemerisSource::ephemeris_variance_at_epoch_query(
+                &interpolant,
+                satellite(),
+                &query,
+                &query,
+            ),
+            54.0
+        );
+        assert_eq!(
+            crate::spp::EphemerisSource::ephemeris_variance_at_epoch_query(
+                &current,
+                satellite(),
+                &query,
+                &query,
+            ),
+            54.0
+        );
+        let selection_epoch = ExactEpoch::from_binary_j2000_seconds(450.0).unwrap();
+        assert_eq!(
+            crate::spp::EphemerisSource::ephemeris_variance_at_epoch_query(
+                &interpolant,
+                satellite(),
+                &query,
+                &selection_epoch,
+            ),
+            54.0
+        );
+        assert_eq!(
+            crate::spp::EphemerisSource::ephemeris_variance_at_epoch_query(
+                &current,
+                satellite(),
+                &query,
+                &selection_epoch,
+            ),
+            54.0
+        );
+
+        let legacy_bytes = legacy_v1_bytes(bytes);
+        let legacy =
+            MmapPreciseEphemerisInterpolant::from_vec(legacy_bytes).expect("read legacy v1 store");
+        assert_eq!(
+            legacy.accuracy_variance_at_epoch_query(satellite(), &query),
+            0.0
+        );
+    }
+
+    #[test]
+    fn version_two_rejects_malformed_accuracy_records_after_checksum_validation() {
+        let bytes = accurate_store_bytes();
+        let index_offset = read_usize(&bytes, HEADER_INDEX_OFFSET_OFFSET).unwrap();
+        let record = &bytes[index_offset..index_offset + SAT_INDEX_RECORD_LEN];
+        let position_count = read_u32(record, SAT_POS_COUNT_OFFSET).unwrap() as usize;
+        let position_kz_offset = read_usize(record, SAT_POS_KZ_OFFSET_OFFSET).unwrap();
+        let first_accuracy_record = position_kz_offset + position_count * 8;
+
+        for (case_name, tag, value, reserved_byte) in [
+            ("invalid tag", u8::MAX, 0.0, None),
+            ("known NaN", 1, f64::NAN, None),
+            ("negative known value", 1, -1.0, None),
+            ("nonzero reserved byte", 1, 4.0, Some(1)),
+            ("unknown value payload", 0, 1.0, None),
+            ("too-large value payload", 2, 1.0, None),
+        ] {
+            assert_invalid_accuracy_record(
+                bytes.clone(),
+                first_accuracy_record,
+                tag,
+                value,
+                reserved_byte,
+                case_name,
+            );
+        }
+    }
+
+    #[test]
+    fn precise_variance_uses_rtklib_orbit_predecessor_and_nearest_clock_ties_later() {
+        let position_nodes = [0.0, 10.0, 20.0];
+        let position_variances = [
+            [
+                Sp3AccuracyValue::Known(1.0),
+                Sp3AccuracyValue::Known(4.0),
+                Sp3AccuracyValue::Known(9.0),
+            ],
+            [
+                Sp3AccuracyValue::Known(4.0),
+                Sp3AccuracyValue::Known(9.0),
+                Sp3AccuracyValue::Known(16.0),
+            ],
+            [
+                Sp3AccuracyValue::Known(9.0),
+                Sp3AccuracyValue::Known(16.0),
+                Sp3AccuracyValue::Known(25.0),
+            ],
+        ];
+        let clock_nodes = [(0.0, 0.0, false), (10.0, 0.0, false), (20.0, 0.0, false)];
+        let clock_variances = [
+            Sp3AccuracyValue::Known(100.0),
+            Sp3AccuracyValue::Known(400.0),
+            Sp3AccuracyValue::Known(900.0),
+        ];
+        let exact_node = ExactEpoch::from_binary_j2000_seconds(10.0).unwrap();
+        let exact_tie = ExactEpoch::from_binary_j2000_seconds(15.0).unwrap();
+        let extrapolated_clock_variance_m2 = (900.0_f64.sqrt() + 1.0e-3 * 5.0).powi(2);
+        assert_eq!(
+            crate::sp3::precise_accuracy_variance_m2(
+                &position_nodes,
+                &position_variances,
+                &clock_nodes,
+                &clock_variances,
+                &exact_node,
+                DEFAULT_GAP_THRESHOLD_FACTOR,
+            ),
+            414.0
+        );
+        assert_eq!(
+            crate::sp3::precise_accuracy_variance_m2(
+                &position_nodes,
+                &position_variances,
+                &clock_nodes,
+                &clock_variances,
+                &exact_tie,
+                DEFAULT_GAP_THRESHOLD_FACTOR,
+            ),
+            29.0 + extrapolated_clock_variance_m2
+        );
+        let after_last = ExactEpoch::from_binary_j2000_seconds(25.0).unwrap();
+        assert_eq!(
+            crate::sp3::precise_accuracy_variance_m2(
+                &position_nodes,
+                &position_variances,
+                &clock_nodes,
+                &clock_variances,
+                &after_last,
+                DEFAULT_GAP_THRESHOLD_FACTOR,
+            ),
+            29.0 + extrapolated_clock_variance_m2
+        );
+    }
+
+    #[test]
+    fn precise_variance_adds_reference_growth_at_the_supported_orbit_endpoint() {
+        let position_nodes: Vec<_> = (0..11).map(|index| index as f64 * 900.0).collect();
+        let position_variances = vec![
+            [
+                Sp3AccuracyValue::Known(4.0),
+                Sp3AccuracyValue::Known(9.0),
+                Sp3AccuracyValue::Known(16.0),
+            ];
+            11
+        ];
+        let clock_nodes: Vec<_> = position_nodes
+            .iter()
+            .map(|&seconds| (seconds, 0.0, false))
+            .collect();
+        let clock_variances = vec![Sp3AccuracyValue::Known(25.0); 11];
+        let query = ExactEpoch::from_binary_j2000_seconds(-900.0).unwrap();
+        let expected_orbit_sigma = 29.0_f64.sqrt() + 5.0e-7 * 900.0 * 900.0 / 2.0;
+        let expected_clock_sigma = 5.0 + 1.0e-3 * 900.0;
+        let expected = expected_orbit_sigma * expected_orbit_sigma
+            + expected_clock_sigma * expected_clock_sigma;
+        assert_eq!(
+            crate::sp3::precise_accuracy_variance_m2(
+                &position_nodes,
+                &position_variances,
+                &clock_nodes,
+                &clock_variances,
+                &query,
+                DEFAULT_GAP_THRESHOLD_FACTOR,
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn precise_variance_uses_exact_local_extrapolation_age_at_large_epoch() {
+        let epoch_origin = 900_000_000_i64;
+        let position_nodes: Vec<_> = (0..11)
+            .map(|index| epoch_origin as f64 + index as f64 * 900.0)
+            .collect();
+        let position_variances = vec![
+            [
+                Sp3AccuracyValue::Known(4.0),
+                Sp3AccuracyValue::Known(9.0),
+                Sp3AccuracyValue::Known(16.0),
+            ];
+            11
+        ];
+        let clock_nodes: Vec<_> = position_nodes
+            .iter()
+            .map(|&seconds| (seconds, 0.0, false))
+            .collect();
+        let clock_variances = vec![Sp3AccuracyValue::Known(25.0); 11];
+        let query = ExactEpoch::new(epoch_origin, 0)
+            .unwrap()
+            .query()
+            .checked_sub_binary_seconds(0.1)
+            .unwrap();
+        let elapsed_s = query
+            .seconds_since_query(&ExactEpoch::new(epoch_origin, 0).unwrap().query())
+            .abs();
+        let expected_orbit_sigma = 29.0_f64.sqrt() + 5.0e-7 * elapsed_s * elapsed_s / 2.0;
+        let expected_clock_sigma = 5.0 + 1.0e-3 * elapsed_s;
+        let expected = expected_orbit_sigma * expected_orbit_sigma
+            + expected_clock_sigma * expected_clock_sigma;
+        assert_eq!(
+            crate::sp3::precise_accuracy_variance_m2(
+                &position_nodes,
+                &position_variances,
+                &clock_nodes,
+                &clock_variances,
+                &query,
+                DEFAULT_GAP_THRESHOLD_FACTOR,
+            ),
+            expected
+        );
     }
 }

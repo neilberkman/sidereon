@@ -17,7 +17,8 @@ use crate::sp3::interp::{
     PreciseSatSeries, Sp3InterpolationOptions,
 };
 use crate::sp3::{
-    PreciseEphemerisSample, PreciseEphemerisSamples, PreciseSamplesError, Sp3, Sp3State,
+    PreciseEphemerisAccuracySample, PreciseEphemerisSample, PreciseEphemerisSamples,
+    PreciseSamplesError, Sp3, Sp3State,
 };
 use crate::{Error, Result};
 
@@ -107,6 +108,15 @@ impl PreciseEphemerisInterpolant {
         Ok(Self::from_precise_ephemeris_samples(&source))
     }
 
+    /// Build a cached interpolant from samples and aligned accuracy sidecars.
+    pub fn from_samples_with_accuracy(
+        samples: impl IntoIterator<Item = PreciseEphemerisSample>,
+        accuracy: impl IntoIterator<Item = PreciseEphemerisAccuracySample>,
+    ) -> core::result::Result<Self, PreciseInterpolantError> {
+        let source = PreciseEphemerisSamples::from_samples_with_accuracy(samples, accuracy)?;
+        Ok(Self::from_precise_ephemeris_samples(&source))
+    }
+
     /// Build a cached interpolant from an existing sample-backed source.
     pub fn from_precise_ephemeris_samples(source: &PreciseEphemerisSamples) -> Self {
         Self {
@@ -131,6 +141,24 @@ impl PreciseEphemerisInterpolant {
     /// into a store built from this handle.
     pub fn interpolation_options(&self) -> Sp3InterpolationOptions {
         self.interpolation
+    }
+
+    pub(crate) fn accuracy_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        query: &crate::astro::time::ExactEpochQuery,
+    ) -> f64 {
+        let Some(fitted) = self.nodes.get(&sat) else {
+            return 0.0;
+        };
+        crate::sp3::precise_accuracy_variance_m2(
+            &fitted.series.x,
+            &fitted.series.position_variance_m2,
+            &fitted.series.clk,
+            &fitted.series.clock_variance_m2,
+            query,
+            self.interpolation.gap_threshold_factor(),
+        )
     }
 
     /// Return the handle with a different interpretation policy.

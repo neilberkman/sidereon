@@ -1,9 +1,13 @@
 //! Convenient imports for common GNSS workflows.
 
 pub use crate::ephemeris::{
-    sp3_ecef_state_to_eci, OrientedPreciseEphemerisStateSample, PreciseEphemerisStateSample,
+    sp3_ecef_state_to_eci, OrientedPreciseEphemerisStateSample, PreciseEphemerisAccuracySample,
+    PreciseEphemerisStateSample,
 };
-pub use crate::ephemeris::{BroadcastEphemeris, EphemerisSource, Sp3, SP3};
+pub use crate::ephemeris::{
+    BroadcastEphemeris, EphemerisSource, Sp3, Sp3AccuracyCodeGroup, Sp3AccuracyValue,
+    Sp3PositionClockAccuracy, Sp3RawRecordAccuracy, Sp3RecordAccuracy, Sp3VelocityAccuracy, SP3,
+};
 pub use crate::frame::{ItrfPositionM, ItrfVelocityMS, Wgs84Geodetic};
 pub use crate::fusion::{
     velocity_match_outage, FusionUpdate, GnssFixMeasurement, GnssFixStatus, GnssFixStatusWeighting,

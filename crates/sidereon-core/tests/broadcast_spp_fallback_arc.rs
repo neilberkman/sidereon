@@ -27,17 +27,18 @@
 
 use sidereon_core::astro::time::model::JulianDateSplit;
 use sidereon_core::astro::time::split_julian_date;
+use sidereon_core::astro::time::ExactEpoch;
 use sidereon_core::constants::{SECONDS_PER_DAY, SECONDS_PER_HOUR, SECONDS_PER_MINUTE};
 use sidereon_core::ephemeris::{BroadcastEphemeris, Sp3};
 use sidereon_core::observables::j2000_seconds_from_split;
 use sidereon_core::positioning::{
-    solve, solve_broadcast, solve_with_fallback, BroadcastReason, Corrections, FixSource,
-    KlobucharCoeffs, Observation, ReceiverSolution, SolveInputs, SurfaceMet,
+    solve, solve_broadcast, solve_with_fallback, BroadcastReason, Corrections, EphemerisSource,
+    FixSource, KlobucharCoeffs, Observation, ReceiverSolution, SolveInputs, SurfaceMet,
 };
 use sidereon_core::rinex::observations::{
     observation_values, ObsEpoch, ObsEpochTime, ObservationFilter, RinexObs,
 };
-use sidereon_core::staleness::{DegradationKind, SelectionError, StalenessPolicy};
+use sidereon_core::staleness::{select_sp3, DegradationKind, SelectionError, StalenessPolicy};
 use sidereon_core::GnssSystem;
 use std::path::PathBuf;
 
@@ -66,6 +67,38 @@ fn precise_sp3() -> Sp3 {
     ]))
     .expect("read COD precise SP3");
     Sp3::parse(&bytes).expect("parse COD precise SP3")
+}
+
+fn precise_sp3_with_accuracy() -> Sp3 {
+    let bytes = std::fs::read(fixture_path(&[
+        "sp3",
+        "COD0MGXFIN_20201770000_01D_05M_ORB.SP3",
+    ]))
+    .expect("read COD precise SP3");
+    let mut with_accuracy = Vec::with_capacity(bytes.len());
+    let mut records_with_accuracy = 0;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if line.starts_with(b"PG01") {
+            let mut record = line.strip_suffix(b"\n").unwrap_or(line).to_vec();
+            record.resize(record.len().max(73), b' ');
+            record[61..63].copy_from_slice(b" 0");
+            record[64..66].copy_from_slice(b" 0");
+            record[67..69].copy_from_slice(b" 0");
+            record[70..73].copy_from_slice(b"  0");
+            with_accuracy.extend_from_slice(&record);
+            if line.ends_with(b"\n") {
+                with_accuracy.push(b'\n');
+            }
+            records_with_accuracy += 1;
+        } else {
+            with_accuracy.extend_from_slice(line);
+        }
+    }
+    assert!(
+        records_with_accuracy > 0,
+        "fixture must contain GPS G01 records"
+    );
+    Sp3::parse(&with_accuracy).expect("parse COD precise SP3 with G01 accuracy")
 }
 
 /// An SP3 whose coverage (2026 DOY120) lies entirely after the 2020 query epoch,
@@ -332,6 +365,54 @@ fn fallback_uses_precise_byte_identically_when_it_covers_the_epoch() {
     // The precise-present path must change no output bit versus solving the SP3
     // directly: the fallback is purely additive.
     assert_solution_bits_eq(&sourced.solution, &direct);
+}
+
+#[test]
+fn sp3_selection_preserves_scalar_and_exact_accuracy_variance() {
+    let inputs = first_epoch_inputs();
+    let products = [precise_sp3_with_accuracy()];
+    let selection = select_sp3(&products, inputs.t_rx_j2000_s, StalenessPolicy::days(3.0))
+        .expect("exact SP3 selection");
+    let satellite = sidereon_core::GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid GPS G01");
+    let raw_accuracy = products[0]
+        .record_accuracy_codes(satellite, 0)
+        .expect("G01 raw record accuracy")
+        .p
+        .expect("G01 P-record accuracy");
+    assert_eq!(raw_accuracy.axis_exponents, [Some(0); 3]);
+    assert_eq!(raw_accuracy.clock_exponent, Some(0));
+    let selection_epoch =
+        ExactEpoch::from_binary_j2000_seconds(inputs.t_rx_j2000_s).expect("binary receive epoch");
+    let state_epoch = selection_epoch
+        .clone()
+        .checked_sub_binary_seconds(0.071_234_567_890_123)
+        .expect("binary transmit offset");
+
+    let direct_scalar = products[0].ephemeris_variance_m2(
+        satellite,
+        state_epoch.j2000_seconds(),
+        selection_epoch.j2000_seconds(),
+    );
+    let selected_scalar = selection.ephemeris_variance_m2(
+        satellite,
+        state_epoch.j2000_seconds(),
+        selection_epoch.j2000_seconds(),
+    );
+    assert!(
+        direct_scalar > 0.0,
+        "fixture must exercise retained SP3 accuracy"
+    );
+    assert_eq!(selected_scalar.to_bits(), direct_scalar.to_bits());
+
+    let direct_exact =
+        products[0].ephemeris_variance_at_epoch_query(satellite, &state_epoch, &selection_epoch);
+    let selected_exact =
+        selection.ephemeris_variance_at_epoch_query(satellite, &state_epoch, &selection_epoch);
+    assert!(
+        direct_exact > 0.0,
+        "fixture must exercise exact retained accuracy"
+    );
+    assert_eq!(selected_exact.to_bits(), direct_exact.to_bits());
 }
 
 #[test]

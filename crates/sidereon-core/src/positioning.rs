@@ -15,15 +15,14 @@ use crate::rtcm::{self, MsmKind};
 pub use crate::spp::{
     residual_rms, solve, solve_broadcast, solve_doppler_velocity, solve_spp_batch_parallel,
     solve_spp_batch_serial, solve_with_doppler_velocity, solve_with_exact_epoch,
-    solve_with_exact_epoch_and_policy,
-    solve_with_fallback, solve_with_policy, solve_with_solver, BroadcastReason, ClockRelativity,
-    Corrections, DopplerObservation, DopplerVelocityInputs, EphemerisSource, ExactSolveInputs,
-    FallbackError, FixSource, GalileoNequickCoeffs, KlobucharCoeffs, Observation, PseudorangeCode,
-    QzssClock, ReceiverSolution, RejectedSat, RejectionReason, RobustConfig, SolutionMetadata,
-    SolveInputs, SolvePolicy, SolvePolicyError, SourcedSolution, SppDopplerSolution, SppError,
-    SppInputErrorKind, SurfaceMet, TroposphereModel, DEFAULT_HUBER_K, DEFAULT_ROBUST_MAX_OUTER,
-    DEFAULT_ROBUST_OUTER_TOL_M, DEFAULT_ROBUST_SCALE_FLOOR_M, ELEVATION_MASK_RAD,
-    TRANSMIT_TIME_ITERATIONS,
+    solve_with_exact_epoch_and_policy, solve_with_fallback, solve_with_policy, solve_with_solver,
+    BroadcastReason, ClockRelativity, Corrections, DopplerObservation, DopplerVelocityInputs,
+    EphemerisSource, ExactSolveInputs, FallbackError, FixSource, GalileoNequickCoeffs,
+    KlobucharCoeffs, Observation, PseudorangeCode, QzssClock, ReceiverSolution, RejectedSat,
+    RejectionReason, RobustConfig, SolutionMetadata, SolveInputs, SolvePolicy, SolvePolicyError,
+    SourcedSolution, SppDopplerSolution, SppError, SppInputErrorKind, SurfaceMet, TroposphereModel,
+    DEFAULT_HUBER_K, DEFAULT_ROBUST_MAX_OUTER, DEFAULT_ROBUST_OUTER_TOL_M,
+    DEFAULT_ROBUST_SCALE_FLOOR_M, ELEVATION_MASK_RAD, TRANSMIT_TIME_ITERATIONS,
 };
 pub use crate::static_positioning::{
     solve_static, StaticClockBias, StaticCovariance, StaticEpoch, StaticEpochInfluence,
@@ -380,11 +379,8 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for RinexSppSource<'_, E> {
         state_epoch: &crate::astro::time::ExactEpochQuery,
         selection_epoch: &crate::astro::time::ExactEpochQuery,
     ) -> f64 {
-        self.ephemeris.ephemeris_variance_at_epoch_query(
-            sat,
-            state_epoch,
-            selection_epoch,
-        )
+        self.ephemeris
+            .ephemeris_variance_at_epoch_query(sat, state_epoch, selection_epoch)
     }
 }
 
@@ -1162,9 +1158,8 @@ mod tests {
             "../tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx"
         ))
         .expect("parse NAV fixture");
-        let observation_text = include_str!(
-            "../tests/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx"
-        );
+        let observation_text =
+            include_str!("../tests/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx");
         let first_epoch_end = observation_text
             .match_indices("\n>")
             .nth(1)
@@ -1177,8 +1172,8 @@ mod tests {
                 .collect(),
         };
         let options = RinexSppOptions::new(signal_policy);
-        let assembled = spp_inputs_from_rinex_obs(&obs, &nav, &options)
-            .expect("assemble exact receive label");
+        let assembled =
+            spp_inputs_from_rinex_obs(&obs, &nav, &options).expect("assemble exact receive label");
         assert_eq!(assembled.len(), 1);
         let exact_inputs = assembled[0]
             .exact_solve_inputs()
@@ -1187,21 +1182,12 @@ mod tests {
             coarse_search_seeds: Some(2),
             ..SolvePolicy::default()
         };
-        let direct = crate::spp::solve_with_exact_epoch_and_policy(
-            &nav,
-            &exact_inputs,
-            false,
-            policy,
-        )
-        .expect("direct exact policy solve");
-        let via_rinex = solve_spp_from_rinex_obs_exact_with_policy(
-            &nav,
-            &obs,
-            &options,
-            false,
-            policy,
-        )
-        .expect("public exact RINEX policy route");
+        let direct =
+            crate::spp::solve_with_exact_epoch_and_policy(&nav, &exact_inputs, false, policy)
+                .expect("direct exact policy solve");
+        let via_rinex =
+            solve_spp_from_rinex_obs_exact_with_policy(&nav, &obs, &options, false, policy)
+                .expect("public exact RINEX policy route");
         assert_eq!(via_rinex.len(), 1);
         assert_eq!(via_rinex[0].epoch_index, assembled[0].epoch_index);
         assert_eq!(via_rinex[0].epoch, assembled[0].epoch);
