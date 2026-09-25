@@ -2,12 +2,14 @@
  * RTKLIB single-point positioning oracle: runs RTKLIB `pntpos` on every epoch of a
  * RINEX observation file from several initial positions and prints, for each epoch
  * and initial position, the solution status, the position, its covariance, the
- * receiver clock and the satellites `estpos` used, as one JSON object. The
+ * receiver clock, the satellites `estpos` used and their `satposs` inputs and final
+ * residuals, as one
+ * JSON object. The
  * covariance is `sol.qr`, the single-precision position block of `estpos`'s
  * `Q = (H^T W H)^-1` with the pseudorange variances of `rescode`, in the order
  * xx, yy, zz, xy, yz, zx, printed with the nine significant digits that restate a
  * float exactly. `generate.sh` builds it against
- * RTKLIB and writes `tests/fixtures/rtk/rtklib_spp_selection_oracle.json` from three
+ * RTKLIB and writes `tests/fixtures/rtk/rtklib_spp_selection_oracle.json` from five
  * runs of it.
  *
  * RTKLIB is used unmodified (https://github.com/rtklibexplorer/RTKLIB, branch demo5,
@@ -25,12 +27,61 @@
  */
 
 #include <math.h>
+#include <float.h>
+#include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "rtklib.h"
+static int capture_lsq(const double *weighted_design, const double *residuals,
+                       int parameter_count, int measurement_count, double *step,
+                       double *covariance);
+#define lsq capture_lsq
+#include "pntpos.c"
+#undef lsq
+
+static int captured_lsq_valid;
+static int captured_lsq_columns;
+static double captured_lsq_design[(MAXOBS + NX) * NX];
+static double captured_lsq_covariance[NX * NX];
+static int captured_lsq_state_valid;
+static double tracked_receiver_state[NX];
+static double captured_lsq_receiver_state[NX];
+static double captured_lsq_step[NX];
+
+#if FLT_RADIX != 2 || DBL_MANT_DIG != 53 || DBL_MIN_EXP != -1021 || DBL_MAX_EXP != 1024
+#error "the exact transmit-time export requires IEEE-754 binary64 double"
+#endif
 
 #define TURN_DEG 12.0
+
+static int capture_lsq(const double *weighted_design, const double *residuals,
+                       int parameter_count, int measurement_count, double *step,
+                       double *covariance)
+{
+    int row, column;
+    int status = lsq(weighted_design, residuals, parameter_count, measurement_count,
+                     step, covariance);
+    if (parameter_count != NX || status != 0) return status;
+    memcpy(captured_lsq_receiver_state, tracked_receiver_state,
+           sizeof(captured_lsq_receiver_state));
+    memcpy(captured_lsq_step, step, sizeof(captured_lsq_step));
+    for (row = 0; row < parameter_count; row++) tracked_receiver_state[row] += step[row];
+    captured_lsq_state_valid = 1;
+    if (measurement_count < parameter_count || measurement_count > MAXOBS + NX) return status;
+    for (column = 0; column < measurement_count; column++) {
+        for (row = 0; row < parameter_count; row++) {
+            captured_lsq_design[row + column * parameter_count] =
+                weighted_design[row + column * parameter_count];
+        }
+    }
+    memcpy(captured_lsq_covariance, covariance, sizeof(captured_lsq_covariance));
+    captured_lsq_columns = measurement_count;
+    captured_lsq_valid = 1;
+    return status;
+}
 
 /* Progress callbacks the RTKLIB library expects its application to define. */
 extern int showmsg(const char *format, ...) { (void)format; return 0; }
@@ -48,6 +99,169 @@ static void turned(const double *r, double deg, double *out)
 static void print_position(const double *r)
 {
     printf("[%.17g, %.17g, %.17g]", r[0], r[1], r[2]);
+}
+
+static void print_captured_lsq(void)
+{
+    int row, column;
+    double receiver_geodetic[3];
+    printf(", \"lsq_weighted_design_columns\": [");
+    for (column = 0; column < captured_lsq_columns; column++) {
+        printf("%s[", column ? ", " : "");
+        for (row = 0; row < NX; row++) {
+            printf("%s%.17g", row ? ", " : "",
+                   captured_lsq_design[row + column * NX]);
+        }
+        printf("]");
+    }
+    printf("], \"lsq_covariance\": [");
+    for (row = 0; row < NX; row++) {
+        printf("%s[", row ? ", " : "");
+        for (column = 0; column < NX; column++) {
+            printf("%s%.17g", column ? ", " : "",
+                   captured_lsq_covariance[row + column * NX]);
+        }
+        printf("]");
+    }
+    printf("], \"lsq_receiver_state\": [");
+    for (row = 0; row < NX; row++) {
+        printf("%s%.17g", row ? ", " : "", captured_lsq_receiver_state[row]);
+    }
+    printf("], \"lsq_step\": [");
+    for (row = 0; row < NX; row++) {
+        printf("%s%.17g", row ? ", " : "", captured_lsq_step[row]);
+    }
+    ecef2pos(captured_lsq_receiver_state, receiver_geodetic);
+    printf("], \"lsq_geodetic_rad_m\": [%.17g, %.17g, %.17g]",
+           receiver_geodetic[0], receiver_geodetic[1], receiver_geodetic[2]);
+}
+
+static eph_t *gps_eph_at(gtime_t teph, int sat, const nav_t *nav)
+{
+    double age, maximum_age = MAXDTOE + 1.0, minimum_age = maximum_age + 1.0;
+    int record_index, selected = -1;
+    for (record_index = 0; record_index < nav->n; record_index++) {
+        if (nav->eph[record_index].sat != sat) continue;
+        if ((age = fabs(timediff(nav->eph[record_index].toe, teph))) > maximum_age) continue;
+        if (age <= minimum_age) {
+            selected = record_index;
+            minimum_age = age;
+        }
+    }
+    return selected < 0 ? NULL : nav->eph + selected;
+}
+
+static void print_used_states(const obsd_t *obs, int observation_count, gtime_t teph,
+                              const nav_t *nav, const prcopt_t *opt, const sol_t *sol,
+                              const ssat_t *ssat)
+{
+    double rs[MAXOBS * 6] = {0}, dts[MAXOBS * 2] = {0}, sat_var[MAXOBS] = {0};
+    double receiver_state[NX] = {0}, residual[MAXOBS + NX] = {0};
+    double design[NX * (MAXOBS + NX)] = {0}, fit_var[MAXOBS + NX] = {0};
+    double azel[MAXOBS * 2] = {0}, resp[MAXOBS] = {0};
+    int svh[MAXOBS] = {0}, vsat[MAXOBS] = {0};
+    int reference_used_by_satellite[MAXSAT] = {0};
+    int satellite_index, observation_index, first = 1, reference_count = 0;
+    int reference_satellite_count = 0;
+    receiver_state[0] = sol->rr[0];
+    receiver_state[1] = sol->rr[1];
+    receiver_state[2] = sol->rr[2];
+    receiver_state[3] = sol->dtr[0] * CLIGHT;
+    satposs(teph, obs, observation_count, nav, opt->sateph, rs, dts, sat_var, svh);
+    reference_count = rescode(1, obs, observation_count, rs, dts, sat_var, svh, nav,
+                              receiver_state, opt, ssat, residual, design, fit_var,
+                              azel, vsat, resp, &reference_satellite_count);
+    if (reference_count < NX || reference_satellite_count <= 0) {
+        fprintf(stderr, "cannot evaluate RTKLIB residuals at returned solution\n");
+        exit(1);
+    }
+    for (observation_index = 0; observation_index < observation_count; observation_index++) {
+        if (vsat[observation_index]) {
+            reference_used_by_satellite[obs[observation_index].sat - 1] = 1;
+        }
+    }
+    for (satellite_index = 0; satellite_index < MAXSAT; satellite_index++) {
+        if (ssat[satellite_index].vs != reference_used_by_satellite[satellite_index]) {
+            fprintf(stderr, "RTKLIB selected set changed at returned solution for %d\n",
+                    satellite_index + 1);
+            exit(1);
+        }
+    }
+    printf(", \"satellite_states\": [");
+    for (satellite_index = 0; satellite_index < MAXSAT; satellite_index++) {
+        char id[8];
+        int sat = satellite_index + 1;
+        gtime_t tx;
+        double ep[6], clock, placement_pseudorange = 0.0;
+        int64_t tx_j2000_whole_s;
+        uint64_t tx_fraction_bits;
+        double reference_design[NX];
+        int fit_row;
+        int frequency_index;
+        eph_t *eph;
+        if (!reference_used_by_satellite[satellite_index] || satsys(sat, NULL) != SYS_GPS) {
+            continue;
+        }
+        for (observation_index = 0;
+             observation_index < observation_count && obs[observation_index].sat != sat;
+             observation_index++) {
+        }
+        if (observation_index == observation_count || !(eph = gps_eph_at(teph, sat, nav))) {
+            fprintf(stderr, "missing used satellite input for %d\n", sat);
+            exit(1);
+        }
+        for (frequency_index = 0; frequency_index < NFREQ; frequency_index++) {
+            if (obs[observation_index].P[frequency_index] != 0.0) {
+                placement_pseudorange = obs[observation_index].P[frequency_index];
+                break;
+            }
+        }
+        if (placement_pseudorange == 0.0) {
+            fprintf(stderr, "missing used satellite pseudorange for %d\n", sat);
+            exit(1);
+        }
+        tx = timeadd(obs[observation_index].time, -placement_pseudorange / CLIGHT);
+        clock = eph2clk(tx, eph);
+        tx = timeadd(tx, -clock);
+        tx_j2000_whole_s = (int64_t)tx.time - INT64_C(946728000);
+        memcpy(&tx_fraction_bits, &tx.sec, sizeof(tx_fraction_bits));
+        time2epoch(tx, ep);
+        satno2id(sat, id);
+        if (!vsat[observation_index]) {
+            fprintf(stderr, "reference state absent for used satellite %d\n", sat);
+            exit(1);
+        }
+        fit_row = 0;
+        for (observation_index = 0; observation_index < observation_count;
+             observation_index++) {
+            if (vsat[observation_index] && obs[observation_index].sat == sat) break;
+            if (vsat[observation_index]) fit_row++;
+        }
+        if (observation_index == observation_count || fit_row >= reference_count) {
+            fprintf(stderr, "missing reference design row for %d\n", sat);
+            exit(1);
+        }
+        for (frequency_index = 0; frequency_index < NX; frequency_index++) {
+            reference_design[frequency_index] = design[frequency_index + fit_row * NX];
+        }
+        printf("%s{\"sat\": \"%s\", \"transmit_epoch\": [%d, %d, %d, %d, %d, %.17g], ",
+               first ? "" : ", ", id, (int)ep[0], (int)ep[1], (int)ep[2], (int)ep[3],
+               (int)ep[4], ep[5]);
+        printf("\"transmit_j2000_whole_s\": %" PRId64 ", \"transmit_fraction_bits\": \"%016" PRIx64 "\", ",
+               tx_j2000_whole_s, tx_fraction_bits);
+        first = 0;
+        printf("\"position_m\": ");
+        print_position(rs + observation_index * 6);
+        printf(", \"velocity_m_s\": ");
+        print_position(rs + observation_index * 6 + 3);
+        printf(", \"clock_s\": %.17g, \"variance_m2\": %.17g, ",
+               dts[observation_index * 2], sat_var[observation_index]);
+        printf("\"residual_m\": %.17g, \"design_row\": [%.17g, %.17g, %.17g, %.17g], ",
+               resp[observation_index], reference_design[0], reference_design[1],
+               reference_design[2], reference_design[3]);
+        printf("\"reference_variance_m2\": %.17g}", fit_var[fit_row]);
+    }
+    printf("]");
 }
 
 int main(int argc, char **argv)
@@ -113,19 +327,63 @@ int main(int argc, char **argv)
         for (j = 0; j < 4; j++) {
             sol_t sol = {{0}};
             ssat_t ssat[MAXSAT];
+            double receiver_geodetic[3];
             char msg[128] = "";
             int stat, used = 0;
             memset(ssat, 0, sizeof(ssat));
             for (k = 0; k < 3; k++) sol.rr[k] = guesses[j][k];
+            memset(tracked_receiver_state, 0, sizeof(tracked_receiver_state));
+            for (k = 0; k < 3; k++) tracked_receiver_state[k] = guesses[j][k];
+            captured_lsq_valid = 0;
+            captured_lsq_state_valid = 0;
             stat = pntpos(epoch, m, &nav, &opt, &sol, NULL, ssat, msg);
+            if (stat && (!captured_lsq_valid || !captured_lsq_state_valid)) {
+                fprintf(stderr, "missing final RTKLIB positioning least-squares capture\n");
+                return 1;
+            }
+            if (stat) {
+                double tracked_clock_s = tracked_receiver_state[3] / CLIGHT;
+                for (k = 0; k < 3; k++) {
+                    if (memcmp(&tracked_receiver_state[k], &sol.rr[k], sizeof(double)) != 0) {
+                        fprintf(stderr, "passive RTKLIB receiver replay differs from sol.rr\n");
+                        return 1;
+                    }
+                }
+                if (memcmp(&tracked_clock_s, &sol.dtr[0], sizeof(double)) != 0) {
+                    fprintf(stderr, "passive RTKLIB clock replay differs from sol.dtr\n");
+                    return 1;
+                }
+                for (k = 0; k < NX; k++) {
+                    double replayed = captured_lsq_receiver_state[k] + captured_lsq_step[k];
+                    if (memcmp(&replayed, &tracked_receiver_state[k], sizeof(double)) != 0) {
+                        fprintf(stderr, "captured final RTKLIB step does not replay\n");
+                        return 1;
+                    }
+                }
+            }
+            if (stat && ((float)captured_lsq_covariance[0] != sol.qr[0] ||
+                         (float)captured_lsq_covariance[1 + NX] != sol.qr[1] ||
+                         (float)captured_lsq_covariance[2 + 2 * NX] != sol.qr[2] ||
+                         (float)captured_lsq_covariance[1] != sol.qr[3] ||
+                         (float)captured_lsq_covariance[2 + NX] != sol.qr[4] ||
+                         (float)captured_lsq_covariance[2] != sol.qr[5])) {
+                fprintf(stderr, "captured RTKLIB least-squares covariance is not sol.qr\n");
+                return 1;
+            }
             printf("%s  {\"epoch\": [%d, %d, %d, %d, %d, %.7f], \"guess\": \"%s\", \"stat\": %d, ",
                    first_case ? "" : ",\n", (int)ep[0], (int)ep[1], (int)ep[2], (int)ep[3],
                    (int)ep[4], ep[5], names[j], stat);
             first_case = 0;
             printf("\"position_m\": ");
             print_position(sol.rr);
+            if (stat) {
+                ecef2pos(sol.rr, receiver_geodetic);
+                printf(", \"geodetic_rad_m\": [%.17g, %.17g, %.17g]",
+                       receiver_geodetic[0], receiver_geodetic[1], receiver_geodetic[2]);
+            }
             printf(", \"qr_m2\": [%.9g, %.9g, %.9g, %.9g, %.9g, %.9g]", sol.qr[0], sol.qr[1],
                    sol.qr[2], sol.qr[3], sol.qr[4], sol.qr[5]);
+            if (stat) print_captured_lsq();
             printf(", \"clock_m\": %.17g, \"used\": [", sol.dtr[0] * CLIGHT);
             for (k = 0; k < MAXSAT; k++) {
                 char id[8];
@@ -133,7 +391,9 @@ int main(int argc, char **argv)
                 satno2id(k + 1, id);
                 printf("%s\"%s\"", used++ ? ", " : "", id);
             }
-            printf("], \"msg\": \"%s\"}", msg);
+            printf("]");
+            print_used_states(epoch, m, epoch[0].time, &nav, &opt, &sol, ssat);
+            printf(", \"msg\": \"%s\"}", msg);
         }
     }
     printf("\n ]}\n");

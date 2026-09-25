@@ -14,14 +14,16 @@ use crate::rinex::observations::{pseudoranges, ObsEpochTime, ObservationFile, Si
 use crate::rtcm::{self, MsmKind};
 pub use crate::spp::{
     residual_rms, solve, solve_broadcast, solve_doppler_velocity, solve_spp_batch_parallel,
-    solve_spp_batch_serial, solve_with_doppler_velocity, solve_with_fallback, solve_with_policy,
-    solve_with_solver, BroadcastReason, ClockRelativity, Corrections, DopplerObservation,
-    DopplerVelocityInputs, EphemerisSource, FallbackError, FixSource, GalileoNequickCoeffs,
-    KlobucharCoeffs, Observation, PseudorangeCode, QzssClock, ReceiverSolution, RejectedSat,
-    RejectionReason, RobustConfig, SolutionMetadata, SolveInputs, SolvePolicy, SolvePolicyError,
-    SourcedSolution, SppDopplerSolution, SppError, SurfaceMet, TroposphereModel, DEFAULT_HUBER_K,
-    DEFAULT_ROBUST_MAX_OUTER, DEFAULT_ROBUST_OUTER_TOL_M, DEFAULT_ROBUST_SCALE_FLOOR_M,
-    ELEVATION_MASK_RAD, TRANSMIT_TIME_ITERATIONS,
+    solve_spp_batch_serial, solve_with_doppler_velocity, solve_with_exact_epoch,
+    solve_with_exact_epoch_and_policy,
+    solve_with_fallback, solve_with_policy, solve_with_solver, BroadcastReason, ClockRelativity,
+    Corrections, DopplerObservation, DopplerVelocityInputs, EphemerisSource, ExactSolveInputs,
+    FallbackError, FixSource, GalileoNequickCoeffs, KlobucharCoeffs, Observation, PseudorangeCode,
+    QzssClock, ReceiverSolution, RejectedSat, RejectionReason, RobustConfig, SolutionMetadata,
+    SolveInputs, SolvePolicy, SolvePolicyError, SourcedSolution, SppDopplerSolution, SppError,
+    SppInputErrorKind, SurfaceMet, TroposphereModel, DEFAULT_HUBER_K, DEFAULT_ROBUST_MAX_OUTER,
+    DEFAULT_ROBUST_OUTER_TOL_M, DEFAULT_ROBUST_SCALE_FLOOR_M, ELEVATION_MASK_RAD,
+    TRANSMIT_TIME_ITERATIONS,
 };
 pub use crate::static_positioning::{
     solve_static, StaticClockBias, StaticCovariance, StaticEpoch, StaticEpochInfluence,
@@ -250,6 +252,20 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for RinexSppSource<'_, E> {
         EphemerisSource::clock_relativity_for_state_s(self.ephemeris, sat, t_j2000_s, position_m)
     }
 
+    fn clock_relativity_for_state_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        position_m: [f64; 3],
+    ) -> crate::spp::ClockRelativity {
+        EphemerisSource::clock_relativity_for_state_at_epoch_query(
+            self.ephemeris,
+            sat,
+            epoch,
+            position_m,
+        )
+    }
+
     fn position_clock_group_delay_at_j2000_s(
         &self,
         sat: GnssSatelliteId,
@@ -292,6 +308,32 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for RinexSppSource<'_, E> {
             .try_position_clock_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
     }
 
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<
+        Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>,
+        crate::Error,
+    > {
+        self.ephemeris
+            .try_position_clock_group_delay_selected_at_exact_epoch(sat, epoch, selection_j2000_s)
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Result<
+        Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>,
+        crate::Error,
+    > {
+        self.ephemeris
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, epoch, selection_epoch)
+    }
+
     fn try_transmit_epoch_clock_s(
         &self,
         sat: GnssSatelliteId,
@@ -302,6 +344,26 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for RinexSppSource<'_, E> {
             .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
     }
 
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<crate::astro::time::Validated<f64>>, crate::Error> {
+        self.ephemeris
+            .try_transmit_epoch_clock_at_exact_epoch(sat, epoch, selection_j2000_s)
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Result<Option<crate::astro::time::Validated<f64>>, crate::Error> {
+        self.ephemeris
+            .try_transmit_epoch_clock_at_epoch_query(sat, epoch, selection_epoch)
+    }
+
     fn ephemeris_variance_m2(
         &self,
         sat: GnssSatelliteId,
@@ -310,6 +372,19 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for RinexSppSource<'_, E> {
     ) -> f64 {
         self.ephemeris
             .ephemeris_variance_m2(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> f64 {
+        self.ephemeris.ephemeris_variance_at_epoch_query(
+            sat,
+            state_epoch,
+            selection_epoch,
+        )
     }
 }
 
@@ -442,6 +517,26 @@ pub struct RinexSppEpochInputs {
     pub epoch: ObsEpochTime,
     /// Fully assembled SPP inputs for this epoch.
     pub inputs: SolveInputs,
+}
+
+impl RinexSppEpochInputs {
+    /// Pair the assembled inputs with the exact civil receive-time label.
+    pub fn exact_solve_inputs(&self) -> Option<ExactSolveInputs> {
+        let receive_epoch = time::ExactEpoch::from_civil(
+            self.epoch.year,
+            i32::from(self.epoch.month),
+            i32::from(self.epoch.day),
+            i32::from(self.epoch.hour),
+            i32::from(self.epoch.minute),
+            self.epoch.second,
+        )?;
+        let mut inputs = self.inputs.clone();
+        inputs.t_rx_j2000_s = receive_epoch.j2000_seconds();
+        Some(ExactSolveInputs {
+            inputs,
+            receive_epoch,
+        })
+    }
 }
 
 /// One RINEX observation epoch paired with its serial SPP solve result.
@@ -827,6 +922,75 @@ where
         .collect())
 }
 
+/// Assemble and solve RINEX epochs using their preserved civil receive labels.
+/// Unlike [`solve_spp_from_rinex_obs`], this entrypoint does not apply the
+/// business validation or coarse-start policy; callers may apply those gates
+/// to each returned solution.
+pub fn solve_spp_from_rinex_obs_exact<S>(
+    source: &S,
+    obs: &ObservationFile,
+    options: &RinexSppOptions,
+    with_geodetic: bool,
+) -> Result<Vec<RinexSppEpochSolution>, RinexSppError>
+where
+    S: EphemerisSource + RinexSppAssemblySource,
+{
+    let epochs = spp_inputs_from_rinex_obs(obs, source, options)?;
+    Ok(epochs
+        .into_iter()
+        .map(|epoch| {
+            let solution = epoch
+                .exact_solve_inputs()
+                .ok_or(SppError::InvalidInput {
+                    field: "receive_epoch",
+                    kind: SppInputErrorKind::InvalidCivilTime,
+                })
+                .and_then(|exact| crate::spp::solve_with_exact_epoch(source, &exact, with_geodetic))
+                .map_err(SolvePolicyError::Solve);
+            RinexSppEpochSolution {
+                epoch_index: epoch.epoch_index,
+                epoch: epoch.epoch,
+                solution,
+            }
+        })
+        .collect())
+}
+
+/// Assemble and solve RINEX epochs using their exact civil receive labels and the
+/// validation/coarse-start policy of [`solve_spp_from_rinex_obs`].
+pub fn solve_spp_from_rinex_obs_exact_with_policy<S>(
+    source: &S,
+    obs: &ObservationFile,
+    options: &RinexSppOptions,
+    with_geodetic: bool,
+    policy: SolvePolicy,
+) -> Result<Vec<RinexSppEpochSolution>, RinexSppError>
+where
+    S: EphemerisSource + RinexSppAssemblySource,
+{
+    let epochs = spp_inputs_from_rinex_obs(obs, source, options)?;
+    Ok(epochs
+        .into_iter()
+        .map(|epoch| {
+            let solution = epoch
+                .exact_solve_inputs()
+                .ok_or(SppError::InvalidInput {
+                    field: "receive_epoch",
+                    kind: SppInputErrorKind::InvalidCivilTime,
+                })
+                .map_err(SolvePolicyError::Solve)
+                .and_then(|exact| {
+                    solve_with_exact_epoch_and_policy(source, &exact, with_geodetic, policy)
+                });
+            RinexSppEpochSolution {
+                epoch_index: epoch.epoch_index,
+                epoch: epoch.epoch,
+                solution,
+            }
+        })
+        .collect())
+}
+
 fn klobuchar_from_alpha_beta(value: crate::ephemeris::KlobucharAlphaBeta) -> KlobucharCoeffs {
     KlobucharCoeffs {
         alpha: value.alpha,
@@ -990,6 +1154,68 @@ mod tests {
             epoch.inputs.observations[0].pseudorange_m as i64,
             30_129_142
         );
+    }
+
+    #[test]
+    fn exact_rinex_policy_route_preserves_coarse_start_and_reporting() {
+        let nav = crate::ephemeris::BroadcastEphemeris::from_nav(include_str!(
+            "../tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx"
+        ))
+        .expect("parse NAV fixture");
+        let observation_text = include_str!(
+            "../tests/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx"
+        );
+        let first_epoch_end = observation_text
+            .match_indices("\n>")
+            .nth(1)
+            .map_or(observation_text.len(), |(index, _)| index + 1);
+        let obs = ObservationFile::parse(&observation_text[..first_epoch_end])
+            .expect("parse first observation epoch");
+        let signal_policy = SignalPolicy {
+            codes: [(GnssSystem::Gps, vec!["C1C".to_string()])]
+                .into_iter()
+                .collect(),
+        };
+        let options = RinexSppOptions::new(signal_policy);
+        let assembled = spp_inputs_from_rinex_obs(&obs, &nav, &options)
+            .expect("assemble exact receive label");
+        assert_eq!(assembled.len(), 1);
+        let exact_inputs = assembled[0]
+            .exact_solve_inputs()
+            .expect("construct exact solve inputs");
+        let policy = SolvePolicy {
+            coarse_search_seeds: Some(2),
+            ..SolvePolicy::default()
+        };
+        let direct = crate::spp::solve_with_exact_epoch_and_policy(
+            &nav,
+            &exact_inputs,
+            false,
+            policy,
+        )
+        .expect("direct exact policy solve");
+        let via_rinex = solve_spp_from_rinex_obs_exact_with_policy(
+            &nav,
+            &obs,
+            &options,
+            false,
+            policy,
+        )
+        .expect("public exact RINEX policy route");
+        assert_eq!(via_rinex.len(), 1);
+        assert_eq!(via_rinex[0].epoch_index, assembled[0].epoch_index);
+        assert_eq!(via_rinex[0].epoch, assembled[0].epoch);
+        let reported = via_rinex[0]
+            .solution
+            .as_ref()
+            .expect("RINEX route reports its solution");
+        assert_eq!(reported.metadata, direct.metadata);
+        assert_eq!(reported.used_sats, direct.used_sats);
+        assert_eq!(
+            reported.position.as_array().map(f64::to_bits),
+            direct.position.as_array().map(f64::to_bits)
+        );
+        assert_eq!(reported.rx_clock_s.to_bits(), direct.rx_clock_s.to_bits());
     }
 
     fn single_signal_msm(kind: MsmKind, satellite_id: u8, fine_pseudorange: i32) -> MsmMessage {

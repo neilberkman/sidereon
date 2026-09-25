@@ -16,39 +16,67 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FIX="$HERE/../../tests/fixtures"
 OUT="$FIX/rtk/rtklib_spp_selection_oracle.json"
 SRC="${RTKLIB_SRC:?set RTKLIB_SRC to the RTKLIB demo5 src directory}"
+PIN="75a2e56275485b21a67bd35bc94bbeb8936e1a74"
+SRC_ROOT="$(git -C "$SRC" rev-parse --show-toplevel)"
+ACTUAL_PIN="$(git -C "$SRC_ROOT" rev-parse HEAD)"
+if [[ "$ACTUAL_PIN" != "$PIN" ]]; then
+    printf 'RTKLIB checkout is %s, expected %s\n' "$ACTUAL_PIN" "$PIN" >&2
+    exit 1
+fi
+if [[ "$(cd "$SRC_ROOT/src" && pwd)" != "$(cd "$SRC" && pwd)" ]]; then
+    printf 'RTKLIB_SRC must name the pinned checkout src directory\n' >&2
+    exit 1
+fi
+if [[ -n "$(git -C "$SRC_ROOT" status --porcelain --untracked-files=all -- src)" ]]; then
+    printf 'RTKLIB src is dirty; refusing to generate the oracle\n' >&2
+    exit 1
+fi
 BUILD="$(mktemp -d)"
-trap 'rm -rf "$BUILD"' EXIT
+OUT_TMP="$(mktemp "$FIX/rtk/.rtklib_spp_selection_oracle.json.XXXXXX")"
+trap 'rm -rf "$BUILD"; rm -f "$OUT_TMP"' EXIT
 
 # rtkcmn.c defines _POSIX_C_SOURCE, which on macOS hides snprintf unless
 # _DARWIN_C_SOURCE is also defined; elsewhere the macro has no effect.
 OPTS="-DENAGLO -DENAQZS -DENAGAL -DENACMP -DENAIRN -DNFREQ=4 -DNEXOBS=3 -D_DARWIN_C_SOURCE"
 CFLAGS="-std=gnu99 -O2 -ffp-contract=off -fno-fast-math -w -I$SRC $OPTS"
 for unit in rtkcmn trace rinex rtkpos postpos solution lambda geoid sbas preceph \
-    pntpos ephemeris options ppp ppp_ar rtcm rtcm2 rtcm3 rtcm3e ionex tides sofa; do
+    ephemeris options ppp ppp_ar rtcm rtcm2 rtcm3 rtcm3e ionex tides sofa; do
     cc $CFLAGS -c "$SRC/$unit.c" -o "$BUILD/$unit.o"
 done
 cc $CFLAGS -o "$BUILD/rtklib_spp_oracle" "$HERE/rtklib_spp_oracle.c" "$BUILD"/*.o -lm
 
 NAV="$FIX/nav/ESBC00DNK_R_20201770000_01D_MN.rnx"
+ESBC_OBS="$FIX/obs/ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx"
+WTZR_OBS="$FIX/obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx"
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        sha256sum "$1" | awk '{print $1}'
+    fi
+}
 {
     printf '{"generator": "fixtures-generators/rtklib_spp_oracle/generate.sh",\n'
     printf ' "rtklib": "rtklibexplorer/RTKLIB demo5 75a2e56275485b21a67bd35bc94bbeb8936e1a74",\n'
     printf ' "nav": "nav/ESBC00DNK_R_20201770000_01D_MN.rnx",\n'
+    printf ' "input_sha256": {"nav": "%s", "obs": {"ESBC": "%s", "WTZR": "%s"}},\n' \
+        "$(sha256_file "$NAV")" "$(sha256_file "$ESBC_OBS")" "$(sha256_file "$WTZR_OBS")"
     printf ' "runs": [\n'
     "$BUILD/rtklib_spp_oracle" esbc_iono_tropo \
-        "$FIX/obs/ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx" "$NAV" 1 1
+        "$ESBC_OBS" "$NAV" 1 1
     printf ',\n'
     "$BUILD/rtklib_spp_oracle" wtzr_iono_tropo \
-        "$FIX/obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx" "$NAV" 1 1
+        "$WTZR_OBS" "$NAV" 1 1
     printf ',\n'
     "$BUILD/rtklib_spp_oracle" esbc_tropo \
-        "$FIX/obs/ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx" "$NAV" 0 1
+        "$ESBC_OBS" "$NAV" 0 1
     printf ',\n'
     "$BUILD/rtklib_spp_oracle" esbc_iono \
-        "$FIX/obs/ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx" "$NAV" 1 0
+        "$ESBC_OBS" "$NAV" 1 0
     printf ',\n'
     "$BUILD/rtklib_spp_oracle" wtzr_iono \
-        "$FIX/obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx" "$NAV" 1 0
+        "$WTZR_OBS" "$NAV" 1 0
     printf ']}\n'
-} > "$OUT"
+} > "$OUT_TMP"
+mv -f "$OUT_TMP" "$OUT"
 echo "wrote $OUT"

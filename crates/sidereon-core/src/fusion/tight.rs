@@ -1102,6 +1102,7 @@ fn spp_code_satellite_prediction(
     let env = SatModelEnv {
         eph: &tracked,
         t_rx_j2000_s,
+        receive_epoch: None,
         t_rx_second_of_day_s: 0.0,
         day_of_year: 1.0,
         corrections: Corrections::NONE,
@@ -2024,6 +2025,7 @@ mod tests {
             let env = SatModelEnv {
                 eph: source,
                 t_rx_j2000_s: T0,
+                receive_epoch: None,
                 t_rx_second_of_day_s: SOD,
                 day_of_year: DOY,
                 corrections: Corrections::NONE,

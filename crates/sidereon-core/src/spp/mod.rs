@@ -28,6 +28,9 @@
 //! as RTKLIB `pntpos` builds it: the transmission epoch is placed from the
 //! measured pseudorange as RTKLIB `satposs` places it (`t_rx - P / c`, less the
 //! satellite clock read there), the satellite ephemeris is read at that epoch,
+//! with the pseudorange and clock offsets subtracted from an [`ExactEpoch`];
+//! broadcast Keplerian states form seconds of week from its whole and fractional
+//! seconds before any absolute J2000 conversion,
 //! the geometric range is RTKLIB `geodist` (the Euclidean range from the
 //! unrotated position plus the first-order Sagnac term), the line-of-sight
 //! azimuth/elevation follow, then the ionosphere and troposphere delays are added
@@ -78,12 +81,29 @@ use crate::astro::math::least_squares::{
 };
 use crate::astro::math::linear::invert_symmetric_pd;
 use crate::astro::math::portable;
+use crate::astro::time::ExactEpoch;
 use crate::geometry_quality::{classify, GeometryQuality, GeometryQualityThresholds};
 use nalgebra::{DMatrix, DVector};
 use std::collections::BTreeMap;
 
+#[cfg(all(test, sidereon_repo_tests))]
+mod atmosphere_certificate;
+#[cfg(all(test, sidereon_repo_tests))]
+mod broadcast_certificate;
+#[cfg(all(test, sidereon_repo_tests))]
+mod centre_certificate;
 mod config;
+#[cfg(all(test, sidereon_repo_tests))]
+mod covariance_certificate;
+#[cfg(all(test, sidereon_repo_tests))]
+mod endpoint_certificate;
 mod fallback;
+#[cfg(all(test, sidereon_repo_tests))]
+mod interval_certificate;
+#[cfg(all(test, sidereon_repo_tests))]
+mod oracle_certificate;
+#[cfg(all(test, sidereon_repo_tests))]
+mod regional_certificate;
 mod source;
 use crate::astro::math::robust::{huber_weight, mad_scale, RobustError};
 pub use config::{
@@ -605,6 +625,22 @@ pub struct SolveInputs {
     pub qzss_clock: QzssClock,
 }
 
+/// Existing SPP inputs paired with a receive epoch that retains its civil label.
+///
+/// `inputs.t_rx_j2000_s` must be the nearest `f64` to `receive_epoch`, and the
+/// second-of-day and day-of-year fields must be derived from the same civil
+/// label. Exact solve entry points reject a mismatched J2000-seconds field.
+/// Legacy [`solve`] callers can provide only the binary `f64` receive time;
+/// transmit-time arithmetic preserves that binary value and its computed binary
+/// offsets without recovering a civil label that was not supplied.
+#[derive(Debug, Clone)]
+pub struct ExactSolveInputs {
+    /// All non-time solve inputs, unchanged from the compatibility API.
+    pub inputs: SolveInputs,
+    /// Exact receive epoch in the source's time scale.
+    pub receive_epoch: ExactEpoch,
+}
+
 /// The troposphere delay an SPP solve applies to each pseudorange when
 /// [`Corrections::troposphere`] is set.
 ///
@@ -960,11 +996,7 @@ pub(crate) struct SatModel {
     /// Variance (m²) of `iono_m` as RTKLIB `ionocorr` states it, scaled to the
     /// satellite's carrier as `rescode` scales it; see [`ionosphere_variance_m2`].
     pub iono_variance_m2: f64,
-    /// Epoch the satellite state was read at, and the epoch its record was selected at:
-    /// the transmission and reception epochs under the RTKLIB placement, the state epoch
-    /// for both under a light-time recipe, which selects no record apart.
-    pub state_epoch_j2000_s: f64,
-    pub selection_epoch_j2000_s: f64,
+    pub ephemeris_variance_m2: f64,
     #[cfg(all(test, sidereon_repo_tests))]
     pub az_rad: f64,
     #[cfg(all(test, sidereon_repo_tests))]
@@ -1020,6 +1052,9 @@ pub(crate) struct SatModelEnv<'a> {
     pub eph: &'a dyn EphemerisSource,
     /// Receive epoch, seconds since J2000 in the SP3 product's time scale.
     pub t_rx_j2000_s: f64,
+    /// Civil receive label when available. With `None`, the binary value of
+    /// `t_rx_j2000_s` is the exact receive instant for transmit-time arithmetic.
+    pub receive_epoch: Option<crate::astro::time::ExactEpochQuery>,
     /// GPS second-of-day of the receive epoch (Klobuchar diurnal argument).
     pub t_rx_second_of_day_s: f64,
     /// Fractional day-of-year of the receive epoch (Niell seasonal argument).
@@ -1153,6 +1188,18 @@ fn state_gap(
         .map_or(SatModelGap::Other, SatModelGap::SsrCorrectionExceedsLimit)
 }
 
+fn state_gap_at_epoch_query(
+    env: &SatModelEnv,
+    sat: GnssSatelliteId,
+    epoch: &crate::astro::time::ExactEpochQuery,
+    selection_epoch: &crate::astro::time::ExactEpochQuery,
+) -> SatModelGap {
+    env.eph
+        .ssr_correction_source()
+        .and_then(|ssr| ssr.correction_size_refusal_at_epoch_query(sat, epoch, selection_epoch))
+        .map_or(SatModelGap::Other, SatModelGap::SsrCorrectionExceedsLimit)
+}
+
 /// [`sat_model`] with the reason it gives no model: the size of the SSR corrections for
 /// which the source refuses the state it reads, asked at the same epoch and record
 /// selection as the state, or [`SatModelGap::Other`].
@@ -1166,10 +1213,24 @@ pub(crate) fn sat_model_checked(
 ) -> Result<SatModel, SatModelGap> {
     let sagnac = env.model.sagnac;
     let frame = env.model.frame;
+    let selection_epoch = env
+        .receive_epoch
+        .clone()
+        .or_else(|| ExactEpoch::from_binary_j2000_seconds(env.t_rx_j2000_s))
+        .ok_or(SatModelGap::Other)?;
 
     // Transmission epoch, selected by the range recipe.
     // `_t_tx` is read only by the test-build trace fields below.
-    let (sat_pos, dt_sat, tau, group_delay, t_state, _t_tx, t_selection) = match env.model.range {
+    let (
+        sat_pos,
+        dt_sat,
+        tau,
+        group_delay,
+        t_state,
+        _t_tx,
+        ephemeris_variance,
+        relativity_epoch,
+    ) = match env.model.range {
         RangeRecipe::RtklibSatpossPseudorange => {
             // RTKLIB `satposs`: the clock read at `t_rx - P / c` (`ephclk`) places the
             // transmission epoch `t_rx - P / c - dts`, and the state is read there. No
@@ -1184,35 +1245,52 @@ pub(crate) fn sat_model_checked(
             if !p_place_m.is_finite() || p_place_m <= 0.0 {
                 return Err(SatModelGap::Other);
             }
-            let clock_epoch =
-                crate::observables::pseudorange_clock_epoch_j2000_s(env.t_rx_j2000_s, p_place_m);
-            // RTKLIB selects each broadcast record by the observation epoch (`teph`), the
-            // reception epoch, for the clock and for the state alike.
+            let clock_epoch = selection_epoch
+                .clone()
+                .checked_sub_binary_seconds(p_place_m / C_M_S)
+                .ok_or(SatModelGap::Other)?;
             let placement_clock_s = env
                 .eph
-                .try_transmit_epoch_clock_s(sat, clock_epoch, env.t_rx_j2000_s)
+                .try_transmit_epoch_clock_at_epoch_query(sat, &clock_epoch, &selection_epoch)
                 .ok()
                 .flatten()
                 .ok_or(SatModelGap::Other)?
                 .value;
-            let t_tx = crate::observables::pseudorange_transmit_epoch_from_clock_j2000_s(
-                env.t_rx_j2000_s,
-                p_place_m,
-                placement_clock_s,
-            );
+            let t_tx = clock_epoch
+                .checked_sub_binary_seconds(placement_clock_s)
+                .ok_or(SatModelGap::Other)?;
             let (pos, clk, gd) = env
                 .eph
-                .try_position_clock_group_delay_selected_at_j2000_s(sat, t_tx, env.t_rx_j2000_s)
+                .try_position_clock_group_delay_selected_at_epoch_query(
+                    sat,
+                    &t_tx,
+                    &selection_epoch,
+                )
                 .ok()
                 .flatten()
-                .ok_or_else(|| state_gap(env, sat, t_tx, env.t_rx_j2000_s))?
+                .ok_or_else(|| state_gap_at_epoch_query(env, sat, &t_tx, &selection_epoch))?
                 .value;
+            let t_tx_j2000_s = t_tx.j2000_seconds();
+            let ephemeris_variance = env.eph.ephemeris_variance_at_epoch_query(
+                sat,
+                &t_tx,
+                &selection_epoch,
+            );
             // The flight time a closed-form rotation turns the satellite through, when a
             // recipe pairs one with this placement: the geometric range over `c`. RTKLIB
             // `geodist` rotates nothing and takes the first-order Sagnac term instead.
             let tau = geometric_range(SagnacRecipe::Off, pos, rx_ecef_m, OMEGA_E_DOT_RAD_S, C_M_S)
                 / C_M_S;
-            (pos, clk, tau, gd, t_tx, t_tx, env.t_rx_j2000_s)
+            (
+                pos,
+                clk,
+                tau,
+                gd,
+                t_tx_j2000_s,
+                t_tx_j2000_s,
+                Some(ephemeris_variance),
+                Some(t_tx),
+            )
         }
         RangeRecipe::SppMeasuredPseudorangeFixedIter => {
             // Geometric light time from the receiver's time tag: fixed iteration count,
@@ -1240,7 +1318,7 @@ pub(crate) fn sat_model_checked(
                 tau = rho0 / C_M_S;
                 t_tx = env.t_rx_j2000_s - tau;
             }
-            (sat_pos, dt_sat, tau, group_delay, t_state, t_tx, t_state)
+            (sat_pos, dt_sat, tau, group_delay, t_state, t_tx, None, None)
         }
         RangeRecipe::CanonicalLightTimeClosedFormSagnac => {
             // Full iterative light-time (the IERS-rigorous op-order): iterate the
@@ -1279,7 +1357,7 @@ pub(crate) fn sat_model_checked(
                 }
                 prev_tau = tau;
             }
-            (sat_pos, dt_sat, tau, group_delay, t_state, t_tx, t_state)
+            (sat_pos, dt_sat, tau, group_delay, t_state, t_tx, None, None)
         }
         RangeRecipe::ObservableRoundedMicrosecondFixedIter
         | RangeRecipe::RtkProvidedTxFirstOrderSagnac => unreachable!(
@@ -1298,7 +1376,13 @@ pub(crate) fn sat_model_checked(
     // its own term and the source returns none. The source is handed the position it
     // returned at that epoch, so a precise source interpolates only the position 1 ms
     // later.
-    let dt_sat = match env.eph.clock_relativity_for_state_s(sat, t_state, sat_pos) {
+    let relativity = match relativity_epoch.as_ref() {
+        Some(epoch) => env
+            .eph
+            .clock_relativity_for_state_at_epoch_query(sat, epoch, sat_pos),
+        None => env.eph.clock_relativity_for_state_s(sat, t_state, sat_pos),
+    };
+    let dt_sat = match relativity {
         ClockRelativity::NotApplicable => dt_sat,
         ClockRelativity::Term(relativity_s) => dt_sat + relativity_s,
         ClockRelativity::Unavailable => return Err(SatModelGap::Other),
@@ -1415,6 +1499,16 @@ pub(crate) fn sat_model_checked(
     // Predicted pseudorange, left-to-right; c*dt_sat is a single multiply.
     let p_hat = rho + b_m - C_M_S * dt_sat + iono_m + tropo_m;
 
+    let ephemeris_variance_m2 = match ephemeris_variance {
+        Some(variance_m2) => variance_m2,
+        None => {
+            let state_epoch =
+                ExactEpoch::from_binary_j2000_seconds(t_state).ok_or(SatModelGap::Other)?;
+            env.eph
+                .ephemeris_variance_at_epoch_query(sat, &state_epoch, &selection_epoch)
+        }
+    };
+
     Ok(SatModel {
         sat_rot_ecef_m: sat_rot,
         el_rad: g.el_rad,
@@ -1424,8 +1518,7 @@ pub(crate) fn sat_model_checked(
         iono_m,
         tropo_m,
         iono_variance_m2,
-        state_epoch_j2000_s: t_state,
-        selection_epoch_j2000_s: t_selection,
+        ephemeris_variance_m2,
         #[cfg(all(test, sidereon_repo_tests))]
         az_rad: g.az_rad,
         #[cfg(all(test, sidereon_repo_tests))]
@@ -1607,6 +1700,18 @@ pub(crate) fn select_at(
     rx_ecef_m: [f64; 3],
     clock_m: &dyn Fn(GnssSystem) -> f64,
 ) -> Selection {
+    select_at_with_epoch(eph, inputs, model, placement, rx_ecef_m, clock_m, None)
+}
+
+fn select_at_with_epoch(
+    eph: &dyn EphemerisSource,
+    inputs: &SolveInputs,
+    model: SppModelRecipe,
+    placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
+    rx_ecef_m: [f64; 3],
+    clock_m: &dyn Fn(GnssSystem) -> f64,
+    receive_epoch: Option<crate::astro::time::ExactEpochQuery>,
+) -> Selection {
     // Ascending satellite-id order, never observation order.
     let mut obs: Vec<&Observation> = inputs.observations.iter().collect();
     obs.sort_by_key(|o| o.satellite_id);
@@ -1620,6 +1725,7 @@ pub(crate) fn select_at(
     let env = SatModelEnv {
         eph,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
+        receive_epoch,
         t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,
@@ -1698,15 +1804,10 @@ pub(crate) fn select_at(
             });
             continue;
         }
-        let ephemeris_variance_m2 = eph.ephemeris_variance_m2(
-            sat,
-            model.state_epoch_j2000_s,
-            model.selection_epoch_j2000_s,
-        );
         let variance_m2 = pseudorange_variance_m2(
             sat,
             &model,
-            ephemeris_variance_m2,
+            model.ephemeris_variance_m2,
             inputs.corrections,
             inputs.pseudorange_code,
         );
@@ -1773,7 +1874,7 @@ pub(crate) fn residual_unweighted(
     inputs: &SolveInputs,
     model: SppModelRecipe,
 ) -> Result<Vec<f64>, GnssSatelliteId> {
-    residual_unweighted_placed(eph, used, obs_by_id, x, inputs, model, None)
+    residual_unweighted_placed(eph, used, obs_by_id, x, inputs, model, None, None)
 }
 
 /// [`residual_unweighted`] with the satellites of `placement` placed from its
@@ -1786,12 +1887,14 @@ fn residual_unweighted_placed(
     inputs: &SolveInputs,
     model: SppModelRecipe,
     placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
+    receive_epoch: Option<crate::astro::time::ExactEpochQuery>,
 ) -> Result<Vec<f64>, GnssSatelliteId> {
     let rx = [x[0], x[1], x[2]];
     let systems = clock_systems(used, inputs.qzss_clock);
     let env = SatModelEnv {
         eph,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
+        receive_epoch,
         t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,
@@ -1835,6 +1938,12 @@ fn residual_unweighted_placed(
 /// [`SolverRecipe::NalgebraTrfLegacy`] trust-region factorization, so its
 /// existing goldens are unchanged. [`solve_with_solver`] selects the owned
 /// deterministic kernel.
+///
+/// `SolveInputs::t_rx_j2000_s` is treated as its exact binary `f64` receive
+/// instant. Computed binary offsets are kept in
+/// [`crate::astro::time::ExactEpochQuery`] through
+/// transmit-time arithmetic; only the scalar source compatibility adapter may
+/// round the query to J2000 seconds.
 pub fn solve(
     eph: &dyn EphemerisSource,
     inputs: &SolveInputs,
@@ -1848,6 +1957,96 @@ pub fn solve(
         SppModelRecipe::reference(),
         TrustRegionSolve::NalgebraLu,
     )
+}
+
+/// Solve using the receive epoch's civil label without changing `SolveInputs`.
+/// The embedded J2000-seconds field must be its correctly rounded `f64` value;
+/// RINEX exact-input construction sets that mirror from the label.
+pub fn solve_with_exact_epoch(
+    eph: &dyn EphemerisSource,
+    inputs: &ExactSolveInputs,
+    with_geodetic: bool,
+) -> Result<ReceiverSolution, SppError> {
+    validate_exact_solve_inputs(inputs)?;
+    solve_inner_at_exact_epoch(
+        eph,
+        &inputs.inputs,
+        with_geodetic,
+        SppModelRecipe::reference(),
+        TrustRegionSolve::NalgebraLu,
+        inputs.receive_epoch.query(),
+    )
+}
+
+/// Solve at the exact receive epoch with the same validation and coarse-start
+/// policy as [`solve_with_policy`]. Its errors use the same solve, validation,
+/// and no-coarse-solution variants as the legacy policy entry point.
+pub fn solve_with_exact_epoch_and_policy(
+    eph: &dyn EphemerisSource,
+    inputs: &ExactSolveInputs,
+    with_geodetic: bool,
+    policy: SolvePolicy,
+) -> Result<ReceiverSolution, SolvePolicyError> {
+    validate_exact_solve_inputs(inputs).map_err(SolvePolicyError::Solve)?;
+    let model = SppModelRecipe::reference();
+    let solver = TrustRegionSolve::NalgebraLu;
+    match policy.coarse_search_seeds {
+        Some(seed_count) => {
+            let mut candidates = Vec::new();
+            let mut last_error = SolvePolicyError::NoCoarseSolution;
+            for seed in std::iter::once(inputs.inputs.initial_guess).chain(coarse_seeds(seed_count))
+            {
+                let mut seeded = inputs.inputs.clone();
+                seeded.initial_guess = seed;
+                match solve_inner_at_exact_epoch(
+                    eph,
+                    &seeded,
+                    with_geodetic,
+                    model,
+                    solver,
+                    inputs.receive_epoch.query(),
+                )
+                .map_err(SolvePolicyError::Solve)
+                .and_then(|solution| {
+                    validate_receiver_solution(&solution, policy.validation)?;
+                    Ok(solution)
+                }) {
+                    Ok(solution) => candidates.push(solution),
+                    Err(error @ SolvePolicyError::Solve(SppError::Ut1OutsideCoverage(_))) => {
+                        return Err(error)
+                    }
+                    Err(error) => last_error = error,
+                }
+            }
+            select_coarse_candidate(&candidates)
+                .cloned()
+                .ok_or(last_error)
+        }
+        None => {
+            let solution = solve_inner_at_exact_epoch(
+                eph,
+                &inputs.inputs,
+                with_geodetic,
+                model,
+                solver,
+                inputs.receive_epoch.query(),
+            )
+            .map_err(SolvePolicyError::Solve)?;
+            validate_receiver_solution(&solution, policy.validation)?;
+            Ok(solution)
+        }
+    }
+}
+
+fn validate_exact_solve_inputs(inputs: &ExactSolveInputs) -> Result<(), SppError> {
+    validate_solve_inputs(&inputs.inputs)?;
+    if inputs.receive_epoch.j2000_seconds().to_bits() != inputs.inputs.t_rx_j2000_s.to_bits() {
+        return Err(SppError::InvalidInput {
+            field: "receive_epoch",
+            kind: SppInputErrorKind::OutOfRange,
+        });
+    }
+    Ok(())
 }
 
 /// [`solve`] with the satellites of `placement` placed from its pseudoranges while the
@@ -2038,7 +2237,26 @@ fn solve_inner(
     model: SppModelRecipe,
     linear_solve: TrustRegionSolve,
 ) -> Result<ReceiverSolution, SppError> {
-    solve_inner_placed(eph, inputs, with_geodetic, model, linear_solve, None)
+    solve_inner_placed_at_exact_epoch(eph, inputs, with_geodetic, model, linear_solve, None, None)
+}
+
+fn solve_inner_at_exact_epoch(
+    eph: &dyn EphemerisSource,
+    inputs: &SolveInputs,
+    with_geodetic: bool,
+    model: SppModelRecipe,
+    linear_solve: TrustRegionSolve,
+    receive_epoch: crate::astro::time::ExactEpochQuery,
+) -> Result<ReceiverSolution, SppError> {
+    solve_inner_placed_at_exact_epoch(
+        eph,
+        inputs,
+        with_geodetic,
+        model,
+        linear_solve,
+        None,
+        Some(receive_epoch),
+    )
 }
 
 /// [`solve_inner`] with the satellites of `placement` placed from its pseudoranges
@@ -2051,6 +2269,26 @@ fn solve_inner_placed(
     linear_solve: TrustRegionSolve,
     placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
 ) -> Result<ReceiverSolution, SppError> {
+    solve_inner_placed_at_exact_epoch(
+        eph,
+        inputs,
+        with_geodetic,
+        model,
+        linear_solve,
+        placement,
+        None,
+    )
+}
+
+fn solve_inner_placed_at_exact_epoch(
+    eph: &dyn EphemerisSource,
+    inputs: &SolveInputs,
+    with_geodetic: bool,
+    model: SppModelRecipe,
+    linear_solve: TrustRegionSolve,
+    placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
+    receive_epoch: Option<crate::astro::time::ExactEpochQuery>,
+) -> Result<ReceiverSolution, SppError> {
     let tracked = Ut1TrackedSource::new(eph);
     let result = solve_tracked(
         &tracked,
@@ -2059,6 +2297,7 @@ fn solve_inner_placed(
         model,
         linear_solve,
         placement,
+        receive_epoch,
     );
     if let Some(reason) = tracked.refusal() {
         return Err(SppError::Ut1OutsideCoverage(reason));
@@ -2122,10 +2361,17 @@ fn select_at_state(
     model: SppModelRecipe,
     placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
     state: &IterateState,
+    receive_epoch: Option<crate::astro::time::ExactEpochQuery>,
 ) -> Result<(Selection, Vec<GnssSystem>), SppError> {
-    let sel = select_at(eph, inputs, model, placement, state.rx_ecef_m, &|system| {
-        state.clock_m(system)
-    });
+    let sel = select_at_with_epoch(
+        eph,
+        inputs,
+        model,
+        placement,
+        state.rx_ecef_m,
+        &|system| state.clock_m(system),
+        receive_epoch,
+    );
     // One receiver-clock parameter per distinct GNSS (a reference clock plus an
     // inter-system bias for each additional system), so the state has
     // `3 + n_systems` parameters and needs at least that many usable satellites.
@@ -2329,6 +2575,7 @@ pub(crate) fn model_env<'a>(
     SatModelEnv {
         eph,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
+        receive_epoch: None,
         t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,
@@ -2357,6 +2604,7 @@ fn solve_selected(
     systems: &[GnssSystem],
     x0: DVector<f64>,
     weights: &[f64],
+    receive_epoch: Option<crate::astro::time::ExactEpochQuery>,
 ) -> Result<PassEnd, SppError> {
     // Agreement-track stopping thresholds (see the SPP_SOLVER_* constants).
     let opts = SolveOptions {
@@ -2380,6 +2628,7 @@ fn solve_selected(
             inputs,
             model,
             placement,
+            receive_epoch.clone(),
         ) {
             Ok(r) => DVector::from_vec(r),
             Err(sat) => {
@@ -2498,6 +2747,7 @@ fn solve_tracked(
     model: SppModelRecipe,
     linear_solve: TrustRegionSolve,
     placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
+    receive_epoch: Option<crate::astro::time::ExactEpochQuery>,
 ) -> Result<ReceiverSolution, SppError> {
     // One pseudorange per satellite. Reject duplicates deterministically (by
     // the smallest repeated id) so the result can never depend on observation
@@ -2534,7 +2784,8 @@ fn solve_tracked(
     // The satellites of the last pass, when its selection can end the solve.
     let mut last_used: Option<Vec<GnssSatelliteId>> = None;
     let settled = loop {
-        let (sel, systems) = select_at_state(eph, inputs, model, placement, &state)?;
+        let (sel, systems) =
+            select_at_state(eph, inputs, model, placement, &state, receive_epoch.clone())?;
         if last_used.as_ref() == Some(&sel.used) {
             // The selection holds: the step RTKLIB takes here, from this
             // iterate's residuals and weights.
@@ -2561,9 +2812,15 @@ fn solve_tracked(
                 // The reported geometry is taken at the position reached: the
                 // selection there when it is the same one, else that selection's
                 // satellites evaluated there.
-                let post = select_at(eph, inputs, model, placement, state.rx_ecef_m, &|system| {
-                    state.clock_m(system)
-                });
+                let post = select_at_with_epoch(
+                    eph,
+                    inputs,
+                    model,
+                    placement,
+                    state.rx_ecef_m,
+                    &|system| state.clock_m(system),
+                    receive_epoch.clone(),
+                );
                 if post.used == sel.used {
                     break post;
                 }
@@ -2600,6 +2857,7 @@ fn solve_tracked(
             &systems,
             state.parameters(&systems),
             &sel.weights,
+            receive_epoch.clone(),
         )?;
         passes += 1;
         match end {
@@ -2639,7 +2897,8 @@ fn solve_tracked(
     // the one the last solve used, at the state it reached, with its effective
     // weights.
     if let Some(rc) = inputs.robust {
-        let (mut sel, mut systems) = select_at_state(eph, inputs, model, placement, &state)?;
+        let (mut sel, mut systems) =
+            select_at_state(eph, inputs, model, placement, &state, receive_epoch.clone())?;
         let mut settled = false;
         // How the last solve ended; a least-squares step ends at its own target.
         let mut last_inner = Status::SelectionSettled;
@@ -2685,6 +2944,7 @@ fn solve_tracked(
                     &systems,
                     state.parameters(&systems),
                     &eff,
+                    receive_epoch.clone(),
                 )? {
                     PassEnd::Solved(report) => {
                         iterations += report.iterations;
@@ -2696,8 +2956,14 @@ fn solve_tracked(
                         // weights there until a reweighted solve or step
                         // replaces them.
                         state.update(&systems, &x);
-                        let (next, next_systems) =
-                            select_at_state(eph, inputs, model, placement, &state)?;
+                        let (next, next_systems) = select_at_state(
+                            eph,
+                            inputs,
+                            model,
+                            placement,
+                            &state,
+                            receive_epoch.clone(),
+                        )?;
                         step_next = next.used == sel.used;
                         final_set = FinalSet {
                             used: next.used.clone(),
@@ -2718,7 +2984,8 @@ fn solve_tracked(
             let dy = state.rx_ecef_m[1] - prev_rx[1];
             let dz = state.rx_ecef_m[2] - prev_rx[2];
             let dpos = (dx * dx + dy * dy + dz * dz).sqrt();
-            let (next, next_systems) = select_at_state(eph, inputs, model, placement, &state)?;
+            let (next, next_systems) =
+                select_at_state(eph, inputs, model, placement, &state, receive_epoch.clone())?;
             let same_set = next.used == sel.used;
             let solved_geometry = if same_set {
                 Some((next.lines_of_sight.clone(), next.residuals_m.clone()))
@@ -3387,6 +3654,7 @@ pub(crate) mod test_support {
     ) {
         let rtklib_env = SatModelEnv {
             model: SppModelRecipe::reference(),
+            receive_epoch: replay_env.receive_epoch.clone(),
             ..*replay_env
         };
         let g = sat_model_for_test(replay_env, sat, rx, b, p_meas, klobuchar)
@@ -3394,25 +3662,43 @@ pub(crate) mod test_support {
         let r = sat_model_for_test(&rtklib_env, sat, rx, b, p_meas, klobuchar)
             .expect("RTKLIB placement model");
 
-        let t_rx = replay_env.t_rx_j2000_s;
-        let clock_epoch = t_rx - p_meas / C_M_S;
-        let dts = EphemerisSource::try_transmit_epoch_clock_s(source, sat, clock_epoch, t_rx)
-            .expect("no refusal")
-            .expect("a clock at t_rx - P / c")
-            .value;
-        let t_tx = clock_epoch - dts;
+        let selection_epoch = replay_env
+            .receive_epoch
+            .clone()
+            .or_else(|| ExactEpoch::from_binary_j2000_seconds(replay_env.t_rx_j2000_s))
+            .expect("finite receive epoch");
+        let clock_epoch = selection_epoch
+            .clone()
+            .checked_sub_binary_seconds(p_meas / C_M_S)
+            .expect("finite placement offset");
+        let dts = EphemerisSource::try_transmit_epoch_clock_at_epoch_query(
+            source,
+            sat,
+            &clock_epoch,
+            &selection_epoch,
+        )
+        .expect("no refusal")
+        .expect("a clock at t_rx - P / c")
+        .value;
+        let t_tx = clock_epoch
+            .checked_sub_binary_seconds(dts)
+            .expect("finite transmit clock offset");
+        let t_tx_j2000_s = t_tx.j2000_seconds();
         assert_eq!(
             r.t_tx_j2000_s.to_bits(),
-            t_tx.to_bits(),
+            t_tx_j2000_s.to_bits(),
             "{label}: satposs epoch"
         );
         assert_eq!(
             r.clock_epoch_j2000_s.to_bits(),
-            t_tx.to_bits(),
+            t_tx_j2000_s.to_bits(),
             "{label}: state epoch"
         );
-        let pos = EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s(
-            source, sat, t_tx, t_rx,
+        let pos = EphemerisSource::try_position_clock_group_delay_selected_at_epoch_query(
+            source,
+            sat,
+            &t_tx,
+            &selection_epoch,
         )
         .expect("no refusal")
         .expect("state at the transmission epoch")
@@ -3447,17 +3733,28 @@ pub(crate) mod test_support {
             "{label}: epochs {dt} s apart where the pseudorange puts them {expected_dt} s apart"
         );
 
-        let selected_position = |t: f64| {
-            EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s(
-                source, sat, t, t_rx,
+        let selected_position = |epoch: &crate::astro::time::ExactEpochQuery| {
+            EphemerisSource::try_position_clock_group_delay_selected_at_epoch_query(
+                source,
+                sat,
+                epoch,
+                &selection_epoch,
             )
             .expect("no refusal")
             .expect("state near the transmission epoch")
             .value
             .0
         };
-        let plus = selected_position(t_tx + 0.5);
-        let minus = selected_position(t_tx - 0.5);
+        let plus_query = t_tx
+            .clone()
+            .checked_add_binary_seconds(0.5)
+            .expect("finite positive probe offset");
+        let minus_query = t_tx
+            .clone()
+            .checked_sub_binary_seconds(0.5)
+            .expect("finite negative probe offset");
+        let plus = selected_position(&plus_query);
+        let minus = selected_position(&minus_query);
         let velocity = [plus[0] - minus[0], plus[1] - minus[1], plus[2] - minus[2]];
         let range_rate = (d[0] * velocity[0] + d[1] * velocity[1] + d[2] * velocity[2]) / distance;
         let moved = (r.rho_m - g.rho_m) - range_rate * dt;

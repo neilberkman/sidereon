@@ -70,6 +70,7 @@
 use crate::astro::time::model::{Instant, InstantRepr, JulianDateSplit};
 
 use crate::astro::time::civil::j2000_seconds_from_split;
+use crate::astro::time::{ExactEpoch, ExactEpochQuery};
 use crate::constants::{J2000_JD, KM_TO_M, OMEGA_E_DOT_RAD_S, SECONDS_PER_DAY, US_TO_S};
 use crate::frame::ItrfPositionM;
 use crate::id::GnssSatelliteId;
@@ -267,6 +268,27 @@ impl Sp3 {
             self.interpolation.gap_threshold_factor(),
         )
     }
+
+    /// Interpolate `sat` at an exact query in the product header's time system.
+    /// Unlike the scalar entry point, all node and coverage decisions retain
+    /// the query's exact epoch until each local interpolation offset is formed.
+    pub fn position_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        query: &ExactEpochQuery,
+    ) -> Result<Sp3State> {
+        let series = gather_sp3_precise_series(self, sat);
+        interpolate_precise_state_at_epoch_query(
+            sat,
+            &series.x,
+            &series.kx,
+            &series.ky,
+            &series.kz,
+            &series.clk,
+            query,
+            self.interpolation.gap_threshold_factor(),
+        )
+    }
 }
 
 impl Sp3 {
@@ -288,6 +310,28 @@ impl Sp3 {
             self.interpolation.gap_threshold_factor(),
         )
         .map(|(x, y, z)| [x, y, z])
+    }
+
+    pub(crate) fn position_after_ephpos_step_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        query: &ExactEpochQuery,
+    ) -> Result<[f64; 3]> {
+        let stepped = query
+            .clone()
+            .checked_add_binary_seconds(crate::rinex_nav::EPHPOS_STEP_S)
+            .ok_or(Error::EpochOutOfRange)?;
+        let series = gather_sp3_precise_series(self, sat);
+        interpolate_precise_position_at_epoch_query(
+            sat,
+            &series.x,
+            &series.kx,
+            &series.ky,
+            &series.kz,
+            &stepped,
+            self.interpolation.gap_threshold_factor(),
+        )
+        .map(|(x_m, y_m, z_m)| [x_m, y_m, z_m])
     }
 }
 
@@ -597,6 +641,69 @@ pub(super) fn interpolate_precise_state_with_clock_arcs(
     })
 }
 
+#[allow(clippy::expect_used)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn interpolate_precise_state_at_epoch_query(
+    sat: GnssSatelliteId,
+    pos_x: &[f64],
+    pos_kx: &[f64],
+    pos_ky: &[f64],
+    pos_kz: &[f64],
+    clk_nodes: &[(f64, f64, bool)],
+    query: &ExactEpochQuery,
+    gap_threshold_factor: f64,
+) -> Result<Sp3State> {
+    let (x_m, y_m, z_m) = interpolate_precise_position_at_epoch_query(
+        sat,
+        pos_x,
+        pos_kx,
+        pos_ky,
+        pos_kz,
+        query,
+        gap_threshold_factor,
+    )?;
+    let clock_arcs = fit_clock_spline_arcs(clk_nodes);
+    let clock_s = interpolate_fitted_clock_at_epoch_query(&clock_arcs, query);
+    Ok(Sp3State {
+        position: ItrfPositionM::new(x_m, y_m, z_m).expect("valid ITRF position"),
+        clock_s,
+        velocity: None,
+        clock_rate_s_s: None,
+        flags: crate::sp3::Sp3Flags::default(),
+    })
+}
+
+#[allow(clippy::expect_used)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn interpolate_precise_state_with_clock_arcs_at_epoch_query(
+    sat: GnssSatelliteId,
+    pos_x: &[f64],
+    pos_kx: &[f64],
+    pos_ky: &[f64],
+    pos_kz: &[f64],
+    clock_arcs: &[ClockSplineArc],
+    query: &ExactEpochQuery,
+    gap_threshold_factor: f64,
+) -> Result<Sp3State> {
+    let (x_m, y_m, z_m) = interpolate_precise_position_at_epoch_query(
+        sat,
+        pos_x,
+        pos_kx,
+        pos_ky,
+        pos_kz,
+        query,
+        gap_threshold_factor,
+    )?;
+    let clock_s = interpolate_fitted_clock_at_epoch_query(clock_arcs, query);
+    Ok(Sp3State {
+        position: ItrfPositionM::new(x_m, y_m, z_m).expect("valid ITRF position"),
+        clock_s,
+        velocity: None,
+        clock_rate_s_s: None,
+        flags: crate::sp3::Sp3Flags::default(),
+    })
+}
+
 pub(super) fn interpolate_precise_position(
     sat: GnssSatelliteId,
     pos_x: &[f64],
@@ -629,6 +736,43 @@ pub(super) fn interpolate_precise_position(
         // nodes admitted far from the query can coincide at its precision.
         return Err(Error::InvalidInput(format!(
             "{sat}: non-finite interpolated position at query {query}: the selected nodes \
+             are not distinct at its precision, or the coordinates overflow"
+        )));
+    }
+    Ok((x_m, y_m, z_m))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn interpolate_precise_position_at_epoch_query(
+    sat: GnssSatelliteId,
+    pos_x: &[f64],
+    pos_kx: &[f64],
+    pos_ky: &[f64],
+    pos_kz: &[f64],
+    query: &ExactEpochQuery,
+    gap_threshold_factor: f64,
+) -> Result<(f64, f64, f64)> {
+    let rounded_query = query.j2000_seconds();
+    if pos_x.is_empty() {
+        return Err(Error::UnknownSatellite(sat));
+    }
+    validate_strictly_increasing_nodes(pos_x)?;
+    select_position_nodes_at_epoch_query(pos_x.len(), query, gap_threshold_factor, |index| {
+        pos_x[index]
+    })
+    .map_err(|refusal| refusal.into_error(sat))?;
+
+    let (x_m, y_m, z_m) = interpolate_position_neville_at_epoch_query(
+        pos_x,
+        pos_kx,
+        pos_ky,
+        pos_kz,
+        query,
+        gap_threshold_factor,
+    );
+    if !(x_m.is_finite() && y_m.is_finite() && z_m.is_finite()) {
+        return Err(Error::InvalidInput(format!(
+            "{sat}: non-finite interpolated position at query {rounded_query}: the selected nodes \
              are not distinct at its precision, or the coordinates overflow"
         )));
     }
@@ -708,6 +852,74 @@ pub(super) fn select_position_nodes(
     }
 
     let window = neville_window(n, nominal, gap_threshold_factor, query, &node);
+    if window.len() < NEVILLE_POINTS {
+        return Err(NodeRefusal::Insufficient {
+            nodes: window.len(),
+        });
+    }
+    Ok(window)
+}
+
+pub(super) fn query_minus_node_cmp(
+    query: &ExactEpochQuery,
+    node_s: f64,
+    offset_s: f64,
+) -> Option<core::cmp::Ordering> {
+    let node_query = ExactEpoch::from_binary_j2000_seconds(node_s)?;
+    query.compare_interval_query(&node_query, offset_s)
+}
+
+pub(super) fn select_position_nodes_at_epoch_query(
+    node_count: usize,
+    query: &ExactEpochQuery,
+    gap_threshold_factor: f64,
+    node_seconds: impl Fn(usize) -> f64,
+) -> core::result::Result<core::ops::Range<usize>, NodeRefusal> {
+    let nominal = (1..node_count)
+        .map(|index| node_seconds(index) - node_seconds(index - 1))
+        .filter(|spacing| *spacing > 0.0)
+        .fold(f64::INFINITY, f64::min);
+    if !nominal.is_finite() {
+        return Err(NodeRefusal::OutOfRange);
+    }
+    let before_first = query_minus_node_cmp(query, node_seconds(0), -nominal);
+    let after_last = query_minus_node_cmp(query, node_seconds(node_count - 1), nominal);
+    if before_first.is_none()
+        || after_last.is_none()
+        || before_first == Some(core::cmp::Ordering::Less)
+        || after_last == Some(core::cmp::Ordering::Greater)
+    {
+        return Err(NodeRefusal::OutOfRange);
+    }
+
+    let gap_threshold_s = gap_threshold_factor * nominal;
+    let mut bracket_index = 0usize;
+    while bracket_index + 1 < node_count
+        && query_minus_node_cmp(query, node_seconds(bracket_index + 1), 0.0)
+            .is_some_and(|ordering| ordering != core::cmp::Ordering::Less)
+    {
+        bracket_index += 1;
+    }
+    if bracket_index + 1 < node_count {
+        let lower_node_s = node_seconds(bracket_index);
+        let upper_node_s = node_seconds(bracket_index + 1);
+        if upper_node_s - lower_node_s > gap_threshold_s
+            && query_minus_node_cmp(query, lower_node_s, nominal)
+                == Some(core::cmp::Ordering::Greater)
+            && query_minus_node_cmp(query, upper_node_s, -nominal)
+                == Some(core::cmp::Ordering::Less)
+        {
+            return Err(NodeRefusal::OutOfRange);
+        }
+    }
+
+    let window = neville_window_at_epoch_query(
+        node_count,
+        nominal,
+        gap_threshold_factor,
+        query,
+        &node_seconds,
+    );
     if window.len() < NEVILLE_POINTS {
         return Err(NodeRefusal::Insufficient {
             nodes: window.len(),
@@ -836,6 +1048,96 @@ pub(super) fn interpolate_fitted_clock(arcs: &[ClockSplineArc], query: f64) -> O
         return None;
     }
     Some(evaluate_ppoly(&arc.x, &arc.c0, &arc.c1, &arc.c2, &arc.c3, query) * US_TO_S)
+}
+
+pub(super) fn interpolate_fitted_clock_at_epoch_query(
+    arcs: &[ClockSplineArc],
+    query: &ExactEpochQuery,
+) -> Option<f64> {
+    let mut chosen = None;
+    for (arc_index, arc) in arcs.iter().enumerate() {
+        if arc_contains_epoch_query(arc, query)? {
+            chosen = Some(arc_index);
+            break;
+        }
+    }
+    let arc = match chosen {
+        Some(index) => &arcs[index],
+        None => nearest_fitted_subarc_at_epoch_query(arcs, query)?,
+    };
+    if arc.x.len() < 2 {
+        return None;
+    }
+    Some(evaluate_ppoly_at_epoch_query(arc, query)? * US_TO_S)
+}
+
+fn arc_contains_epoch_query(arc: &ClockSplineArc, query: &ExactEpochQuery) -> Option<bool> {
+    if arc.x.is_empty() {
+        return Some(false);
+    }
+    Some(
+        query_minus_node_cmp(query, arc.x[0], 0.0)? != core::cmp::Ordering::Less
+            && query_minus_node_cmp(query, *arc.x.last()?, 0.0)? != core::cmp::Ordering::Greater,
+    )
+}
+
+fn nearest_fitted_subarc_at_epoch_query<'a>(
+    arcs: &'a [ClockSplineArc],
+    query: &ExactEpochQuery,
+) -> Option<&'a ClockSplineArc> {
+    let mut chosen: Option<(&ClockSplineArc, ExactEpochQuery)> = None;
+    for arc in arcs.iter().filter(|arc| arc.x.len() >= 2) {
+        let first = ExactEpoch::from_binary_j2000_seconds(arc.x[0])?;
+        let last = ExactEpoch::from_binary_j2000_seconds(*arc.x.last()?)?;
+        let boundary = if query_minus_node_cmp(query, arc.x[0], 0.0)? == core::cmp::Ordering::Less {
+            first
+        } else {
+            last
+        };
+        let replace = chosen.as_ref().is_none_or(|(_, current_boundary)| {
+            query.compare_distance_to(&boundary, current_boundary) == core::cmp::Ordering::Less
+        });
+        if replace {
+            chosen = Some((arc, boundary));
+        }
+    }
+    chosen.map(|(arc, _)| arc)
+}
+
+fn evaluate_ppoly_at_epoch_query(arc: &ClockSplineArc, query: &ExactEpochQuery) -> Option<f64> {
+    let node_count = arc.x.len();
+    let last = node_count - 2;
+    let first_order = query_minus_node_cmp(query, arc.x[0], 0.0)?;
+    let end_order = query_minus_node_cmp(query, arc.x[node_count - 1], 0.0)?;
+    let interval = if first_order == core::cmp::Ordering::Less {
+        0
+    } else if end_order != core::cmp::Ordering::Less {
+        last
+    } else {
+        let mut lo = 0usize;
+        let mut hi = node_count - 1;
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if query_minus_node_cmp(query, arc.x[mid], 0.0)? != core::cmp::Ordering::Less {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    };
+    let node_query = ExactEpoch::from_binary_j2000_seconds(arc.x[interval])?;
+    let local_s = query.seconds_since_query(&node_query);
+    let mut result = 0.0;
+    let mut power = 1.0;
+    result += arc.c3[interval] * power;
+    power *= local_s;
+    result += arc.c2[interval] * power;
+    power *= local_s;
+    result += arc.c1[interval] * power;
+    power *= local_s;
+    result += arc.c0[interval] * power;
+    Some(result)
 }
 
 /// Whether `query` lies within the closed node-span of a fitted sub-arc.
@@ -1062,6 +1364,57 @@ pub(super) fn neville_window(
     start..start + win
 }
 
+pub(super) fn neville_window_at_epoch_query(
+    node_count: usize,
+    nominal: f64,
+    gap_threshold_factor: f64,
+    query: &ExactEpochQuery,
+    node_seconds: impl Fn(usize) -> f64,
+) -> core::ops::Range<usize> {
+    if node_count == 0 {
+        return 0..0;
+    }
+    let gap_threshold_s = gap_threshold_factor * nominal;
+    let mut pivot_index = 0usize;
+    while pivot_index + 1 < node_count
+        && query_minus_node_cmp(query, node_seconds(pivot_index + 1), 0.0)
+            == Some(core::cmp::Ordering::Greater)
+    {
+        pivot_index += 1;
+    }
+    if pivot_index + 1 < node_count
+        && node_seconds(pivot_index + 1) - node_seconds(pivot_index) > gap_threshold_s
+        && query_minus_node_cmp(query, node_seconds(pivot_index + 1), -nominal)
+            .is_some_and(|ordering| ordering != core::cmp::Ordering::Less)
+    {
+        pivot_index += 1;
+    }
+
+    let mut run_start = pivot_index;
+    while run_start > 0 && node_seconds(run_start) - node_seconds(run_start - 1) <= gap_threshold_s
+    {
+        run_start -= 1;
+    }
+    let mut run_end = pivot_index + 1;
+    while run_end < node_count
+        && node_seconds(run_end) - node_seconds(run_end - 1) <= gap_threshold_s
+    {
+        run_end += 1;
+    }
+    let run_length = run_end - run_start;
+    let window_length = NEVILLE_POINTS.min(run_length);
+    let half_window = (NEVILLE_POINTS / 2) as isize;
+    let mut window_start = pivot_index as isize - half_window;
+    if window_start < run_start as isize {
+        window_start = run_start as isize;
+    }
+    if window_start + window_length as isize > run_end as isize {
+        window_start = run_end as isize - window_length as isize;
+    }
+    let window_start = window_start as usize;
+    window_start..window_start + window_length
+}
+
 /// Sliding-window Lagrange (Neville) satellite-POSITION interpolation, matching
 /// RTKLIB `preceph.c` pephpos/interppol. Replaces the global not-a-knot cubic
 /// spline, which is degree-3 over the whole day and errs ~200 m at the day
@@ -1114,6 +1467,63 @@ fn interpolate_position_neville(
     let y_km = neville(&t[..win], &py[..win]);
     let z_km = neville(&t[..win], &pz[..win]);
     (x_km * KM_TO_M, y_km * KM_TO_M, z_km * KM_TO_M)
+}
+
+fn interpolate_position_neville_at_epoch_query(
+    node_seconds: &[f64],
+    position_x_km: &[f64],
+    position_y_km: &[f64],
+    position_z_km: &[f64],
+    query: &ExactEpochQuery,
+    gap_threshold_factor: f64,
+) -> (f64, f64, f64) {
+    let nominal = nominal_positive_spacing(node_seconds).unwrap_or(1.0);
+    let window = neville_window_at_epoch_query(
+        node_seconds.len(),
+        nominal,
+        gap_threshold_factor,
+        query,
+        |index| node_seconds[index],
+    );
+    let window_start = window.start;
+    let window_length = window.len();
+    let mut offsets_s = [0.0f64; NEVILLE_POINTS];
+    let mut positions_x_km = [0.0f64; NEVILLE_POINTS];
+    let mut positions_y_km = [0.0f64; NEVILLE_POINTS];
+    let mut positions_z_km = [0.0f64; NEVILLE_POINTS];
+    for local_index in 0..window_length {
+        let node_index = window_start + local_index;
+        let node_query = ExactEpoch::from_binary_j2000_seconds(node_seconds[node_index])
+            .expect("validated SP3 node epoch is representable");
+        let offset_s = query.seconds_since_query(&node_query);
+        let theta = OMEGA_E_DOT_RAD_S * -offset_s;
+        let sine = libm::sin(theta);
+        let cosine = libm::cos(theta);
+        offsets_s[local_index] = -offset_s;
+        positions_x_km[local_index] =
+            cosine * position_x_km[node_index] - sine * position_y_km[node_index];
+        positions_y_km[local_index] =
+            sine * position_x_km[node_index] + cosine * position_y_km[node_index];
+        positions_z_km[local_index] = position_z_km[node_index];
+    }
+
+    let interpolated_x_km = neville(
+        &offsets_s[..window_length],
+        &positions_x_km[..window_length],
+    );
+    let interpolated_y_km = neville(
+        &offsets_s[..window_length],
+        &positions_y_km[..window_length],
+    );
+    let interpolated_z_km = neville(
+        &offsets_s[..window_length],
+        &positions_z_km[..window_length],
+    );
+    (
+        interpolated_x_km * KM_TO_M,
+        interpolated_y_km * KM_TO_M,
+        interpolated_z_km * KM_TO_M,
+    )
 }
 
 /// Neville's algorithm evaluated at 0, reproducing RTKLIB `rtkcmn.c` interppol
@@ -1485,6 +1895,201 @@ fn evaluate_ppoly(x: &[f64], c0: &[f64], c1: &[f64], c2: &[f64], c3: &[f64], que
 #[cfg(all(test, sidereon_repo_tests))]
 pub(super) fn eval_cubic_spline_for_test(x: &[f64], y: &[f64], query: f64) -> f64 {
     eval_cubic_spline(x, y, query)
+}
+
+#[cfg(all(test, sidereon_repo_tests))]
+mod exact_query_tests {
+    use super::*;
+
+    fn query_with_offset(epoch_s: f64, offset_s: f64) -> ExactEpochQuery {
+        ExactEpoch::from_binary_j2000_seconds(epoch_s)
+            .expect("test epoch is representable")
+            .checked_add_binary_seconds(offset_s)
+            .expect("test offset is representable")
+    }
+
+    #[test]
+    fn exact_position_stencil_distinguishes_equal_rounded_node_queries() {
+        let base_s = 800_000_000.0;
+        let nodes: Vec<f64> = (0..20).map(|index| base_s + index as f64 * 60.0).collect();
+        let center_query =
+            ExactEpoch::from_binary_j2000_seconds(nodes[10]).expect("test node is representable");
+        let before = center_query
+            .clone()
+            .checked_sub_binary_seconds(1.0e-10)
+            .expect("test offset is representable");
+        let after = center_query
+            .clone()
+            .checked_add_binary_seconds(1.0e-10)
+            .expect("test offset is representable");
+
+        assert_eq!(before.j2000_seconds(), after.j2000_seconds());
+        assert_eq!(before.seconds_since_query(&center_query), -1.0e-10);
+        assert_eq!(after.seconds_since_query(&center_query), 1.0e-10);
+        assert_eq!(
+            select_position_nodes_at_epoch_query(nodes.len(), &before, 1.5, |index| nodes[index]),
+            Ok(4..15)
+        );
+        assert_eq!(
+            select_position_nodes_at_epoch_query(nodes.len(), &after, 1.5, |index| nodes[index]),
+            Ok(5..16)
+        );
+    }
+
+    #[test]
+    fn exact_position_coverage_edges_use_exact_threshold_side() {
+        let base_s = 800_000_000.0;
+        let nodes: Vec<f64> = (0..20).map(|index| base_s + index as f64 * 60.0).collect();
+        let first_node =
+            ExactEpoch::from_binary_j2000_seconds(nodes[0]).expect("test node is representable");
+        let before_lower_edge = first_node
+            .clone()
+            .checked_sub_binary_seconds(60.0 + 1.0e-10)
+            .expect("test offset is representable");
+        let inside_lower_edge = first_node
+            .checked_sub_binary_seconds(60.0 - 1.0e-10)
+            .expect("test offset is representable");
+        let last_node = ExactEpoch::from_binary_j2000_seconds(*nodes.last().expect("nodes exist"))
+            .expect("test node is representable");
+        let inside_upper_edge = last_node
+            .clone()
+            .checked_add_binary_seconds(60.0 - 1.0e-10)
+            .expect("test offset is representable");
+        let after_upper_edge = last_node
+            .checked_add_binary_seconds(60.0 + 1.0e-10)
+            .expect("test offset is representable");
+
+        assert_eq!(
+            before_lower_edge.j2000_seconds(),
+            inside_lower_edge.j2000_seconds()
+        );
+        assert_eq!(
+            inside_upper_edge.j2000_seconds(),
+            after_upper_edge.j2000_seconds()
+        );
+        assert_eq!(
+            select_position_nodes_at_epoch_query(nodes.len(), &before_lower_edge, 1.5, |index| {
+                nodes[index]
+            }),
+            Err(NodeRefusal::OutOfRange)
+        );
+        assert!(select_position_nodes_at_epoch_query(
+            nodes.len(),
+            &inside_lower_edge,
+            1.5,
+            |index| nodes[index]
+        )
+        .is_ok());
+        assert!(select_position_nodes_at_epoch_query(
+            nodes.len(),
+            &inside_upper_edge,
+            1.5,
+            |index| nodes[index]
+        )
+        .is_ok());
+        assert_eq!(
+            select_position_nodes_at_epoch_query(nodes.len(), &after_upper_edge, 1.5, |index| {
+                nodes[index]
+            }),
+            Err(NodeRefusal::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn exact_position_gap_refusal_uses_exact_threshold_side() {
+        let base_s = 800_000_000.0;
+        let nodes: Vec<f64> = (0..11)
+            .chain(15..26)
+            .map(|index| base_s + index as f64 * 60.0)
+            .collect();
+        let edge_query = ExactEpoch::from_binary_j2000_seconds(base_s + 10.0 * 60.0)
+            .expect("test node is representable");
+        let before_edge = edge_query
+            .clone()
+            .checked_add_binary_seconds(60.0 - 1.0e-10)
+            .expect("test offset is representable");
+        let after_edge = edge_query
+            .checked_add_binary_seconds(60.0 + 1.0e-10)
+            .expect("test offset is representable");
+
+        assert_eq!(before_edge.j2000_seconds(), after_edge.j2000_seconds());
+        assert!(
+            select_position_nodes_at_epoch_query(nodes.len(), &before_edge, 1.5, |index| {
+                nodes[index]
+            })
+            .is_ok()
+        );
+        assert_eq!(
+            select_position_nodes_at_epoch_query(nodes.len(), &after_edge, 1.5, |index| nodes
+                [index]),
+            Err(NodeRefusal::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn exact_clock_uses_exact_interval_event_and_nearest_arc_ties() {
+        let base_s = 800_000_000.0;
+        let arc = ClockSplineArc {
+            x: vec![base_s, base_s + 1.0, base_s + 2.0],
+            c0: vec![0.0, 0.0],
+            c1: vec![0.0, 0.0],
+            c2: vec![1.0, 2.0],
+            c3: vec![0.0, 100.0],
+        };
+        let node_query = ExactEpoch::from_binary_j2000_seconds(base_s + 1.0)
+            .expect("test node is representable");
+        let before = node_query
+            .clone()
+            .checked_sub_binary_seconds(1.0e-10)
+            .expect("test offset is representable");
+        let after = node_query
+            .checked_add_binary_seconds(1.0e-10)
+            .expect("test offset is representable");
+        let before_value = evaluate_ppoly_at_epoch_query(&arc, &before)
+            .expect("test clock nodes are representable");
+        let after_value = evaluate_ppoly_at_epoch_query(&arc, &after)
+            .expect("test clock nodes are representable");
+        assert!(after_value - before_value > 99.0);
+
+        let event_arcs = [
+            ClockSplineArc {
+                x: vec![base_s, base_s + 1.0],
+                c0: vec![0.0],
+                c1: vec![0.0],
+                c2: vec![0.0],
+                c3: vec![11.0],
+            },
+            ClockSplineArc {
+                x: vec![base_s + 4.0, base_s + 5.0],
+                c0: vec![0.0],
+                c1: vec![0.0],
+                c2: vec![0.0],
+                c3: vec![22.0],
+            },
+        ];
+        let event_query = ExactEpoch::from_binary_j2000_seconds(base_s + 4.0)
+            .expect("test event is representable");
+        assert_eq!(
+            interpolate_fitted_clock_at_epoch_query(&event_arcs, &event_query),
+            Some(22.0 * US_TO_S)
+        );
+        let tie_query = query_with_offset(base_s, 2.5);
+        assert_eq!(
+            interpolate_fitted_clock_at_epoch_query(&event_arcs, &tie_query),
+            Some(11.0 * US_TO_S)
+        );
+        let before_tie = query_with_offset(base_s, 2.5 - 1.0e-10);
+        let after_tie = query_with_offset(base_s, 2.5 + 1.0e-10);
+        assert_eq!(before_tie.j2000_seconds(), after_tie.j2000_seconds());
+        assert_eq!(
+            interpolate_fitted_clock_at_epoch_query(&event_arcs, &before_tie),
+            Some(11.0 * US_TO_S)
+        );
+        assert_eq!(
+            interpolate_fitted_clock_at_epoch_query(&event_arcs, &after_tie),
+            Some(22.0 * US_TO_S)
+        );
+    }
 }
 
 #[cfg(all(test, sidereon_repo_tests))]

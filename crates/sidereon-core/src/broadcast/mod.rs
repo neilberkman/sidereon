@@ -566,12 +566,22 @@ pub(crate) fn satellite_clock_offset_s_unchecked(
     t_sow_s: f64,
     tgd_s: f64,
 ) -> ClockOffset {
+    let dt = time_from_reference_s(t_sow_s, clock.toc_sow);
+    satellite_clock_offset_at_deltas_unchecked(clock, consts, elements, sin_e, dt, tgd_s)
+}
+
+pub(crate) fn satellite_clock_offset_at_deltas_unchecked(
+    clock: &ClockPolynomial,
+    consts: &ConstellationConstants,
+    elements: &KeplerianElements,
+    sin_e: f64,
+    dt: f64,
+    tgd_s: f64,
+) -> ClockOffset {
     let af0 = clock.af0;
     let af1 = clock.af1;
     let af2 = clock.af2;
 
-    // RTKLIB `eph2pos`: tk=timediff(time,eph->toc); *dts=eph->f0+eph->f1*tk+eph->f2*tk*tk;
-    let dt = time_from_reference_s(t_sow_s, clock.toc_sow);
     let dt_poly = af0 + af1 * dt + af2 * dt * dt;
 
     // *dts-=2.0*sqrt(mu*eph->A)*eph->e*sinE/SQR(CLIGHT); with A = SQR(sqrtA). Adding the
@@ -613,6 +623,10 @@ pub(crate) fn satellite_clock_bias_s_unchecked(clock: &ClockPolynomial, t_sv_sow
     // for (i=0;i<2;i++) t=ts-(eph->f0+eph->f1*t+eph->f2*t*t);
     // return eph->f0+eph->f1*t+eph->f2*t*t;
     let ts = time_from_reference_s(t_sv_sow_s, clock.toc_sow);
+    satellite_clock_bias_at_delta_unchecked(clock, ts)
+}
+
+pub(crate) fn satellite_clock_bias_at_delta_unchecked(clock: &ClockPolynomial, ts: f64) -> f64 {
     let mut t = ts;
     let mut refine = 0usize;
     while refine < CLOCK_MAX_ITER {
@@ -620,6 +634,16 @@ pub(crate) fn satellite_clock_bias_s_unchecked(clock: &ClockPolynomial, t_sv_sow
         refine += 1;
     }
     clock.af0 + clock.af1 * t + clock.af2 * t * t
+}
+
+pub(crate) fn time_from_reference_delta_s(mut dt: f64) -> f64 {
+    if dt > HALF_WEEK_S {
+        dt -= SECONDS_PER_WEEK;
+    }
+    if dt < -HALF_WEEK_S {
+        dt += SECONDS_PER_WEEK;
+    }
+    dt
 }
 
 /// A satellite's broadcast orbit and clock evaluated together at one instant.
@@ -666,9 +690,30 @@ pub(crate) fn satellite_state_unchecked(
     tgd_s: f64,
     is_geo: bool,
 ) -> SatelliteState {
-    let orbit = satellite_position_ecef_unchecked(elements, consts, t_sow_s, is_geo);
-    let clock =
-        satellite_clock_offset_s_unchecked(clock, consts, elements, orbit.sin_e, t_sow_s, tgd_s);
+    let tk = time_from_reference_s(t_sow_s, elements.toe_sow);
+    let toc = time_from_reference_s(t_sow_s, clock.toc_sow);
+    satellite_state_at_deltas_unchecked(elements, None, clock, consts, tk, toc, tgd_s, is_geo)
+}
+
+pub(crate) fn satellite_state_at_deltas_unchecked(
+    elements: &KeplerianElements,
+    cnav_rates: Option<&CnavRates>,
+    clock: &ClockPolynomial,
+    consts: &ConstellationConstants,
+    tk_s: f64,
+    toc_delta_s: f64,
+    tgd_s: f64,
+    is_geo: bool,
+) -> SatelliteState {
+    let orbit = satellite_position_ecef_at_tk_unchecked(elements, cnav_rates, consts, tk_s, is_geo);
+    let clock = satellite_clock_offset_at_deltas_unchecked(
+        clock,
+        consts,
+        elements,
+        orbit.sin_e,
+        toc_delta_s,
+        tgd_s,
+    );
     SatelliteState { orbit, clock }
 }
 

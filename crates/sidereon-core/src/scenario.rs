@@ -1374,6 +1374,20 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for DeclaredScenarioSource<'_,
         EphemerisSource::clock_relativity_for_state_s(self.source, sat, t_j2000_s, position_m)
     }
 
+    fn clock_relativity_for_state_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        position_m: [f64; 3],
+    ) -> crate::spp::ClockRelativity {
+        EphemerisSource::clock_relativity_for_state_at_epoch_query(
+            self.source,
+            sat,
+            epoch,
+            position_m,
+        )
+    }
+
     fn try_position_clock_at_j2000_s(
         &self,
         sat: GnssSatelliteId,
@@ -1408,6 +1422,32 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for DeclaredScenarioSource<'_,
             .try_position_clock_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
     }
 
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<
+        Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>,
+        crate::Error,
+    > {
+        self.source
+            .try_position_clock_group_delay_selected_at_exact_epoch(sat, epoch, selection_j2000_s)
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Result<
+        Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>,
+        crate::Error,
+    > {
+        self.source
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, epoch, selection_epoch)
+    }
+
     fn try_transmit_epoch_clock_s(
         &self,
         sat: GnssSatelliteId,
@@ -1418,6 +1458,26 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for DeclaredScenarioSource<'_,
             .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
     }
 
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<crate::astro::time::Validated<f64>>, crate::Error> {
+        self.source
+            .try_transmit_epoch_clock_at_exact_epoch(sat, epoch, selection_j2000_s)
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Result<Option<crate::astro::time::Validated<f64>>, crate::Error> {
+        self.source
+            .try_transmit_epoch_clock_at_epoch_query(sat, epoch, selection_epoch)
+    }
+
     fn ephemeris_variance_m2(
         &self,
         sat: GnssSatelliteId,
@@ -1426,6 +1486,16 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for DeclaredScenarioSource<'_,
     ) -> f64 {
         self.source
             .ephemeris_variance_m2(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> f64 {
+        self.source
+            .ephemeris_variance_at_epoch_query(sat, state_epoch, selection_epoch)
     }
 }
 
@@ -1598,6 +1668,83 @@ impl<'a, E> SourceTranscript<'a, E> {
         answer: Option<(&[f64], Option<f64>)>,
     ) {
         let mut hash = self.hash_query(tag, sat, t_j2000_s);
+        hash_u64(&mut hash, 0);
+        hash_f64(&mut hash, selection_j2000_s);
+        match answer {
+            Some((values, optional)) => {
+                hash_u64(&mut hash, 1);
+                for value in values {
+                    hash_f64(&mut hash, *value);
+                }
+                match optional {
+                    Some(value) => {
+                        hash_u64(&mut hash, 1);
+                        hash_f64(&mut hash, value);
+                    }
+                    None => hash_u64(&mut hash, 0),
+                }
+            }
+            None => hash_u64(&mut hash, 0),
+        }
+        self.store_hash(hash);
+    }
+
+    fn transcribe_selected_queries(
+        &self,
+        tag: u64,
+        sat: GnssSatelliteId,
+        state_epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+        answer: Option<(&[f64], Option<f64>)>,
+    ) {
+        let mut hash = self.hash_query(tag, sat, state_epoch.j2000_seconds());
+        hash_u64(&mut hash, 1);
+        for word in state_epoch.exact_hash_words() {
+            hash_u64(&mut hash, word);
+        }
+        hash_u64(&mut hash, 1);
+        for word in selection_epoch.exact_hash_words() {
+            hash_u64(&mut hash, word);
+        }
+        match answer {
+            Some((values, optional)) => {
+                hash_u64(&mut hash, 1);
+                for value in values {
+                    hash_f64(&mut hash, *value);
+                }
+                match optional {
+                    Some(value) => {
+                        hash_u64(&mut hash, 1);
+                        hash_f64(&mut hash, value);
+                    }
+                    None => hash_u64(&mut hash, 0),
+                }
+            }
+            None => hash_u64(&mut hash, 0),
+        }
+        self.store_hash(hash);
+    }
+
+    fn transcribe_selected_exact_scalar(
+        &self,
+        tag: u64,
+        sat: GnssSatelliteId,
+        state_epoch: &crate::astro::time::ExactEpochQuery,
+        selection_j2000_s: f64,
+        answer: Option<(&[f64], Option<f64>)>,
+    ) {
+        if let Some(selection_epoch) =
+            crate::astro::time::ExactEpoch::from_binary_j2000_seconds(selection_j2000_s)
+        {
+            self.transcribe_selected_queries(tag, sat, state_epoch, &selection_epoch, answer);
+            return;
+        }
+        let mut hash = self.hash_query(tag, sat, state_epoch.j2000_seconds());
+        hash_u64(&mut hash, 1);
+        for word in state_epoch.exact_hash_words() {
+            hash_u64(&mut hash, word);
+        }
+        hash_u64(&mut hash, 0);
         hash_f64(&mut hash, selection_j2000_s);
         match answer {
             Some((values, optional)) => {
@@ -1636,6 +1783,50 @@ impl<'a, E> SourceTranscript<'a, E> {
         }
         self.store_hash(hash);
     }
+
+    fn transcribe_relativity(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        result: crate::spp::ClockRelativity,
+    ) {
+        let mut hash = self.hash_query(0x5245_4c41_5449_5654, sat, t_j2000_s);
+        hash_clock_relativity(&mut hash, result);
+        self.store_hash(hash);
+    }
+
+    fn transcribe_state_relativity(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        position_m: [f64; 3],
+        result: crate::spp::ClockRelativity,
+    ) {
+        let mut hash = self.hash_query(0x5245_4c41_5449_5653, sat, t_j2000_s);
+        for component in position_m {
+            hash_f64(&mut hash, component);
+        }
+        hash_clock_relativity(&mut hash, result);
+        self.store_hash(hash);
+    }
+
+    fn transcribe_state_relativity_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        position_m: [f64; 3],
+        result: crate::spp::ClockRelativity,
+    ) {
+        let mut hash = self.hash_query(0x5245_4c41_5449_5653, sat, epoch.j2000_seconds());
+        for word in epoch.exact_hash_words() {
+            hash_u64(&mut hash, word);
+        }
+        for component in position_m {
+            hash_f64(&mut hash, component);
+        }
+        hash_clock_relativity(&mut hash, result);
+        self.store_hash(hash);
+    }
 }
 
 impl<E: EphemerisSource> EphemerisSource for SourceTranscript<'_, E> {
@@ -1664,6 +1855,85 @@ impl<E: EphemerisSource> EphemerisSource for SourceTranscript<'_, E> {
         result
     }
 
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<
+        Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>,
+        crate::Error,
+    > {
+        let Some(selection_epoch) =
+            crate::astro::time::ExactEpoch::from_binary_j2000_seconds(selection_j2000_s)
+        else {
+            let result = self
+                .source
+                .try_position_clock_group_delay_selected_at_exact_epoch(
+                    sat,
+                    epoch,
+                    selection_j2000_s,
+                );
+            let answer = match &result {
+                Ok(Some(state)) => {
+                    let (position, clock, group_delay) = state.value;
+                    Some(([position[0], position[1], position[2], clock], group_delay))
+                }
+                Ok(None) | Err(_) => None,
+            };
+            self.transcribe_selected_exact_scalar(
+                SELECTED_STATE_TAG,
+                sat,
+                &epoch.query(),
+                selection_j2000_s,
+                answer
+                    .as_ref()
+                    .map(|(values, optional)| (values.as_slice(), *optional)),
+            );
+            return result;
+        };
+        self.try_position_clock_group_delay_selected_at_epoch_query(
+            sat,
+            &epoch.query(),
+            &selection_epoch,
+        )
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Result<
+        Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>,
+        crate::Error,
+    > {
+        let result = self
+            .source
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, epoch, selection_epoch);
+        match &result {
+            Ok(Some(state)) => {
+                let (position, clock, group_delay) = state.value;
+                let values = [position[0], position[1], position[2], clock];
+                self.transcribe_selected_queries(
+                    SELECTED_STATE_TAG,
+                    sat,
+                    epoch,
+                    selection_epoch,
+                    Some((&values, group_delay)),
+                );
+            }
+            Ok(None) | Err(_) => self.transcribe_selected_queries(
+                SELECTED_STATE_TAG,
+                sat,
+                epoch,
+                selection_epoch,
+                None,
+            ),
+        }
+        result
+    }
+
     /// Transcribed with its own tag, so the group delay a single-frequency model
     /// applies is part of the digest.
     fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
@@ -1679,12 +1949,35 @@ impl<E: EphemerisSource> EphemerisSource for SourceTranscript<'_, E> {
         t_j2000_s: f64,
     ) -> crate::spp::ClockRelativity {
         let result = EphemerisSource::clock_relativity_s(self.source, sat, t_j2000_s);
-        let value = match result {
-            crate::spp::ClockRelativity::Term(term_s) => Some(term_s),
-            crate::spp::ClockRelativity::NotApplicable => None,
-            crate::spp::ClockRelativity::Unavailable => Some(f64::NAN),
-        };
-        self.transcribe_optional(0x5245_4c41_5449_5654, sat, t_j2000_s, value);
+        self.transcribe_relativity(sat, t_j2000_s, result);
+        result
+    }
+
+    fn clock_relativity_for_state_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        position_m: [f64; 3],
+    ) -> crate::spp::ClockRelativity {
+        let result =
+            EphemerisSource::clock_relativity_for_state_s(self.source, sat, t_j2000_s, position_m);
+        self.transcribe_state_relativity(sat, t_j2000_s, position_m, result);
+        result
+    }
+
+    fn clock_relativity_for_state_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        position_m: [f64; 3],
+    ) -> crate::spp::ClockRelativity {
+        let result = EphemerisSource::clock_relativity_for_state_at_epoch_query(
+            self.source,
+            sat,
+            epoch,
+            position_m,
+        );
+        self.transcribe_state_relativity_at_epoch_query(sat, epoch, position_m, result);
         result
     }
 
@@ -1799,6 +2092,56 @@ impl<E: EphemerisSource> EphemerisSource for SourceTranscript<'_, E> {
         result
     }
 
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Result<Option<crate::astro::time::Validated<f64>>, crate::Error> {
+        let result =
+            self.source
+                .try_transmit_epoch_clock_at_epoch_query(sat, epoch, selection_epoch);
+        let value = match &result {
+            Ok(Some(clock)) => Some(clock.value),
+            Ok(None) | Err(_) => None,
+        };
+        self.transcribe_selected_queries(
+            TRANSMIT_EPOCH_CLOCK_TAG,
+            sat,
+            epoch,
+            selection_epoch,
+            value
+                .as_ref()
+                .map(|clock| (std::slice::from_ref(clock), None)),
+        );
+        result
+    }
+
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<crate::astro::time::Validated<f64>>, crate::Error> {
+        let result =
+            self.source
+                .try_transmit_epoch_clock_at_exact_epoch(sat, epoch, selection_j2000_s);
+        let value = match &result {
+            Ok(Some(clock)) => Some(clock.value),
+            Ok(None) | Err(_) => None,
+        };
+        self.transcribe_selected_exact_scalar(
+            TRANSMIT_EPOCH_CLOCK_TAG,
+            sat,
+            &epoch.query(),
+            selection_j2000_s,
+            value
+                .as_ref()
+                .map(|clock| (std::slice::from_ref(clock), None)),
+        );
+        result
+    }
+
     /// Transcribed with its own tag and the selection epoch.
     fn ephemeris_variance_m2(
         &self,
@@ -1814,6 +2157,25 @@ impl<E: EphemerisSource> EphemerisSource for SourceTranscript<'_, E> {
             sat,
             t_j2000_s,
             selection_j2000_s,
+            Some((std::slice::from_ref(&variance_m2), None)),
+        );
+        variance_m2
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> f64 {
+        let variance_m2 =
+            self.source
+                .ephemeris_variance_at_epoch_query(sat, state_epoch, selection_epoch);
+        self.transcribe_selected_queries(
+            EPHEMERIS_VARIANCE_TAG,
+            sat,
+            state_epoch,
+            selection_epoch,
             Some((std::slice::from_ref(&variance_m2), None)),
         );
         variance_m2
@@ -1854,12 +2216,7 @@ impl<E: ObservableEphemerisSource> ObservableEphemerisSource for SourceTranscrip
         t_j2000_s: f64,
     ) -> crate::spp::ClockRelativity {
         let result = ObservableEphemerisSource::clock_relativity_s(self.source, sat, t_j2000_s);
-        let value = match result {
-            crate::spp::ClockRelativity::Term(term_s) => Some(term_s),
-            crate::spp::ClockRelativity::NotApplicable => None,
-            crate::spp::ClockRelativity::Unavailable => Some(f64::NAN),
-        };
-        self.transcribe_optional(0x5245_4c41_5449_5654, sat, t_j2000_s, value);
+        self.transcribe_relativity(sat, t_j2000_s, result);
         result
     }
 
@@ -2519,6 +2876,7 @@ where
     let env = SatModelEnv {
         eph: &tracked,
         t_rx_j2000_s: receiver.t_rx_j2000_s,
+        receive_epoch: None,
         t_rx_second_of_day_s: epoch_context.t_rx_second_of_day_s,
         day_of_year: epoch_context.day_of_year,
         corrections: epoch_context.corrections,
@@ -3170,6 +3528,17 @@ fn hash_f64(hash: &mut u64, value: f64) {
     hash_u64(hash, value.to_bits());
 }
 
+fn hash_clock_relativity(hash: &mut u64, relativity: crate::spp::ClockRelativity) {
+    match relativity {
+        crate::spp::ClockRelativity::NotApplicable => hash_u64(hash, 0),
+        crate::spp::ClockRelativity::Term(term_s) => {
+            hash_u64(hash, 1);
+            hash_f64(hash, term_s);
+        }
+        crate::spp::ClockRelativity::Unavailable => hash_u64(hash, 2),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Provenance: scenario observation equations use the standard GNSS code
@@ -3186,6 +3555,140 @@ mod tests {
     use crate::clock_stability::{allan_deviation_power_law_slope, overlapping_adev, AllanSeries};
     use crate::positioning::{solve, SolveInputs};
     use crate::rinex::observations::{observation_values, ObservationFilter, ObservationKind};
+    use std::cell::RefCell;
+
+    struct RelativityTranscriptSource {
+        scalar_result: crate::spp::ClockRelativity,
+        state_result: crate::spp::ClockRelativity,
+        exact_result: crate::spp::ClockRelativity,
+        observable_result: crate::spp::ClockRelativity,
+        positions: RefCell<Vec<[u64; 3]>>,
+        exact_epochs: RefCell<Vec<crate::astro::time::ExactEpochQuery>>,
+    }
+
+    impl crate::spp::EphemerisSource for RelativityTranscriptSource {
+        fn position_clock_at_j2000_s(
+            &self,
+            _sat: GnssSatelliteId,
+            _t_j2000_s: f64,
+        ) -> Option<([f64; 3], f64)> {
+            None
+        }
+
+        fn clock_relativity_s(
+            &self,
+            _sat: GnssSatelliteId,
+            _t_j2000_s: f64,
+        ) -> crate::spp::ClockRelativity {
+            self.scalar_result
+        }
+
+        fn clock_relativity_for_state_s(
+            &self,
+            _sat: GnssSatelliteId,
+            _t_j2000_s: f64,
+            position_m: [f64; 3],
+        ) -> crate::spp::ClockRelativity {
+            self.positions
+                .borrow_mut()
+                .push(position_m.map(f64::to_bits));
+            self.state_result
+        }
+
+        fn clock_relativity_for_state_at_epoch_query(
+            &self,
+            _sat: GnssSatelliteId,
+            epoch: &crate::astro::time::ExactEpochQuery,
+            position_m: [f64; 3],
+        ) -> crate::spp::ClockRelativity {
+            self.positions
+                .borrow_mut()
+                .push(position_m.map(f64::to_bits));
+            self.exact_epochs.borrow_mut().push(epoch.clone());
+            self.exact_result
+        }
+    }
+
+    impl crate::observables::ObservableEphemerisSource for RelativityTranscriptSource {
+        fn observable_state_at_j2000_s(
+            &self,
+            _sat: GnssSatelliteId,
+            _t_j2000_s: f64,
+        ) -> Result<ObservableState, ObservablesError> {
+            Err(ObservablesError::NoEphemeris)
+        }
+
+        fn clock_relativity_s(
+            &self,
+            _sat: GnssSatelliteId,
+            _t_j2000_s: f64,
+        ) -> crate::spp::ClockRelativity {
+            self.observable_result
+        }
+    }
+
+    fn relativity_transcript_source(
+        result: crate::spp::ClockRelativity,
+    ) -> RelativityTranscriptSource {
+        RelativityTranscriptSource {
+            scalar_result: result,
+            state_result: result,
+            exact_result: result,
+            observable_result: result,
+            positions: RefCell::new(Vec::new()),
+            exact_epochs: RefCell::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn exact_transcript_preserves_epoch_and_nonfinite_selection_identity() {
+        let source = relativity_transcript_source(crate::spp::ClockRelativity::NotApplicable);
+        let satellite = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite");
+        let first =
+            crate::astro::time::ExactEpoch::new(1_000_000_000, 0).expect("valid first epoch");
+        let second =
+            crate::astro::time::ExactEpoch::new(1_000_000_000, 1).expect("valid second epoch");
+        assert_eq!(first.j2000_seconds(), second.j2000_seconds());
+        let clock_digest = |epoch| {
+            let transcript = SourceTranscript::new(&source);
+            assert!(
+                crate::spp::EphemerisSource::try_transmit_epoch_clock_at_exact_epoch(
+                    &transcript,
+                    satellite,
+                    epoch,
+                    1_000_000_000.0,
+                )
+                .expect("valid clock query")
+                .is_none()
+            );
+            transcript.digest()
+        };
+        assert_ne!(clock_digest(first), clock_digest(second));
+        assert_eq!(clock_digest(first), clock_digest(first));
+        let state_digest = |epoch, selection| {
+            let transcript = SourceTranscript::new(&source);
+            let before = transcript.digest();
+            assert!(crate::spp::EphemerisSource::try_position_clock_group_delay_selected_at_exact_epoch(
+                &transcript,
+                satellite,
+                epoch,
+                selection,
+            )
+            .expect("source declines unavailable state")
+            .is_none());
+            assert_ne!(transcript.digest(), before);
+            transcript.digest()
+        };
+        assert_ne!(
+            state_digest(first, f64::NAN),
+            state_digest(second, f64::NAN)
+        );
+        assert_ne!(
+            state_digest(first, f64::NAN),
+            state_digest(first, f64::INFINITY)
+        );
+        assert_eq!(state_digest(first, f64::NAN), state_digest(first, f64::NAN));
+    }
 
     /// The transcript forwards the SSR corrections, the velocity and the clock's relativity
     /// declaration of the source it wraps, so a PPP solve through it still checks SSR
@@ -3235,6 +3738,49 @@ mod tests {
             .expect("broadcast fallback velocity");
         assert_eq!(forwarded.map(f64::to_bits), direct.map(f64::to_bits));
 
+        let query = crate::astro::time::ExactEpoch::from_binary_j2000_seconds(t)
+            .expect("finite exact query");
+        let selection_query = query
+            .clone()
+            .checked_add_binary_seconds(1.0e-30)
+            .expect("finite sub-attosecond selection offset");
+        let direct_state =
+            crate::spp::EphemerisSource::try_position_clock_group_delay_selected_at_epoch_query(
+                &fallback,
+                sat,
+                &query,
+                &selection_query,
+            )
+            .expect("source exact state query");
+        let transcript_before_state = fallback_transcript.digest();
+        let forwarded_state =
+            crate::spp::EphemerisSource::try_position_clock_group_delay_selected_at_epoch_query(
+                &fallback_transcript,
+                sat,
+                &query,
+                &selection_query,
+            )
+            .expect("transcript exact state query");
+        assert_eq!(forwarded_state, direct_state);
+        assert_ne!(fallback_transcript.digest(), transcript_before_state);
+        let direct_clock = crate::spp::EphemerisSource::try_transmit_epoch_clock_at_epoch_query(
+            &fallback,
+            sat,
+            &query,
+            &selection_query,
+        )
+        .expect("source exact clock query");
+        let transcript_before_clock = fallback_transcript.digest();
+        let forwarded_clock = crate::spp::EphemerisSource::try_transmit_epoch_clock_at_epoch_query(
+            &fallback_transcript,
+            sat,
+            &query,
+            &selection_query,
+        )
+        .expect("transcript exact clock query");
+        assert_eq!(forwarded_clock, direct_clock);
+        assert_ne!(fallback_transcript.digest(), transcript_before_clock);
+
         let broadcast_transcript = SourceTranscript::new(&nav);
         assert!(broadcast_transcript.ssr_corrections().is_none());
 
@@ -3242,6 +3788,129 @@ mod tests {
         // source it wraps does, so a PPP solve through it adds no second term.
         assert!(transcript.clock_includes_relativity());
         assert!(broadcast_transcript.clock_includes_relativity());
+    }
+
+    #[derive(Clone, Copy)]
+    enum RelativityTranscriptRoute {
+        Scalar,
+        State,
+        ExactState,
+        Observable,
+    }
+
+    fn relativity_digest_for(
+        route: RelativityTranscriptRoute,
+        result: crate::spp::ClockRelativity,
+    ) -> String {
+        let source = relativity_transcript_source(result);
+        let transcript = SourceTranscript::new(&source);
+        let satellite = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite");
+        match route {
+            RelativityTranscriptRoute::Scalar => {
+                crate::spp::EphemerisSource::clock_relativity_s(&transcript, satellite, 90.0);
+            }
+            RelativityTranscriptRoute::State => {
+                crate::spp::EphemerisSource::clock_relativity_for_state_s(
+                    &transcript,
+                    satellite,
+                    90.0,
+                    [1.0, 2.0, 3.0],
+                );
+            }
+            RelativityTranscriptRoute::ExactState => {
+                let epoch = crate::astro::time::ExactEpoch::new(90, 0)
+                    .expect("valid exact epoch")
+                    .query();
+                crate::spp::EphemerisSource::clock_relativity_for_state_at_epoch_query(
+                    &transcript,
+                    satellite,
+                    &epoch,
+                    [1.0, 2.0, 3.0],
+                );
+            }
+            RelativityTranscriptRoute::Observable => {
+                crate::observables::ObservableEphemerisSource::clock_relativity_s(
+                    &transcript,
+                    satellite,
+                    90.0,
+                );
+            }
+        }
+        transcript.digest()
+    }
+
+    #[test]
+    fn source_transcript_distinguishes_relativity_variants_on_every_route() {
+        let routes = [
+            RelativityTranscriptRoute::Scalar,
+            RelativityTranscriptRoute::State,
+            RelativityTranscriptRoute::ExactState,
+            RelativityTranscriptRoute::Observable,
+        ];
+        let results = [
+            crate::spp::ClockRelativity::NotApplicable,
+            crate::spp::ClockRelativity::Term(f64::NAN),
+            crate::spp::ClockRelativity::Unavailable,
+        ];
+
+        for route in routes {
+            let digests = results.map(|result| relativity_digest_for(route, result));
+            assert_ne!(digests[0], digests[1]);
+            assert_ne!(digests[0], digests[2]);
+            assert_ne!(digests[1], digests[2]);
+        }
+    }
+
+    #[test]
+    fn source_transcript_forwards_and_hashes_state_relativity_position() {
+        let mut source = relativity_transcript_source(crate::spp::ClockRelativity::NotApplicable);
+        source.scalar_result = crate::spp::ClockRelativity::Unavailable;
+        source.state_result = crate::spp::ClockRelativity::Term(17.0);
+        source.exact_result = crate::spp::ClockRelativity::Term(19.0);
+        let satellite = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite");
+        let first_position = [1.0, 2.0, 3.0];
+        let second_position = [1.0, 2.0, 4.0];
+        let first_transcript = SourceTranscript::new(&source);
+        assert_eq!(
+            crate::spp::EphemerisSource::clock_relativity_for_state_s(
+                &first_transcript,
+                satellite,
+                90.0,
+                first_position,
+            ),
+            crate::spp::ClockRelativity::Term(17.0)
+        );
+        let first_digest = first_transcript.digest();
+        let second_transcript = SourceTranscript::new(&source);
+        crate::spp::EphemerisSource::clock_relativity_for_state_s(
+            &second_transcript,
+            satellite,
+            90.0,
+            second_position,
+        );
+        assert_ne!(first_digest, second_transcript.digest());
+        assert_eq!(
+            *source.positions.borrow(),
+            vec![
+                first_position.map(f64::to_bits),
+                second_position.map(f64::to_bits)
+            ]
+        );
+
+        let exact_epoch = crate::astro::time::ExactEpoch::new(90, 0)
+            .expect("valid exact epoch")
+            .query();
+        let exact_transcript = SourceTranscript::new(&source);
+        assert_eq!(
+            crate::spp::EphemerisSource::clock_relativity_for_state_at_epoch_query(
+                &exact_transcript,
+                satellite,
+                &exact_epoch,
+                first_position,
+            ),
+            crate::spp::ClockRelativity::Term(19.0)
+        );
+        assert_eq!(*source.exact_epochs.borrow(), vec![exact_epoch]);
     }
 
     /// A scenario source declared over an SSR-corrected source keeps the SSR corrections

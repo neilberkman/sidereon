@@ -74,6 +74,23 @@ pub trait IssueAwareBroadcast: EphemerisSource {
         self.state_group_delay_by_iode_at(sat, iode, t_j2000_s)
     }
 
+    /// [`Self::state_group_delay_by_iode_selected_at`] at an exact query. The default
+    /// adapts custom sources through their existing `f64` interface.
+    fn state_group_delay_by_iode_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        self.state_group_delay_by_iode_selected_at(
+            sat,
+            iode,
+            epoch.j2000_seconds(),
+            selection_epoch.j2000_seconds(),
+        )
+    }
+
     /// [`Self::velocity_by_iode_at`] of the record selected at `selection_j2000_s`. The
     /// default selects at `t_j2000_s`.
     fn velocity_by_iode_selected_at(
@@ -360,6 +377,103 @@ impl<'a> SbasCorrectedEphemeris<'a> {
             .map(|state| state.value)
     }
 
+    fn broadcast_state_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        self.broadcast
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, epoch, selection_epoch)
+            .ok()?
+            .map(|state| state.value)
+    }
+
+    fn corrected_state_with_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        if self.store.is_disabled_at_epoch_query(self.geo, epoch)
+            || self.store.is_withdrawn(self.geo, sat)
+        {
+            return None;
+        }
+        if sat == self.geo {
+            let geo_state = self.store.fresh_geo_nav_at_epoch_query(self.geo, epoch)?;
+            let (position, clock) = geo_state.state_at_epoch_query(epoch)?;
+            return match self.fast_clock_delta_at_epoch_query(sat, epoch) {
+                Some(delta_s) => Some((position, clock + delta_s, None)),
+                None => match self.mode {
+                    SbasSolveMode::MixedAugmentation => Some((position, clock, None)),
+                    SbasSolveMode::SbasOnly => None,
+                },
+            };
+        }
+
+        let fast = self.store.fresh_fast_at_epoch_query(self.geo, sat, epoch);
+        let long = (sat.system == GnssSystem::Gps)
+            .then(|| {
+                self.store
+                    .fresh_long_term_at_epoch_query(self.geo, sat, epoch)
+            })
+            .flatten();
+        match (fast, long) {
+            (Some(_), Some(long)) => {
+                let (mut position, mut clock, group_delay) = self
+                    .broadcast
+                    .state_group_delay_by_iode_selected_at_epoch_query(
+                        sat,
+                        long.iode,
+                        epoch,
+                        selection_epoch,
+                    )?;
+                let reference =
+                    crate::astro::time::ExactEpoch::from_binary_j2000_seconds(long.t0_j2000_s)?;
+                let dt = epoch.seconds_since_query(&reference);
+                for (axis_index, component) in position.iter_mut().enumerate() {
+                    *component +=
+                        long.delta_ecef_m[axis_index] + long.delta_ecef_rate_m_s[axis_index] * dt;
+                }
+                clock += long.delta_af0_s + long.delta_af1_s_s * dt;
+                clock += self.fast_clock_delta_at_epoch_query(sat, epoch)?;
+                Some((position, clock, group_delay))
+            }
+            (Some(_), None) if self.store.allow_partial_corrections() => {
+                let (position, mut clock, group_delay) =
+                    self.broadcast_state_selected_at_epoch_query(sat, epoch, selection_epoch)?;
+                clock += self.fast_clock_delta_at_epoch_query(sat, epoch)?;
+                Some((position, clock, group_delay))
+            }
+            (None, Some(long)) if self.store.allow_partial_corrections() => {
+                let (mut position, mut clock, group_delay) = self
+                    .broadcast
+                    .state_group_delay_by_iode_selected_at_epoch_query(
+                        sat,
+                        long.iode,
+                        epoch,
+                        selection_epoch,
+                    )?;
+                let reference =
+                    crate::astro::time::ExactEpoch::from_binary_j2000_seconds(long.t0_j2000_s)?;
+                let dt = epoch.seconds_since_query(&reference);
+                for (axis_index, component) in position.iter_mut().enumerate() {
+                    *component +=
+                        long.delta_ecef_m[axis_index] + long.delta_ecef_rate_m_s[axis_index] * dt;
+                }
+                clock += long.delta_af0_s + long.delta_af1_s_s * dt;
+                Some((position, clock, group_delay))
+            }
+            _ => match self.mode {
+                SbasSolveMode::MixedAugmentation => {
+                    self.broadcast_state_selected_at_epoch_query(sat, epoch, selection_epoch)
+                }
+                SbasSolveMode::SbasOnly => None,
+            },
+        }
+    }
+
     /// Satellite clock that places a pseudorange's transmission epoch, as RTKLIB `satposs`
     /// reads it with `ephclk` for the SBAS ephemeris option: the broadcast clock
     /// polynomial of the underlying store, uncorrected, and for the GEO its navigation
@@ -380,6 +494,43 @@ impl<'a> SbasCorrectedEphemeris<'a> {
         }
         self.broadcast
             .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        let selection_epoch =
+            crate::astro::time::ExactEpoch::from_binary_j2000_seconds(selection_j2000_s)
+                .ok_or(crate::Error::EpochOutOfRange)?;
+        self.try_transmit_epoch_clock_at_epoch_query(sat, &epoch.query(), &selection_epoch)
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        if sat != self.geo {
+            return self.broadcast.try_transmit_epoch_clock_at_epoch_query(
+                sat,
+                epoch,
+                selection_epoch,
+            );
+        }
+        if self.store.is_disabled_at_epoch_query(self.geo, epoch) {
+            return Ok(None);
+        }
+        Ok(self
+            .store
+            .fresh_geo_nav_at_epoch_query(self.geo, epoch)
+            .and_then(|geo_state| {
+                let (_, clock) = geo_state.state_at_epoch_query(epoch)?;
+                Some(crate::astro::time::Validated::ok(clock))
+            }))
     }
 
     /// Variance (m²) of the state [`Self::corrected_state_with_group_delay_selected`]
@@ -429,9 +580,113 @@ impl<'a> SbasCorrectedEphemeris<'a> {
         }
     }
 
+    fn state_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> f64 {
+        if self
+            .corrected_state_with_group_delay_selected_at_epoch_query(
+                sat,
+                state_epoch,
+                selection_epoch,
+            )
+            .is_none()
+        {
+            return 0.0;
+        }
+        let fast_variance_m2 =
+            self.store
+                .fast_correction_variance_at_epoch_query(self.geo, sat, state_epoch);
+        if sat == self.geo {
+            return fast_variance_m2.unwrap_or_else(|| {
+                self.store
+                    .fresh_geo_nav_at_epoch_query(self.geo, state_epoch)
+                    .map_or(0.0, |geo_state| {
+                        crate::rinex_nav::ura_variance_m2(usize::from(geo_state.ura_index))
+                    })
+            });
+        }
+        let long_term_present = sat.system == GnssSystem::Gps
+            && self
+                .store
+                .fresh_long_term_at_epoch_query(self.geo, sat, state_epoch)
+                .is_some();
+        match fast_variance_m2 {
+            Some(variance_m2) if long_term_present || self.store.allow_partial_corrections() => {
+                variance_m2
+            }
+            _ => {
+                self.broadcast
+                    .ephemeris_variance_at_epoch_query(sat, state_epoch, selection_epoch)
+            }
+        }
+    }
+
+    fn transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        if sat == self.geo {
+            if self
+                .store
+                .is_disabled_at_epoch_query(self.geo, &epoch.query())
+            {
+                return Ok(None);
+            }
+            return Ok(self
+                .store
+                .fresh_geo_nav_at_epoch_query(self.geo, &epoch.query())
+                .and_then(|geo_state| {
+                    geo_state
+                        .state_at_exact_epoch(epoch)
+                        .map(|(_, clock)| crate::astro::time::Validated::ok(clock))
+                }));
+        }
+        self.broadcast
+            .try_transmit_epoch_clock_at_epoch_query(sat, &epoch.query(), selection_epoch)
+    }
+
+    fn transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        if sat == self.geo {
+            if self.store.is_disabled_at_epoch_query(self.geo, epoch) {
+                return Ok(None);
+            }
+            return Ok(self
+                .store
+                .fresh_geo_nav_at_epoch_query(self.geo, epoch)
+                .and_then(|geo_state| {
+                    let (_, clock) = geo_state.state_at_epoch_query(epoch)?;
+                    Some(crate::astro::time::Validated::ok(clock))
+                }));
+        }
+        self.broadcast
+            .try_transmit_epoch_clock_at_epoch_query(sat, epoch, selection_epoch)
+    }
+
     fn fast_clock_delta_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
         let fast = self.store.fresh_fast(self.geo, sat, t_j2000_s)?;
         Some((fast.prc_m + fast.rrc_m_s * (t_j2000_s - fast.t_of_j2000_s)) / C_M_S)
+    }
+
+    fn fast_clock_delta_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<f64> {
+        let fast = self.store.fresh_fast_at_epoch_query(self.geo, sat, epoch)?;
+        let reference =
+            crate::astro::time::ExactEpoch::from_binary_j2000_seconds(fast.t_of_j2000_s)?;
+        let dt = epoch.seconds_since_query(&reference);
+        Some((fast.prc_m + fast.rrc_m_s * dt) / C_M_S)
     }
 }
 
@@ -480,6 +735,83 @@ impl EphemerisSource for SbasCorrectedEphemeris<'_> {
             .map(crate::astro::time::Validated::ok))
     }
 
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>>
+    {
+        let selection_epoch =
+            crate::astro::time::ExactEpoch::from_binary_j2000_seconds(selection_j2000_s)
+                .ok_or(crate::Error::EpochOutOfRange)?;
+        if sat != self.geo {
+            return Ok(self
+                .corrected_state_with_group_delay_selected_at_epoch_query(
+                    sat,
+                    &epoch.query(),
+                    &selection_epoch,
+                )
+                .map(crate::astro::time::Validated::ok));
+        }
+        let state = if self
+            .store
+            .is_disabled_at_epoch_query(self.geo, &epoch.query())
+            || self.store.is_withdrawn(self.geo, sat)
+        {
+            None
+        } else {
+            self.store
+                .fresh_geo_nav_at_epoch_query(self.geo, &epoch.query())
+                .and_then(|geo_state| {
+                    let (position, clock) = geo_state.state_at_exact_epoch(epoch)?;
+                    let clock = match self.fast_clock_delta_at_epoch_query(sat, &epoch.query()) {
+                        Some(delta) => clock + delta,
+                        None if self.mode == SbasSolveMode::MixedAugmentation => clock,
+                        None => return None,
+                    };
+                    Some((position, clock, None))
+                })
+        };
+        Ok(state.map(crate::astro::time::Validated::ok))
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> crate::Result<Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>>
+    {
+        if sat != self.geo {
+            return Ok(self
+                .corrected_state_with_group_delay_selected_at_epoch_query(
+                    sat,
+                    epoch,
+                    selection_epoch,
+                )
+                .map(crate::astro::time::Validated::ok));
+        }
+        let state = if self.store.is_disabled_at_epoch_query(self.geo, epoch)
+            || self.store.is_withdrawn(self.geo, sat)
+        {
+            None
+        } else {
+            self.store
+                .fresh_geo_nav_at_epoch_query(self.geo, epoch)
+                .and_then(|geo_state| {
+                    let (position, clock) = geo_state.state_at_epoch_query(epoch)?;
+                    let clock = match self.fast_clock_delta_at_epoch_query(sat, epoch) {
+                        Some(delta) => clock + delta,
+                        None if self.mode == SbasSolveMode::MixedAugmentation => clock,
+                        None => return None,
+                    };
+                    Some((position, clock, None))
+                })
+        };
+        Ok(state.map(crate::astro::time::Validated::ok))
+    }
+
     fn try_transmit_epoch_clock_s(
         &self,
         sat: GnssSatelliteId,
@@ -496,6 +828,36 @@ impl EphemerisSource for SbasCorrectedEphemeris<'_> {
         selection_j2000_s: f64,
     ) -> f64 {
         self.state_variance_m2(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> f64 {
+        self.state_variance_at_epoch_query(sat, state_epoch, selection_epoch)
+    }
+
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        let selection_epoch =
+            crate::astro::time::ExactEpoch::from_binary_j2000_seconds(selection_j2000_s)
+                .ok_or(crate::Error::EpochOutOfRange)?;
+        self.transmit_epoch_clock_at_exact_epoch(sat, epoch, &selection_epoch)
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        self.transmit_epoch_clock_at_epoch_query(sat, epoch, selection_epoch)
     }
 }
 
@@ -699,6 +1061,28 @@ impl EphemerisSource for SbasCorrectedEphemerisOwned {
             .try_position_clock_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
     }
 
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>>
+    {
+        self.borrowed()
+            .try_position_clock_group_delay_selected_at_exact_epoch(sat, epoch, selection_j2000_s)
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> crate::Result<Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>>
+    {
+        self.borrowed()
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, epoch, selection_epoch)
+    }
+
     fn try_transmit_epoch_clock_s(
         &self,
         sat: GnssSatelliteId,
@@ -717,6 +1101,36 @@ impl EphemerisSource for SbasCorrectedEphemerisOwned {
     ) -> f64 {
         self.borrowed()
             .state_variance_m2(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> f64 {
+        self.borrowed()
+            .state_variance_at_epoch_query(sat, state_epoch, selection_epoch)
+    }
+
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: crate::astro::time::ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        self.borrowed()
+            .try_transmit_epoch_clock_at_exact_epoch(sat, epoch, selection_j2000_s)
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        self.borrowed()
+            .transmit_epoch_clock_at_epoch_query(sat, epoch, selection_epoch)
     }
 }
 
@@ -846,6 +1260,22 @@ impl IssueAwareBroadcast for crate::rinex_nav::BroadcastStore {
             iode,
             t_j2000_s,
             selection_j2000_s,
+        )
+    }
+
+    fn state_group_delay_by_iode_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        epoch: &crate::astro::time::ExactEpochQuery,
+        selection_epoch: &crate::astro::time::ExactEpochQuery,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        crate::rinex_nav::BroadcastStore::state_group_delay_by_iode_selected_at_epoch_query(
+            self,
+            sat,
+            iode,
+            epoch,
+            selection_epoch,
         )
     }
 

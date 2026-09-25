@@ -18,6 +18,7 @@ use std::mem;
 use std::path::{Path, PathBuf};
 
 use crate::astro::time::model::{Instant, TimeScale};
+use crate::astro::time::{ExactEpoch, ExactEpochQuery};
 use crate::constants::{KM_TO_M, OMEGA_E_DOT_RAD_S, US_TO_S};
 use crate::frame::ItrfPositionM;
 use crate::id::{GnssSatelliteId, GnssSystem};
@@ -25,8 +26,9 @@ use crate::observables::{
     ObservableEphemerisSource, ObservableState, ObservableStateBatch, ObservablesError,
 };
 use crate::sp3::interp::{
-    instant_to_j2000_seconds, neville, neville_window, select_position_nodes, PreciseQuery,
-    Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR, NEVILLE_POINTS,
+    instant_to_j2000_seconds, neville, neville_window, neville_window_at_epoch_query,
+    query_minus_node_cmp, select_position_nodes, select_position_nodes_at_epoch_query,
+    PreciseQuery, Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR, NEVILLE_POINTS,
 };
 use crate::sp3::{PreciseEphemerisInterpolant, Sp3, Sp3State};
 use crate::{validate, Error, Result};
@@ -688,6 +690,24 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
         )
     }
 
+    /// Interpolate `sat` at an exact query in this store's epoch time system.
+    pub fn position_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        query: &ExactEpochQuery,
+    ) -> Result<Sp3State> {
+        let Some(series) = self.series.get(&sat) else {
+            return Err(Error::UnknownSatellite(sat));
+        };
+        interpolate_mapped_state_at_epoch_query(
+            sat,
+            self.bytes.as_ref(),
+            series,
+            query,
+            self.interpolation.gap_threshold_factor(),
+        )
+    }
+
     /// Position of `sat` 1 ms after `t_j2000_s`, the second position RTKLIB `peph2pos`
     /// interpolates to form the satellite velocity.
     pub(crate) fn position_after_ephpos_step(
@@ -704,6 +724,26 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
             self.interpolation.gap_threshold_factor(),
         )
         .map(|(x, y, z)| [x, y, z])
+    }
+
+    pub(crate) fn position_after_ephpos_step_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        query: &ExactEpochQuery,
+    ) -> Result<[f64; 3]> {
+        let stepped = query
+            .clone()
+            .checked_add_binary_seconds(crate::rinex_nav::EPHPOS_STEP_S)
+            .ok_or(Error::EpochOutOfRange)?;
+        let series = self.series.get(&sat).ok_or(Error::UnknownSatellite(sat))?;
+        interpolate_mapped_position_at_epoch_query(
+            sat,
+            self.bytes.as_ref(),
+            series,
+            &stepped,
+            self.interpolation.gap_threshold_factor(),
+        )
+        .map(|(x_m, y_m, z_m)| [x_m, y_m, z_m])
     }
 
     /// Interpolate the state of `sat` at an arbitrary [`Instant`].
@@ -1452,6 +1492,31 @@ fn interpolate_mapped_state(
     })
 }
 
+#[allow(clippy::expect_used)]
+fn interpolate_mapped_state_at_epoch_query(
+    sat: GnssSatelliteId,
+    bytes: &[u8],
+    series: &MmapSeries,
+    query: &ExactEpochQuery,
+    gap_threshold_factor: f64,
+) -> Result<Sp3State> {
+    let (x_m, y_m, z_m) = interpolate_mapped_position_at_epoch_query(
+        sat,
+        bytes,
+        series,
+        query,
+        gap_threshold_factor,
+    )?;
+    let clock_s = interpolate_mapped_clock_at_epoch_query(bytes, series, query);
+    Ok(Sp3State {
+        position: ItrfPositionM::new(x_m, y_m, z_m).expect("valid ITRF position"),
+        clock_s,
+        velocity: None,
+        clock_rate_s_s: None,
+        flags: crate::sp3::Sp3Flags::default(),
+    })
+}
+
 /// Mapped-series position at `precise_query`, with the in-memory path's coverage and
 /// gap checks.
 fn interpolate_mapped_position(
@@ -1477,6 +1542,37 @@ fn interpolate_mapped_position(
         // query can coincide at its precision and zero a Neville denominator.
         return Err(Error::InvalidInput(format!(
             "non-finite interpolated position at query {query}: the selected nodes are not \
+             distinct at its precision, or the coordinates overflow"
+        )));
+    }
+    Ok((x_m, y_m, z_m))
+}
+
+fn interpolate_mapped_position_at_epoch_query(
+    sat: GnssSatelliteId,
+    bytes: &[u8],
+    series: &MmapSeries,
+    query: &ExactEpochQuery,
+    gap_threshold_factor: f64,
+) -> Result<(f64, f64, f64)> {
+    let rounded_query = query.j2000_seconds();
+    if series.pos_count == 0 {
+        return Err(Error::UnknownSatellite(sat));
+    }
+    select_position_nodes_at_epoch_query(series.pos_count, query, gap_threshold_factor, |index| {
+        series.pos_x.get(bytes, index)
+    })
+    .map_err(|refusal| refusal.into_error(sat))?;
+
+    let (x_m, y_m, z_m) = interpolate_mapped_position_neville_at_epoch_query(
+        bytes,
+        series,
+        query,
+        gap_threshold_factor,
+    );
+    if !(x_m.is_finite() && y_m.is_finite() && z_m.is_finite()) {
+        return Err(Error::InvalidInput(format!(
+            "non-finite interpolated position at query {rounded_query}: the selected nodes are not \
              distinct at its precision, or the coordinates overflow"
         )));
     }
@@ -1526,6 +1622,46 @@ fn interpolate_mapped_position_neville(
     (x_km * KM_TO_M, y_km * KM_TO_M, z_km * KM_TO_M)
 }
 
+fn interpolate_mapped_position_neville_at_epoch_query(
+    bytes: &[u8],
+    series: &MmapSeries,
+    query: &ExactEpochQuery,
+    gap_threshold_factor: f64,
+) -> (f64, f64, f64) {
+    let nominal = nominal_positive_spacing(bytes, series).unwrap_or(1.0);
+    let window = neville_window_at_epoch_query(
+        series.pos_count,
+        nominal,
+        gap_threshold_factor,
+        query,
+        |index| series.pos_x.get(bytes, index),
+    );
+    let mut offsets_s = [0.0f64; NEVILLE_POINTS];
+    let mut positions_x_km = [0.0f64; NEVILLE_POINTS];
+    let mut positions_y_km = [0.0f64; NEVILLE_POINTS];
+    let mut positions_z_km = [0.0f64; NEVILLE_POINTS];
+    for local_index in 0..window.len() {
+        let node_index = window.start + local_index;
+        let node_query = ExactEpoch::from_binary_j2000_seconds(series.pos_x.get(bytes, node_index))
+            .expect("validated mapped node epoch is representable");
+        let offset_s = query.seconds_since_query(&node_query);
+        let theta = OMEGA_E_DOT_RAD_S * -offset_s;
+        let sine = libm::sin(theta);
+        let cosine = libm::cos(theta);
+        let kx = series.pos_kx.get(bytes, node_index);
+        let ky = series.pos_ky.get(bytes, node_index);
+        offsets_s[local_index] = -offset_s;
+        positions_x_km[local_index] = cosine * kx - sine * ky;
+        positions_y_km[local_index] = sine * kx + cosine * ky;
+        positions_z_km[local_index] = series.pos_kz.get(bytes, node_index);
+    }
+    let win = window.len();
+    let x_km = neville(&offsets_s[..win], &positions_x_km[..win]);
+    let y_km = neville(&offsets_s[..win], &positions_y_km[..win]);
+    let z_km = neville(&offsets_s[..win], &positions_z_km[..win]);
+    (x_km * KM_TO_M, y_km * KM_TO_M, z_km * KM_TO_M)
+}
+
 fn interpolate_mapped_clock(bytes: &[u8], series: &MmapSeries, query: f64) -> Option<f64> {
     if series.clock_node_count < 2 {
         return None;
@@ -1547,6 +1683,31 @@ fn interpolate_mapped_clock(bytes: &[u8], series: &MmapSeries, query: f64) -> Op
     Some(evaluate_mapped_ppoly(bytes, arc, query) * US_TO_S)
 }
 
+fn interpolate_mapped_clock_at_epoch_query(
+    bytes: &[u8],
+    series: &MmapSeries,
+    query: &ExactEpochQuery,
+) -> Option<f64> {
+    if series.clock_node_count < 2 {
+        return None;
+    }
+    let mut chosen = None;
+    for (arc_index, arc) in series.clock_arcs.iter().enumerate() {
+        if mapped_arc_contains_epoch_query(bytes, arc, query)? {
+            chosen = Some(arc_index);
+            break;
+        }
+    }
+    let arc = match chosen {
+        Some(index) => &series.clock_arcs[index],
+        None => nearest_mapped_clock_arc_at_epoch_query(bytes, &series.clock_arcs, query)?,
+    };
+    if arc.node_count() < 2 {
+        return None;
+    }
+    Some(evaluate_mapped_ppoly_at_epoch_query(bytes, arc, query)? * US_TO_S)
+}
+
 fn mapped_arc_contains_query(bytes: &[u8], arc: &MmapClockArc, query: f64) -> bool {
     let node_count = arc.node_count();
     if node_count == 0 {
@@ -1555,6 +1716,22 @@ fn mapped_arc_contains_query(bytes: &[u8], arc: &MmapClockArc, query: f64) -> bo
     let lo = arc.x.get(bytes, 0);
     let hi = arc.x.get(bytes, node_count - 1);
     query >= lo && query <= hi
+}
+
+fn mapped_arc_contains_epoch_query(
+    bytes: &[u8],
+    arc: &MmapClockArc,
+    query: &ExactEpochQuery,
+) -> Option<bool> {
+    let node_count = arc.node_count();
+    if node_count == 0 {
+        return Some(false);
+    }
+    Some(
+        query_minus_node_cmp(query, arc.x.get(bytes, 0), 0.0)? != core::cmp::Ordering::Less
+            && query_minus_node_cmp(query, arc.x.get(bytes, node_count - 1), 0.0)?
+                != core::cmp::Ordering::Greater,
+    )
 }
 
 fn nearest_mapped_clock_arc<'a, 'b>(
@@ -1569,6 +1746,32 @@ fn nearest_mapped_clock_arc<'a, 'b>(
             let d2 = mapped_span_distance(bytes, arc2, query);
             d1.partial_cmp(&d2).unwrap_or(core::cmp::Ordering::Equal)
         })
+}
+
+fn nearest_mapped_clock_arc_at_epoch_query<'a, 'b>(
+    bytes: &[u8],
+    arcs: &'a [MmapClockArc<'b>],
+    query: &ExactEpochQuery,
+) -> Option<&'a MmapClockArc<'b>> {
+    let mut chosen: Option<(&MmapClockArc<'b>, ExactEpochQuery)> = None;
+    for arc in arcs.iter().filter(|arc| arc.node_count() >= 2) {
+        let first = ExactEpoch::from_binary_j2000_seconds(arc.x.get(bytes, 0))?;
+        let last = ExactEpoch::from_binary_j2000_seconds(arc.x.get(bytes, arc.node_count() - 1))?;
+        let boundary = if query_minus_node_cmp(query, arc.x.get(bytes, 0), 0.0)?
+            == core::cmp::Ordering::Less
+        {
+            first
+        } else {
+            last
+        };
+        let replace = chosen.as_ref().is_none_or(|(_, current_boundary)| {
+            query.compare_distance_to(&boundary, current_boundary) == core::cmp::Ordering::Less
+        });
+        if replace {
+            chosen = Some((arc, boundary));
+        }
+    }
+    chosen.map(|(arc, _)| arc)
 }
 
 fn mapped_span_distance(bytes: &[u8], arc: &MmapClockArc, query: f64) -> f64 {
@@ -1618,6 +1821,47 @@ fn evaluate_mapped_ppoly(bytes: &[u8], arc: &MmapClockArc, query: f64) -> f64 {
     z *= s;
     res += arc.c0.get(bytes, interval) * z;
     res
+}
+
+fn evaluate_mapped_ppoly_at_epoch_query(
+    bytes: &[u8],
+    arc: &MmapClockArc,
+    query: &ExactEpochQuery,
+) -> Option<f64> {
+    let node_count = arc.node_count();
+    let last = node_count - 2;
+    let first_order = query_minus_node_cmp(query, arc.x.get(bytes, 0), 0.0)?;
+    let end_order = query_minus_node_cmp(query, arc.x.get(bytes, node_count - 1), 0.0)?;
+    let interval = if first_order == core::cmp::Ordering::Less {
+        0
+    } else if end_order != core::cmp::Ordering::Less {
+        last
+    } else {
+        let mut lo = 0usize;
+        let mut hi = node_count - 1;
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if query_minus_node_cmp(query, arc.x.get(bytes, mid), 0.0)? != core::cmp::Ordering::Less
+            {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    };
+    let node_query = ExactEpoch::from_binary_j2000_seconds(arc.x.get(bytes, interval))?;
+    let local_s = query.seconds_since_query(&node_query);
+    let mut result = 0.0;
+    let mut power = 1.0;
+    result += arc.c3.get(bytes, interval) * power;
+    power *= local_s;
+    result += arc.c2.get(bytes, interval) * power;
+    power *= local_s;
+    result += arc.c1.get(bytes, interval) * power;
+    power *= local_s;
+    result += arc.c0.get(bytes, interval) * power;
+    Some(result)
 }
 
 fn nominal_positive_spacing(bytes: &[u8], series: &MmapSeries) -> Option<f64> {

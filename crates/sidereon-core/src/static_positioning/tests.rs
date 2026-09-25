@@ -164,6 +164,7 @@ fn pseudorange(
     let env = SatModelEnv {
         eph,
         t_rx_j2000_s,
+        receive_epoch: None,
         t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
         day_of_year,
         corrections: Corrections::NONE,
@@ -655,6 +656,7 @@ fn hand_covariance(
         let env = SatModelEnv {
             eph,
             t_rx_j2000_s: epoch.t_rx_j2000_s,
+            receive_epoch: None,
             t_rx_second_of_day_s: epoch.t_rx_second_of_day_s,
             day_of_year: epoch.day_of_year,
             corrections: epoch.corrections,
@@ -823,6 +825,7 @@ fn go_fixture_rtklib_placement_differs_from_the_replay_by_the_transmit_epoch_alo
     let env = SatModelEnv {
         eph: &sp3,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
+        receive_epoch: None,
         t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,

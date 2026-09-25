@@ -1,0 +1,232 @@
+{
+  "decimal_precision": 100,
+  "trigonometric_terms": 80,
+  "trigonometric_remainder": "directed geometric bound after first omitted term",
+  "exp_log_reference": "correctly rounded Decimal operations, enclosed by adjacent Decimal values",
+  "binary64_conversion": "one adjacent value outward after nearest conversion",
+  "generator_sha256": "26b0cb996c1f798bfcf19b4927f8f1ab84b3020d9832f438f8bc063ccd9193fd",
+  "cases": [
+    {
+      "function": "sin",
+      "argument_bits": "0xc020000000000000",
+      "lower_bits": "0xbfefa8d2a028cf7c",
+      "upper_bits": "0xbfefa8d2a028cf7a"
+    },
+    {
+      "function": "sin",
+      "argument_bits": "0xc010000000000000",
+      "lower_bits": "0x3fe837b9dddc1ead",
+      "upper_bits": "0x3fe837b9dddc1eaf"
+    },
+    {
+      "function": "sin",
+      "argument_bits": "0xc000000000000000",
+      "lower_bits": "0xbfed18f6ead1b447",
+      "upper_bits": "0xbfed18f6ead1b445"
+    },
+    {
+      "function": "sin",
+      "argument_bits": "0xbff0000000000000",
+      "lower_bits": "0xbfeaed548f090cef",
+      "upper_bits": "0xbfeaed548f090ced"
+    },
+    {
+      "function": "sin",
+      "argument_bits": "0xbfe0000000000000",
+      "lower_bits": "0xbfdeaee8744b05f1",
+      "upper_bits": "0xbfdeaee8744b05ef"
+    },
+    {
+      "function": "sin",
+      "argument_bits": "0x0000000000000000",
+      "lower_bits": "0x8000000000000001",
+      "upper_bits": "0x0000000000000001"
+    },
+    {
+      "function": "sin",
+      "argument_bits": "0x3fe0000000000000",
+      "lower_bits": "0x3fdeaee8744b05ef",
+      "upper_bits": "0x3fdeaee8744b05f1"
+    },
+    {
+      "function": "sin",
+      "argument_bits": "0x3ff0000000000000",
+      "lower_bits": "0x3feaed548f090ced",
+      "upper_bits": "0x3feaed548f090cef"
+    },
+    {
+      "function": "sin",
+      "argument_bits": "0x4000000000000000",
+      "lower_bits": "0x3fed18f6ead1b445",
+      "upper_bits": "0x3fed18f6ead1b447"
+    },
+    {
+      "function": "sin",
+      "argument_bits": "0x4010000000000000",
+      "lower_bits": "0xbfe837b9dddc1eaf",
+      "upper_bits": "0xbfe837b9dddc1ead"
+    },
+    {
+      "function": "sin",
+      "argument_bits": "0x4020000000000000",
+      "lower_bits": "0x3fefa8d2a028cf7a",
+      "upper_bits": "0x3fefa8d2a028cf7c"
+    },
+    {
+      "function": "cos",
+      "argument_bits": "0xc020000000000000",
+      "lower_bits": "0xbfc29fbebf632f95",
+      "upper_bits": "0xbfc29fbebf632f93"
+    },
+    {
+      "function": "cos",
+      "argument_bits": "0xc010000000000000",
+      "lower_bits": "0xbfe4eaa606db24c2",
+      "upper_bits": "0xbfe4eaa606db24c0"
+    },
+    {
+      "function": "cos",
+      "argument_bits": "0xc000000000000000",
+      "lower_bits": "0xbfdaa22657537206",
+      "upper_bits": "0xbfdaa22657537204"
+    },
+    {
+      "function": "cos",
+      "argument_bits": "0xbff0000000000000",
+      "lower_bits": "0x3fe14a280fb5068b",
+      "upper_bits": "0x3fe14a280fb5068d"
+    },
+    {
+      "function": "cos",
+      "argument_bits": "0xbfe0000000000000",
+      "lower_bits": "0x3fec1528065b7d4f",
+      "upper_bits": "0x3fec1528065b7d51"
+    },
+    {
+      "function": "cos",
+      "argument_bits": "0x0000000000000000",
+      "lower_bits": "0x3fefffffffffffff",
+      "upper_bits": "0x3ff0000000000001"
+    },
+    {
+      "function": "cos",
+      "argument_bits": "0x3fe0000000000000",
+      "lower_bits": "0x3fec1528065b7d4f",
+      "upper_bits": "0x3fec1528065b7d51"
+    },
+    {
+      "function": "cos",
+      "argument_bits": "0x3ff0000000000000",
+      "lower_bits": "0x3fe14a280fb5068b",
+      "upper_bits": "0x3fe14a280fb5068d"
+    },
+    {
+      "function": "cos",
+      "argument_bits": "0x4000000000000000",
+      "lower_bits": "0xbfdaa22657537206",
+      "upper_bits": "0xbfdaa22657537204"
+    },
+    {
+      "function": "cos",
+      "argument_bits": "0x4010000000000000",
+      "lower_bits": "0xbfe4eaa606db24c2",
+      "upper_bits": "0xbfe4eaa606db24c0"
+    },
+    {
+      "function": "cos",
+      "argument_bits": "0x4020000000000000",
+      "lower_bits": "0xbfc29fbebf632f95",
+      "upper_bits": "0xbfc29fbebf632f93"
+    },
+    {
+      "function": "exp",
+      "argument_bits": "0xc020000000000000",
+      "lower_bits": "0x3f35fc21041027ac",
+      "upper_bits": "0x3f35fc21041027ae"
+    },
+    {
+      "function": "exp",
+      "argument_bits": "0xc010000000000000",
+      "lower_bits": "0x3f92c155b8213cf3",
+      "upper_bits": "0x3f92c155b8213cf5"
+    },
+    {
+      "function": "exp",
+      "argument_bits": "0xc000000000000000",
+      "lower_bits": "0x3fc152aaa3bf81cb",
+      "upper_bits": "0x3fc152aaa3bf81cd"
+    },
+    {
+      "function": "exp",
+      "argument_bits": "0xbff0000000000000",
+      "lower_bits": "0x3fd78b56362cef37",
+      "upper_bits": "0x3fd78b56362cef39"
+    },
+    {
+      "function": "exp",
+      "argument_bits": "0xbfe0000000000000",
+      "lower_bits": "0x3fe368b2fc6f9609",
+      "upper_bits": "0x3fe368b2fc6f960b"
+    },
+    {
+      "function": "exp",
+      "argument_bits": "0x0000000000000000",
+      "lower_bits": "0x3fefffffffffffff",
+      "upper_bits": "0x3ff0000000000001"
+    },
+    {
+      "function": "exp",
+      "argument_bits": "0x3fe0000000000000",
+      "lower_bits": "0x3ffa61298e1e069b",
+      "upper_bits": "0x3ffa61298e1e069d"
+    },
+    {
+      "function": "exp",
+      "argument_bits": "0x3ff0000000000000",
+      "lower_bits": "0x4005bf0a8b145768",
+      "upper_bits": "0x4005bf0a8b14576a"
+    },
+    {
+      "function": "exp",
+      "argument_bits": "0x4000000000000000",
+      "lower_bits": "0x401d8e64b8d4ddad",
+      "upper_bits": "0x401d8e64b8d4ddaf"
+    },
+    {
+      "function": "exp",
+      "argument_bits": "0x4010000000000000",
+      "lower_bits": "0x404b4c902e273a57",
+      "upper_bits": "0x404b4c902e273a59"
+    },
+    {
+      "function": "exp",
+      "argument_bits": "0x4020000000000000",
+      "lower_bits": "0x40a749ea7d470c6d",
+      "upper_bits": "0x40a749ea7d470c6f"
+    },
+    {
+      "function": "ln",
+      "argument_bits": "0x3fe0000000000000",
+      "lower_bits": "0xbfe62e42fefa39f0",
+      "upper_bits": "0xbfe62e42fefa39ee"
+    },
+    {
+      "function": "ln",
+      "argument_bits": "0x3ff0000000000000",
+      "lower_bits": "0x8000000000000001",
+      "upper_bits": "0x0000000000000001"
+    },
+    {
+      "function": "ln",
+      "argument_bits": "0x3ff8000000000000",
+      "lower_bits": "0x3fd9f323ecbf984b",
+      "upper_bits": "0x3fd9f323ecbf984d"
+    },
+    {
+      "function": "ln",
+      "argument_bits": "0x4000000000000000",
+      "lower_bits": "0x3fe62e42fefa39ee",
+      "upper_bits": "0x3fe62e42fefa39f0"
+    }
+  ]
+}

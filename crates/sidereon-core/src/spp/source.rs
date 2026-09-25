@@ -2,7 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use crate::astro::time::{DegradeReason, Validated};
+use crate::astro::time::{DegradeReason, ExactEpoch, ExactEpochQuery, Validated};
 use crate::id::GnssSatelliteId;
 use crate::observables::{ObservableEphemerisSource, ObservableState, ObservablesError};
 use crate::sp3::{MmapPreciseEphemerisInterpolant, PreciseEphemerisInterpolant, Sp3};
@@ -55,6 +55,85 @@ pub trait EphemerisSource {
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64)>;
 
+    /// ECEF position, clock and group delay at an exact transmission epoch,
+    /// using the record selected at the exact binary value of
+    /// `selection_j2000_s`. This scalar cannot preserve a civil label's
+    /// sub-`f64` precision; use the epoch-query method for that.
+    ///
+    /// The default keeps existing sources compatible by rounding the epoch
+    /// once to their J2000-seconds interface. Sources with split-epoch native
+    /// arithmetic can override this method to retain its fractional second.
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        match ExactEpoch::from_binary_j2000_seconds(selection_j2000_s) {
+            Some(selection_epoch) => self.try_position_clock_group_delay_selected_at_epoch_query(
+                sat,
+                &epoch.query(),
+                &selection_epoch,
+            ),
+            None => self.try_position_clock_group_delay_selected_at_j2000_s(
+                sat,
+                epoch.j2000_seconds(),
+                selection_j2000_s,
+            ),
+        }
+    }
+
+    /// Clock used to place a transmission epoch, queried at an exact clock epoch.
+    /// The default rounds once to the existing J2000-seconds interface; sources
+    /// with exact native time arithmetic override it.
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        match ExactEpoch::from_binary_j2000_seconds(selection_j2000_s) {
+            Some(selection_epoch) => {
+                self.try_transmit_epoch_clock_at_epoch_query(sat, &epoch.query(), &selection_epoch)
+            }
+            None => Ok(self
+                .try_transmit_epoch_clock_s(sat, epoch.j2000_seconds(), selection_j2000_s)?
+                .map(|clock| Validated {
+                    value: clock.value,
+                    degraded: clock.degraded,
+                })),
+        }
+    }
+
+    /// Selected state at an exact transmit query using an exact selection query.
+    /// The default is an explicit compatibility adapter through the existing `f64`
+    /// J2000-seconds method for both queries; native-time sources override it to preserve
+    /// both epochs' precision.
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        self.try_position_clock_group_delay_selected_at_j2000_s(
+            sat,
+            epoch.j2000_seconds(),
+            selection_epoch.j2000_seconds(),
+        )
+    }
+
+    /// Transmit clock at an exact query using an exact selection query. The default is an
+    /// explicit compatibility adapter through the existing `f64` J2000-seconds method
+    /// for both queries; native-time sources override it to preserve both epochs' precision.
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        self.try_transmit_epoch_clock_s(sat, epoch.j2000_seconds(), selection_epoch.j2000_seconds())
+    }
+
     /// Group delay, seconds, the single-frequency pseudorange model subtracts from the
     /// satellite clock of `sat` at `t_j2000_s`, or `None` for none.
     ///
@@ -103,6 +182,18 @@ pub trait EphemerisSource {
         _position_m: [f64; 3],
     ) -> ClockRelativity {
         self.clock_relativity_s(sat, t_j2000_s)
+    }
+
+    /// [`Self::clock_relativity_for_state_s`] for an exact transmit-time query.
+    /// Existing sources remain compatible through the scalar epoch adapter; sources
+    /// with native exact-time arithmetic can override this method.
+    fn clock_relativity_for_state_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        position_m: [f64; 3],
+    ) -> ClockRelativity {
+        self.clock_relativity_for_state_s(sat, epoch.j2000_seconds(), position_m)
     }
 
     /// [`Self::position_clock_at_j2000_s`] and [`Self::single_frequency_group_delay_s`]
@@ -264,6 +355,23 @@ pub trait EphemerisSource {
     ) -> f64 {
         0.0
     }
+
+    /// Variance for an exact state query and its exact selection epoch. The
+    /// compatibility adapter rounds both queries once to the scalar API; native
+    /// record-backed sources should override it so state and variance use the
+    /// same selected record.
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> f64 {
+        self.ephemeris_variance_m2(
+            sat,
+            state_epoch.j2000_seconds(),
+            selection_epoch.j2000_seconds(),
+        )
+    }
 }
 
 /// A view of an ephemeris source that reads it through its fallible methods
@@ -358,6 +466,19 @@ impl<S: EphemerisSource + ?Sized> EphemerisSource for Ut1Tracked<'_, S> {
         result
     }
 
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        let result = self
+            .inner
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, epoch, selection_epoch);
+        self.note(&result);
+        result
+    }
+
     fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
         self.inner.single_frequency_group_delay_s(sat, t_j2000_s)
     }
@@ -374,6 +495,16 @@ impl<S: EphemerisSource + ?Sized> EphemerisSource for Ut1Tracked<'_, S> {
     ) -> ClockRelativity {
         self.inner
             .clock_relativity_for_state_s(sat, t_j2000_s, position_m)
+    }
+
+    fn clock_relativity_for_state_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        position_m: [f64; 3],
+    ) -> ClockRelativity {
+        self.inner
+            .clock_relativity_for_state_at_epoch_query(sat, epoch, position_m)
     }
 
     fn position_clock_group_delay_at_j2000_s(
@@ -412,6 +543,19 @@ impl<S: EphemerisSource + ?Sized> EphemerisSource for Ut1Tracked<'_, S> {
         result
     }
 
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        let result = self
+            .inner
+            .try_position_clock_group_delay_selected_at_exact_epoch(sat, epoch, selection_j2000_s);
+        self.note(&result);
+        result
+    }
+
     fn try_transmit_epoch_clock_s(
         &self,
         sat: GnssSatelliteId,
@@ -433,6 +577,41 @@ impl<S: EphemerisSource + ?Sized> EphemerisSource for Ut1Tracked<'_, S> {
     ) -> f64 {
         self.inner
             .ephemeris_variance_m2(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> f64 {
+        self.inner
+            .ephemeris_variance_at_epoch_query(sat, state_epoch, selection_epoch)
+    }
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        let result =
+            self.inner
+                .try_transmit_epoch_clock_at_exact_epoch(sat, epoch, selection_j2000_s);
+        self.note(&result);
+        result
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        let result =
+            self.inner
+                .try_transmit_epoch_clock_at_epoch_query(sat, epoch, selection_epoch);
+        self.note(&result);
+        result
     }
 }
 
@@ -590,6 +769,57 @@ impl EphemerisSource for Sp3 {
         Some((state.position.as_array(), clk))
     }
 
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        _selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        let query = epoch.query();
+        self.try_position_clock_group_delay_selected_at_epoch_query(sat, &query, &query)
+    }
+
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        _selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        let query = epoch.query();
+        self.try_transmit_epoch_clock_at_epoch_query(sat, &query, &query)
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        _selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        let state = self.position_at_epoch_query(sat, epoch)?;
+        let Some(clock_s) = state.clock_s else {
+            return Ok(None);
+        };
+        Ok(Some(Validated::ok((
+            state.position.as_array(),
+            clock_s,
+            None,
+        ))))
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        Ok(self
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, epoch, selection_epoch)?
+            .map(|state| Validated {
+                value: state.value.1,
+                degraded: state.degraded,
+            }))
+    }
+
     /// The `peph2pos` relativistic term for the product clock this source returns.
     fn clock_relativity_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> ClockRelativity {
         crate::sp3::peph2pos_clock_relativity(
@@ -608,6 +838,17 @@ impl EphemerisSource for Sp3 {
     ) -> ClockRelativity {
         crate::sp3::peph2pos_state_clock_relativity(position_m, || {
             self.position_after_ephpos_step(sat, t_j2000_s)
+        })
+    }
+
+    fn clock_relativity_for_state_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        position_m: [f64; 3],
+    ) -> ClockRelativity {
+        crate::sp3::peph2pos_state_clock_relativity(position_m, || {
+            self.position_after_ephpos_step_at_epoch_query(sat, epoch)
         })
     }
 }
@@ -623,6 +864,57 @@ impl EphemerisSource for PreciseEphemerisInterpolant {
         Some((state.position.as_array(), clk))
     }
 
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        _selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        let query = epoch.query();
+        self.try_position_clock_group_delay_selected_at_epoch_query(sat, &query, &query)
+    }
+
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        _selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        let query = epoch.query();
+        self.try_transmit_epoch_clock_at_epoch_query(sat, &query, &query)
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        _selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        let state = self.position_at_epoch_query(sat, epoch)?;
+        let Some(clock_s) = state.clock_s else {
+            return Ok(None);
+        };
+        Ok(Some(Validated::ok((
+            state.position.as_array(),
+            clock_s,
+            None,
+        ))))
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        Ok(self
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, epoch, selection_epoch)?
+            .map(|state| Validated {
+                value: state.value.1,
+                degraded: state.degraded,
+            }))
+    }
+
     /// The `peph2pos` relativistic term for the product clock this source returns.
     fn clock_relativity_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> ClockRelativity {
         crate::sp3::peph2pos_clock_relativity(
@@ -643,6 +935,17 @@ impl EphemerisSource for PreciseEphemerisInterpolant {
             self.position_after_ephpos_step(sat, t_j2000_s)
         })
     }
+
+    fn clock_relativity_for_state_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        position_m: [f64; 3],
+    ) -> ClockRelativity {
+        crate::sp3::peph2pos_state_clock_relativity(position_m, || {
+            self.position_after_ephpos_step_at_epoch_query(sat, epoch)
+        })
+    }
 }
 
 impl EphemerisSource for MmapPreciseEphemerisInterpolant<'_> {
@@ -654,6 +957,57 @@ impl EphemerisSource for MmapPreciseEphemerisInterpolant<'_> {
         let state = self.position_at_j2000_seconds(sat, t_j2000_s).ok()?;
         let clk = state.clock_s?;
         Some((state.position.as_array(), clk))
+    }
+
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        _selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        let query = epoch.query();
+        self.try_position_clock_group_delay_selected_at_epoch_query(sat, &query, &query)
+    }
+
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        _selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        let query = epoch.query();
+        self.try_transmit_epoch_clock_at_epoch_query(sat, &query, &query)
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        _selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        let state = self.position_at_epoch_query(sat, epoch)?;
+        let Some(clock_s) = state.clock_s else {
+            return Ok(None);
+        };
+        Ok(Some(Validated::ok((
+            state.position.as_array(),
+            clock_s,
+            None,
+        ))))
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        Ok(self
+            .try_position_clock_group_delay_selected_at_epoch_query(sat, epoch, selection_epoch)?
+            .map(|state| Validated {
+                value: state.value.1,
+                degraded: state.degraded,
+            }))
     }
 
     /// The `peph2pos` relativistic term for the product clock this source returns.
@@ -674,6 +1028,17 @@ impl EphemerisSource for MmapPreciseEphemerisInterpolant<'_> {
     ) -> ClockRelativity {
         crate::sp3::peph2pos_state_clock_relativity(position_m, || {
             self.position_after_ephpos_step(sat, t_j2000_s)
+        })
+    }
+
+    fn clock_relativity_for_state_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        position_m: [f64; 3],
+    ) -> ClockRelativity {
+        crate::sp3::peph2pos_state_clock_relativity(position_m, || {
+            self.position_after_ephpos_step_at_epoch_query(sat, epoch)
         })
     }
 }
@@ -695,12 +1060,9 @@ const MEMO_EPOCHS_PER_SATELLITE: usize = 6;
 /// final residuals and geometry. The RTKLIB placement reads the clock at `t_rx - P / c`
 /// and the state at the transmission epoch it gives, both fixed by the pseudorange and
 /// selected at `t_rx`, so every evaluation after the first asks the same epochs. The memo
-/// answers a repeated [`EphemerisSource::position_clock_group_delay_at_j2000_s`],
-/// [`EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s`],
-/// [`EphemerisSource::try_transmit_epoch_clock_s`] or
-/// [`EphemerisSource::clock_relativity_for_state_s`] query, keyed by the satellite and
-/// the bits of the query and selection epochs, with the answer the source gave before, which is the answer it
-/// gives again: an ephemeris source's answers are functions of their arguments. Every
+/// answers a repeated scalar query using the exact scalar argument bits, or an epoch-query
+/// read using the exact mathematical values of both query epochs. Exact keys never round
+/// either epoch to an `f64`. The cached answer is the one the source gave before; every
 /// other query goes to the source.
 pub(crate) struct TransmitStateMemo<'a> {
     source: &'a dyn EphemerisSource,
@@ -712,15 +1074,19 @@ pub(crate) struct TransmitStateMemo<'a> {
 /// it reaches the caller as the error every time.
 type MemoState = Option<Validated<PositionClockGroupDelay>>;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, PartialEq, Eq)]
+enum MemoKey {
+    Scalar(u64, u64),
+    Exact(ExactEpochQuery, ExactEpochQuery),
+}
+
+#[derive(Clone)]
 struct MemoEntry {
-    t_bits: u64,
-    /// Bits of the epoch the source selected its record at: the query epoch itself for a
-    /// read that selects nothing apart.
-    selection_bits: u64,
+    key: MemoKey,
     state: Option<MemoState>,
     transmit_epoch_clock: Option<Option<Validated<f64>>>,
-    relativity: Option<ClockRelativity>,
+    variance_m2: Option<f64>,
+    relativity: Option<([u64; 3], ClockRelativity)>,
 }
 
 struct SatelliteMemo {
@@ -748,33 +1114,57 @@ impl<'a> TransmitStateMemo<'a> {
         selection_j2000_s: f64,
         f: impl FnOnce(&mut MemoEntry) -> R,
     ) -> R {
+        self.with_entry_key(
+            sat,
+            MemoKey::Scalar(t_j2000_s.to_bits(), selection_j2000_s.to_bits()),
+            f,
+        )
+    }
+
+    fn with_exact_entry<R>(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+        f: impl FnOnce(&mut MemoEntry) -> R,
+    ) -> R {
+        self.with_entry_key(
+            sat,
+            MemoKey::Exact(state_epoch.clone(), selection_epoch.clone()),
+            f,
+        )
+    }
+
+    fn with_entry_key<R>(
+        &self,
+        sat: GnssSatelliteId,
+        key: MemoKey,
+        f: impl FnOnce(&mut MemoEntry) -> R,
+    ) -> R {
         let mut satellites = self.satellites.borrow_mut();
         let index = match satellites.iter().position(|memo| memo.sat == sat) {
             Some(index) => index,
             None => {
                 satellites.push(SatelliteMemo {
                     sat,
-                    entries: [None; MEMO_EPOCHS_PER_SATELLITE],
+                    entries: std::array::from_fn(|_| None),
                 });
                 satellites.len() - 1
             }
         };
         let entries = &mut satellites[index].entries;
-        let t_bits = t_j2000_s.to_bits();
-        let selection_bits = selection_j2000_s.to_bits();
-        let slot = match entries.iter().position(|entry| {
-            entry.is_some_and(|entry| {
-                entry.t_bits == t_bits && entry.selection_bits == selection_bits
-            })
-        }) {
+        let slot = match entries
+            .iter()
+            .position(|entry| entry.as_ref().is_some_and(|entry| entry.key == key))
+        {
             Some(slot) => slot,
             None => {
                 let slot = MEMO_EPOCHS_PER_SATELLITE - 1;
                 entries[slot] = Some(MemoEntry {
-                    t_bits,
-                    selection_bits,
+                    key,
                     state: None,
                     transmit_epoch_clock: None,
+                    variance_m2: None,
                     relativity: None,
                 });
                 slot
@@ -825,11 +1215,39 @@ impl EphemerisSource for TransmitStateMemo<'_> {
         t_j2000_s: f64,
         position_m: [f64; 3],
     ) -> ClockRelativity {
+        let position_bits = position_m.map(f64::to_bits);
         self.with_entry(sat, t_j2000_s, t_j2000_s, |entry| {
-            *entry.relativity.get_or_insert_with(|| {
-                self.source
-                    .clock_relativity_for_state_s(sat, t_j2000_s, position_m)
-            })
+            if let Some((cached_position_bits, relativity)) = entry.relativity {
+                if cached_position_bits == position_bits {
+                    return relativity;
+                }
+            }
+            let relativity = self
+                .source
+                .clock_relativity_for_state_s(sat, t_j2000_s, position_m);
+            entry.relativity = Some((position_bits, relativity));
+            relativity
+        })
+    }
+
+    fn clock_relativity_for_state_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        position_m: [f64; 3],
+    ) -> ClockRelativity {
+        let position_bits = position_m.map(f64::to_bits);
+        self.with_exact_entry(sat, epoch, epoch, |entry| {
+            if let Some((cached_position_bits, relativity)) = entry.relativity {
+                if cached_position_bits == position_bits {
+                    return relativity;
+                }
+            }
+            let relativity = self
+                .source
+                .clock_relativity_for_state_at_epoch_query(sat, epoch, position_m);
+            entry.relativity = Some((position_bits, relativity));
+            relativity
         })
     }
 
@@ -875,6 +1293,28 @@ impl EphemerisSource for TransmitStateMemo<'_> {
         })
     }
 
+    fn try_position_clock_group_delay_selected_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        self.source
+            .try_position_clock_group_delay_selected_at_exact_epoch(sat, epoch, selection_j2000_s)
+    }
+
+    fn try_position_clock_group_delay_selected_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        self.remembered_exact_state(sat, epoch, selection_epoch, || {
+            self.source
+                .try_position_clock_group_delay_selected_at_epoch_query(sat, epoch, selection_epoch)
+        })
+    }
+
     /// The source's clock, remembered when it gives one or none; a refusal is asked for
     /// again, so every caller receives it.
     fn try_transmit_epoch_clock_s(
@@ -909,6 +1349,52 @@ impl EphemerisSource for TransmitStateMemo<'_> {
         self.source
             .ephemeris_variance_m2(sat, t_j2000_s, selection_j2000_s)
     }
+
+    fn ephemeris_variance_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> f64 {
+        self.with_exact_entry(sat, state_epoch, selection_epoch, |entry| {
+            *entry.variance_m2.get_or_insert_with(|| {
+                self.source
+                    .ephemeris_variance_at_epoch_query(sat, state_epoch, selection_epoch)
+            })
+        })
+    }
+    fn try_transmit_epoch_clock_at_exact_epoch(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: ExactEpoch,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        self.source
+            .try_transmit_epoch_clock_at_exact_epoch(sat, epoch, selection_j2000_s)
+    }
+
+    fn try_transmit_epoch_clock_at_epoch_query(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        if let Some(clock) = self.with_exact_entry(sat, epoch, selection_epoch, |entry| {
+            entry.transmit_epoch_clock
+        }) {
+            return Ok(clock);
+        }
+        let result =
+            self.source
+                .try_transmit_epoch_clock_at_epoch_query(sat, epoch, selection_epoch);
+        if let Ok(clock) = &result {
+            let clock = *clock;
+            self.with_exact_entry(sat, epoch, selection_epoch, |entry| {
+                entry.transmit_epoch_clock = Some(clock)
+            });
+        }
+        result
+    }
 }
 
 impl TransmitStateMemo<'_> {
@@ -933,5 +1419,346 @@ impl TransmitStateMemo<'_> {
             });
         }
         result
+    }
+
+    fn remembered_exact_state(
+        &self,
+        sat: GnssSatelliteId,
+        state_epoch: &ExactEpochQuery,
+        selection_epoch: &ExactEpochQuery,
+        read: impl FnOnce() -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error>,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        if let Some(state) =
+            self.with_exact_entry(sat, state_epoch, selection_epoch, |entry| entry.state)
+        {
+            return Ok(state);
+        }
+        let result = read();
+        if let Ok(state) = &result {
+            let state = *state;
+            self.with_exact_entry(sat, state_epoch, selection_epoch, |entry| {
+                entry.state = Some(state)
+            });
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod memo_tests {
+    use super::*;
+
+    struct CountingSource {
+        state_queries: Cell<usize>,
+        variance_queries: Cell<usize>,
+    }
+
+    impl EphemerisSource for CountingSource {
+        fn position_clock_at_j2000_s(
+            &self,
+            _sat: GnssSatelliteId,
+            _t_j2000_s: f64,
+        ) -> Option<([f64; 3], f64)> {
+            None
+        }
+
+        fn try_position_clock_group_delay_selected_at_epoch_query(
+            &self,
+            _sat: GnssSatelliteId,
+            _state_epoch: &ExactEpochQuery,
+            _selection_epoch: &ExactEpochQuery,
+        ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+            self.state_queries
+                .set(self.state_queries.get().saturating_add(1));
+            Ok(Some(Validated {
+                value: ([1.0, 2.0, 3.0], 4.0, None),
+                degraded: None,
+            }))
+        }
+
+        fn ephemeris_variance_at_epoch_query(
+            &self,
+            _sat: GnssSatelliteId,
+            _state_epoch: &ExactEpochQuery,
+            _selection_epoch: &ExactEpochQuery,
+        ) -> f64 {
+            self.variance_queries
+                .set(self.variance_queries.get().saturating_add(1));
+            5.0
+        }
+    }
+
+    #[test]
+    fn exact_query_memo_keys_retain_sub_f64_selection_precision() {
+        let source = CountingSource {
+            state_queries: Cell::new(0),
+            variance_queries: Cell::new(0),
+        };
+        let memo = TransmitStateMemo::new(&source, 1);
+        let satellite =
+            GnssSatelliteId::new(crate::id::GnssSystem::Gps, 1).expect("valid GPS satellite");
+        let state_epoch = ExactEpoch::new(90, 0).expect("valid exact epoch").query();
+        let selection_epoch = state_epoch
+            .clone()
+            .checked_add_binary_seconds(1.0e-30)
+            .expect("finite exact selection offset");
+
+        for _ in 0..2 {
+            memo.try_position_clock_group_delay_selected_at_epoch_query(
+                satellite,
+                &state_epoch,
+                &selection_epoch,
+            )
+            .expect("memoized exact state query");
+            assert_eq!(
+                memo.ephemeris_variance_at_epoch_query(satellite, &state_epoch, &selection_epoch,),
+                5.0
+            );
+        }
+        assert_eq!(source.state_queries.get(), 1);
+        assert_eq!(source.variance_queries.get(), 1);
+
+        let distinct_selection = state_epoch
+            .clone()
+            .checked_add_binary_seconds(2.0e-30)
+            .expect("finite distinct selection offset");
+        memo.try_position_clock_group_delay_selected_at_epoch_query(
+            satellite,
+            &state_epoch,
+            &distinct_selection,
+        )
+        .expect("distinct exact selection query");
+        assert_eq!(source.state_queries.get(), 2);
+    }
+
+    struct RelativityCapturingSource {
+        queries: RefCell<Vec<ExactEpochQuery>>,
+        calls: Cell<usize>,
+    }
+
+    impl EphemerisSource for RelativityCapturingSource {
+        fn position_clock_at_j2000_s(
+            &self,
+            _sat: GnssSatelliteId,
+            _t_j2000_s: f64,
+        ) -> Option<([f64; 3], f64)> {
+            Some(([20_000_000.0, 10_000_000.0, 15_000_000.0], 0.0))
+        }
+
+        fn clock_relativity_for_state_s(
+            &self,
+            _sat: GnssSatelliteId,
+            _t_j2000_s: f64,
+            position_m: [f64; 3],
+        ) -> ClockRelativity {
+            self.calls.set(self.calls.get().saturating_add(1));
+            ClockRelativity::Term(position_m[0])
+        }
+
+        fn clock_relativity_for_state_at_epoch_query(
+            &self,
+            _sat: GnssSatelliteId,
+            epoch: &ExactEpochQuery,
+            position_m: [f64; 3],
+        ) -> ClockRelativity {
+            self.calls.set(self.calls.get().saturating_add(1));
+            self.queries.borrow_mut().push(epoch.clone());
+            ClockRelativity::Term(position_m[0])
+        }
+    }
+
+    #[test]
+    fn memo_forwards_distinct_exact_relativity_queries() {
+        let source = RelativityCapturingSource {
+            queries: RefCell::new(Vec::new()),
+            calls: Cell::new(0),
+        };
+        let memo = TransmitStateMemo::new(&source, 1);
+        let satellite =
+            GnssSatelliteId::new(crate::id::GnssSystem::Gps, 1).expect("valid GPS satellite");
+        let epoch = ExactEpoch::new(90, 0).expect("valid exact epoch").query();
+        let first_query = epoch
+            .clone()
+            .checked_add_binary_seconds(1.0e-30)
+            .expect("finite exact query");
+        let second_query = epoch
+            .checked_add_binary_seconds(2.0e-30)
+            .expect("finite exact query");
+
+        assert_eq!(
+            first_query.j2000_seconds().to_bits(),
+            second_query.j2000_seconds().to_bits()
+        );
+        assert_eq!(
+            memo.clock_relativity_for_state_at_epoch_query(
+                satellite,
+                &first_query,
+                [1.0, 0.0, 0.0]
+            ),
+            ClockRelativity::Term(1.0)
+        );
+        assert_eq!(
+            memo.clock_relativity_for_state_at_epoch_query(
+                satellite,
+                &second_query,
+                [2.0, 0.0, 0.0]
+            ),
+            ClockRelativity::Term(2.0)
+        );
+        assert_eq!(*source.queries.borrow(), vec![first_query, second_query]);
+    }
+
+    #[test]
+    fn memo_recomputes_relativity_when_the_state_position_changes() {
+        let source = RelativityCapturingSource {
+            queries: RefCell::new(Vec::new()),
+            calls: Cell::new(0),
+        };
+        let memo = TransmitStateMemo::new(&source, 1);
+        let satellite =
+            GnssSatelliteId::new(crate::id::GnssSystem::Gps, 1).expect("valid GPS satellite");
+        let epoch = ExactEpoch::new(90, 0).expect("valid exact epoch").query();
+
+        assert_eq!(
+            memo.clock_relativity_for_state_at_epoch_query(satellite, &epoch, [1.0, 0.0, 0.0]),
+            ClockRelativity::Term(1.0)
+        );
+        assert_eq!(
+            memo.clock_relativity_for_state_at_epoch_query(satellite, &epoch, [1.0, 0.0, 0.0]),
+            ClockRelativity::Term(1.0)
+        );
+        assert_eq!(
+            memo.clock_relativity_for_state_at_epoch_query(satellite, &epoch, [2.0, 0.0, 0.0]),
+            ClockRelativity::Term(2.0)
+        );
+        assert_eq!(
+            memo.clock_relativity_for_state_at_epoch_query(satellite, &epoch, [2.0, 0.0, 0.0]),
+            ClockRelativity::Term(2.0)
+        );
+        assert_eq!(source.calls.get(), 2);
+        assert_eq!(source.queries.borrow().len(), 2);
+
+        assert_eq!(
+            memo.clock_relativity_for_state_s(satellite, 90.0, [3.0, 0.0, 0.0]),
+            ClockRelativity::Term(3.0)
+        );
+        assert_eq!(
+            memo.clock_relativity_for_state_s(satellite, 90.0, [3.0, 0.0, 0.0]),
+            ClockRelativity::Term(3.0)
+        );
+        assert_eq!(
+            memo.clock_relativity_for_state_s(satellite, 90.0, [4.0, 0.0, 0.0]),
+            ClockRelativity::Term(4.0)
+        );
+        assert_eq!(
+            memo.clock_relativity_for_state_s(satellite, 90.0, [4.0, 0.0, 0.0]),
+            ClockRelativity::Term(4.0)
+        );
+        assert_eq!(source.calls.get(), 4);
+    }
+
+    #[test]
+    fn sat_model_forwards_exact_transmit_query_to_relativity() {
+        let source = RelativityCapturingSource {
+            queries: RefCell::new(Vec::new()),
+            calls: Cell::new(0),
+        };
+        let satellite =
+            GnssSatelliteId::new(crate::id::GnssSystem::Gps, 1).expect("valid GPS satellite");
+        let receive_epoch = ExactEpoch::new(90, 0)
+            .expect("valid exact epoch")
+            .query()
+            .checked_add_binary_seconds(1.0e-30)
+            .expect("finite exact receive epoch");
+        let receive_j2000_s = receive_epoch.j2000_seconds();
+        let glonass_channels = std::collections::BTreeMap::new();
+        let met = crate::spp::SurfaceMet::default();
+        let env = crate::spp::SatModelEnv {
+            eph: &source,
+            t_rx_j2000_s: receive_j2000_s,
+            receive_epoch: Some(receive_epoch.clone()),
+            t_rx_second_of_day_s: 0.0,
+            day_of_year: 1.0,
+            corrections: crate::spp::Corrections::NONE,
+            met: &met,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
+            glonass_channels: &glonass_channels,
+            model: crate::spp::SppModelRecipe::reference(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            placement_pseudoranges_m: None,
+        };
+        let pseudorange_m = 20_000_000.0;
+
+        crate::spp::sat_model(
+            &env,
+            satellite,
+            [0.0; 3],
+            0.0,
+            pseudorange_m,
+            crate::spp::SppIonosphere::Klobuchar(crate::spp::KlobucharCoeffs {
+                alpha: [0.0; 4],
+                beta: [0.0; 4],
+            }),
+        )
+        .expect("RTKLIB sat model");
+
+        let expected_transmit_epoch = receive_epoch
+            .checked_sub_binary_seconds(pseudorange_m / crate::spp::C_M_S)
+            .expect("finite transmit query");
+        assert_eq!(*source.queries.borrow(), vec![expected_transmit_epoch]);
+    }
+
+    #[test]
+    fn parsed_cached_mapped_and_relativity_routes_keep_exact_query() {
+        let product = Sp3::parse(include_bytes!(
+            "../../tests/fixtures/sp3/trimmed_go_static.sp3"
+        ))
+        .expect("valid SP3 fixture");
+        let satellite =
+            GnssSatelliteId::new(crate::id::GnssSystem::Gps, 8).expect("valid GPS satellite");
+        let base_epoch_s = product.epochs_j2000_seconds()[6];
+        let query = ExactEpoch::from_binary_j2000_seconds(base_epoch_s)
+            .expect("fixture epoch is representable")
+            .checked_add_binary_seconds(1.0e-10)
+            .expect("query offset is representable");
+        let parsed_state = product
+            .position_at_epoch_query(satellite, &query)
+            .expect("parsed exact state");
+
+        let cached = PreciseEphemerisInterpolant::from_sp3(&product);
+        let cached_state = cached
+            .position_at_epoch_query(satellite, &query)
+            .expect("cached exact state");
+        assert_eq!(parsed_state, cached_state);
+
+        let store_bytes = cached.to_mmap_store_bytes().expect("mapped store bytes");
+        let mapped =
+            MmapPreciseEphemerisInterpolant::from_bytes(&store_bytes).expect("valid mapped store");
+        let mapped_state = mapped
+            .position_at_epoch_query(satellite, &query)
+            .expect("mapped exact state");
+        assert_eq!(parsed_state, mapped_state);
+
+        let stepped_query = query
+            .clone()
+            .checked_add_binary_seconds(crate::rinex_nav::EPHPOS_STEP_S)
+            .expect("relativity step is representable");
+        let stepped_position = product
+            .position_at_epoch_query(satellite, &stepped_query)
+            .expect("exact stepped state")
+            .position
+            .as_array();
+        let expected_relativity =
+            crate::sp3::peph2pos_state_clock_relativity(parsed_state.position.as_array(), || {
+                Ok(stepped_position)
+            });
+        assert_eq!(
+            product.clock_relativity_for_state_at_epoch_query(
+                satellite,
+                &query,
+                parsed_state.position.as_array(),
+            ),
+            expected_relativity
+        );
     }
 }
