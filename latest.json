@@ -1,83 +1,83 @@
 {
-  "date_utc": "2026-09-22",
+  "date_utc": "2026-09-24",
   "sidereon_version": "0.15.0",
   "status": "scored",
   "product": {
-    "name": "IGS0OPSULT_20262650600_02D_15M_ORB.SP3",
+    "name": "IGS0OPSULT_20262670600_02D_15M_ORB.SP3",
     "agency": "IGS",
     "parser_skipped_records": 0
   },
   "attempted_candidates": [
     {
-      "date_utc": "2026-09-23",
+      "date_utc": "2026-09-25",
       "cadence": "rapid",
       "source": "BKG IGS",
-      "name": "IGS0OPSRAP_20262660000_01D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSRAP_20262660000_01D_15M_ORB.SP3.gz",
+      "name": "IGS0OPSRAP_20262680000_01D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSRAP_20262680000_01D_15M_ORB.SP3.gz",
       "http_status": 404
     },
     {
-      "date_utc": "2026-09-23",
+      "date_utc": "2026-09-25",
       "cadence": "ultra_rapid",
       "source": "BKG IGS",
-      "name": "IGS0OPSULT_20262661800_02D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262661800_02D_15M_ORB.SP3.gz",
+      "name": "IGS0OPSULT_20262681800_02D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262681800_02D_15M_ORB.SP3.gz",
       "http_status": 404
     },
     {
-      "date_utc": "2026-09-23",
+      "date_utc": "2026-09-25",
       "cadence": "ultra_rapid",
       "source": "BKG IGS",
-      "name": "IGS0OPSULT_20262661200_02D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262661200_02D_15M_ORB.SP3.gz",
+      "name": "IGS0OPSULT_20262681200_02D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262681200_02D_15M_ORB.SP3.gz",
       "http_status": 404
     },
     {
-      "date_utc": "2026-09-23",
+      "date_utc": "2026-09-25",
       "cadence": "ultra_rapid",
       "source": "BKG IGS",
-      "name": "IGS0OPSULT_20262660600_02D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262660600_02D_15M_ORB.SP3.gz",
+      "name": "IGS0OPSULT_20262680600_02D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262680600_02D_15M_ORB.SP3.gz",
       "http_status": 404
     },
     {
-      "date_utc": "2026-09-23",
+      "date_utc": "2026-09-25",
       "cadence": "ultra_rapid",
       "source": "BKG IGS",
-      "name": "IGS0OPSULT_20262660000_02D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262660000_02D_15M_ORB.SP3.gz",
+      "name": "IGS0OPSULT_20262680000_02D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262680000_02D_15M_ORB.SP3.gz",
       "http_status": 404
     },
     {
-      "date_utc": "2026-09-22",
+      "date_utc": "2026-09-24",
       "cadence": "rapid",
       "source": "BKG IGS",
-      "name": "IGS0OPSRAP_20262650000_01D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSRAP_20262650000_01D_15M_ORB.SP3.gz",
+      "name": "IGS0OPSRAP_20262670000_01D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSRAP_20262670000_01D_15M_ORB.SP3.gz",
       "http_status": 404
     },
     {
-      "date_utc": "2026-09-22",
+      "date_utc": "2026-09-24",
       "cadence": "ultra_rapid",
       "source": "BKG IGS",
-      "name": "IGS0OPSULT_20262651800_02D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262651800_02D_15M_ORB.SP3.gz",
+      "name": "IGS0OPSULT_20262671800_02D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262671800_02D_15M_ORB.SP3.gz",
       "http_status": 404
     },
     {
-      "date_utc": "2026-09-22",
+      "date_utc": "2026-09-24",
       "cadence": "ultra_rapid",
       "source": "BKG IGS",
-      "name": "IGS0OPSULT_20262651200_02D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262651200_02D_15M_ORB.SP3.gz",
+      "name": "IGS0OPSULT_20262671200_02D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262671200_02D_15M_ORB.SP3.gz",
       "http_status": 404
     },
     {
-      "date_utc": "2026-09-22",
+      "date_utc": "2026-09-24",
       "cadence": "ultra_rapid",
       "source": "BKG IGS",
-      "name": "IGS0OPSULT_20262650600_02D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262650600_02D_15M_ORB.SP3.gz",
+      "name": "IGS0OPSULT_20262670600_02D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262670600_02D_15M_ORB.SP3.gz",
       "http_status": null
     }
   ],
@@ -86,8 +86,8 @@
       "sat_count": 31,
       "fit_count": 31,
       "skipped": 0,
-      "median_rms_3d_m": 92.73373977217325,
-      "worst_rms_3d_m": 135.5017395454481
+      "median_rms_3d_m": 93.28737733897425,
+      "worst_rms_3d_m": 135.85505350933886
     }
   },
   "per_sat": {
@@ -95,30 +95,30 @@
       {
         "satellite": "G19",
         "constellation": "GPS",
-        "rms_3d_m": 48.67066663668044,
-        "radial_rms_m": 10.625861924961923,
-        "along_rms_m": 28.485026837762092,
-        "cross_rms_m": 38.00694798668391,
-        "n": 192,
-        "low_sample_count": false
-      },
-      {
-        "satellite": "G29",
-        "constellation": "GPS",
-        "rms_3d_m": 50.676044106746865,
-        "radial_rms_m": 16.65310782680717,
-        "along_rms_m": 32.645093609336286,
-        "cross_rms_m": 35.00047584327046,
+        "rms_3d_m": 46.96114270031665,
+        "radial_rms_m": 9.182045747329383,
+        "along_rms_m": 26.240016008001756,
+        "cross_rms_m": 37.848388598634756,
         "n": 192,
         "low_sample_count": false
       },
       {
         "satellite": "G17",
         "constellation": "GPS",
-        "rms_3d_m": 51.76203024800131,
-        "radial_rms_m": 11.09693091886977,
-        "along_rms_m": 35.1598942049023,
-        "cross_rms_m": 36.331085024767866,
+        "rms_3d_m": 50.63950820192762,
+        "radial_rms_m": 10.031189959388175,
+        "along_rms_m": 34.008519131157634,
+        "cross_rms_m": 36.15460752708359,
+        "n": 192,
+        "low_sample_count": false
+      },
+      {
+        "satellite": "G29",
+        "constellation": "GPS",
+        "rms_3d_m": 52.0570614244558,
+        "radial_rms_m": 17.73430315412246,
+        "along_rms_m": 34.45137164368338,
+        "cross_rms_m": 34.763991825681586,
         "n": 192,
         "low_sample_count": false
       }
@@ -127,30 +127,30 @@
       {
         "satellite": "G27",
         "constellation": "GPS",
-        "rms_3d_m": 135.5017395454481,
-        "radial_rms_m": 56.4966065592302,
-        "along_rms_m": 118.94866127415665,
-        "cross_rms_m": 31.938547997990472,
-        "n": 192,
-        "low_sample_count": false
-      },
-      {
-        "satellite": "G10",
-        "constellation": "GPS",
-        "rms_3d_m": 127.85939395584236,
-        "radial_rms_m": 54.249581165574185,
-        "along_rms_m": 112.0375509926439,
-        "cross_rms_m": 29.19922488159223,
+        "rms_3d_m": 135.85505350933886,
+        "radial_rms_m": 56.58319757443006,
+        "along_rms_m": 119.39077297616795,
+        "cross_rms_m": 31.635117265966635,
         "n": 192,
         "low_sample_count": false
       },
       {
         "satellite": "G07",
         "constellation": "GPS",
-        "rms_3d_m": 126.24766077850848,
-        "radial_rms_m": 53.537467064118296,
-        "along_rms_m": 108.13836985469786,
-        "cross_rms_m": 37.125522724567425,
+        "rms_3d_m": 126.84087062658558,
+        "radial_rms_m": 53.91194086398538,
+        "along_rms_m": 108.81832353585817,
+        "cross_rms_m": 36.61531860347062,
+        "n": 192,
+        "low_sample_count": false
+      },
+      {
+        "satellite": "G10",
+        "constellation": "GPS",
+        "rms_3d_m": 126.25303155655487,
+        "radial_rms_m": 53.58101860004907,
+        "along_rms_m": 110.5801374128503,
+        "cross_rms_m": 28.998890198709013,
         "n": 192,
         "low_sample_count": false
       }
