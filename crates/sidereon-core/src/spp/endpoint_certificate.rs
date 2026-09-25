@@ -157,8 +157,21 @@ pub(super) enum EndpointCertificateError {
     OracleDesignOutsideInterval(GnssSatelliteId),
     OracleWeightOutsideInterval(GnssSatelliteId),
     OracleResidualOutsideInterval(GnssSatelliteId),
-    Center(CenterCertificateError),
+    CenterContext {
+        role: &'static str,
+        satellite: GnssSatelliteId,
+        cause: CenterCertificateError,
+        finite_inverse_heights_m: [f64; 2],
+        ideal_height_m: Option<(f64, f64)>,
+    },
     Atmosphere(atmosphere_certificate::AtmosphereBoundError),
+    AtmosphereHeightRegion {
+        role: &'static str,
+        cause: atmosphere_certificate::AtmosphereBoundError,
+        lower_m: f64,
+        upper_m: f64,
+        boundary: &'static str,
+    },
     RegionNotCertified,
     EndpointOutsideFixedBall,
     EndpointDistanceExceedsDerivedBound,
@@ -217,8 +230,30 @@ impl core::fmt::Display for EndpointCertificateError {
             Self::OracleResidualOutsideInterval(satellite) => {
                 write!(formatter, "oracle residual outside interval: {satellite}")
             }
-            Self::Center(cause) => write!(formatter, "center: {cause:?}"),
+            Self::CenterContext {
+                role,
+                satellite,
+                cause,
+                finite_inverse_heights_m,
+                ideal_height_m,
+            } => write!(
+                formatter,
+                "{role} center {satellite}: {cause:?}; finite inverse heights \
+                 [Skyfield, RTKLIB] {:?}; ideal height enclosure {ideal_height_m:?}",
+                finite_inverse_heights_m
+            ),
             Self::Atmosphere(cause) => write!(formatter, "atmosphere: {cause:?}"),
+            Self::AtmosphereHeightRegion {
+                role,
+                cause,
+                lower_m,
+                upper_m,
+                boundary,
+            } => write!(
+                formatter,
+                "{role} atmosphere region: {cause:?}; height [{lower_m:.9}, {upper_m:.9}] m; \
+                 boundary {boundary}"
+            ),
             Self::RegionNotCertified => formatter.write_str("region not certified"),
             Self::EndpointOutsideFixedBall => formatter.write_str("endpoint outside fixed ball"),
             Self::EndpointDistanceExceedsDerivedBound => {
@@ -302,18 +337,29 @@ pub(super) fn certify(
     }
     check_reference_rows(reference, &reference_selection)?;
 
-    let reference_centres =
-        centre_intervals(inputs, &reference_center, &reference_selection, &candidates)?;
+    let reference_centres = centre_intervals(
+        inputs,
+        &reference_center,
+        &reference_selection,
+        &candidates,
+        "RTKLIB reference",
+    )?;
     let oracle_states = oracle_states(reference)?;
     let oracle_centres = centre_intervals(
         inputs,
         &reference_center,
         &reference_selection,
         &oracle_states,
+        "RTKLIB oracle",
     )?;
     check_oracle_intervals(reference, &oracle_centres)?;
-    let solution_centres =
-        centre_intervals(inputs, &solution_center, &solution_selection, &candidates)?;
+    let solution_centres = centre_intervals(
+        inputs,
+        &solution_center,
+        &solution_selection,
+        &candidates,
+        "native endpoint",
+    )?;
     check_selection_intervals(&reference_selection, &reference_centres)?;
     check_selection_intervals(&solution_selection, &solution_centres)?;
     let c_endpoint_covariance = super::spp_position_covariance(
@@ -349,8 +395,13 @@ pub(super) fn certify(
     if prestate_selection.used != reference_selection.used {
         return Err(EndpointCertificateError::SelectionChanged);
     }
-    let prestate_oracle_centres =
-        centre_intervals(inputs, &lsq_center, &prestate_selection, &oracle_states)?;
+    let prestate_oracle_centres = centre_intervals(
+        inputs,
+        &lsq_center,
+        &prestate_selection,
+        &oracle_states,
+        "RTKLIB pre-LSQ",
+    )?;
     check_final_lsq(
         reference,
         final_lsq,
@@ -386,7 +437,35 @@ pub(super) fn certify(
         &center_geodetic,
         &center_angles,
     )
-    .map_err(EndpointCertificateError::Atmosphere)?;
+    .map_err(|cause| {
+        if cause == atmosphere_certificate::AtmosphereBoundError::HeightBranchMayChange {
+            let height = Interval::point(center_geodetic.height_m);
+            let error = Interval::point(center_geodetic.height_error_m);
+            let radius = Interval::point(REGION_RADIUS_M);
+            let lower_m = height.sub(error).sub(radius).lower();
+            let upper_m = height.add(error).add(radius).upper();
+            let boundary = if lower_m < atmosphere_certificate::IONOSPHERE_HEIGHT_CUTOFF_M {
+                "-1000 m ionosphere/geodetic lower limit"
+            } else if lower_m < atmosphere_certificate::TROPOSPHERE_HEIGHT_CUTOFF_M
+                && upper_m >= atmosphere_certificate::TROPOSPHERE_HEIGHT_CUTOFF_M
+            {
+                "-100 m troposphere cutoff"
+            } else if upper_m >= atmosphere_certificate::HEIGHT_MAX_M {
+                "10000 m upper limit"
+            } else {
+                "supported receiver-height boundary"
+            };
+            EndpointCertificateError::AtmosphereHeightRegion {
+                role: "RTKLIB reference-centered endpoint",
+                cause,
+                lower_m,
+                upper_m,
+                boundary,
+            }
+        } else {
+            EndpointCertificateError::Atmosphere(cause)
+        }
+    })?;
     let reference_regions = merge_regions(&reference_selection, &reference_centres, &atmosphere)?;
     let solution_regions = merge_regions(&solution_selection, &solution_centres, &atmosphere)?;
 
@@ -802,6 +881,7 @@ fn centre_intervals(
     endpoint: &ReceiverCenter,
     selection: &Selection,
     candidates: &BTreeMap<GnssSatelliteId, CandidateState>,
+    role: &'static str,
 ) -> Result<BTreeMap<GnssSatelliteId, CenterIntervals>, EndpointCertificateError> {
     let observations: BTreeMap<_, _> = inputs
         .observations
@@ -831,13 +911,33 @@ fn centre_intervals(
             apply_ionosphere: inputs.corrections.ionosphere,
             apply_troposphere: inputs.corrections.troposphere,
         };
-        output.insert(
-            *satellite,
-            centre_certificate::evaluate(&center_inputs)
-                .map_err(EndpointCertificateError::Center)?,
-        );
+        let center = centre_certificate::evaluate(&center_inputs)
+            .map_err(|cause| contextual_center_error(role, endpoint, *satellite, cause))?;
+        output.insert(*satellite, center);
     }
     Ok(output)
+}
+
+fn contextual_center_error(
+    role: &'static str,
+    endpoint: &ReceiverCenter,
+    satellite: GnssSatelliteId,
+    cause: CenterCertificateError,
+) -> EndpointCertificateError {
+    let ideal_height_m =
+        centre_certificate::geodetic(endpoint.position_ecef_m.map(Interval::point))
+            .ok()
+            .map(|geodetic| (geodetic[2].lower(), geodetic[2].upper()));
+    EndpointCertificateError::CenterContext {
+        role,
+        satellite,
+        cause,
+        finite_inverse_heights_m: [
+            endpoint.finite_inverse_candidates_m[0][2],
+            endpoint.finite_inverse_candidates_m[1][2],
+        ],
+        ideal_height_m,
+    }
 }
 
 fn check_reference_rows(
@@ -1140,8 +1240,14 @@ fn candidate_angles(
                 apply_ionosphere: false,
                 apply_troposphere: false,
             };
-            centre_certificate::evaluate_geometry(&center_inputs)
-                .map_err(EndpointCertificateError::Center)?
+            centre_certificate::evaluate_geometry(&center_inputs).map_err(|cause| {
+                contextual_center_error(
+                    "RTKLIB reference endpoint candidate geometry",
+                    endpoint,
+                    *satellite,
+                    cause,
+                )
+            })?
         };
         let selected_index = selection.used.iter().position(|id| id == satellite);
         let (weight_error, klobuchar_error) = match (selected_index, center) {

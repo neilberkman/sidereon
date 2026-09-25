@@ -534,10 +534,13 @@ fn raim_checked(
 ) -> Result<RaimResult, QualityError> {
     validate_probability(options.p_fa)?;
     options.weights.validate()?;
+    validate_raim_input(used_sats, residuals_m, None)?;
+    // Variances are read, and so validated, only under `Solution`.
+    let variances_m2 = match options.weights {
+        RaimWeights::Solution => Some(variances_m2.ok_or(QualityError::MissingVariances)?),
+        RaimWeights::Unit | RaimWeights::BySatellite(_) => None,
+    };
     validate_raim_input(used_sats, residuals_m, variances_m2)?;
-    if options.weights == RaimWeights::Solution && variances_m2.is_none() {
-        return Err(QualityError::MissingVariances);
-    }
 
     let n_used = used_sats.len() as isize;
     let n_systems = match n_systems {
@@ -650,6 +653,10 @@ fn distinct_systems(used_sats: &[String]) -> isize {
         .len() as isize
 }
 
+/// The fewest observations for which a failed full-set solve is searched for an
+/// exclusion, RTKLIB demo5 `pntpos`'s `n >= 6` condition on `raim_fde`.
+pub const FDE_MIN_OBSERVATIONS: usize = 6;
+
 /// The fewest satellites a leave-one-out re-solve may use and still be kept as
 /// an exclusion candidate, RTKLIB demo5 `raim_fde`'s `nvsat < 5` floor.
 pub const FDE_MIN_CANDIDATE_SATELLITES: usize = 5;
@@ -675,6 +682,7 @@ pub struct FdeResult<S> {
 
 /// Why [`fde`] ended with a fault still detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FdeUnresolvedReason {
     /// The exclusion budget ([`FdeOptions::max_exclusions`]) was spent.
     ExclusionBudgetExhausted,
@@ -687,6 +695,7 @@ pub enum FdeUnresolvedReason {
 /// The state [`fde`] stopped in with a fault still detected: the last solution,
 /// the exclusions made to reach it and its detection test.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct FdeUnresolved<S> {
     /// Why the loop stopped.
     pub reason: FdeUnresolvedReason,
@@ -704,7 +713,8 @@ pub enum FdeError<S, E> {
     /// A fault was still detected when the loop stopped. The payload carries
     /// the last solution, the exclusions made and its detection test.
     FaultUnresolved(Box<FdeUnresolved<S>>),
-    /// The supplied solve callback failed on the full observation set.
+    /// The supplied solve callback failed on the full observation set, and
+    /// the failure was an input error or no leave-one-out re-solve cured it.
     Solve(E),
     /// RAIM configuration was invalid.
     Raim(QualityError),
@@ -746,6 +756,20 @@ impl Default for FdeOptions {
     }
 }
 
+/// How a failed solve of the full observation set is treated by [`fde`].
+///
+/// RTKLIB demo5 `pntpos` calls `raim_fde` when `estpos` fails: when the
+/// iteration diverges, the least-squares step is singular, or `valsol` refuses
+/// the solution's geometry. A solve error of that kind describes the
+/// measurement set, and removing a satellite can cure it; an input error
+/// cannot be cured that way and is returned as [`FdeError::Solve`].
+pub trait FdeSolveFailure {
+    /// True when the failure is one a leave-one-out search may cure: a
+    /// non-converging or singular solve, or a solution refused for its
+    /// geometry or plausibility.
+    fn admits_exclusion_search(&self) -> bool;
+}
+
 /// Fault detection and exclusion over a caller-supplied SPP solver.
 ///
 /// # Algorithm
@@ -761,10 +785,16 @@ impl Default for FdeOptions {
 ///    re-solved with `solve`. A candidate whose re-solve fails or uses fewer
 ///    than [`FDE_MIN_CANDIDATE_SATELLITES`] satellites is skipped. Of the
 ///    others, the one whose unweighted post-fit residual RMS
-///    `sqrt(sum r^2 / n)` is smallest is excluded, provided it is no larger
-///    than [`FdeOptions::max_exclusion_rms_m`]; equal RMS values go to the later
+///    `sqrt(sum r^2 / n)`, summed in that satellite order, is smallest is
+///    excluded, provided it is no larger than
+///    [`FdeOptions::max_exclusion_rms_m`]; equal RMS values go to the later
 ///    candidate, as RTKLIB's `if (rms_e > rms) continue;` does.
-/// 3. Test the chosen re-solve. It is accepted when it passes. Otherwise, while
+/// 3. When the full-set solve fails in a way [`FdeSolveFailure`] admits and at
+///    least [`FDE_MIN_OBSERVATIONS`] observations were supplied, which is when
+///    demo5 `pntpos` calls `raim_fde`, the same search runs over every observed
+///    satellite. When no candidate is admissible, or the failure is an input
+///    error, the failure is returned as [`FdeError::Solve`].
+/// 4. Test the chosen re-solve. It is accepted when it passes. Otherwise, while
 ///    [`FdeOptions::max_exclusions`] allows, step 2 repeats on the remaining
 ///    set; when the budget is spent, or no candidate is admissible, the loop
 ///    ends with [`FdeError::FaultUnresolved`] carrying the last solution.
@@ -778,19 +808,25 @@ impl Default for FdeOptions {
 /// # Differences from RTKLIB demo5
 ///
 /// - demo5 has `valsol`'s chi-square rejection commented out, so `pntpos` calls
-///   `raim_fde` only when `estpos` fails (a GDOP, least-squares or divergence
-///   failure). This function is an explicit fault-detection API: it runs the
-///   chi-square test demo5 computes and reports, and excludes when that test
-///   fails. A failure of the first solve is returned as [`FdeError::Solve`]
-///   rather than searched for an exclusion, so an input error is never turned
-///   into an exclusion.
-/// - demo5 re-solves every candidate from the last successful candidate's
-///   position (its `sol_e` is reused); `solve` starts wherever the caller's
-///   solver starts. Both iterate to the same fixed point, within the solver's
-///   step tolerance.
-/// - Only satellites the flagged solution used are candidates. demo5 also
-///   tries the satellites `estpos` did not use, whose removal repeats the failed
-///   solve and is skipped.
+///   `raim_fde` only when `estpos` fails. This function is an explicit
+///   fault-detection API: it also runs the chi-square test demo5 computes and
+///   reports, and excludes when that test fails. The threshold is the exact
+///   `1 - p_fa` chi-square quantile; demo5's `chisqr` table rounds it to one
+///   decimal, repeats values past 60 degrees of freedom and ends at 100.
+/// - demo5 starts its first candidate from the geocentre (`sol_e` is
+///   zero-initialized) and every later candidate from the position the last
+///   converged candidate reached, including one `valsol` then refused for its
+///   GDOP, since `estpos` writes the position before validating it. `solve`
+///   starts wherever the caller's solver starts. Those starts can reach
+///   different solutions; the RTKLIB oracle records the candidate RMS and state,
+///   and the comparison bounds RMS differences from the measured state distance
+///   and RTKLIB's final least-squares step.
+/// - After a detected fault only the satellites the flagged solution used are
+///   candidates. Leaving out a satellite it did not use returns the same
+///   flagged solution, which is no exclusion at all; in demo5's own path the
+///   full-set `estpos` failed, so that candidate repeats the failure and is
+///   skipped. After a failed full-set solve every observed satellite is a
+///   candidate, as in demo5.
 pub fn fde<S, E, F>(
     observations: &[Observation],
     options: &FdeOptions,
@@ -798,12 +834,32 @@ pub fn fde<S, E, F>(
 ) -> Result<FdeResult<S>, FdeError<S, E>>
 where
     S: RaimSolution,
+    E: FdeSolveFailure,
     F: FnMut(&[Observation]) -> Result<S, E>,
 {
     validate_exclusion_rms_cap(options.max_exclusion_rms_m).map_err(FdeError::Raim)?;
     let mut remaining = observations.to_vec();
     let mut excluded = Vec::new();
-    let mut solution = solve(&remaining).map_err(FdeError::Solve)?;
+    let mut solution = match solve(&remaining) {
+        Ok(solution) => solution,
+        Err(error) => {
+            if !error.admits_exclusion_search()
+                || remaining.len() < FDE_MIN_OBSERVATIONS
+                || options.max_exclusions == 0
+            {
+                return Err(FdeError::Solve(error));
+            }
+            let candidates = rtklib_candidates(&remaining, |_| true);
+            let Some((left_out, candidate)) =
+                leave_one_out_exclusion(&remaining, &candidates, options, &mut solve)
+            else {
+                return Err(FdeError::Solve(error));
+            };
+            remaining.retain(|ob| ob.satellite_id != left_out);
+            excluded.push(left_out.to_string());
+            candidate
+        }
+    };
 
     loop {
         let raim = raim_for_solution(&solution, &options.raim).map_err(FdeError::Raim)?;
@@ -826,37 +882,12 @@ where
         }
 
         let used: BTreeSet<String> = solution.raim_used_sats().into_iter().collect();
-        let mut candidates: Vec<GnssSatelliteId> = remaining
-            .iter()
-            .map(|ob| ob.satellite_id)
-            .filter(|satellite| used.contains(&satellite.to_string()))
-            .collect();
-        candidates.sort_by_key(|satellite| rtklib_satellite_order(*satellite));
-        candidates.dedup();
-
-        let mut subset = Vec::with_capacity(remaining.len());
-        let choice = rtklib_leave_one_out(
-            candidates.len(),
-            FDE_MIN_CANDIDATE_SATELLITES,
-            options.max_exclusion_rms_m,
-            |index| {
-                let left_out = candidates[index];
-                subset.clear();
-                subset.extend(
-                    remaining
-                        .iter()
-                        .filter(|ob| ob.satellite_id != left_out)
-                        .cloned(),
-                );
-                let candidate = solve(&subset).ok()?;
-                Some(LeaveOneOutFit {
-                    used: candidate.raim_used_sats().len(),
-                    rms_m: residual_rms(candidate.raim_residuals_m()),
-                    fit: candidate,
-                })
-            },
-        );
-        let Some((index, candidate)) = choice else {
+        let candidates = rtklib_candidates(&remaining, |satellite| {
+            used.contains(&satellite.to_string())
+        });
+        let Some((left_out, candidate)) =
+            leave_one_out_exclusion(&remaining, &candidates, options, &mut solve)
+        else {
             return Err(fault_unresolved(
                 FdeUnresolvedReason::NoAdmissibleExclusion,
                 solution,
@@ -865,11 +896,86 @@ where
             ));
         };
 
-        let left_out = candidates[index];
         remaining.retain(|ob| ob.satellite_id != left_out);
         excluded.push(left_out.to_string());
         solution = candidate;
     }
+}
+
+/// The satellites of `remaining` that `keep` admits, once each, in RTKLIB's
+/// satellite-number order.
+fn rtklib_candidates(
+    remaining: &[Observation],
+    keep: impl Fn(GnssSatelliteId) -> bool,
+) -> Vec<GnssSatelliteId> {
+    let mut candidates: Vec<GnssSatelliteId> = remaining
+        .iter()
+        .map(|ob| ob.satellite_id)
+        .filter(|satellite| keep(*satellite))
+        .collect();
+    candidates.sort_by_key(|satellite| rtklib_satellite_order(*satellite));
+    candidates.dedup();
+    candidates
+}
+
+/// RTKLIB's leave-one-out choice over `candidates`: each is left out of
+/// `remaining` in turn and the rest re-solved with `solve`.
+fn leave_one_out_exclusion<S, E, F>(
+    remaining: &[Observation],
+    candidates: &[GnssSatelliteId],
+    options: &FdeOptions,
+    solve: &mut F,
+) -> Option<(GnssSatelliteId, S)>
+where
+    S: RaimSolution,
+    F: FnMut(&[Observation]) -> Result<S, E>,
+{
+    let mut subset = Vec::with_capacity(remaining.len());
+    rtklib_leave_one_out(
+        candidates.len(),
+        FDE_MIN_CANDIDATE_SATELLITES,
+        options.max_exclusion_rms_m,
+        |index| {
+            let left_out = candidates[index];
+            subset.clear();
+            subset.extend(
+                remaining
+                    .iter()
+                    .filter(|ob| ob.satellite_id != left_out)
+                    .cloned(),
+            );
+            let candidate = solve(&subset).ok()?;
+            let used_sats = candidate.raim_used_sats();
+            Some(LeaveOneOutFit {
+                used: used_sats.len(),
+                rms_m: rtklib_order_rms_m(&used_sats, candidate.raim_residuals_m()),
+                fit: candidate,
+            })
+        },
+    )
+    .map(|(index, candidate)| (candidates[index], candidate))
+}
+
+/// RTKLIB `raim_fde`'s residual RMS, `sqrt(sum r^2 / n)`, with the squares
+/// summed in RTKLIB's satellite-number order, the order `raim_fde` sums them.
+/// Tokens that do not name a satellite are summed in the given order.
+fn rtklib_order_rms_m(used_sats: &[String], residuals_m: &[f64]) -> f64 {
+    let ids: Option<Vec<GnssSatelliteId>> = used_sats
+        .iter()
+        .map(|token| token.parse::<GnssSatelliteId>().ok())
+        .collect();
+    let mut order: Vec<usize> = (0..residuals_m.len()).collect();
+    if let Some(ids) = ids.filter(|ids| ids.len() == residuals_m.len()) {
+        order.sort_by_key(|&index| rtklib_satellite_order(ids[index]));
+    }
+    if order.is_empty() {
+        return 0.0;
+    }
+    let mut sum_sq = 0.0;
+    for index in order {
+        sum_sq += residuals_m[index] * residuals_m[index];
+    }
+    (sum_sq / residuals_m.len() as f64).sqrt()
 }
 
 fn fault_unresolved<S, E>(
@@ -975,6 +1081,30 @@ impl core::fmt::Display for FdeSppError {
 }
 
 impl std::error::Error for FdeSppError {}
+
+impl FdeSolveFailure for FdeSppError {
+    /// A solve that did not settle or hit singular geometry, and a solution
+    /// refused as rank deficient, over the PDOP ceiling, implausibly placed or
+    /// with an implausible residual RMS, admit the search; input, duplicate,
+    /// ephemeris, UT1 and too-few-satellite failures, and invalid options, do
+    /// not.
+    fn admits_exclusion_search(&self) -> bool {
+        match self {
+            Self::Spp(error) => matches!(
+                error,
+                SppError::Singular(crate::astro::math::least_squares::SolveError::SingularJacobian)
+                    | SppError::SelectionUnsettled { .. }
+            ),
+            Self::Validation(error) => matches!(
+                error,
+                SolutionValidationError::DegenerateGeometryRankDeficient
+                    | SolutionValidationError::DegenerateGeometryPdop(_)
+                    | SolutionValidationError::ImplausiblePosition(_)
+                    | SolutionValidationError::NoConvergence(_)
+            ),
+        }
+    }
+}
 
 /// Options for [`fde_spp`]: the RAIM-gated exclusion loop plus the per-iteration
 /// solution-validation gates applied to each candidate solve.
@@ -2017,6 +2147,20 @@ mod tests {
         );
     }
 
+    /// A solve failure for the synthetic FDE tests: an input error, or a solve
+    /// that did not settle.
+    #[derive(Debug, Clone, PartialEq)]
+    enum TestSolveError {
+        Input,
+        Unsettled,
+    }
+
+    impl FdeSolveFailure for TestSolveError {
+        fn admits_exclusion_search(&self) -> bool {
+            matches!(self, Self::Unsettled)
+        }
+    }
+
     #[derive(Debug, Clone, PartialEq)]
     struct TestSolution {
         used_sats: Vec<String>,
@@ -2551,6 +2695,8 @@ mod tests {
             ..Default::default()
         };
         assert!(raim(&input(None), &unit).is_ok());
+        // ... and are not validated when they are not read.
+        assert!(raim(&input(Some(vec![f64::NAN; 2])), &unit).is_ok());
     }
 
     #[test]
@@ -2598,7 +2744,7 @@ mod tests {
         let observations = gps_observations(1..=7);
         let result = fde(&observations, &FdeOptions::default(), |remaining| {
             let faulted = remaining.iter().any(|ob| ob.satellite_id == gps(4));
-            Ok::<_, ()>(TestSolution::over(remaining, |satellite| {
+            Ok::<_, TestSolveError>(TestSolution::over(remaining, |satellite| {
                 match (faulted, satellite.prn) {
                     (true, 1) => 9.0,
                     (true, 4) => 1.0,
@@ -2626,7 +2772,7 @@ mod tests {
         let tied = |remaining: &[Observation]| {
             let without = |prn| !remaining.iter().any(|ob| ob.satellite_id == gps(prn));
             let level = if without(2) || without(5) { 1.0 } else { 3.0 };
-            Ok::<_, ()>(TestSolution::over(remaining, |_| {
+            Ok::<_, TestSolveError>(TestSolution::over(remaining, |_| {
                 if remaining.len() == 6 {
                     50.0
                 } else {
@@ -2657,7 +2803,7 @@ mod tests {
         // Five observations: every candidate re-solve uses four satellites.
         let five = gps_observations(1..=5);
         let err = fde(&five, &FdeOptions::default(), |remaining| {
-            Ok::<_, ()>(TestSolution::over(remaining, |_| {
+            Ok::<_, TestSolveError>(TestSolution::over(remaining, |_| {
                 if remaining.len() == 5 {
                     50.0
                 } else {
@@ -2677,7 +2823,7 @@ mod tests {
 
         // Every exclusion leaves more than 100 m RMS.
         let err = fde(&observations, &FdeOptions::default(), |remaining| {
-            Ok::<_, ()>(TestSolution::over(remaining, |_| {
+            Ok::<_, TestSolveError>(TestSolution::over(remaining, |_| {
                 if remaining.len() == 6 {
                     500.0
                 } else {
@@ -2696,7 +2842,7 @@ mod tests {
 
         // Exactly 100 m is kept, as RTKLIB's `rms_e > rms` test keeps it.
         let err = fde(&observations, &FdeOptions::default(), |remaining| {
-            Ok::<_, ()>(TestSolution::over(remaining, |_| {
+            Ok::<_, TestSolveError>(TestSolution::over(remaining, |_| {
                 if remaining.len() == 6 {
                     500.0
                 } else {
@@ -2723,7 +2869,7 @@ mod tests {
         let result = fde(&observations, &FdeOptions::default(), |remaining| {
             let without = |prn| !remaining.iter().any(|ob| ob.satellite_id == gps(prn));
             if remaining.len() == 6 && without(3) {
-                return Err("singular");
+                return Err(TestSolveError::Unsettled);
             }
             Ok(TestSolution::over(remaining, |_| {
                 if remaining.len() == 7 {
@@ -2739,13 +2885,158 @@ mod tests {
         assert_eq!(result.excluded, vec!["G06".to_string()]);
     }
 
+    /// A full-set solve that fails the way demo5's `estpos` does is searched
+    /// over every observed satellite, as `pntpos` calls `raim_fde`; an input
+    /// error, fewer than six observations, a zero budget, or no admissible
+    /// candidate returns the failure.
+    #[test]
+    fn fde_searches_a_failed_full_set_solve_as_rtklib_pntpos_does() {
+        let observations = gps_observations(1..=7);
+        let unsettled_unless_g03_is_out = |remaining: &[Observation]| {
+            let with_g03 = remaining.iter().any(|ob| ob.satellite_id == gps(3));
+            if remaining.len() == 7 {
+                return Err(TestSolveError::Unsettled);
+            }
+            Ok(TestSolution::over(remaining, |_| {
+                if with_g03 {
+                    5.0
+                } else {
+                    0.0
+                }
+            }))
+        };
+        let result = fde(
+            &observations,
+            &FdeOptions::default(),
+            unsettled_unless_g03_is_out,
+        )
+        .unwrap();
+        assert_eq!(result.excluded, vec!["G03".to_string()]);
+        assert_eq!(result.iterations, 1);
+        assert!(!result.raim.fault_detected);
+
+        let input_error = fde(&observations, &FdeOptions::default(), |_| {
+            Err::<TestSolution, _>(TestSolveError::Input)
+        })
+        .unwrap_err();
+        assert_eq!(input_error, FdeError::Solve(TestSolveError::Input));
+
+        let five = gps_observations(1..=5);
+        let too_few = fde(&five, &FdeOptions::default(), |remaining| {
+            if remaining.len() == 5 {
+                return Err(TestSolveError::Unsettled);
+            }
+            Ok(TestSolution::over(remaining, |_| 0.0))
+        })
+        .unwrap_err();
+        assert_eq!(too_few, FdeError::Solve(TestSolveError::Unsettled));
+
+        let no_budget = fde(
+            &observations,
+            &FdeOptions::new(RaimOptions::default(), 0),
+            unsettled_unless_g03_is_out,
+        )
+        .unwrap_err();
+        assert_eq!(no_budget, FdeError::Solve(TestSolveError::Unsettled));
+
+        let nothing_cures = fde(&observations, &FdeOptions::default(), |_| {
+            Err::<TestSolution, _>(TestSolveError::Unsettled)
+        })
+        .unwrap_err();
+        assert_eq!(nothing_cures, FdeError::Solve(TestSolveError::Unsettled));
+    }
+
+    #[test]
+    fn fde_spp_errors_admit_the_search_only_for_estpos_failures() {
+        use crate::astro::math::least_squares::SolveError;
+        for (error, admits) in [
+            (
+                FdeSppError::Spp(SppError::Singular(SolveError::SingularJacobian)),
+                true,
+            ),
+            (
+                FdeSppError::Spp(SppError::SelectionUnsettled { passes: 10 }),
+                true,
+            ),
+            (
+                FdeSppError::Spp(SppError::TooFewSatellites {
+                    used: 3,
+                    required: 4,
+                }),
+                false,
+            ),
+            (
+                FdeSppError::Spp(SppError::DuplicateObservation { satellite: gps(1) }),
+                false,
+            ),
+            (
+                FdeSppError::Spp(SppError::EphemerisLost { satellite: gps(1) }),
+                false,
+            ),
+            (
+                FdeSppError::Validation(SolutionValidationError::DegenerateGeometryRankDeficient),
+                true,
+            ),
+            (
+                FdeSppError::Validation(SolutionValidationError::DegenerateGeometryPdop(30.0)),
+                true,
+            ),
+            (
+                FdeSppError::Validation(SolutionValidationError::ImplausiblePosition(1.0)),
+                true,
+            ),
+            (
+                FdeSppError::Validation(SolutionValidationError::NoConvergence(2.0e4)),
+                true,
+            ),
+            (
+                FdeSppError::Validation(SolutionValidationError::InvalidResiduals),
+                false,
+            ),
+            (
+                FdeSppError::Validation(SolutionValidationError::InvalidOptions {
+                    field: "max_pdop",
+                    reason: "not finite",
+                }),
+                false,
+            ),
+        ] {
+            assert_eq!(error.admits_exclusion_search(), admits, "{error}");
+        }
+    }
+
+    /// The candidate RMS sums the squares in RTKLIB's satellite-number order
+    /// (QZSS before BeiDou), whatever order the solution lists them in.
+    #[test]
+    fn leave_one_out_rms_sums_in_rtklib_satellite_order() {
+        let used: Vec<String> = ["C01", "J01", "G01"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let residuals = [1.0, 1.0, 1.0e8];
+        // G01 first: 1e16 + 1 rounds to 1e16, and so does the second + 1.
+        let expected = (((1.0e16_f64 + 1.0) + 1.0) / 3.0).sqrt();
+        let listed_order = (((1.0_f64 + 1.0) + 1.0e16) / 3.0).sqrt();
+        assert_ne!(expected.to_bits(), listed_order.to_bits());
+        assert_eq!(
+            rtklib_order_rms_m(&used, &residuals).to_bits(),
+            expected.to_bits()
+        );
+        // Tokens that name no satellite keep the listed order.
+        let opaque: Vec<String> = ["a", "b", "c"].into_iter().map(str::to_string).collect();
+        assert_eq!(
+            rtklib_order_rms_m(&opaque, &residuals).to_bits(),
+            listed_order.to_bits()
+        );
+    }
+
     /// The iterative mode repeats detection and the leave-one-out search.
     #[test]
     fn fde_multiple_exclusions_repeat_the_search_on_the_remaining_set() {
         let observations = gps_observations(1..=8);
         let solve = |remaining: &[Observation]| {
             let with = |prn| remaining.iter().any(|ob| ob.satellite_id == gps(prn));
-            Ok::<_, ()>(TestSolution::over(remaining, |satellite| {
+            Ok::<_, TestSolveError>(TestSolution::over(remaining, |satellite| {
                 let mut r = 0.0;
                 if with(2) {
                     r += if satellite.prn == 2 { 30.0 } else { -3.0 };
@@ -2778,7 +3069,7 @@ mod tests {
         let observations = gps_observations(1..=5);
         let options = FdeOptions::new(RaimOptions::default(), 0);
         let err = fde(&observations, &options, |remaining| {
-            Ok::<_, ()>(TestSolution::over(remaining, |satellite| {
+            Ok::<_, TestSolveError>(TestSolution::over(remaining, |satellite| {
                 if satellite.prn == 5 {
                     5.0
                 } else {
@@ -2810,7 +3101,7 @@ mod tests {
                 ..FdeOptions::default()
             };
             let err = fde(&observations, &options, |remaining| {
-                Ok::<_, ()>(TestSolution::over(remaining, |_| 0.0))
+                Ok::<_, TestSolveError>(TestSolution::over(remaining, |_| 0.0))
             })
             .unwrap_err();
             assert_eq!(err, FdeError::Raim(QualityError::InvalidParameter));

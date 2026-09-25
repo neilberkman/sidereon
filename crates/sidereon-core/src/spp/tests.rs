@@ -5229,6 +5229,193 @@ fn fde_spp_recovers_a_fault_on_every_satellite_of_the_consistent_set() {
     }
 }
 
+/// A repeated robust state must include clocks and the IRLS weights, not only
+/// position and selection. Shrinking revisits are allowed to continue.
+#[test]
+fn outer_cycle_detector_tells_a_cycle_from_a_damped_alternation() {
+    let tol = 1.0e-4;
+    let a = [0.0, 0.0, 0.0];
+    let b = [3.0, 0.0, 0.0];
+    let sample = |position_m, clock_m, selection, scale_m, weights| super::OuterCycleSample {
+        position_m,
+        clocks_m: vec![(super::OuterClockKey::System(GnssSystem::Gps), clock_m)],
+        selection,
+        scale_m,
+        weights,
+    };
+    let mut cycle = super::OuterCycleDetector::new(sample(a, 4.0, 1u8, 2.0, vec![0.5]));
+    assert!(!cycle.closes_cycle(sample(b, 4.0, 1, 2.0, vec![0.5]), 3.0, tol));
+    // Back to `a` by a step as large as the one that led to `b`, but `a` is
+    // the warm start, which no step led to.
+    assert!(!cycle.closes_cycle(sample(a, 4.0, 1, 2.0, vec![0.5]), 3.0, tol));
+    assert!(cycle.closes_cycle(sample(b, 4.0, 1, 2.0, vec![0.5]), 3.0, tol));
+
+    let mut damped = super::OuterCycleDetector::new(sample(a, 4.0, 1u8, 2.0, vec![0.5]));
+    let mut x = 0.0;
+    let mut step = 1.0;
+    let mut sign = 1.0;
+    for _ in 0..200 {
+        x += sign * step;
+        assert!(!damped.closes_cycle(sample([x, 0.0, 0.0], 4.0, 1, 2.0, vec![0.5]), step, tol));
+        step *= 0.9;
+        sign = -sign;
+    }
+
+    let mut reselected = super::OuterCycleDetector::new(sample(a, 4.0, 1u8, 2.0, vec![0.5]));
+    assert!(!reselected.closes_cycle(sample(b, 4.0, 1, 2.0, vec![0.5]), 3.0, tol));
+    assert!(!reselected.closes_cycle(sample(a, 4.0, 2, 2.0, vec![0.5]), 3.0, tol));
+    assert!(!reselected.closes_cycle(sample(b, 4.0, 2, 2.0, vec![0.5]), 3.0, tol));
+
+    let mut changed_clock = super::OuterCycleDetector::new(sample(a, 4.0, 1u8, 2.0, vec![0.5]));
+    assert!(!changed_clock.closes_cycle(sample(a, 5.0, 1, 2.0, vec![0.5]), 1.0, tol));
+    assert!(!changed_clock.closes_cycle(sample(a, 4.0, 1, 2.0, vec![0.5]), 1.0, tol));
+    assert!(!changed_clock.closes_cycle(sample(a, 4.0, 1, 2.0, vec![0.5]), 1.0, tol));
+
+    let mut changed_weights = super::OuterCycleDetector::new(sample(a, 4.0, 1u8, 2.0, vec![0.5]));
+    assert!(!changed_weights.closes_cycle(sample(a, 4.0, 1, 2.0, vec![0.6]), 1.0, tol));
+    assert!(!changed_weights.closes_cycle(sample(a, 4.0, 1, 2.0, vec![0.7]), 1.0, tol));
+    assert!(!changed_weights.closes_cycle(sample(a, 4.0, 1, 2.0, vec![0.8]), 1.0, tol));
+}
+
+#[test]
+fn robust_settling_includes_receiver_clock_motion() {
+    let position = [0.0, 0.0, 0.0];
+    let clocks = |clock_m| vec![(super::OuterClockKey::System(GnssSystem::Gps), clock_m)];
+    let tolerance_m = 1.0e-4;
+    let step_m = super::outer_state_step_m(position, &clocks(10.0), position, &clocks(10.001));
+    assert!(step_m > tolerance_m);
+    assert!(!super::outer_state_settled(step_m, true, tolerance_m));
+    assert!(!super::outer_state_settled(0.0, false, tolerance_m));
+    assert!(super::outer_state_settled(0.0, true, tolerance_m));
+}
+
+/// Outer solves the default robust configuration runs, over every epoch of the
+/// ESBC and WTZR 120-epoch arcs (ionosphere and troposphere corrected, from the
+/// header position), and for a static robust solve over every fourth ESBC
+/// epoch (the solve itself, without its leave-one-out influence re-solves).
+/// These operational regression pins record the full-state position-and-clock
+/// settling criterion on the reference gate host. They do not assert a
+/// per-epoch cause for a histogram change.
+#[test]
+fn robust_default_outer_solves_on_real_arcs() {
+    use crate::ephemeris::BroadcastEphemeris;
+    use crate::positioning::{spp_inputs_from_rinex_obs, RinexSppOptions};
+    use crate::rinex::observations::ObservationFile;
+    use crate::static_positioning::{
+        solve_static_without_influence, StaticEpoch, StaticSolveOptions,
+    };
+
+    let nav = std::fs::read_to_string(fixture_path("nav/ESBC00DNK_R_20201770000_01D_MN.rnx"))
+        .expect("read nav fixture");
+    let store = BroadcastEphemeris::from_nav(&nav).expect("parse nav fixture");
+    let policy = SignalPolicy {
+        codes: [(GnssSystem::Gps, vec!["C1C".to_string()])]
+            .into_iter()
+            .collect(),
+    };
+    let mut report = Vec::new();
+    let mut static_result = None;
+    for (label, obs_name) in [
+        (
+            "ESBC",
+            "obs/ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx",
+        ),
+        (
+            "WTZR",
+            "obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx",
+        ),
+    ] {
+        let obs = ObservationFile::parse(
+            &std::fs::read_to_string(fixture_path(obs_name)).expect("read obs fixture"),
+        )
+        .expect("parse obs fixture");
+        let approx = obs
+            .header()
+            .approx_position_m
+            .expect("approximate position");
+        let options = RinexSppOptions::new(policy.clone())
+            .with_corrections(Corrections::IONO_TROPO)
+            .with_initial_guess([approx[0], approx[1], approx[2], 0.0]);
+        let epochs = spp_inputs_from_rinex_obs(&obs, &store, &options).expect("assemble");
+        assert_eq!(epochs.len(), 120);
+        let mut histogram = std::collections::BTreeMap::new();
+        let mut unsettled = Vec::new();
+        for (index, epoch) in epochs.iter().enumerate() {
+            let mut inputs = epoch.inputs.clone();
+            inputs.robust = Some(RobustConfig::default());
+            let solution = solve(&store, &inputs, false).expect("robust solve");
+            let solves = solution.metadata.outer_iterations + 1;
+            *histogram.entry(solves).or_insert(0usize) += 1;
+            if solution.metadata.status != Status::SelectionSettled {
+                unsettled.push((index, solution.metadata.status));
+            }
+        }
+        eprintln!(
+            "{label} robust outer solves (solves: epochs) {histogram:?}; not settled {unsettled:?}"
+        );
+        report.push((label, histogram, unsettled));
+
+        if label == "ESBC" {
+            let static_epochs: Vec<StaticEpoch> = epochs
+                .iter()
+                .step_by(4)
+                .map(|epoch| StaticEpoch::from_solve_inputs(epoch.inputs.clone()))
+                .collect();
+            let mut static_options =
+                StaticSolveOptions::from_solve_inputs(&epochs[0].inputs, false);
+            static_options.robust = Some(RobustConfig::default());
+            let solution = solve_static_without_influence(&store, &static_epochs, static_options)
+                .expect("robust static");
+            eprintln!(
+                "ESBC static robust ({} epochs): {} outer solves, status {:?}",
+                static_epochs.len(),
+                solution.metadata.outer_iterations + 1,
+                solution.metadata.status
+            );
+            static_result = Some((
+                static_epochs.len(),
+                solution.metadata.status,
+                solution.metadata.outer_iterations + 1,
+            ));
+        }
+    }
+    let (static_epoch_count, static_status, static_solves) =
+        static_result.expect("ESBC static robust result");
+    assert_eq!(static_epoch_count, 30);
+    assert_eq!(static_status, Status::SelectionSettled);
+    assert_eq!(static_solves, 6);
+    let pinned: [(&str, &[(usize, usize)]); 2] = [
+        ("ESBC", &[(2, 17), (3, 84), (7, 2), (9, 3), (10, 14)]),
+        (
+            "WTZR",
+            &[
+                (2, 20),
+                (3, 82),
+                (9, 2),
+                (10, 7),
+                (11, 1),
+                (12, 2),
+                (13, 5),
+                (14, 1),
+            ],
+        ),
+    ];
+    for ((label, histogram, unsettled), (pinned_label, pinned_histogram)) in
+        report.iter().zip(pinned)
+    {
+        assert_eq!(*label, pinned_label);
+        assert!(unsettled.is_empty(), "{label}: {unsettled:?}");
+        assert_eq!(
+            histogram.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
+            pinned_histogram,
+            "{label}: outer solves per epoch"
+        );
+        assert!(histogram
+            .keys()
+            .all(|&solves| solves < crate::spp::DEFAULT_ROBUST_MAX_OUTER));
+    }
+}
+
 /// The default Huber budget runs the reweighting to its settled fixed point on
 /// ordinary faults: +300 m on each satellite of the consistent set ends
 /// `SelectionSettled`, bit-identical to a solve with an effectively unbounded
@@ -5263,17 +5450,42 @@ fn robust_default_budget_settles_on_single_faults() {
     }
 }
 
+/// Bound on how much a pseudorange residual moves per metre of receiver
+/// position, beyond the unit line of sight: the Sagnac term moves it by up to
+/// `omega_e |r_sat| / c` (6.3e-6), and the Saastamoinen delay at the 10-degree
+/// mask by up to 2e-3 per metre of height (the surface pressure falls by about
+/// 1.2e-4 per metre and the mapping multiplies the zenith delay by 5.6). The
+/// satellite state does not move: RTKLIB and core place it from the
+/// pseudorange.
+const RESIDUAL_POSITION_SLOPE_EXCESS: f64 = 1.0e-2;
+
 /// `fde_spp` against RTKLIB demo5's own `raim_fde` on real data: every twelfth
-/// ESBC epoch with each used satellite faulted by +5000 m and by +300 m. In
-/// every case core's detection fires, `fde_spp` excludes the satellite RTKLIB
-/// excludes, and its solution is certified against RTKLIB's with the
-/// selection oracle's independent endpoint certificate.
+/// ESBC epoch with each used satellite faulted by +5000, +300, +30 and
+/// +299792.458 m, plus paired faults of +5000, +300 and +30 m. The checked-in
+/// fixture carries independent RTKLIB candidate records for all these cases,
+/// including the +299792.458 m (1 ms) blunders.
+///
+/// For every candidate RTKLIB tried, core's re-solve without that satellite
+/// (as `fde_spp` runs it) must be admissible exactly when RTKLIB's is (solved,
+/// at least five satellites, RMS within 100 m). Where both solved, the RMS
+/// values must agree within the bound the state difference allows: RTKLIB's
+/// RMS is of the residuals before its final step, and each residual moves by
+/// at most `(1 + RESIDUAL_POSITION_SLOPE_EXCESS)` times the position change
+/// plus the clock change, so the bound is that factor times the distance
+/// between the two final states plus RTKLIB's final step. Whenever core's
+/// detection fires or its full-set solve fails the way `estpos` does,
+/// `fde_spp` must exclude the satellite RTKLIB excludes, or none where RTKLIB
+/// excludes none, and its solution must pass the selection oracle's endpoint
+/// certificate against RTKLIB's.
 #[test]
 fn fde_spp_matches_rtklib_raim_fde_on_faulted_epochs() {
+    use super::interval_certificate::Interval;
     use crate::ephemeris::BroadcastEphemeris;
     use crate::positioning::{spp_inputs_from_rinex_obs, RinexSppOptions};
     use crate::quality::{
-        fde_spp, raim_for_solution, FdeError, FdeSppOptions, FdeUnresolvedReason, RaimOptions,
+        fde_spp, raim_for_solution, validate_receiver_solution, FdeError, FdeSolveFailure,
+        FdeSppError, FdeSppOptions, FdeUnresolvedReason, RaimOptions,
+        DEFAULT_FDE_MAX_EXCLUSION_RMS_M, FDE_MIN_CANDIDATE_SATELLITES,
     };
     use crate::rinex::observations::ObservationFile;
 
@@ -5306,13 +5518,17 @@ fn fde_spp_matches_rtklib_raim_fde_on_faulted_epochs() {
     assert_eq!(run["ionosphere"].as_bool(), Some(true));
     assert_eq!(run["troposphere"].as_bool(), Some(true));
     let stride = run["stride"].as_u64().expect("stride") as usize;
-    let biases: Vec<f64> = run["biases_m"]
-        .as_array()
-        .expect("biases_m")
-        .iter()
-        .map(|bias| bias.as_f64().expect("bias"))
-        .collect();
-    assert_eq!(biases, vec![5000.0, 300.0]);
+    let numbers = |key: &str| -> Vec<f64> {
+        run[key]
+            .as_array()
+            .expect(key)
+            .iter()
+            .map(|bias| bias.as_f64().expect("bias"))
+            .collect()
+    };
+    assert_eq!(numbers("biases_m"), vec![5000.0, 300.0, 30.0, 299_792.458]);
+    assert_eq!(numbers("pair_biases_m"), vec![5000.0, 300.0, 30.0]);
+    let cases_per_satellite = numbers("biases_m").len() + numbers("pair_biases_m").len();
     let guess = num3(&run["guess"]);
     let policy = SignalPolicy {
         codes: [(GnssSystem::Gps, vec!["C1C".to_string()])]
@@ -5324,10 +5540,65 @@ fn fde_spp_matches_rtklib_raim_fde_on_faulted_epochs() {
         .with_initial_guess([guess[0], guess[1], guess[2], 0.0]);
     let epochs = spp_inputs_from_rinex_obs(&obs, &store, &options).expect("assemble");
     assert_eq!(epochs.len(), 120);
+    let fde_options = FdeSppOptions::default();
 
     let rtklib_cases = run["cases"].as_array().expect("cases");
+    // Choose close-runner-up coverage from the reference candidates alone:
+    // the case with the smallest gap between its two best admissible RTKLIB
+    // RMS values. Core output and fitted proximity thresholds do not select it.
+    let reference_minimum_margin_case = rtklib_cases
+        .iter()
+        .enumerate()
+        .filter_map(|(index, case)| {
+            let mut admissible: Vec<_> = case["candidates"]
+                .as_array()?
+                .iter()
+                .filter(|candidate| {
+                    candidate["status"] == "solved"
+                        && candidate["rms_m"]
+                            .as_f64()
+                            .is_some_and(|rms| rms <= DEFAULT_FDE_MAX_EXCLUSION_RMS_M)
+                })
+                .filter_map(|candidate| candidate["rms_m"].as_f64())
+                .collect();
+            admissible.sort_by(f64::total_cmp);
+            let [best, runner_up, ..] = admissible[..] else {
+                return None;
+            };
+            Some((index, runner_up - best))
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .expect("reference corpus has admissible candidate runner-ups");
+    let closest_reference_case = &rtklib_cases[reference_minimum_margin_case.0];
+    assert_eq!(closest_reference_case["mode"], "two_fault");
+    assert_eq!(
+        closest_reference_case["epoch"],
+        serde_json::json!([2020, 6, 25, 0, 42, 0.0])
+    );
+    assert_eq!(
+        closest_reference_case["faults"],
+        serde_json::json!([
+            {"sat": "G15", "bias_m": 30},
+            {"sat": "G18", "bias_m": 30}
+        ])
+    );
     let mut consumed = 0usize;
-    let mut faulted_satellite_excluded = 0usize;
+    let mut compared_candidates = 0usize;
+    let mut largest_rms_bound_use = 0.0_f64;
+    let mut exclusion_compared = 0usize;
+    let mut excluded_nothing = 0usize;
+    let mut not_detected = 0usize;
+    let mut core_full_solve_failed = 0usize;
+    let mut rtklib_full_estpos_failed = 0usize;
+    let mut smallest_runner_up_margin_m = f64::INFINITY;
+    let mut runner_up_cases = 0usize;
+    let mut small_bias_cases = 0usize;
+    let mut small_bias_runner_up_cases = 0usize;
+    let mut two_fault_cases = 0usize;
+    let mut one_ms_blunder_cases = 0usize;
+    let mut cap_binding_cases = 0usize;
+    let mut cap_rejected_candidates = 0usize;
+    let mut closest_reference_case_reached_exclusion_comparison = false;
     let mut certificate_failures: std::collections::BTreeMap<String, (usize, String)> =
         std::collections::BTreeMap::new();
     for epoch in epochs.iter().step_by(stride) {
@@ -5351,52 +5622,242 @@ fn fde_spp_matches_rtklib_raim_fde_on_faulted_epochs() {
             .collect();
         assert_eq!(
             epoch_cases.len(),
-            clean.used_sats.len() * biases.len(),
-            "{key}: one RTKLIB case per used satellite and bias"
+            clean.used_sats.len() * cases_per_satellite,
+            "{key}: one RTKLIB case per used satellite and fault"
         );
         for case in epoch_cases {
+            let is_closest_reference_case =
+                std::ptr::eq(case, &rtklib_cases[reference_minimum_margin_case.0]);
             consumed += 1;
-            let fault_sat = parse_prn(case["fault"]["sat"].as_str().expect("fault sat"));
-            let bias_m = case["fault"]["bias_m"].as_f64().expect("fault bias");
-            let context = format!("{key} {fault_sat} {bias_m:+} m");
-            assert!(clean.used_sats.contains(&fault_sat), "{context}");
-            let faulted = with_bias(&epoch.inputs, fault_sat, bias_m);
+            match case["mode"].as_str().expect("mode") {
+                "small_bias" => small_bias_cases += 1,
+                "two_fault" => two_fault_cases += 1,
+                "one_millisecond_blunder" => one_ms_blunder_cases += 1,
+                "single_fault" => {}
+                mode => panic!("{key}: unknown FDE oracle mode {mode}"),
+            }
+            let mut faulted = epoch.inputs.clone();
+            let mut context = key.clone();
+            for fault in case["faults"].as_array().expect("faults") {
+                let satellite = parse_prn(fault["sat"].as_str().expect("fault sat"));
+                let bias_m = fault["bias_m"].as_f64().expect("fault bias");
+                assert!(clean.used_sats.contains(&satellite), "{context}");
+                faulted = with_bias(&faulted, satellite, bias_m);
+                context.push_str(&format!(" {satellite} {bias_m:+} m"));
+            }
+            if case["full_estpos_stat"] == 0 {
+                rtklib_full_estpos_failed += 1;
+                assert_eq!(case["pntpos_stat"], case["stat"], "{context}");
+            }
 
-            let flagged = solve(&store, &faulted, false).expect("faulted epoch solves");
-            let detection = raim_for_solution(&flagged, &RaimOptions::default()).expect("raim");
-            assert!(detection.fault_detected, "{context}: detection");
-
-            let (excluded, solution) =
-                match fde_spp(&store, &faulted, false, &FdeSppOptions::default()) {
-                    Ok(result) => (result.excluded, Some(result.solution)),
-                    Err(FdeError::FaultUnresolved(unresolved)) => {
-                        if unresolved.reason == FdeUnresolvedReason::NoAdmissibleExclusion {
-                            (Vec::new(), None)
-                        } else {
-                            (unresolved.excluded, Some(unresolved.solution))
-                        }
+            // Every candidate RTKLIB tried, re-solved as `fde_spp` does.
+            let mut rtklib_admissible_rms = Vec::new();
+            let mut core_candidates = std::collections::BTreeMap::new();
+            let mut case_has_cap_rejection = false;
+            let candidate_records = case["candidates"].as_array().expect("candidates");
+            let expected_candidates: std::collections::BTreeSet<_> = faulted
+                .observations
+                .iter()
+                .map(|observation| observation.satellite_id)
+                .collect();
+            let mut recorded_candidates = std::collections::BTreeSet::new();
+            assert_eq!(
+                candidate_records.len(),
+                expected_candidates.len(),
+                "{context}"
+            );
+            for candidate in candidate_records {
+                let satellite = parse_prn(candidate["sat"].as_str().expect("candidate sat"));
+                assert!(
+                    recorded_candidates.insert(satellite),
+                    "{context}: duplicate RTKLIB candidate {satellite}"
+                );
+                let status = candidate["status"].as_str().expect("candidate status");
+                let rtklib_rms_m = candidate["rms_m"].as_f64().expect("candidate rms");
+                let rtklib_admissible =
+                    status == "solved" && rtklib_rms_m <= DEFAULT_FDE_MAX_EXCLUSION_RMS_M;
+                if rtklib_admissible {
+                    rtklib_admissible_rms.push(rtklib_rms_m);
+                } else if status == "solved" {
+                    cap_rejected_candidates += 1;
+                    case_has_cap_rejection = true;
+                }
+                let reduced = without(&faulted, satellite);
+                let core = solve(&store, &reduced, false)
+                    .map_err(FdeSppError::Spp)
+                    .and_then(|solution| {
+                        validate_receiver_solution(&solution, fde_options.validation)
+                            .map_err(FdeSppError::Validation)?;
+                        Ok(solution)
+                    });
+                let core_rms_m = core.as_ref().ok().map(rtklib_order_rms_independent);
+                let core_admissible = core.as_ref().is_ok_and(|solution| {
+                    solution.used_sats.len() >= FDE_MIN_CANDIDATE_SATELLITES
+                        && core_rms_m.is_some_and(|rms| rms <= DEFAULT_FDE_MAX_EXCLUSION_RMS_M)
+                });
+                assert_eq!(
+                    core_admissible, rtklib_admissible,
+                    "{context}: admissibility without {satellite} (RTKLIB {status}, \
+                     {rtklib_rms_m} m; core {core_rms_m:?})"
+                );
+                if let (Ok(solution), "solved" | "too_few_satellites") = (&core, status) {
+                    assert_eq!(
+                        solution.used_sats.len() as u64,
+                        candidate["nvsat"].as_u64().expect("nvsat"),
+                        "{context}: satellites used without {satellite}"
+                    );
+                }
+                if let (Ok(solution), "solved") = (&core, status) {
+                    let position = num3(&candidate["position_m"]);
+                    let clock_m = candidate["clock_m"].as_f64().expect("clock");
+                    let step: Vec<f64> = candidate["lsq_step"]
+                        .as_array()
+                        .expect("lsq_step")
+                        .iter()
+                        .map(|value| value.as_f64().expect("step"))
+                        .collect();
+                    let core_position_m = solution.position.as_array();
+                    let position_delta = [
+                        Interval::point(core_position_m[0]).sub(Interval::point(position[0])),
+                        Interval::point(core_position_m[1]).sub(Interval::point(position[1])),
+                        Interval::point(core_position_m[2]).sub(Interval::point(position[2])),
+                    ];
+                    let position_distance_upper_m = interval_norm_upper(&position_delta);
+                    let clock_distance_upper_m = interval_abs_upper(
+                        Interval::point(solution.rx_clock_s)
+                            .mul(Interval::point(C_M_S))
+                            .sub(Interval::point(clock_m)),
+                    );
+                    let step_delta = [
+                        Interval::point(step[0]),
+                        Interval::point(step[1]),
+                        Interval::point(step[2]),
+                    ];
+                    let step_position_upper_m = interval_norm_upper(&step_delta);
+                    let step_clock_upper_m = interval_abs_upper(Interval::point(step[3]));
+                    let state_upper_m = Interval::point(position_distance_upper_m)
+                        .add(Interval::point(clock_distance_upper_m))
+                        .upper();
+                    let step_upper_m = Interval::point(step_position_upper_m)
+                        .add(Interval::point(step_clock_upper_m))
+                        .upper();
+                    let geometric_bound = Interval::point(1.0)
+                        .add(Interval::point(RESIDUAL_POSITION_SLOPE_EXCESS))
+                        .mul(Interval::point(state_upper_m).add(Interval::point(step_upper_m)));
+                    let core_rms_m = core_rms_m.expect("solved");
+                    let core_rms_bound =
+                        rms_rounding_bound_m(core_rms_m, solution.residuals_m.len());
+                    let reference_rms_bound = rms_rounding_bound_m(
+                        rtklib_rms_m,
+                        candidate["nvsat"].as_u64().expect("nvsat") as usize,
+                    );
+                    let arithmetic_bound =
+                        Interval::point(core_rms_bound).add(Interval::point(reference_rms_bound));
+                    let total_bound = geometric_bound.add(arithmetic_bound);
+                    let rms_difference =
+                        Interval::point(core_rms_m).sub(Interval::point(rtklib_rms_m));
+                    let difference_upper_m = interval_abs_upper(rms_difference);
+                    assert!(
+                        difference_upper_m <= total_bound.upper(),
+                        "{context}: RMS without {satellite}: core {core_rms_m:?}, RTKLIB \
+                         {rtklib_rms_m} m, bound {} m",
+                        total_bound.upper()
+                    );
+                    if geometric_bound.lower() > 0.0 {
+                        let bound_use = Interval::point(difference_upper_m)
+                            .div(Interval::point(geometric_bound.lower()))
+                            .upper();
+                        largest_rms_bound_use = largest_rms_bound_use.max(bound_use);
                     }
-                    Err(error) => panic!("{context}: {error:?}"),
-                };
+                    compared_candidates += 1;
+                }
+                core_candidates.insert(satellite, core);
+            }
+            assert_eq!(
+                recorded_candidates, expected_candidates,
+                "{context}: candidate coverage"
+            );
+            if case_has_cap_rejection && !rtklib_admissible_rms.is_empty() {
+                cap_binding_cases += 1;
+            }
+            rtklib_admissible_rms.sort_by(f64::total_cmp);
+            if let [best, runner_up, ..] = rtklib_admissible_rms[..] {
+                let margin = runner_up - best;
+                smallest_runner_up_margin_m = smallest_runner_up_margin_m.min(margin);
+                runner_up_cases += 1;
+                if case["mode"] == "small_bias" {
+                    small_bias_runner_up_cases += 1;
+                }
+                if is_closest_reference_case {
+                    assert_eq!(margin.to_bits(), reference_minimum_margin_case.1.to_bits());
+                }
+            }
+
+            // Whether core reaches the exclusion search at all.
+            let full = solve(&store, &faulted, false)
+                .map_err(FdeSppError::Spp)
+                .and_then(|solution| {
+                    validate_receiver_solution(&solution, fde_options.validation)
+                        .map_err(FdeSppError::Validation)?;
+                    Ok(solution)
+                });
+            let searches = match &full {
+                Ok(solution) => {
+                    raim_for_solution(solution, &RaimOptions::default())
+                        .expect("raim")
+                        .fault_detected
+                }
+                Err(error) => {
+                    core_full_solve_failed += 1;
+                    assert!(error.admits_exclusion_search(), "{context}: {error}");
+                    true
+                }
+            };
+            if is_closest_reference_case {
+                assert!(
+                    searches,
+                    "closest RTKLIB runner-up must reach the FDE search"
+                );
+            }
+            if !searches {
+                not_detected += 1;
+                continue;
+            }
+            let excluded = match fde_spp(&store, &faulted, false, &fde_options) {
+                Ok(result) => result.excluded,
+                Err(FdeError::FaultUnresolved(unresolved)) => {
+                    if unresolved.reason == FdeUnresolvedReason::NoAdmissibleExclusion {
+                        Vec::new()
+                    } else {
+                        unresolved.excluded
+                    }
+                }
+                Err(FdeError::Solve(_)) => Vec::new(),
+                Err(error) => panic!("{context}: {error:?}"),
+            };
+            exclusion_compared += 1;
+            if is_closest_reference_case {
+                closest_reference_case_reached_exclusion_comparison = true;
+            }
             let Some(rtklib_excluded) = case["excluded"].as_str() else {
                 assert_eq!(case["stat"], 0, "{context}");
                 assert!(excluded.is_empty(), "{context}: RTKLIB excluded nothing");
+                excluded_nothing += 1;
                 continue;
             };
             assert_eq!(case["stat"], 1, "{context}");
             assert_eq!(
-                excluded,
-                vec![rtklib_excluded.to_string()],
+                excluded.first().map(String::as_str),
+                Some(rtklib_excluded),
                 "{context}: excluded satellite"
             );
             let excluded_sat = parse_prn(rtklib_excluded);
-            if excluded_sat == fault_sat {
-                faulted_satellite_excluded += 1;
-            }
-            let solution = solution.expect("an exclusion carries its solution");
+            let solution = core_candidates[&excluded_sat]
+                .as_ref()
+                .expect("the exclusion solved");
             let reduced = without(&faulted, excluded_sat);
             if let Err(error) =
-                super::oracle_certificate::verify_case(&store, &reduced, case, &solution)
+                super::oracle_certificate::verify_case(&store, &reduced, case, solution)
             {
                 let failure = certificate_failures
                     .entry(error.to_string())
@@ -5407,10 +5868,153 @@ fn fde_spp_matches_rtklib_raim_fde_on_faulted_epochs() {
     }
     assert_eq!(consumed, rtklib_cases.len(), "every RTKLIB case consumed");
     eprintln!(
-        "{consumed} faulted cases; RTKLIB and core exclude the faulted satellite in {faulted_satellite_excluded}"
+        "{consumed} faulted cases, {compared_candidates} candidate RMS comparisons (largest \
+         use of the geometric bound {largest_rms_bound_use:.3e}), {runner_up_cases} cases with \
+         admissible runner-ups (smallest recorded reference margin \
+         {smallest_runner_up_margin_m:.3e} m); \
+         exclusions compared in {exclusion_compared} \
+         ({excluded_nothing} with none), detection silent in {not_detected}; full-set solve \
+         failed in core {core_full_solve_failed}, in RTKLIB estpos {rtklib_full_estpos_failed}"
     );
     assert!(
         certificate_failures.is_empty(),
         "certificate failures (count, first case): {certificate_failures:#?}"
+    );
+    assert!(
+        excluded_nothing > 0,
+        "a paired fault leaves every exclusion above the cap"
+    );
+    assert!(
+        rtklib_full_estpos_failed > 0 && core_full_solve_failed > 0,
+        "the 1 ms blunder reaches the exclusion search through a failed solve"
+    );
+    assert!(
+        runner_up_cases > 0 && smallest_runner_up_margin_m.is_finite(),
+        "oracle must include candidates with an admissible runner-up"
+    );
+    assert!(
+        closest_reference_case_reached_exclusion_comparison,
+        "closest RTKLIB reference runner-up case must reach and compare the exclusion search"
+    );
+    assert!(
+        cap_rejected_candidates > 0 && cap_binding_cases > 0,
+        "oracle must include a case where RTKLIB's 100 m cap excludes solved candidates"
+    );
+    assert!(
+        small_bias_cases > 0 && small_bias_runner_up_cases > 0,
+        "oracle must include small-bias cases with admissible runner-ups"
+    );
+    assert!(
+        two_fault_cases > 0,
+        "oracle must include explicit two-fault cases"
+    );
+    assert!(
+        one_ms_blunder_cases > 0,
+        "oracle must include explicit 1 ms blunder cases"
+    );
+}
+
+/// Recompute candidate RMS independently in RTKLIB satellite-number order.
+/// This intentionally does not call the production FDE helper.
+fn rtklib_order_rms_independent(solution: &super::ReceiverSolution) -> f64 {
+    let system_order = |satellite: crate::id::GnssSatelliteId| match satellite.system {
+        crate::id::GnssSystem::Gps => 0,
+        crate::id::GnssSystem::Glonass => 1,
+        crate::id::GnssSystem::Galileo => 2,
+        crate::id::GnssSystem::Qzss => 3,
+        crate::id::GnssSystem::BeiDou => 4,
+        crate::id::GnssSystem::Navic => 5,
+        crate::id::GnssSystem::Sbas => 6,
+    };
+    let mut indexes: Vec<_> = (0..solution.residuals_m.len()).collect();
+    assert_eq!(indexes.len(), solution.used_sats.len());
+    indexes.sort_by_key(|&index| {
+        let satellite = solution.used_sats[index];
+        (system_order(satellite), satellite.prn)
+    });
+    let mut sum_sq = 0.0;
+    for index in indexes.iter().copied() {
+        let residual = solution.residuals_m[index];
+        sum_sq += residual * residual;
+    }
+    if indexes.is_empty() {
+        0.0
+    } else {
+        (sum_sq / indexes.len() as f64).sqrt()
+    }
+}
+
+/// Outward upper bound on the difference between a computed RMS and the exact
+/// RMS of its residual inputs. `gamma_(2n+4)` bounds relative rounding in the
+/// n products and additions, division, square root and the squared-result
+/// comparison. For subnormal intermediates, use the mixed rounding model
+/// `|fl(x)-x| <= u|x| + MIN_POSITIVE`: at most `2n+4` absolute errors, each
+/// amplified by less than two; division by n cannot amplify, while squaring
+/// the rounded square root adds a factor below two. Thus
+/// `4*(2n+4)*MIN_POSITIVE` bounds the additive mean-square error. The final
+/// additive RMS allowance is `sqrt(B/(1-gamma))`, evaluated outward. All
+/// residual counts here are at most 64 and values are finite without overflow.
+fn rms_rounding_bound_m(rms_m: f64, residual_count: usize) -> f64 {
+    use super::interval_certificate::Interval;
+
+    assert!(rms_m.is_finite() && rms_m >= 0.0);
+    assert!((1..=64).contains(&residual_count));
+    let unit_roundoff = Interval::point(f64::EPSILON).div(Interval::point(2.0));
+    let operations = Interval::point((2 * residual_count + 4) as f64);
+    let product = operations.mul(unit_roundoff);
+    let gamma = product.div(Interval::point(1.0).sub(product));
+    assert!(gamma.lower() >= 0.0 && gamma.upper() < 1.0);
+    let relative_error = Interval::point(1.0)
+        .add(gamma)
+        .div(Interval::point(1.0).sub(gamma).sqrt())
+        .sub(Interval::point(1.0));
+    let relative_bound = Interval::point(rms_m).mul(relative_error).upper().max(0.0);
+    let underflow_mean_bound = Interval::point(4.0)
+        .mul(operations)
+        .mul(Interval::point(f64::MIN_POSITIVE));
+    let underflow_rms_bound = underflow_mean_bound
+        .div(Interval::point(1.0).sub(gamma))
+        .sqrt()
+        .upper();
+    Interval::point(relative_bound)
+        .add(Interval::point(underflow_rms_bound))
+        .upper()
+}
+
+fn interval_norm_upper(values: &[super::interval_certificate::Interval]) -> f64 {
+    use super::interval_certificate::Interval;
+
+    values
+        .iter()
+        .copied()
+        .fold(Interval::point(0.0), |sum, value| sum.add(value.square()))
+        .sqrt()
+        .upper()
+}
+
+fn interval_abs_upper(value: super::interval_certificate::Interval) -> f64 {
+    value.lower().abs().max(value.upper().abs())
+}
+
+#[test]
+fn rms_rounding_bound_encloses_high_precision_reference_values() {
+    // These are upward-rounded 120-digit Decimal evaluations of
+    // rms*((1+gamma)/sqrt(1-gamma)-1), with gamma=(2n+4)u/(1-(2n+4)u),
+    // exact binary64 RMS inputs and u=2^-53. The underflow allowance is
+    // separate and is covered by the final subnormal control below.
+    let references = [
+        (1.0e-9, 1, f64::from_bits(0x3af3_53cd_652b_b16e)),
+        (1.0, 8, f64::from_bits(0x3cee_0000_0000_001e)),
+        (1.0e8, 64, f64::from_bits(0x3ec2_70b0_1800_0079)),
+    ];
+    for (rms_m, residual_count, reference_upper_m) in references {
+        assert!(
+            rms_rounding_bound_m(rms_m, residual_count) >= reference_upper_m,
+            "RMS allowance must enclose reference at n={residual_count}, rms={rms_m}"
+        );
+    }
+    assert!(
+        rms_rounding_bound_m(0.0, 1) >= f64::from_bits(0x1a70_0000_0000_0000),
+        "the allowance must cover a nonzero residual whose square underflows"
     );
 }

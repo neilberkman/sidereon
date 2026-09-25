@@ -4,6 +4,8 @@
 //! as exact inputs. It computes geometry and model terms independently with
 //! `Interval`; it does not call the SPP production model. Inputs whose model
 //! branches cannot be certified are refused.
+//! The supported receiver-height domain is `[-1000, 10000)` m; the lower
+//! Klobuchar zero-delay branch is retained within that domain.
 
 use super::interval_certificate::Interval;
 
@@ -12,6 +14,8 @@ const C_M_S: f64 = 299_792_458.0;
 const OMEGA_E_DOT_RAD_S: f64 = 7.292_115_146_7e-5;
 const WGS84_A_M: f64 = 6_378_137.0;
 const WGS84_E2: f64 = 6.694_379_990_141_316_5e-3;
+const IONOSPHERE_HEIGHT_CUTOFF_M: f64 = -1_000.0;
+const TROPOSPHERE_HEIGHT_CUTOFF_M: f64 = -100.0;
 const BROADCAST_IONOSPHERE_ERROR_FACTOR: f64 = 0.5;
 const CODE_BIAS_ERROR_M: f64 = 0.3;
 const UNCORRECTED_IONOSPHERE_ERROR_M: f64 = 5.0;
@@ -247,6 +251,14 @@ mod tests {
     }
 
     #[test]
+    fn ideal_geodetic_enclosure_accepts_valid_negative_height() {
+        let enclosure =
+            geodetic_uncached([WGS84_A_M - 50.0, 0.0, 0.0].map(Interval::point)).unwrap();
+        assert!(enclosure[2].contains(-50.0));
+        assert!(enclosure[2].upper() < 0.0);
+    }
+
+    #[test]
     fn evaluation_exposes_ideal_and_finite_hull_klobuchar_enclosures() {
         let mut inputs = inputs([WGS84_A_M + 100.0, 0.0, 0.0]);
         inputs.alpha[0] = 1.0e-8;
@@ -322,8 +334,11 @@ mod tests {
     fn ambiguous_klobuchar_branch_is_refused() {
         let second_of_day_s = 50_400.0 + 1.57 * 72_000.0 / (2.0 * PI);
         let result = klobuchar(
-            Interval::point(0.0),
-            Interval::point(0.0),
+            [
+                Interval::point(0.0),
+                Interval::point(0.0),
+                Interval::point(100.0),
+            ],
             Interval::point(0.0),
             Interval::point(0.5),
             second_of_day_s,
@@ -334,6 +349,115 @@ mod tests {
             result.unwrap_err(),
             CenterCertificateError::CorrectionBranch
         );
+    }
+
+    #[test]
+    fn klobuchar_respects_the_signed_height_cutoff_and_refuses_crossing() {
+        let params = ([1.0e-8, 0.0, 0.0, 0.0], [100_000.0, 0.0, 0.0, 0.0]);
+        let below = klobuchar(
+            [
+                Interval::point(0.2),
+                Interval::point(-0.4),
+                Interval::point(-1_001.0),
+            ],
+            Interval::point(0.1),
+            Interval::point(0.5),
+            50_400.0,
+            params.0,
+            params.1,
+        )
+        .unwrap();
+        assert_eq!(below.delay_m, Interval::point(0.0));
+
+        let active = klobuchar(
+            [
+                Interval::point(0.2),
+                Interval::point(-0.4),
+                Interval::point(-999.0),
+            ],
+            Interval::point(0.1),
+            Interval::point(0.5),
+            50_400.0,
+            params.0,
+            params.1,
+        )
+        .unwrap();
+        assert!(active.delay_m.upper() > 0.0);
+
+        assert_eq!(
+            klobuchar(
+                [
+                    Interval::point(0.2),
+                    Interval::point(-0.4),
+                    Interval::new(-1_001.0, -999.0),
+                ],
+                Interval::point(0.1),
+                Interval::point(0.5),
+                50_400.0,
+                params.0,
+                params.1,
+            )
+            .unwrap_err(),
+            CenterCertificateError::CorrectionBranch
+        );
+    }
+
+    #[test]
+    fn rtklib_troposphere_clamps_sea_level_and_keeps_cutoff_exact() {
+        let latitude = Interval::point(0.4);
+        let elevation = Interval::point(0.5);
+        let below = rtklib_troposphere(latitude, Interval::point(-101.0), elevation).unwrap();
+        assert_eq!(below, Interval::point(0.0));
+
+        let negative_clamped =
+            rtklib_troposphere(latitude, Interval::new(-1.0, 1.0), elevation).unwrap();
+        let sea_level = rtklib_troposphere(latitude, Interval::new(0.0, 1.0), elevation).unwrap();
+        assert_eq!(
+            negative_clamped.lower().to_bits(),
+            sea_level.lower().to_bits()
+        );
+        assert_eq!(
+            negative_clamped.upper().to_bits(),
+            sea_level.upper().to_bits()
+        );
+        assert!(sea_level.lower() > 0.0);
+
+        assert_eq!(
+            rtklib_troposphere(latitude, Interval::new(-101.0, -99.0), elevation).unwrap_err(),
+            CenterCertificateError::TroposphereDomain
+        );
+        assert_eq!(
+            rtklib_troposphere(latitude, Interval::new(9_999.0, 10_001.0), elevation).unwrap_err(),
+            CenterCertificateError::TroposphereDomain
+        );
+    }
+
+    #[test]
+    fn zero_troposphere_delay_keeps_the_elevation_variance() {
+        let mut inputs = inputs([WGS84_A_M - 150.0, 0.0, 0.0]);
+        inputs.apply_ionosphere = false;
+        inputs.apply_troposphere = true;
+        let result = evaluate(&inputs).unwrap();
+        assert!(result.height_m.upper() < TROPOSPHERE_HEIGHT_CUTOFF_M);
+
+        let sine = result.elevation_rad.sin();
+        let tropo_variance = Interval::point(TROPOSPHERE_MODEL_ERROR_M)
+            .div(sine.add(Interval::point(0.1)))
+            .square();
+        let code_variance = Interval::point(CODE_PHASE_ERROR_RATIO).square().mul(
+            Interval::point(PHASE_ERROR_BASE_M)
+                .square()
+                .add(Interval::point(PHASE_ERROR_ELEVATION_M).square().div(sine)),
+        );
+        let total_variance = Interval::point(inputs.ephemeris_variance_m2)
+            .add(Interval::point(CODE_BIAS_ERROR_M).square())
+            .add(Interval::point(UNCORRECTED_IONOSPHERE_ERROR_M).square())
+            .add(tropo_variance)
+            .add(code_variance);
+        let expected_weight = Interval::point(1.0).div(total_variance);
+        let expected_midpoint =
+            expected_weight.lower() + (expected_weight.upper() - expected_weight.lower()) * 0.5;
+        assert!(result.weight.contains(expected_midpoint));
     }
 
     #[test]
@@ -526,8 +650,7 @@ pub(super) fn evaluate(inputs: &CenterInputs) -> Result<CenterIntervals, CenterC
         Interval::point(inputs.satellite_clock_s).sub(Interval::point(inputs.group_delay_s));
     let ideal_klobuchar = if inputs.apply_ionosphere {
         Some(klobuchar(
-            ideal_latitude,
-            ideal_longitude,
+            [ideal_latitude, ideal_longitude, ideal_height],
             ideal_angles.0,
             ideal_angles.1,
             inputs.second_of_day_s,
@@ -539,8 +662,7 @@ pub(super) fn evaluate(inputs: &CenterInputs) -> Result<CenterIntervals, CenterC
     };
     let klobuchar = if inputs.apply_ionosphere {
         Some(klobuchar(
-            latitude_rad,
-            longitude_rad,
+            [latitude_rad, longitude_rad, height_m],
             azimuth_rad,
             elevation_rad,
             inputs.second_of_day_s,
@@ -646,7 +768,7 @@ fn finite_inputs(inputs: &CenterInputs) -> bool {
         && inputs.finite_inverse_candidates.iter().all(|candidate| {
             candidate[0].abs() <= core::f64::consts::FRAC_PI_2
                 && candidate[1].abs() <= 2.0 * PI
-                && (0.0..10_000.0).contains(&candidate[2])
+                && (IONOSPHERE_HEIGHT_CUTOFF_M..10_000.0).contains(&candidate[2])
         })
         && inputs.receiver_clock_m.abs() <= 1.0e6
         && inputs.satellite_clock_s.abs() <= 1.0
@@ -677,7 +799,7 @@ fn forward_residual(
     Ok([x.sub(receiver[0]), y.sub(receiver[1]), z.sub(receiver[2])])
 }
 
-fn geodetic(ecef: [Interval; 3]) -> Result<[Interval; 3], CenterCertificateError> {
+pub(super) fn geodetic(ecef: [Interval; 3]) -> Result<[Interval; 3], CenterCertificateError> {
     cached_geodetic(&IDEAL_GEODETIC_CACHE, ecef, geodetic_uncached)
 }
 
@@ -726,7 +848,7 @@ fn geodetic_uncached(ecef: [Interval; 3]) -> GeodeticResult {
         return Err(CenterCertificateError::GeodeticDomain);
     }
     let height = horizontal.div(cosine).sub(prime_vertical);
-    if height.lower() <= 0.0 || height.upper() >= 10_000.0 {
+    if height.lower() < IONOSPHERE_HEIGHT_CUTOFF_M || height.upper() >= 10_000.0 {
         return Err(CenterCertificateError::GeodeticDomain);
     }
     let longitude = asin_interval(ecef[1].div(horizontal))?;
@@ -1028,14 +1150,26 @@ fn dot(left: [Interval; 3], right: [Interval; 3]) -> Interval {
 }
 
 fn klobuchar(
-    latitude: Interval,
-    longitude: Interval,
+    geodetic: [Interval; 3],
     azimuth: Interval,
     elevation: Interval,
     second_of_day_s: f64,
     alpha: [f64; 4],
     beta: [f64; 4],
 ) -> Result<KlobucharIntervals, CenterCertificateError> {
+    let [latitude, longitude, height] = geodetic;
+    if height.upper() < IONOSPHERE_HEIGHT_CUTOFF_M {
+        return Ok(KlobucharIntervals {
+            raw_phi_i_semicircles: Interval::point(0.0),
+            phi_m_semicircles: Interval::point(0.0),
+            local_time_seconds: Interval::point(0.0),
+            phase_radians: Interval::point(0.0),
+            delay_m: Interval::point(0.0),
+        });
+    }
+    if height.lower() < IONOSPHERE_HEIGHT_CUTOFF_M {
+        return Err(CenterCertificateError::CorrectionBranch);
+    }
     let pi = Interval::point(PI);
     let phi_u = latitude.div(pi);
     let lambda_u = longitude.div(pi);
@@ -1155,16 +1289,26 @@ fn rtklib_troposphere(
     height: Interval,
     elevation: Interval,
 ) -> Result<Interval, CenterCertificateError> {
-    if height.lower() <= 0.0 || height.upper() >= 10_000.0 || elevation.lower() <= 0.0 {
+    if height.upper() < TROPOSPHERE_HEIGHT_CUTOFF_M {
+        return Ok(Interval::point(0.0));
+    }
+    if height.lower() < TROPOSPHERE_HEIGHT_CUTOFF_M
+        || height.upper() >= 10_000.0
+        || elevation.lower() <= 0.0
+    {
         return Err(CenterCertificateError::TroposphereDomain);
     }
-    let pressure_factor = Interval::point(1.0).sub(Interval::point(2.2557e-5).mul(height));
+    // RTKLIB applies max(h, 0) in the valid troposphere branch. This clamp is
+    // continuous and 1-Lipschitz, including an enclosure that crosses sea level.
+    let atmosphere_height = Interval::new(height.lower().max(0.0), height.upper().max(0.0));
+    let pressure_factor =
+        Interval::point(1.0).sub(Interval::point(2.2557e-5).mul(atmosphere_height));
     if pressure_factor.lower() <= 0.0 {
         return Err(CenterCertificateError::TroposphereDomain);
     }
     let pressure =
         Interval::point(1013.25).mul(pressure_factor.ln().mul(Interval::point(5.2568)).exp());
-    let temperature = Interval::point(288.16).sub(Interval::point(0.0065).mul(height));
+    let temperature = Interval::point(288.16).sub(Interval::point(0.0065).mul(atmosphere_height));
     if temperature.lower() <= 38.45 {
         return Err(CenterCertificateError::TroposphereDomain);
     }
@@ -1177,7 +1321,7 @@ fn rtklib_troposphere(
         .mul(vapor_exponent.exp());
     let denominator = Interval::point(1.0)
         .sub(Interval::point(0.00266).mul(Interval::point(2.0).mul(latitude).cos()))
-        .sub(Interval::point(2.8e-7).mul(height));
+        .sub(Interval::point(2.8e-7).mul(atmosphere_height));
     if denominator.lower() <= 0.0 {
         return Err(CenterCertificateError::TroposphereDomain);
     }

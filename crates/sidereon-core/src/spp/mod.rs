@@ -297,13 +297,16 @@ pub struct SolutionMetadata {
     /// RTKLIB least-squares step taken between them.
     pub iterations: usize,
     /// Whether the solve converged: it ended with [`Status::SelectionSettled`],
-    /// not with a robust budget spent ([`Status::OuterBudgetExhausted`]) or a
-    /// robust solve whose last trust-region solve spent its evaluations.
+    /// not with a robust budget spent ([`Status::OuterBudgetExhausted`]), a
+    /// robust reweighting that cycled ([`Status::OuterOscillation`]) or a robust
+    /// solve whose last trust-region solve spent its evaluations.
     pub converged: bool,
     /// How the solve ended: [`Status::SelectionSettled`] when its last
     /// least-squares step fell below [`SELECTION_STEP_TOL_M`] at a selection that
-    /// held (and, on the robust path, its position and selection then settled);
-    /// [`Status::OuterBudgetExhausted`] when the robust budget ran out first; the
+    /// held (and, on the robust path, its keyed position-and-clock state and
+    /// selection then settled);
+    /// [`Status::OuterBudgetExhausted`] when the robust budget ran out first;
+    /// [`Status::OuterOscillation`] when the robust reweighting cycled; the
     /// last trust-region solve's own status when that solve spent its evaluations.
     pub status: Status,
     /// Whether the ionosphere correction was applied.
@@ -543,9 +546,14 @@ impl Default for SurfaceMet {
 /// state and weight it as `weight * huber(r_i / s)`, where `weight` is the inverse
 /// pseudorange variance, `r_i` is the
 /// unweighted residual at that state and `s` is a floored MAD scale. The loop
-/// settles when the position moves less than `outer_tol_m` and the selection at
-/// the new state is the one solved with; after `max_outer` total solves without
-/// settling it ends with [`Status::OuterBudgetExhausted`] and has not converged. With
+/// settles when the keyed position and receiver clocks move less than
+/// `outer_tol_m` in their combined Euclidean norm and the selection at the new
+/// state is the one solved with; after `max_outer` total solves without
+/// settling it ends with [`Status::OuterBudgetExhausted`] and has not converged; one
+/// whose selection, MAD scale and effective weights repeat while its position
+/// and clocks return within tolerance, with non-shrinking parameter motion,
+/// ends early with [`Status::OuterOscillation`] (see [`OuterCycleDetector`]) and
+/// has not converged. With
 /// `robust = None` the solve is byte-identical to the static variance-weighted
 /// solve. `Default` matches the `DEFAULT_*` config constants.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -558,7 +566,7 @@ pub struct RobustConfig {
     pub scale_floor_m: f64,
     /// Maximum total outer solves (the warm start plus reweighted resolves).
     pub max_outer: usize,
-    /// Outer-loop position L2 step tolerance (m).
+    /// Outer-loop combined position-and-clock parameter-step tolerance (m).
     pub outer_tol_m: f64,
 }
 
@@ -1391,175 +1399,168 @@ fn sat_model_checked_with_memos(
 
     // Transmission epoch, selected by the range recipe.
     // `_t_tx` is read only by the test-build trace fields below.
-    let (
-        sat_pos,
-        dt_sat,
-        tau,
-        group_delay,
-        t_state,
-        _t_tx,
-        ephemeris_variance,
-        relativity_epoch,
-    ) = match env.model.range {
-        RangeRecipe::RtklibSatpossPseudorange => {
-            // RTKLIB `satposs`: the clock read at `t_rx - P / c` (`ephclk`) places the
-            // transmission epoch `t_rx - P / c - dts`, and the state is read there. No
-            // light-time iteration: the pseudorange carries the flight time and the
-            // receiver clock offset, so the epoch does not depend on the receiver state
-            // and every evaluation of a solve reads the same two epochs. RTKLIB reads a
-            // zero pseudorange as none and places no satellite for it.
-            let p_place_m = env
-                .placement_pseudoranges_m
-                .and_then(|placement| placement.get(&sat).copied())
-                .unwrap_or(p_meas_m);
-            if !p_place_m.is_finite() || p_place_m <= 0.0 {
-                return Err(SatModelGap::Other);
-            }
-            let placement_pseudorange_bits = p_place_m.to_bits();
-            let clock_epoch_query = if let Some(query_memo) = query_memo {
-                query_memo.clock_epoch(
-                    sat,
-                    selection_epoch,
-                    placement_pseudorange_bits,
-                    p_place_m / C_M_S,
-                )
-            } else {
-                selection_epoch
-                    .clone()
-                    .checked_sub_binary_seconds(p_place_m / C_M_S)
-                    .map(std::rc::Rc::new)
-            }
-            .ok_or(SatModelGap::Other)?;
-            let clock_epoch = clock_epoch_query.as_ref();
-            let placement_clock_s = env
-                .eph
-                .try_transmit_epoch_clock_at_epoch_query(sat, clock_epoch, selection_epoch)
-                .ok()
-                .flatten()
-                .ok_or(SatModelGap::Other)?
-                .value;
-            let t_tx_query = if let Some(query_memo) = query_memo {
-                query_memo.transmit_epoch(
-                    sat,
-                    selection_epoch,
-                    placement_pseudorange_bits,
-                    clock_epoch,
-                    placement_clock_s.to_bits(),
-                    placement_clock_s,
-                )
-            } else {
-                clock_epoch
-                    .clone()
-                    .checked_sub_binary_seconds(placement_clock_s)
-                    .map(std::rc::Rc::new)
-            }
-            .ok_or(SatModelGap::Other)?;
-            let t_tx = t_tx_query.as_ref();
-            let (pos, clk, gd) = env
-                .eph
-                .try_position_clock_group_delay_selected_at_epoch_query(
-                    sat,
-                    t_tx,
-                    selection_epoch,
-                )
-                .ok()
-                .flatten()
-                .ok_or_else(|| state_gap_at_epoch_query(env, sat, t_tx, selection_epoch))?
-                .value;
-            let t_tx_j2000_s = t_tx.j2000_seconds();
-            let ephemeris_variance = env.eph.ephemeris_variance_at_epoch_query(
-                sat,
-                t_tx,
-                selection_epoch,
-            );
-            // The flight time a closed-form rotation turns the satellite through, when a
-            // recipe pairs one with this placement: the geometric range over `c`. RTKLIB
-            // `geodist` rotates nothing and takes the first-order Sagnac term instead.
-            let tau = geometric_range(SagnacRecipe::Off, pos, rx_ecef_m, OMEGA_E_DOT_RAD_S, C_M_S)
-                / C_M_S;
-            (
-                pos,
-                clk,
-                tau,
-                gd,
-                t_tx_j2000_s,
-                t_tx_j2000_s,
-                Some(ephemeris_variance),
-                Some(t_tx_query),
-            )
-        }
-        RangeRecipe::SppMeasuredPseudorangeFixedIter => {
-            // Geometric light time from the receiver's time tag: fixed iteration count,
-            // no inner convergence test; seed tau from the measured pseudorange. The
-            // external SPP references were computed this way; it misses the receiver
-            // clock offset.
-            let mut tau = p_meas_m / C_M_S;
-            let mut t_tx = env.t_rx_j2000_s - tau;
-            let mut sat_pos = [0.0f64; 3];
-            let mut dt_sat = 0.0f64;
-            let mut group_delay = None;
-            let mut t_state = t_tx;
-            for _ in 0..TRANSMIT_TIME_ITERATIONS {
-                let (pos, clk, gd) = env
-                    .eph
-                    .position_clock_group_delay_at_j2000_s(sat, t_tx)
-                    .ok_or_else(|| state_gap(env, sat, t_tx, t_tx))?;
-                sat_pos = pos;
-                dt_sat = clk;
-                group_delay = gd;
-                t_state = t_tx;
-                // Pre-rotation geometric range through the shared substrate (the
-                // closed-form recipe = plain `norm3(sub3(sat, recv))`).
-                let rho0 = geometric_range(sagnac, sat_pos, rx_ecef_m, OMEGA_E_DOT_RAD_S, C_M_S);
-                tau = rho0 / C_M_S;
-                t_tx = env.t_rx_j2000_s - tau;
-            }
-            (sat_pos, dt_sat, tau, group_delay, t_state, t_tx, None, None)
-        }
-        RangeRecipe::CanonicalLightTimeClosedFormSagnac => {
-            // Full iterative light-time (the IERS-rigorous op-order): iterate the
-            // transmit epoch until the signal travel time stops changing, rather
-            // than a fixed truncation. The reception epoch is the receiver's time tag
-            // less the receiver clock offset of the state, `b / c`, so the fixed point
-            // `t_tx = (t_rx - b / c) - rho(t_tx) / c` is the true transmission epoch;
-            // the receiver's time tag alone would move each satellite by `v · b / c`.
-            // Seeded, like the reference, from the measured pseudorange; the range is
-            // the closed-form Sagnac range (never a first-order scalar Sagnac). The
-            // satellite clock's relativistic periodic term is applied once, after the
-            // iteration: a broadcast clock carries it (`F*e*sqrt(A)*sin(E)`), and a
-            // precise product clock takes the `peph2pos` term the source returns.
-            let t_rx_true = env.t_rx_j2000_s - b_m / C_M_S;
-            let mut tau = p_meas_m / C_M_S;
-            let mut t_tx = env.t_rx_j2000_s - tau;
-            let mut sat_pos = [0.0f64; 3];
-            let mut dt_sat = 0.0f64;
-            let mut group_delay = None;
-            let mut t_state = t_tx;
-            let mut prev_tau = f64::INFINITY;
-            for _ in 0..CANONICAL_LIGHT_TIME_MAX_ITERS {
-                let (pos, clk, gd) = env
-                    .eph
-                    .position_clock_group_delay_at_j2000_s(sat, t_tx)
-                    .ok_or_else(|| state_gap(env, sat, t_tx, t_tx))?;
-                sat_pos = pos;
-                dt_sat = clk;
-                group_delay = gd;
-                t_state = t_tx;
-                let rho0 = geometric_range(sagnac, sat_pos, rx_ecef_m, OMEGA_E_DOT_RAD_S, C_M_S);
-                tau = rho0 / C_M_S;
-                t_tx = t_rx_true - tau;
-                if (tau - prev_tau).abs() <= CANONICAL_LIGHT_TIME_TOL_S {
-                    break;
+    let (sat_pos, dt_sat, tau, group_delay, t_state, _t_tx, ephemeris_variance, relativity_epoch) =
+        match env.model.range {
+            RangeRecipe::RtklibSatpossPseudorange => {
+                // RTKLIB `satposs`: the clock read at `t_rx - P / c` (`ephclk`) places the
+                // transmission epoch `t_rx - P / c - dts`, and the state is read there. No
+                // light-time iteration: the pseudorange carries the flight time and the
+                // receiver clock offset, so the epoch does not depend on the receiver state
+                // and every evaluation of a solve reads the same two epochs. RTKLIB reads a
+                // zero pseudorange as none and places no satellite for it.
+                let p_place_m = env
+                    .placement_pseudoranges_m
+                    .and_then(|placement| placement.get(&sat).copied())
+                    .unwrap_or(p_meas_m);
+                if !p_place_m.is_finite() || p_place_m <= 0.0 {
+                    return Err(SatModelGap::Other);
                 }
-                prev_tau = tau;
+                let placement_pseudorange_bits = p_place_m.to_bits();
+                let clock_epoch_query = if let Some(query_memo) = query_memo {
+                    query_memo.clock_epoch(
+                        sat,
+                        selection_epoch,
+                        placement_pseudorange_bits,
+                        p_place_m / C_M_S,
+                    )
+                } else {
+                    selection_epoch
+                        .clone()
+                        .checked_sub_binary_seconds(p_place_m / C_M_S)
+                        .map(std::rc::Rc::new)
+                }
+                .ok_or(SatModelGap::Other)?;
+                let clock_epoch = clock_epoch_query.as_ref();
+                let placement_clock_s = env
+                    .eph
+                    .try_transmit_epoch_clock_at_epoch_query(sat, clock_epoch, selection_epoch)
+                    .ok()
+                    .flatten()
+                    .ok_or(SatModelGap::Other)?
+                    .value;
+                let t_tx_query = if let Some(query_memo) = query_memo {
+                    query_memo.transmit_epoch(
+                        sat,
+                        selection_epoch,
+                        placement_pseudorange_bits,
+                        clock_epoch,
+                        placement_clock_s.to_bits(),
+                        placement_clock_s,
+                    )
+                } else {
+                    clock_epoch
+                        .clone()
+                        .checked_sub_binary_seconds(placement_clock_s)
+                        .map(std::rc::Rc::new)
+                }
+                .ok_or(SatModelGap::Other)?;
+                let t_tx = t_tx_query.as_ref();
+                let (pos, clk, gd) = env
+                    .eph
+                    .try_position_clock_group_delay_selected_at_epoch_query(
+                        sat,
+                        t_tx,
+                        selection_epoch,
+                    )
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| state_gap_at_epoch_query(env, sat, t_tx, selection_epoch))?
+                    .value;
+                let t_tx_j2000_s = t_tx.j2000_seconds();
+                let ephemeris_variance =
+                    env.eph
+                        .ephemeris_variance_at_epoch_query(sat, t_tx, selection_epoch);
+                // The flight time a closed-form rotation turns the satellite through, when a
+                // recipe pairs one with this placement: the geometric range over `c`. RTKLIB
+                // `geodist` rotates nothing and takes the first-order Sagnac term instead.
+                let tau =
+                    geometric_range(SagnacRecipe::Off, pos, rx_ecef_m, OMEGA_E_DOT_RAD_S, C_M_S)
+                        / C_M_S;
+                (
+                    pos,
+                    clk,
+                    tau,
+                    gd,
+                    t_tx_j2000_s,
+                    t_tx_j2000_s,
+                    Some(ephemeris_variance),
+                    Some(t_tx_query),
+                )
             }
-            (sat_pos, dt_sat, tau, group_delay, t_state, t_tx, None, None)
-        }
-        RangeRecipe::ObservableRoundedMicrosecondFixedIter
-        | RangeRecipe::RtkProvidedTxFirstOrderSagnac => unreachable!(
-            "the SPP measurement model runs only the RTKLIB placement or a geometric light-time recipe"
-        ),
-    };
+            RangeRecipe::SppMeasuredPseudorangeFixedIter => {
+                // Geometric light time from the receiver's time tag: fixed iteration count,
+                // no inner convergence test; seed tau from the measured pseudorange. The
+                // external SPP references were computed this way; it misses the receiver
+                // clock offset.
+                let mut tau = p_meas_m / C_M_S;
+                let mut t_tx = env.t_rx_j2000_s - tau;
+                let mut sat_pos = [0.0f64; 3];
+                let mut dt_sat = 0.0f64;
+                let mut group_delay = None;
+                let mut t_state = t_tx;
+                for _ in 0..TRANSMIT_TIME_ITERATIONS {
+                    let (pos, clk, gd) = env
+                        .eph
+                        .position_clock_group_delay_at_j2000_s(sat, t_tx)
+                        .ok_or_else(|| state_gap(env, sat, t_tx, t_tx))?;
+                    sat_pos = pos;
+                    dt_sat = clk;
+                    group_delay = gd;
+                    t_state = t_tx;
+                    // Pre-rotation geometric range through the shared substrate (the
+                    // closed-form recipe = plain `norm3(sub3(sat, recv))`).
+                    let rho0 =
+                        geometric_range(sagnac, sat_pos, rx_ecef_m, OMEGA_E_DOT_RAD_S, C_M_S);
+                    tau = rho0 / C_M_S;
+                    t_tx = env.t_rx_j2000_s - tau;
+                }
+                (sat_pos, dt_sat, tau, group_delay, t_state, t_tx, None, None)
+            }
+            RangeRecipe::CanonicalLightTimeClosedFormSagnac => {
+                // Full iterative light-time (the IERS-rigorous op-order): iterate the
+                // transmit epoch until the signal travel time stops changing, rather
+                // than a fixed truncation. The reception epoch is the receiver's time tag
+                // less the receiver clock offset of the state, `b / c`, so the fixed point
+                // `t_tx = (t_rx - b / c) - rho(t_tx) / c` is the true transmission epoch;
+                // the receiver's time tag alone would move each satellite by `v · b / c`.
+                // Seeded, like the reference, from the measured pseudorange; the range is
+                // the closed-form Sagnac range (never a first-order scalar Sagnac). The
+                // satellite clock's relativistic periodic term is applied once, after the
+                // iteration: a broadcast clock carries it (`F*e*sqrt(A)*sin(E)`), and a
+                // precise product clock takes the `peph2pos` term the source returns.
+                let t_rx_true = env.t_rx_j2000_s - b_m / C_M_S;
+                let mut tau = p_meas_m / C_M_S;
+                let mut t_tx = env.t_rx_j2000_s - tau;
+                let mut sat_pos = [0.0f64; 3];
+                let mut dt_sat = 0.0f64;
+                let mut group_delay = None;
+                let mut t_state = t_tx;
+                let mut prev_tau = f64::INFINITY;
+                for _ in 0..CANONICAL_LIGHT_TIME_MAX_ITERS {
+                    let (pos, clk, gd) = env
+                        .eph
+                        .position_clock_group_delay_at_j2000_s(sat, t_tx)
+                        .ok_or_else(|| state_gap(env, sat, t_tx, t_tx))?;
+                    sat_pos = pos;
+                    dt_sat = clk;
+                    group_delay = gd;
+                    t_state = t_tx;
+                    let rho0 =
+                        geometric_range(sagnac, sat_pos, rx_ecef_m, OMEGA_E_DOT_RAD_S, C_M_S);
+                    tau = rho0 / C_M_S;
+                    t_tx = t_rx_true - tau;
+                    if (tau - prev_tau).abs() <= CANONICAL_LIGHT_TIME_TOL_S {
+                        break;
+                    }
+                    prev_tau = tau;
+                }
+                (sat_pos, dt_sat, tau, group_delay, t_state, t_tx, None, None)
+            }
+            RangeRecipe::ObservableRoundedMicrosecondFixedIter
+            | RangeRecipe::RtkProvidedTxFirstOrderSagnac => unreachable!(
+                "the SPP measurement model runs only the RTKLIB placement or a geometric light-time recipe"
+            ),
+        };
 
     // Single-frequency group delay. The source's clock is the one RTKLIB `satposs`
     // returns, without TGD or BGD; RTKLIB `pntpos` applies the delay to the
@@ -2290,7 +2291,7 @@ pub fn solve_with_exact_epoch_and_policy(
                 }) {
                     Ok(solution) => candidates.push(solution),
                     Err(error @ SolvePolicyError::Solve(SppError::Ut1OutsideCoverage(_))) => {
-                        return Err(error)
+                        return Err(error);
                     }
                     Err(error) => last_error = error,
                 }
@@ -2609,6 +2610,14 @@ impl IterateState {
             .iter()
             .find(|(s, _)| *s == system)
             .map_or(self.reference_clock_m, |&(_, clock)| clock)
+    }
+
+    pub(crate) fn explicit_clock_values(&self) -> &[(GnssSystem, f64)] {
+        &self.clocks_m
+    }
+
+    pub(crate) fn reference_clock_value_m(&self) -> f64 {
+        self.reference_clock_m
     }
 
     /// The parameter vector `[x, y, z, clk_0, clk_1, ...]` for `systems`.
@@ -3022,6 +3031,162 @@ struct FinalSet {
     residuals_m: Vec<f64>,
 }
 
+/// Detects a repeated robust reweighting state with non-shrinking motion.
+/// Position and clock coordinates must return within the configured outer
+/// tolerance, while the selected observations, MAD scale, and effective
+/// weights must repeat exactly. The latter are the inputs that determine the
+/// next IRLS solve; position alone is not enough to establish a repeated state.
+pub(crate) struct OuterCycleDetector<K> {
+    states: Vec<OuterState<K>>,
+}
+
+pub(crate) struct OuterCycleSample<K> {
+    pub(crate) position_m: [f64; 3],
+    pub(crate) clocks_m: Vec<(OuterClockKey, f64)>,
+    pub(crate) selection: K,
+    pub(crate) scale_m: f64,
+    pub(crate) weights: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OuterClockKey {
+    Reference,
+    System(GnssSystem),
+    EpochReference {
+        epoch_index: usize,
+    },
+    EpochSystem {
+        epoch_index: usize,
+        system: GnssSystem,
+    },
+}
+
+struct OuterState<K> {
+    sample: OuterCycleSample<K>,
+    /// The step that led here; `None` for the warm start.
+    step_m: Option<f64>,
+}
+
+impl<K: PartialEq> OuterCycleDetector<K> {
+    /// Start from the warm-started state the reweighting begins at.
+    pub(crate) fn new(sample: OuterCycleSample<K>) -> Self {
+        Self {
+            states: vec![OuterState {
+                sample,
+                step_m: None,
+            }],
+        }
+    }
+
+    /// Record the state an outer solve reached, by a step of `step_m`, and
+    /// report whether it closes a cycle.
+    pub(crate) fn closes_cycle(
+        &mut self,
+        sample: OuterCycleSample<K>,
+        step_m: f64,
+        tol_m: f64,
+    ) -> bool {
+        let closes = step_m.is_finite()
+            && self.states.iter().rev().skip(1).any(|earlier| {
+                let d = [
+                    sample.position_m[0] - earlier.sample.position_m[0],
+                    sample.position_m[1] - earlier.sample.position_m[1],
+                    sample.position_m[2] - earlier.sample.position_m[2],
+                ];
+                let clock_distance = if earlier.sample.clocks_m.len() == sample.clocks_m.len()
+                    && earlier
+                        .sample
+                        .clocks_m
+                        .iter()
+                        .zip(&sample.clocks_m)
+                        .all(|((left_key, _), (right_key, _))| left_key == right_key)
+                {
+                    earlier
+                        .sample
+                        .clocks_m
+                        .iter()
+                        .zip(&sample.clocks_m)
+                        .map(|((_, a), (_, b))| (a - b) * (a - b))
+                        .sum::<f64>()
+                        .sqrt()
+                } else {
+                    f64::INFINITY
+                };
+                earlier.sample.selection == sample.selection
+                    && earlier.sample.scale_m.to_bits() == sample.scale_m.to_bits()
+                    && earlier.sample.weights.len() == sample.weights.len()
+                    && earlier
+                        .sample
+                        .weights
+                        .iter()
+                        .zip(&sample.weights)
+                        .all(|(a, b)| a.to_bits() == b.to_bits())
+                    && (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] + clock_distance * clock_distance)
+                        .sqrt()
+                        < tol_m
+                    && earlier
+                        .step_m
+                        .is_some_and(|earlier_step| step_m >= earlier_step)
+            });
+        self.states.push(OuterState {
+            sample,
+            step_m: Some(step_m),
+        });
+        closes
+    }
+}
+
+pub(crate) fn outer_state_step_m(
+    previous_position_m: [f64; 3],
+    previous_clocks_m: &[(OuterClockKey, f64)],
+    position_m: [f64; 3],
+    clocks_m: &[(OuterClockKey, f64)],
+) -> f64 {
+    if previous_clocks_m.len() != clocks_m.len()
+        || previous_clocks_m
+            .iter()
+            .zip(clocks_m)
+            .any(|((left_key, _), (right_key, _))| left_key != right_key)
+    {
+        return f64::INFINITY;
+    }
+    let position_sq = (0..3)
+        .map(|axis| {
+            let delta = position_m[axis] - previous_position_m[axis];
+            delta * delta
+        })
+        .sum::<f64>();
+    let clocks_sq = previous_clocks_m
+        .iter()
+        .zip(clocks_m)
+        .map(|((_, before), (_, after))| {
+            let delta = after - before;
+            delta * delta
+        })
+        .sum::<f64>();
+    (position_sq + clocks_sq).sqrt()
+}
+
+pub(crate) fn outer_state_settled(
+    state_step_m: f64,
+    selection_stable: bool,
+    tolerance_m: f64,
+) -> bool {
+    selection_stable && state_step_m < tolerance_m
+}
+
+pub(crate) fn spp_cycle_clocks(state: &IterateState) -> Vec<(OuterClockKey, f64)> {
+    if state.clocks_m.is_empty() {
+        vec![(OuterClockKey::Reference, state.reference_clock_m)]
+    } else {
+        state
+            .clocks_m
+            .iter()
+            .map(|&(system, clock_m)| (OuterClockKey::System(system), clock_m))
+            .collect()
+    }
+}
+
 fn solve_tracked(
     eph: &dyn EphemerisSource,
     inputs: &SolveInputs,
@@ -3193,9 +3358,9 @@ fn solve_tracked(
     // current state, derives a floored MAD scale from its residuals, builds the
     // effective weight vector `weight * huber(r_i / s)` index-aligned
     // to that selection, and re-solves from the current state. It settles when the
-    // position step drops below `outer_tol_m` and the selection at the new state
-    // is the one solved with; a solve whose budget runs out first ends with
-    // [`Status::OuterBudgetExhausted`] and has not converged. The reported set is
+    // keyed position-and-clock step drops below `outer_tol_m` and the selection
+    // at the new state is the one solved with; a solve whose budget runs out
+    // first ends with [`Status::OuterBudgetExhausted`] and has not converged. The reported set is
     // the one the last solve used, at the state it reached, with its effective
     // weights.
     if let Some(rc) = inputs.robust {
@@ -3209,6 +3374,23 @@ fn solve_tracked(
             placement_query_memo,
         )?;
         let mut settled = false;
+        let mut oscillated = false;
+        let initial_scale =
+            mad_scale(&sel.residuals_m, rc.scale_floor_m).map_err(map_robust_error)?;
+        let initial_weights: Vec<f64> = sel
+            .residuals_m
+            .iter()
+            .zip(sel.weights.iter())
+            .map(|(&r, &base)| base * huber_weight(r / initial_scale, rc.huber_k))
+            .collect();
+        let initial_clocks = spp_cycle_clocks(&state);
+        let mut cycles = OuterCycleDetector::new(OuterCycleSample {
+            position_m: state.rx_ecef_m,
+            clocks_m: initial_clocks,
+            selection: sel.used.clone(),
+            scale_m: initial_scale,
+            weights: initial_weights,
+        });
         // How the last solve ended; a least-squares step ends at its own target.
         let mut last_inner = Status::SelectionSettled;
         // After a coverage loss the selection at the last accepted iterate, when it
@@ -3223,6 +3405,7 @@ fn solve_tracked(
                 .map(|(&r, &bw)| bw * huber_weight(r / scale, rc.huber_k))
                 .collect();
             let prev_rx = state.rx_ecef_m;
+            let prev_clocks = spp_cycle_clocks(&state);
             outer_iterations += 1;
             if step_next {
                 step_next = false;
@@ -3291,11 +3474,10 @@ fn solve_tracked(
                     }
                 }
             }
-            // Position L2 step between successive outer solves.
-            let dx = state.rx_ecef_m[0] - prev_rx[0];
-            let dy = state.rx_ecef_m[1] - prev_rx[1];
-            let dz = state.rx_ecef_m[2] - prev_rx[2];
-            let dpos = (dx * dx + dy * dy + dz * dz).sqrt();
+            // Full keyed position-and-clock step between outer solves.
+            let solved_clocks = spp_cycle_clocks(&state);
+            let state_step =
+                outer_state_step_m(prev_rx, &prev_clocks, state.rx_ecef_m, &solved_clocks);
             let (next, next_systems) = select_at_state(
                 eph,
                 inputs,
@@ -3339,8 +3521,29 @@ fn solve_tracked(
             };
             sel = next;
             systems = next_systems;
-            if dpos < rc.outer_tol_m && same_set {
+            if outer_state_settled(state_step, same_set, rc.outer_tol_m) {
                 settled = true;
+                break;
+            }
+            let scale = mad_scale(&sel.residuals_m, rc.scale_floor_m).map_err(map_robust_error)?;
+            let weights: Vec<f64> = sel
+                .residuals_m
+                .iter()
+                .zip(sel.weights.iter())
+                .map(|(&r, &base)| base * huber_weight(r / scale, rc.huber_k))
+                .collect();
+            if cycles.closes_cycle(
+                OuterCycleSample {
+                    position_m: state.rx_ecef_m,
+                    clocks_m: solved_clocks,
+                    selection: sel.used.clone(),
+                    scale_m: scale,
+                    weights,
+                },
+                state_step,
+                rc.outer_tol_m,
+            ) {
+                oscillated = true;
                 break;
             }
         }
@@ -3350,6 +3553,8 @@ fn solve_tracked(
             last_inner
         } else if settled {
             Status::SelectionSettled
+        } else if oscillated {
+            Status::OuterOscillation
         } else {
             Status::OuterBudgetExhausted
         };
@@ -3669,7 +3874,7 @@ fn solve_coarse(
             // A UT1 refusal is a property of the ephemeris source at this
             // epoch, not of the seed, so no other seed can avoid it.
             Err(error @ SolvePolicyError::Solve(SppError::Ut1OutsideCoverage(_))) => {
-                return Err(error)
+                return Err(error);
             }
             Err(error) => last_error = error,
         }
@@ -3698,13 +3903,17 @@ fn coarse_seeds(n: usize) -> Vec<[f64; 4]> {
 }
 
 /// A seed's solution is a candidate when its solve converged, or when it is a
-/// robust solve whose reweighting spent its budget: the reweighting starts only
+/// robust solve whose reweighting spent its budget or stopped cycling: the reweighting starts only
 /// from a settled solve, which converged, so the seed reached the solution's
 /// basin, and the position is where the reweighting left it. Every seed shares the
 /// robust configuration, so refusing these would leave a robust coarse search
 /// with no candidate where the plain solve returns one.
 fn coarse_candidate_ended_well(status: Status) -> bool {
-    solve_converged(status) || status == Status::OuterBudgetExhausted
+    solve_converged(status)
+        || matches!(
+            status,
+            Status::OuterBudgetExhausted | Status::OuterOscillation
+        )
 }
 
 fn select_coarse_candidate(candidates: &[ReceiverSolution]) -> Option<&ReceiverSolution> {
