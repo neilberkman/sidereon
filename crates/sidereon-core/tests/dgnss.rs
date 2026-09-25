@@ -1,6 +1,7 @@
 #![cfg(sidereon_repo_tests)]
 
 use serde_json::Value;
+use sidereon_core::astro::time::ExactEpoch;
 use sidereon_core::constants::C_M_S;
 use sidereon_core::dgnss::{
     apply_corrections, pseudorange_corrections, solve_position, CodeObservation, DgnssError,
@@ -12,12 +13,16 @@ use sidereon_core::observables::{
     PredictOptions,
 };
 use sidereon_core::positioning::{
-    solve, Corrections, KlobucharCoeffs, Observation, SolveInputs, SurfaceMet,
+    solve, ClockRelativity, Corrections, EphemerisSource, KlobucharCoeffs, Observation,
+    SolveInputs, SurfaceMet,
 };
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 
 const GOLDEN: &str = include_str!("fixtures/sidereon_gnss_application_golden.json");
 const T_RX_J2000_S: f64 = 646_272_000.0;
+
+#[path = "support/dgnss_accuracy.rs"]
+mod dgnss_accuracy;
 
 struct ClocklessSatSource<'a> {
     inner: &'a Sp3,
@@ -175,35 +180,112 @@ fn visible_gps(sp3: &Sp3, station: [f64; 3]) -> Vec<GnssSatelliteId> {
 /// record selected at the reception epoch.
 fn placed_base_model_m(
     source: &dyn ObservableEphemerisSource,
-    sat: GnssSatelliteId,
+    satellite: GnssSatelliteId,
     station: [f64; 3],
-    t_rx_j2000_s: f64,
+    receive_seconds: f64,
     pseudorange_m: f64,
 ) -> f64 {
-    let t_tx = pseudorange_transmit_epoch_j2000_s(source, sat, t_rx_j2000_s, pseudorange_m)
-        .expect("placed transmission epoch");
-    let geometry = pseudorange_transmit_geometry(source, sat, station, t_rx_j2000_s, t_tx, true)
-        .expect("placed geometry");
-    let sat_clock_s = geometry.sat_clock_s.expect("satellite clock");
-    let sat_clock_s = match source.clock_relativity_s(sat, t_tx) {
-        sidereon_core::positioning::ClockRelativity::NotApplicable => sat_clock_s,
-        sidereon_core::positioning::ClockRelativity::Term(relativity_s) => {
-            sat_clock_s + relativity_s
-        }
-        sidereon_core::positioning::ClockRelativity::Unavailable => {
-            panic!("{sat}: no peph2pos term")
-        }
+    let transmit_seconds =
+        pseudorange_transmit_epoch_j2000_s(source, satellite, receive_seconds, pseudorange_m)
+            .expect("placed transmission epoch");
+    let geometry = pseudorange_transmit_geometry(
+        source,
+        satellite,
+        station,
+        receive_seconds,
+        transmit_seconds,
+        true,
+    )
+    .expect("placed geometry");
+    let satellite_clock = geometry.sat_clock_s.expect("satellite clock");
+    let satellite_clock = match source.clock_relativity_s(satellite, transmit_seconds) {
+        ClockRelativity::NotApplicable => satellite_clock,
+        ClockRelativity::Term(term) => satellite_clock + term,
+        ClockRelativity::Unavailable => panic!("{satellite}: no peph2pos term"),
     };
     let group_delay = source
-        .try_observable_state_group_delay_selected_at_j2000_s(sat, t_tx, t_rx_j2000_s)
+        .try_observable_state_group_delay_selected_at_j2000_s(
+            satellite,
+            transmit_seconds,
+            receive_seconds,
+        )
         .expect("placed state")
         .value
         .1;
-    let sat_clock_s = match group_delay {
+    let satellite_clock = match group_delay {
+        Some(delay) => satellite_clock - delay,
+        None => satellite_clock,
+    };
+    geometry.geometric_range_m - C_M_S * satellite_clock
+}
+
+fn exact_placed_state<S: EphemerisSource + ?Sized>(
+    source: &S,
+    sat: GnssSatelliteId,
+    t_rx_j2000_s: f64,
+    pseudorange_m: f64,
+) -> ([f64; 3], f64, f64) {
+    let receive_epoch =
+        ExactEpoch::from_binary_j2000_seconds(t_rx_j2000_s).expect("finite receive epoch");
+    let clock_epoch = receive_epoch
+        .clone()
+        .checked_sub_binary_seconds(pseudorange_m / C_M_S)
+        .expect("finite clock epoch");
+    let placement_clock_s = source
+        .try_transmit_epoch_clock_at_epoch_query(sat, &clock_epoch, &receive_epoch)
+        .expect("placement clock query")
+        .expect("satellite clock")
+        .value;
+    let transmit_epoch = clock_epoch
+        .checked_sub_binary_seconds(placement_clock_s)
+        .expect("finite transmit epoch");
+    let (satellite_position_m, sat_clock_s, group_delay_s) = source
+        .try_position_clock_group_delay_selected_at_epoch_query(
+            sat,
+            &transmit_epoch,
+            &receive_epoch,
+        )
+        .expect("placed state query")
+        .expect("satellite state")
+        .value;
+    let sat_clock_s = match source.clock_relativity_for_state_at_epoch_query(
+        sat,
+        &transmit_epoch,
+        satellite_position_m,
+    ) {
+        ClockRelativity::NotApplicable => sat_clock_s,
+        ClockRelativity::Term(relativity_s) => sat_clock_s + relativity_s,
+        ClockRelativity::Unavailable => panic!("{sat}: no peph2pos term"),
+    };
+    let sat_clock_s = match group_delay_s {
         Some(group_delay_s) => sat_clock_s - group_delay_s,
         None => sat_clock_s,
     };
-    geometry.geometric_range_m - C_M_S * sat_clock_s
+    let variance = source.ephemeris_variance_at_epoch_query(sat, &transmit_epoch, &receive_epoch);
+    (satellite_position_m, sat_clock_s, variance)
+}
+
+fn exact_placed_model_m(
+    source: &Sp3,
+    satellite: GnssSatelliteId,
+    station: [f64; 3],
+    pseudorange_m: f64,
+) -> f64 {
+    let (satellite_position_m, sat_clock_s, _) =
+        exact_placed_state(source, satellite, T_RX_J2000_S, pseudorange_m);
+    let line_of_sight_m = [
+        satellite_position_m[0] - station[0],
+        satellite_position_m[1] - station[1],
+        satellite_position_m[2] - station[2],
+    ];
+    let geometric_range_m = libm::sqrt(
+        line_of_sight_m[0] * line_of_sight_m[0]
+            + line_of_sight_m[1] * line_of_sight_m[1]
+            + line_of_sight_m[2] * line_of_sight_m[2],
+    ) + sidereon_core::constants::OMEGA_E_DOT_RAD_S
+        * (satellite_position_m[0] * station[1] - satellite_position_m[1] * station[0])
+        / C_M_S;
+    geometric_range_m - C_M_S * sat_clock_s
 }
 
 /// A pseudorange the positioning models reproduce: the fixed point of
@@ -242,15 +324,16 @@ fn synth(
     station: [f64; 3],
     rx_clock_s: f64,
 ) -> Vec<CodeObservation> {
-    // The synthetic pseudorange carries the satellite clock the positioning models use,
-    // the SP3 clock with the relativistic term RTKLIB `peph2pos` applies, and places its
-    // transmission epoch as they place it.
     sats.iter()
         .map(|sat| {
-            CodeObservation::new(
-                sat.to_string(),
-                synth_placed(sp3, *sat, station, T_RX_J2000_S, rx_clock_s, 0.0),
-            )
+            let seed = predict(sp3, *sat, station, T_RX_J2000_S, PredictOptions::default())
+                .expect("predict visible satellite");
+            let mut pseudorange_m = seed.geometric_range_m + C_M_S * rx_clock_s;
+            for _ in 0..4 {
+                pseudorange_m =
+                    exact_placed_model_m(sp3, *sat, station, pseudorange_m) + C_M_S * rx_clock_s;
+            }
+            CodeObservation::new(sat.to_string(), pseudorange_m)
         })
         .collect()
 }
@@ -543,81 +626,45 @@ fn dgnss_common_mode_error_cancels_in_position_solve() {
     .expect("clean DGNSS solve");
     let clean_error = dist(clean.solution.position.as_array(), rover);
 
-    // Frozen bits of the clean DGNSS solve, all compared at once and printed together
-    // on a mismatch. The synthetic pseudoranges carry the `peph2pos` relativistic term
-    // the base and rover models apply; it cancels in the correction, so the solve
-    // recovers the rover to well under a millimetre.
-    let clean_bits = [
-        (
-            "position",
-            clean
-                .solution
-                .position
-                .as_array()
-                .map(f64::to_bits)
-                .to_vec(),
-        ),
-        ("rx_clock", vec![clean.solution.rx_clock_s.to_bits()]),
-        (
-            "baseline_vector",
-            clean.baseline_vector_m.map(f64::to_bits).to_vec(),
-        ),
-        ("baseline", vec![clean.baseline_m.to_bits()]),
-        (
-            "residuals",
-            clean
-                .solution
-                .residuals_m
-                .iter()
-                .map(|v| v.to_bits())
-                .collect::<Vec<_>>(),
-        ),
-    ];
-    // Re-frozen when the base and rover models moved to RTKLIB `satposs` placement: each
-    // satellite sits at t_rx - P / c - dts, the rover's placed from its raw pseudoranges.
-    // The clean solve is then exact to rounding: every residual is zero or one ulp of a
-    // 2e7 m range (2^-28 m), and the baseline is its designed (2000, 1000, 1500) m to
-    // within a few ulps. Re-frozen when the weights became the inverse RTKLIB `rescode`
-    // variances: the solve ends a few ulps from where it ended, five residuals one ulp
-    // from zero.
-    let frozen_bits: [(&str, Vec<u64>); 5] = [
-        (
-            "position",
-            vec![0x414ad10a00000004, 0x4127d9780000000c, 0x4154072600000005],
-        ),
-        ("rx_clock", vec![0xbec92a737110c643]),
-        (
-            "baseline_vector",
-            vec![0x409f400000002000, 0x408f400000003000, 0x4097700000005000],
-        ),
-        ("baseline", vec![0x40a5092a30cd0b78]),
-        (
-            "residuals",
-            vec![
-                0x0,
-                0x0,
-                0x0,
-                0x0,
-                0x3e30000000000000,
-                0x3e30000000000000,
-                0x3e30000000000000,
-                0x3e30000000000000,
-                0x3e30000000000000,
-                0x0,
-            ],
-        ),
-    ];
-    assert_eq!(
-        clean_bits
-            .iter()
-            .map(|(label, bits)| format!("{label}: {bits:#x?}"))
-            .collect::<Vec<_>>(),
-        frozen_bits
-            .iter()
-            .map(|(label, bits)| format!("{label}: {bits:#x?}"))
-            .collect::<Vec<_>>(),
-        "clean DGNSS frozen bits"
-    );
+    let bit_fields = |result: &sidereon_core::dgnss::PositionSolution| {
+        [
+            (
+                "position",
+                result
+                    .solution
+                    .position
+                    .as_array()
+                    .map(f64::to_bits)
+                    .to_vec(),
+            ),
+            ("rx_clock", vec![result.solution.rx_clock_s.to_bits()]),
+            (
+                "baseline_vector",
+                result.baseline_vector_m.map(f64::to_bits).to_vec(),
+            ),
+            ("baseline", vec![result.baseline_m.to_bits()]),
+            (
+                "residuals",
+                result
+                    .solution
+                    .residuals_m
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+            ),
+        ]
+    };
+    let repeated = solve_position(
+        &sp3,
+        base,
+        &base_clean,
+        &rover_clean,
+        solve_inputs(Vec::new(), [rover[0], rover[1], rover[2], 0.0]),
+        false,
+    )
+    .expect("repeat clean DGNSS solve");
+    assert_eq!(bit_fields(&clean), bit_fields(&repeated));
+    dgnss_accuracy::assert_clean_solution(&sp3, base, rover, &base_clean, &rover_clean, &clean);
 
     assert!(absolute_error > 5.0);
     assert!((dgnss_error - clean_error).abs() <= 1.0e-3);

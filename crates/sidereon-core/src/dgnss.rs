@@ -7,7 +7,8 @@
 use std::collections::BTreeMap;
 
 use crate::astro::math::vec3;
-use crate::constants::C_M_S;
+use crate::astro::time::{ExactEpoch, ExactEpochQuery};
+use crate::constants::{C_M_S, OMEGA_E_DOT_RAD_S};
 use crate::id::GnssSatelliteId;
 use crate::observables::{
     pseudorange_transmit_epoch_j2000_s, pseudorange_transmit_geometry, ObservableEphemerisSource,
@@ -221,6 +222,106 @@ fn tracked_pseudorange_corrections(
     Ok(corrections)
 }
 
+fn exact_pseudorange_corrections<S: EphemerisSource + ?Sized>(
+    source: &S,
+    base_position_m: [f64; 3],
+    base_observations: &[CodeObservation],
+    receive_epoch: &ExactEpochQuery,
+    pseudorange_code: spp::PseudorangeCode,
+) -> Result<BTreeMap<String, f64>, DgnssError> {
+    validate_base_position(base_position_m)?;
+
+    let mut corrections = BTreeMap::new();
+    for observation in base_observations {
+        let pseudorange_m =
+            validate::finite_positive(observation.pseudorange_m, "base_observation.pseudorange_m")
+                .map_err(dgnss_invalid_input)?;
+        let Some(satellite) = sat_from_token(&observation.satellite_id) else {
+            continue;
+        };
+        let clock_epoch = receive_epoch
+            .clone()
+            .checked_sub_binary_seconds(pseudorange_m / C_M_S)
+            .ok_or(DgnssError::InvalidInput {
+                field: "transmit_time_j2000_s",
+                reason: "out of range",
+            })?;
+        let placement_clock_s = match source.try_transmit_epoch_clock_at_epoch_query(
+            satellite,
+            &clock_epoch,
+            receive_epoch,
+        ) {
+            Ok(Some(clock)) => clock.value,
+            Ok(None) | Err(_) => continue,
+        };
+        validate::finite(placement_clock_s, "transmit epoch clock_s")
+            .map_err(dgnss_invalid_input)?;
+        let transmit_epoch = clock_epoch
+            .checked_sub_binary_seconds(placement_clock_s)
+            .ok_or(DgnssError::InvalidInput {
+                field: "transmit_time_j2000_s",
+                reason: "out of range",
+            })?;
+        let Some(state) = (match source.try_position_clock_group_delay_selected_at_epoch_query(
+            satellite,
+            &transmit_epoch,
+            receive_epoch,
+        ) {
+            Ok(state) => state,
+            Err(_) => continue,
+        }) else {
+            continue;
+        };
+        let (satellite_position_m, satellite_clock_s, group_delay_s) = state.value;
+        let satellite_clock_s = validate::finite(satellite_clock_s, "predicted.sat_clock_s")
+            .map_err(dgnss_invalid_input)?;
+        let relativity_s = match source.clock_relativity_for_state_at_epoch_query(
+            satellite,
+            &transmit_epoch,
+            satellite_position_m,
+        ) {
+            spp::ClockRelativity::NotApplicable => 0.0,
+            spp::ClockRelativity::Term(term_s) => {
+                validate::finite(term_s, "predicted.sat_clock_s").map_err(dgnss_invalid_input)?;
+                term_s
+            }
+            spp::ClockRelativity::Unavailable => continue,
+        };
+        let satellite_clock_s =
+            validate::finite(satellite_clock_s + relativity_s, "predicted.sat_clock_s")
+                .map_err(dgnss_invalid_input)?;
+        let satellite_clock_s = match (pseudorange_code, group_delay_s) {
+            (spp::PseudorangeCode::SingleFrequency, Some(group_delay_s)) => {
+                let group_delay_s =
+                    validate::finite(group_delay_s, "single_frequency_group_delay_s")
+                        .map_err(dgnss_invalid_input)?;
+                satellite_clock_s - group_delay_s
+            }
+            _ => satellite_clock_s,
+        };
+        let satellite_clock_s = validate::finite(satellite_clock_s, "predicted.sat_clock_s")
+            .map_err(dgnss_invalid_input)?;
+        let geometric_range_m = crate::geometry::range::sagnac_range_first_order(
+            satellite_position_m,
+            base_position_m,
+            OMEGA_E_DOT_RAD_S,
+            C_M_S,
+        );
+        let geometric_range_m = validate::finite(geometric_range_m, "predicted.geometric_range_m")
+            .map_err(dgnss_invalid_input)?;
+        let modeled_base_m = validate::finite(
+            geometric_range_m - C_M_S * satellite_clock_s,
+            "modeled_base_m",
+        )
+        .map_err(dgnss_invalid_input)?;
+        let correction_m =
+            validate::finite(pseudorange_m - modeled_base_m, "pseudorange_correction_m")
+                .map_err(dgnss_invalid_input)?;
+        corrections.insert(observation.satellite_id.clone(), correction_m);
+    }
+    Ok(corrections)
+}
+
 /// Transmit-time geometry of a base pseudorange, with the single-frequency group delay of
 /// the record it comes from: the transmission epoch placed from the pseudorange
 /// ([`pseudorange_transmit_epoch_j2000_s`]) and the `geodist` range there with the Sagnac
@@ -286,6 +387,10 @@ pub fn apply_corrections(
 /// rover pseudoranges with ionosphere/troposphere disabled because the
 /// differential already removed common path delays.
 ///
+/// Base and rover states use exact transmit queries through [`EphemerisSource`].
+/// `solve_inputs.pseudorange_code` applies on both sides: ionosphere-free code
+/// omits the single-frequency group delay for both base corrections and rover modeling.
+///
 /// Each rover satellite's transmission epoch is placed from the rover's raw
 /// pseudorange, as RTKLIB `rtkpos` calls `satposs` with the rover's own
 /// observations; the corrected pseudorange forms only the residual. The correction
@@ -308,13 +413,27 @@ pub fn solve_position<S>(
 where
     S: ObservableEphemerisSource + EphemerisSource,
 {
-    let corrections = pseudorange_corrections_validated(
-        source,
+    validate::finite(solve_inputs.t_rx_j2000_s, "t_rx_j2000_s").map_err(dgnss_invalid_input)?;
+    let receive_epoch = ExactEpoch::from_binary_j2000_seconds(solve_inputs.t_rx_j2000_s).ok_or(
+        DgnssError::InvalidInput {
+            field: "t_rx_j2000_s",
+            reason: "out of range",
+        },
+    )?;
+    let tracked = spp::Ut1Tracked::new(source);
+    let corrections = exact_pseudorange_corrections(
+        &tracked,
         base_position_m,
         base_observations,
-        solve_inputs.t_rx_j2000_s,
-    )?;
-    let applied = apply_corrections(rover_observations, &corrections.value)?;
+        &receive_epoch,
+        solve_inputs.pseudorange_code,
+    );
+    if let Some(reason) = tracked.refusal() {
+        return Err(DgnssError::Ut1OutsideCoverage(reason));
+    }
+    let corrections = corrections?;
+    let correction_degradation = tracked.departure();
+    let applied = apply_corrections(rover_observations, &corrections)?;
     solve_inputs.observations = applied
         .corrected
         .iter()
@@ -336,7 +455,7 @@ where
     let mut solution = spp::solve_placed(source, &solve_inputs, &placement, with_geodetic)?;
     // The rover solve reports its own departure; a base-correction departure
     // also shaped this position.
-    solution.metadata.ut1_degraded = solution.metadata.ut1_degraded.or(corrections.degraded);
+    solution.metadata.ut1_degraded = solution.metadata.ut1_degraded.or(correction_degradation);
     scale_position_covariance(&mut solution.position_covariance, 2.0);
     let pos = solution.position.as_array();
     let baseline_vector_m = vec3::sub3(pos, base_position_m);
