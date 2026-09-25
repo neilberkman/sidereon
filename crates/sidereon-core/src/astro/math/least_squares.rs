@@ -229,10 +229,10 @@ where
 
 /// How a solve ended. The first four variants are the termination state of a
 /// [`solve_trf`] run, mirroring the scipy `least_squares` status codes for the
-/// conditions this solver detects; [`Self::SelectionSettled`] and
-/// [`Self::OuterBudgetExhausted`] describe how a positioning solve (SPP, the
-/// static solve), which runs several trust-region solves and least-squares steps,
-/// ended as a whole.
+/// conditions this solver detects; [`Self::SelectionSettled`],
+/// [`Self::OuterBudgetExhausted`] and [`Self::OuterOscillation`] describe how a
+/// positioning solve (SPP, the static solve), which runs several trust-region
+/// solves and least-squares steps, ended as a whole.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     /// `||J^T r||_inf` fell below `gtol` (first-order optimality).
@@ -255,6 +255,14 @@ pub enum Status {
     /// fixed point of the reweighting; a last solve that spent its evaluations
     /// reports its own status instead. The solve did not converge.
     OuterBudgetExhausted,
+    /// A robust-reweighted positioning solve returned to within its outer
+    /// tolerance of a state it had reached two or more solves earlier, at the
+    /// same satellite selection, with a step no smaller than the one that led
+    /// to that earlier state: the reweighting is cycling (the MAD scale or the
+    /// Huber weights alternating between states) rather than settling, so it
+    /// stops there instead of spending the rest of its budget. The position is
+    /// where the last reweighted solve ended. The solve did not converge.
+    OuterOscillation,
 }
 
 /// Stopping tolerances and evaluation budget for [`solve_trf`].

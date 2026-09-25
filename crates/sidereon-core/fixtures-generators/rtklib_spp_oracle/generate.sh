@@ -3,7 +3,8 @@
 # single-point solutions of the ESBC and WTZR 120-epoch RINEX fixtures from four
 # initial positions each (see rtklib_spp_oracle.c), with the troposphere corrected
 # and uncorrected. Also regenerate tests/fixtures/rtk/rtklib_spp_fde_oracle.json:
-# RTKLIB `raim_fde` exclusions of faulted copies of every twelfth ESBC epoch.
+# RTKLIB `raim_fde` exclusions of faulted copies (single and paired faults) of every
+# twelfth ESBC epoch.
 #
 # usage: RTKLIB_SRC=/path/to/RTKLIB/src ./generate.sh
 #

@@ -616,6 +616,10 @@ impl PreparedStatic {
     }
 
     /// Whether every epoch uses the satellites it uses in `other`.
+    fn used_sets(&self) -> Vec<Vec<GnssSatelliteId>> {
+        self.epochs.iter().map(|epoch| epoch.used.clone()).collect()
+    }
+
     fn same_sets(&self, other: &Self) -> bool {
         self.epochs.len() == other.epochs.len()
             && self
@@ -751,7 +755,7 @@ fn solve_static_core(
                         return Err(StaticSolveError::EphemerisLost {
                             epoch_index,
                             satellite,
-                        })
+                        });
                     }
                 }
             }
@@ -788,13 +792,31 @@ fn solve_static_core(
 
     // Huber reweighting from the settled solve: each iteration weights the
     // selection at the current state by `huber(r / s)` and re-solves; it settles
-    // when the position moves less than `outer_tol_m` and the selection at the new
-    // state is the one solved with, and a solve whose budget runs out first ends
+    // when keyed position and receiver clocks move less than `outer_tol_m` in
+    // their combined Euclidean norm and the selection at the new state is the
+    // one solved with, and a solve whose budget runs out first ends
     // with `Status::OuterBudgetExhausted`. The reported rows are the ones the last
     // solve used, at the state it reached.
     if let Some(robust) = options.robust {
         let mut current = prepare_static(eph, epochs, &epoch_inputs, model, &state)?;
         let mut settled = false;
+        let mut oscillated = false;
+        let initial_scale = mad_scale(&current.selection_residuals_m, robust.scale_floor_m)
+            .map_err(map_robust_error)?;
+        let initial_weights: Vec<f64> = current
+            .selection_residuals_m
+            .iter()
+            .zip(current.base_weights.iter())
+            .map(|(&r, &base)| base * huber_weight(r / initial_scale, robust.huber_k))
+            .collect();
+        let initial_clocks = static_cycle_clocks(&state);
+        let mut cycles = crate::spp::OuterCycleDetector::new(crate::spp::OuterCycleSample {
+            position_m: state.position_m(),
+            clocks_m: initial_clocks,
+            selection: current.used_sets(),
+            scale_m: initial_scale,
+            weights: initial_weights,
+        });
         // How the last solve ended; a least-squares step ends at its own target.
         let mut last_inner = Status::SelectionSettled;
         // After a coverage loss the rows at the last accepted iterate, when every
@@ -810,6 +832,7 @@ fn solve_static_core(
                 .map(|(&r, &base)| base * huber_weight(r / scale, robust.huber_k))
                 .collect();
             let x_prev = state.position_m();
+            let clocks_prev = static_cycle_clocks(&state);
             outer_iterations += 1;
             if step_next {
                 step_next = false;
@@ -852,10 +875,9 @@ fn solve_static_core(
             final_weights = effective;
             final_robust_scale_m = Some(scale);
             let x_now = state.position_m();
-            let dx = x_now[0] - x_prev[0];
-            let dy = x_now[1] - x_prev[1];
-            let dz = x_now[2] - x_prev[2];
-            let dpos = (dx * dx + dy * dy + dz * dz).sqrt();
+            let solved_clocks = static_cycle_clocks(&state);
+            let state_step =
+                crate::spp::outer_state_step_m(x_prev, &clocks_prev, x_now, &solved_clocks);
             let next = prepare_static(eph, epochs, &epoch_inputs, model, &state)?;
             let same_sets = next.same_sets(&current);
             prepared = std::mem::replace(&mut current, next);
@@ -884,8 +906,30 @@ fn solve_static_core(
                     final_robust_scale_m = None;
                 }
             }
-            if dpos < robust.outer_tol_m && same_sets {
+            if crate::spp::outer_state_settled(state_step, same_sets, robust.outer_tol_m) {
                 settled = true;
+                break;
+            }
+            let scale = mad_scale(&current.selection_residuals_m, robust.scale_floor_m)
+                .map_err(map_robust_error)?;
+            let weights: Vec<f64> = current
+                .selection_residuals_m
+                .iter()
+                .zip(current.base_weights.iter())
+                .map(|(&r, &base)| base * huber_weight(r / scale, robust.huber_k))
+                .collect();
+            if cycles.closes_cycle(
+                crate::spp::OuterCycleSample {
+                    position_m: x_now,
+                    clocks_m: solved_clocks,
+                    selection: current.used_sets(),
+                    scale_m: scale,
+                    weights,
+                },
+                state_step,
+                robust.outer_tol_m,
+            ) {
+                oscillated = true;
                 break;
             }
         }
@@ -895,6 +939,8 @@ fn solve_static_core(
             last_inner
         } else if settled {
             Status::SelectionSettled
+        } else if oscillated {
+            Status::OuterOscillation
         } else {
             Status::OuterBudgetExhausted
         };
@@ -1061,6 +1107,34 @@ impl StaticState {
             }
         }
     }
+}
+
+fn static_cycle_clocks(state: &StaticState) -> Vec<(crate::spp::OuterClockKey, f64)> {
+    let mut clocks = Vec::new();
+    for (epoch_index, epoch) in state.epochs.iter().enumerate() {
+        if epoch.explicit_clock_values().is_empty() {
+            clocks.push((
+                crate::spp::OuterClockKey::EpochReference { epoch_index },
+                epoch.reference_clock_value_m(),
+            ));
+        } else {
+            clocks.extend(
+                epoch
+                    .explicit_clock_values()
+                    .iter()
+                    .map(|&(system, clock_m)| {
+                        (
+                            crate::spp::OuterClockKey::EpochSystem {
+                                epoch_index,
+                                system,
+                            },
+                            clock_m,
+                        )
+                    }),
+            );
+        }
+    }
+    clocks
 }
 
 /// The weighted-residual Jacobian of the stacked rows of `prepared` at `x`, by the

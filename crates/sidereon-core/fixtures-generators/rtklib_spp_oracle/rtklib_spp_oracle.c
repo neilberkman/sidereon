@@ -272,26 +272,33 @@ static void print_used_states(const obsd_t *obs, int observation_count, gtime_t 
  * RAIM FDE oracle.
  *
  * For every <stride>-th epoch, the unmodified `pntpos` first solves the epoch from
- * the header's approximate position; then, for each satellite it used and each
- * bias in `fde_biases_m`, a copy of the epoch with that bias added to the
- * satellite's L1 pseudorange is handed to RTKLIB's own `raim_fde`, with the
- * satellite states `pntpos` computes (`satposs`). demo5's `pntpos` reaches
- * `raim_fde` only when `estpos` fails, because `valsol`'s chi-square rejection is
- * commented out, so `raim_fde` is called directly: its exclusion is the reference,
- * not whether demo5 would have run it.
+ * the header's approximate position. Then, for each satellite it used, faulted
+ * copies of the epoch are handed to RTKLIB's own `raim_fde` with the satellite
+ * states `pntpos` computes (`satposs`): one per bias in `fde_biases_m` added to
+ * that satellite's L1 pseudorange, and one per bias in `fde_pair_biases_m` added
+ * to it and to the next used satellite (two simultaneous faults). demo5's
+ * `pntpos` reaches `raim_fde` only when `estpos` fails, because `valsol`'s
+ * chi-square rejection is commented out, so `raim_fde` is called directly: its
+ * exclusion is the reference, not whether demo5 would have run it. Each case
+ * also records whether `estpos` fails on the whole faulted epoch from the
+ * approximate position, as `pntpos` runs it; when it does, `pntpos` itself (RAIM
+ * FDE on) must return `raim_fde`'s solution bit for bit.
  *
  * `raim_fde` keeps no record of which satellite it removed or of the final
  * least-squares state. A replay of its loop, running the unmodified `estpos` in
  * the same order with the same shared solution state, recovers both; the replay's
  * result must equal `raim_fde`'s bit for bit (position, clock, used satellites) or
- * the run fails. Each case records the fault, the excluded satellite, every
- * candidate's residual RMS, and the chosen solution in the same form as a
- * selection case. No message is recorded: `raim_fde` copies its candidate
+ * the run fails. Each case records the faults, the excluded satellite, every
+ * candidate's status, used-satellite count, residual RMS and final state and
+ * step, and the chosen solution in the same form as a selection case. No message is recorded: `raim_fde` copies its candidate
  * buffer, which a successful `estpos` leaves unwritten, into `msg`.
  * ------------------------------------------------------------------------- */
 
-#define FDE_BIAS_COUNT 2
-static const double fde_biases_m[FDE_BIAS_COUNT] = {5000.0, 300.0};
+/* +299792.458 m is a 1 ms receiver-clock-sized blunder. */
+#define FDE_BIAS_COUNT 4
+static const double fde_biases_m[FDE_BIAS_COUNT] = {5000.0, 300.0, 30.0, 299792.458};
+#define FDE_PAIR_BIAS_COUNT 3
+static const double fde_pair_biases_m[FDE_PAIR_BIAS_COUNT] = {5000.0, 300.0, 30.0};
 
 typedef struct {
     int valid;
@@ -362,8 +369,9 @@ static int verify_capture(const sol_t *sol)
            (float)captured_lsq_covariance[2] == sol->qr[5];
 }
 
-static void fde_case(const obsd_t *obs, int n, int faulted, double bias_m,
-                     const nav_t *nav, const prcopt_t *opt, int first)
+static void fde_case(const obsd_t *obs, int n, const int *faulted, int fault_count,
+                     double bias_m, const double *guess, const nav_t *nav,
+                     const prcopt_t *opt, int first)
 {
     static obsd_t obs_e[MAXOBS];
     static double rs[MAXOBS * 6], dts[MAXOBS * 2], var[MAXOBS];
@@ -372,16 +380,28 @@ static void fde_case(const obsd_t *obs, int n, int faulted, double bias_m,
     static double azel_r[MAXOBS * 2], resp_r[MAXOBS];
     static int svh[MAXOBS], svh_e[MAXOBS], vsat_e[MAXOBS], vsat_r[MAXOBS];
     static int best_vsat[MAXOBS];
-    static double candidate_rms[MAXOBS];
-    static int candidate_status[MAXOBS];
+    static double candidate_rms[MAXOBS], candidate_rr[MAXOBS * 3], candidate_clock[MAXOBS];
+    static double candidate_step[MAXOBS * 4];
+    static int candidate_status[MAXOBS], candidate_nvsat[MAXOBS];
     static ssat_t ssat[MAXSAT], ssat_out[MAXSAT];
-    sol_t sol_e = {{0}}, best_sol = {{0}}, sol_r = {{0}};
+    sol_t sol_e = {{0}}, best_sol = {{0}}, sol_r = {{0}}, sol_full = {{0}}, sol_p = {{0}};
+    static double azel_full[MAXOBS * 2], resp_full[MAXOBS];
+    static int vsat_full[MAXOBS];
+    static ssat_t ssat_p[MAXSAT];
+    char msg_full[128] = "", msg_p[128] = "";
+    int full_stat, pntpos_stat = -1;
     double rms = 100.0, rms_e, ep[6], receiver_geodetic[3];
     char msg_e[128] = "", msg_r[128] = "", id[8];
     int i, j, k, nvsat, best = -1, stat, used = 0;
 
     snr_like_pntpos(obs, n, ssat);
     satposs(obs[0].time, obs, n, nav, opt->sateph, rs, dts, var, svh);
+
+    /* `estpos` on the whole faulted epoch from the approximate position, as
+     * `pntpos` runs it before deciding whether to call `raim_fde`. */
+    for (k = 0; k < 3; k++) sol_full.rr[k] = guess[k];
+    full_stat = estpos(obs, n, rs, dts, var, svh, nav, opt, ssat, &sol_full, azel_full,
+                       vsat_full, resp_full, msg_full);
 
     /* The loop of `raim_fde`, replayed. */
     for (i = 0; i < n; i++) {
@@ -398,6 +418,7 @@ static void fde_case(const obsd_t *obs, int n, int faulted, double bias_m,
         captured_lsq_valid = 0;
         captured_lsq_state_valid = 0;
         candidate_rms[i] = 0.0;
+        candidate_nvsat[i] = 0;
         if (!estpos(obs_e, n - 1, rs_e, dts_e, vare_e, svh_e, nav, opt, ssat, &sol_e, azel_e,
                     vsat_e, resp_e, msg_e)) {
             candidate_status[i] = 0;
@@ -407,6 +428,14 @@ static void fde_case(const obsd_t *obs, int n, int faulted, double bias_m,
             if (!vsat_e[j]) continue;
             rms_e += SQR(resp_e[j]);
             nvsat++;
+        }
+        candidate_nvsat[i] = nvsat;
+        for (k = 0; k < 3; k++) candidate_rr[i * 3 + k] = sol_e.rr[k];
+        candidate_clock[i] = sol_e.dtr[0] * CLIGHT;
+        for (k = 0; k < 4; k++) candidate_step[i * 4 + k] = captured_lsq_step[k];
+        if (!captured_lsq_state_valid) {
+            fprintf(stderr, "missing candidate least-squares step\n");
+            exit(1);
         }
         if (nvsat < 5) {
             candidate_status[i] = 1;
@@ -449,6 +478,22 @@ static void fde_case(const obsd_t *obs, int n, int faulted, double bias_m,
                 exit(1);
             }
         }
+    }
+    if (!full_stat) {
+        /* demo5's own path: `pntpos` with RAIM FDE on reaches `raim_fde`. */
+        prcopt_t opt_p = *opt;
+        opt_p.posopt[4] = 1;
+        memset(ssat_p, 0, sizeof(ssat_p));
+        for (k = 0; k < 3; k++) sol_p.rr[k] = guess[k];
+        pntpos_stat = pntpos(obs, n, nav, &opt_p, &sol_p, NULL, ssat_p, msg_p);
+        if (pntpos_stat != stat ||
+            (stat && (memcmp(sol_p.rr, best_sol.rr, 3 * sizeof(double)) != 0 ||
+                      memcmp(&sol_p.dtr[0], &best_sol.dtr[0], sizeof(double)) != 0))) {
+            fprintf(stderr, "pntpos RAIM FDE differs from raim_fde\n");
+            exit(1);
+        }
+    }
+    if (stat) {
         restore_capture(&fde_best_capture);
         if (!verify_capture(&best_sol)) {
             fprintf(stderr, "replayed raim_fde least-squares capture does not replay\n");
@@ -457,19 +502,36 @@ static void fde_case(const obsd_t *obs, int n, int faulted, double bias_m,
     }
 
     time2epoch(obs[0].time, ep);
-    satno2id(obs[faulted].sat, id);
-    printf("%s  {\"epoch\": [%d, %d, %d, %d, %d, %.7f], \"fault\": {\"sat\": \"%s\", "
-           "\"bias_m\": %.17g}, \"stat\": %d, ",
+    printf("%s  {\"epoch\": [%d, %d, %d, %d, %d, %.7f], \"faults\": [",
            first ? "" : ",\n", (int)ep[0], (int)ep[1], (int)ep[2], (int)ep[3], (int)ep[4],
-           ep[5], id, bias_m, stat);
+           ep[5]);
+    for (k = 0; k < fault_count; k++) {
+        satno2id(obs[faulted[k]].sat, id);
+        printf("%s{\"sat\": \"%s\", \"bias_m\": %.17g}", k ? ", " : "", id, bias_m);
+    }
+    printf("], \"mode\": \"%s\", \"full_estpos_stat\": %d, \"pntpos_stat\": %d, \"stat\": %d, ",
+           fault_count == 2 ? "two_fault"
+           : bias_m == 30.0 ? "small_bias"
+           : bias_m == 299792.458 ? "one_millisecond_blunder"
+                                  : "single_fault",
+           full_stat, pntpos_stat, stat);
     printf("\"candidates\": [");
     for (i = 0; i < n; i++) {
         satno2id(obs[i].sat, id);
-        printf("%s{\"sat\": \"%s\", \"status\": \"%s\", \"rms_m\": %.17g}", i ? ", " : "", id,
+        printf("%s{\"sat\": \"%s\", \"status\": \"%s\", \"nvsat\": %d, \"rms_m\": %.17g",
+               i ? ", " : "", id,
                candidate_status[i] == 2 ? "solved"
                : candidate_status[i] == 1 ? "too_few_satellites"
                                           : "failed",
-               candidate_rms[i]);
+               candidate_nvsat[i], candidate_rms[i]);
+        if (candidate_status[i]) {
+            printf(", \"position_m\": ");
+            print_position(candidate_rr + i * 3);
+            printf(", \"clock_m\": %.17g, \"lsq_step\": [%.17g, %.17g, %.17g, %.17g]",
+                   candidate_clock[i], candidate_step[i * 4], candidate_step[i * 4 + 1],
+                   candidate_step[i * 4 + 2], candidate_step[i * 4 + 3]);
+        }
+        printf("}");
     }
     printf("]");
     if (!stat) {
@@ -544,6 +606,9 @@ static int run_fde(int argc, char **argv)
     print_position(sta.pos);
     printf(", \"biases_m\": [");
     for (k = 0; k < FDE_BIAS_COUNT; k++) printf("%s%.17g", k ? ", " : "", fde_biases_m[k]);
+    printf("], \"pair_biases_m\": [");
+    for (k = 0; k < FDE_PAIR_BIAS_COUNT; k++)
+        printf("%s%.17g", k ? ", " : "", fde_pair_biases_m[k]);
     printf("],\n \"cases\": [\n");
 
     for (i = epoch_index = 0; i < obs.n; i += n, epoch_index++) {
@@ -572,6 +637,7 @@ static int run_fde(int argc, char **argv)
             return 1;
         }
         for (faulted = 0; faulted < m; faulted++) {
+            int pair[2], next;
             if (!ssat[epoch[faulted].sat - 1].vs) continue;
             if (epoch[faulted].P[0] == 0.0) {
                 fprintf(stderr, "used satellite without an L1 pseudorange\n");
@@ -581,7 +647,23 @@ static int run_fde(int argc, char **argv)
                 obsd_t faulted_epoch[MAXOBS];
                 memcpy(faulted_epoch, epoch, sizeof(obsd_t) * m);
                 faulted_epoch[faulted].P[0] += fde_biases_m[b];
-                fde_case(faulted_epoch, m, faulted, fde_biases_m[b], &nav, &opt, first);
+                fde_case(faulted_epoch, m, &faulted, 1, fde_biases_m[b], sta.pos, &nav, &opt,
+                         first);
+                first = 0;
+            }
+            /* The next used satellite, wrapping round. */
+            for (next = (faulted + 1) % m; !ssat[epoch[next].sat - 1].vs;
+                 next = (next + 1) % m) {
+            }
+            pair[0] = faulted;
+            pair[1] = next;
+            for (b = 0; b < FDE_PAIR_BIAS_COUNT; b++) {
+                obsd_t faulted_epoch[MAXOBS];
+                memcpy(faulted_epoch, epoch, sizeof(obsd_t) * m);
+                faulted_epoch[pair[0]].P[0] += fde_pair_biases_m[b];
+                faulted_epoch[pair[1]].P[0] += fde_pair_biases_m[b];
+                fde_case(faulted_epoch, m, pair, 2, fde_pair_biases_m[b], sta.pos, &nav, &opt,
+                         first);
                 first = 0;
             }
         }

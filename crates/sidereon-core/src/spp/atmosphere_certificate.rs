@@ -7,8 +7,12 @@
 //! fixed. Regional derivatives are for the ideal WGS-84 map. Callers provide
 //! certified enclosures for center geodetic and satellite-angle values; these
 //! bounds do not certify the finite-inverse or endpoint arithmetic errors.
-//! The troposphere envelope uses heights in `[0, 10000)` m, its standard
-//! atmosphere temperature range, and humidity 0.7.
+//! The troposphere envelope follows RTKLIB's signed-height branches: zero delay
+//! below -100 m, and a sea-level-clamped standard atmosphere from -100 m to
+//! 10000 m with humidity 0.7. Regions crossing either discontinuous cutoff are
+//! refused. The clamp at zero is continuous and 1-Lipschitz.
+//! The certified receiver-height domain is `[-1000, 10000)` m; a region that
+//! reaches below the ionosphere cutoff is rejected.
 //! Since sine is globally 1-Lipschitz, subtracting the regional elevation
 //! variation from a certified center sine lower bound bounds the whole ball.
 
@@ -24,7 +28,9 @@ use crate::spp::{
 
 const PI: f64 = core::f64::consts::PI;
 const WGS84_M_MIN_M: f64 = 6_335_439.32;
-const HEIGHT_MAX_M: f64 = 10_000.0;
+pub(super) const IONOSPHERE_HEIGHT_CUTOFF_M: f64 = -1_000.0;
+pub(super) const TROPOSPHERE_HEIGHT_CUTOFF_M: f64 = -100.0;
+pub(super) const HEIGHT_MAX_M: f64 = 10_000.0;
 const TROP_HUMIDITY: f64 = 0.7;
 const TROP_PRESSURE_SEA_LEVEL_HPA: f64 = 1013.25;
 const TROP_PRESSURE_SCALE: f64 = 2.2557e-5;
@@ -172,7 +178,7 @@ fn geometry_bounds(
     let radius = Interval::point(radius_m);
     let height_min = height.sub(height_error).sub(radius).lower();
     let height_max = height.add(height_error).add(radius).upper();
-    if height_min <= 0.0 {
+    if height_min < IONOSPHERE_HEIGHT_CUTOFF_M {
         return Err(AtmosphereBoundError::HeightBranchMayChange);
     }
     if height_max >= HEIGHT_MAX_M {
@@ -188,7 +194,13 @@ fn geometry_bounds(
         return Err(AtmosphereBoundError::InvalidInput);
     }
 
-    let latitude_per_m = upper_quotient(1.0, WGS84_M_MIN_M);
+    let meridional_radius_min = Interval::point(WGS84_M_MIN_M)
+        .add(Interval::point(height_min))
+        .lower();
+    if meridional_radius_min <= 0.0 {
+        return Err(AtmosphereBoundError::InvalidInput);
+    }
+    let latitude_per_m = upper_quotient(1.0, meridional_radius_min);
     let longitude_per_m = upper_quotient(1.0, xy_min);
     let range_direction_per_m = upper_quotient(1.0, rho_min);
     const COS_ELEVATION_FLOOR: f64 = 0.09;
@@ -215,9 +227,17 @@ fn geometry_bounds(
 fn tropo_gradient_bound(
     sin_min: f64,
     geometry: GeometryBounds,
+    height_min: f64,
+    height_max: f64,
 ) -> Result<f64, AtmosphereBoundError> {
     if !(sin_min > 0.0 && sin_min <= 1.0) {
         return Err(AtmosphereBoundError::SelectionMayChange);
+    }
+    if height_max < TROPOSPHERE_HEIGHT_CUTOFF_M {
+        return Ok(0.0);
+    }
+    if height_min < TROPOSPHERE_HEIGHT_CUTOFF_M || height_max >= HEIGHT_MAX_M {
+        return Err(AtmosphereBoundError::HeightBranchMayChange);
     }
 
     let pressure_min_factor =
@@ -303,6 +323,11 @@ fn tropo_gradient_bound(
     if sine_squared_lower <= 0.0 {
         return Err(AtmosphereBoundError::SelectionMayChange);
     }
+    // On the active branch RTKLIB evaluates the atmosphere at max(h, 0).
+    // Its clamp is continuous and 1-Lipschitz; the interval envelope above
+    // covers [0, 10000], so integrating the derivative bound on either side of
+    // the zero-height kink bounds the whole segment without assuming a
+    // derivative exists at the kink itself.
     let height_term = upper_quotient(zenith_height_max, sin_min);
     let latitude_term = upper_product(
         upper_quotient(zenith_latitude_max, sin_min),
@@ -325,6 +350,17 @@ fn klobuchar_night_bounds(
     geometry: GeometryBounds,
     radius_m: f64,
 ) -> Result<(f64, f64), AtmosphereBoundError> {
+    let height = Interval::point(geodetic.height_m);
+    let height_error = Interval::point(geodetic.height_error_m);
+    let radius = Interval::point(radius_m);
+    let height_min = height.sub(height_error).sub(radius).lower();
+    let height_max = height.add(height_error).add(radius).upper();
+    if height_max < IONOSPHERE_HEIGHT_CUTOFF_M {
+        return Ok((0.0, 0.0));
+    }
+    if height_min < IONOSPHERE_HEIGHT_CUTOFF_M {
+        return Err(AtmosphereBoundError::HeightBranchMayChange);
+    }
     let components = klobuchar_l1_components(
         geodetic.latitude_rad.to_degrees(),
         geodetic.longitude_rad.to_degrees(),
@@ -571,7 +607,10 @@ pub(super) fn satellite_regions(
     let radius = Interval::point(radius_m);
     let height_min = height.sub(height_error).sub(radius).lower();
     let height_max = height.add(height_error).add(radius).upper();
-    if height_min <= 0.0 || height_max >= HEIGHT_MAX_M {
+    if height_min < IONOSPHERE_HEIGHT_CUTOFF_M || height_max >= HEIGHT_MAX_M {
+        return Err(AtmosphereBoundError::HeightBranchMayChange);
+    }
+    if height_min < TROPOSPHERE_HEIGHT_CUTOFF_M && height_max >= TROPOSPHERE_HEIGHT_CUTOFF_M {
         return Err(AtmosphereBoundError::HeightBranchMayChange);
     }
     let observation_ids: BTreeSet<_> = inputs
@@ -733,7 +772,13 @@ pub(super) fn satellite_regions(
 
         let mut delay_gradient = 0.0;
         let mut ionosphere_delay_max = 0.0;
-        if inputs.corrections.ionosphere {
+        if inputs.corrections.ionosphere
+            && height_max >= IONOSPHERE_HEIGHT_CUTOFF_M
+            && height_min < IONOSPHERE_HEIGHT_CUTOFF_M
+        {
+            return Err(AtmosphereBoundError::HeightBranchMayChange);
+        }
+        if inputs.corrections.ionosphere && height_max >= IONOSPHERE_HEIGHT_CUTOFF_M {
             (ionosphere_delay_max, delay_gradient) =
                 klobuchar_night_bounds(inputs, center_geodetic, angles, *geometry, radius_m)?;
         }
@@ -750,7 +795,7 @@ pub(super) fn satellite_regions(
             return Err(AtmosphereBoundError::SelectionMayChange);
         }
         let troposphere_gradient = if inputs.corrections.troposphere {
-            tropo_gradient_bound(sin_min, *geometry)?
+            tropo_gradient_bound(sin_min, *geometry, height_min, height_max)?
         } else {
             0.0
         };
@@ -842,7 +887,10 @@ fn regional_sine_lower(center_lower: f64, elevation_per_m: f64, radius_m: f64) -
 
 #[cfg(test)]
 mod tests {
-    use super::regional_sine_lower;
+    use super::{
+        geometry_bounds, regional_sine_lower, tropo_gradient_bound, AtmosphereBoundError,
+        CenterGeodeticEnclosure, GeometryBounds, WGS84_M_MIN_M,
+    };
 
     #[test]
     fn regional_sine_bound_includes_the_entire_elevation_variation() {
@@ -854,5 +902,71 @@ mod tests {
         assert!(lower > 0.0);
         assert!(regional_sine_lower(center_lower, elevation_per_m, 4.0) <= 0.0);
         assert!(regional_sine_lower(center_lower, elevation_per_m, 0.0) <= center_lower);
+    }
+
+    #[test]
+    fn signed_height_uses_the_reduced_meridional_radius() {
+        let geodetic = CenterGeodeticEnclosure {
+            latitude_rad: 0.0,
+            latitude_error_rad: 0.0,
+            longitude_rad: 0.0,
+            longitude_error_rad: 0.0,
+            height_m: -500.0,
+            height_error_m: 0.0,
+        };
+        let bounds = geometry_bounds(
+            [6_377_637.0, 0.0, 0.0],
+            [20_200_000.0, 0.0, 0.0],
+            1.0,
+            &geodetic,
+        )
+        .unwrap();
+        assert!(bounds.latitude_per_m > 1.0 / WGS84_M_MIN_M);
+
+        let below_ionosphere_cutoff = CenterGeodeticEnclosure {
+            height_m: -1_001.0,
+            ..geodetic
+        };
+        assert!(matches!(
+            geometry_bounds(
+                [6_377_136.0, 0.0, 0.0],
+                [20_200_000.0, 0.0, 0.0],
+                1.0,
+                &below_ionosphere_cutoff,
+            ),
+            Err(AtmosphereBoundError::HeightBranchMayChange)
+        ));
+        let above_troposphere_domain = CenterGeodeticEnclosure {
+            height_m: 10_000.0,
+            ..geodetic
+        };
+        assert!(matches!(
+            geometry_bounds(
+                [6_388_137.0, 0.0, 0.0],
+                [20_200_000.0, 0.0, 0.0],
+                1.0,
+                &above_troposphere_domain,
+            ),
+            Err(AtmosphereBoundError::HeightBranchMayChange)
+        ));
+    }
+
+    #[test]
+    fn troposphere_gradient_preserves_zero_delay_branch_and_sea_level_clamp() {
+        let geometry = GeometryBounds {
+            latitude_per_m: 1.0 / WGS84_M_MIN_M,
+            longitude_per_m: 1.0e-7,
+            elevation_per_m: 1.0e-6,
+            azimuth_per_m: 1.0e-6,
+        };
+        assert_eq!(
+            tropo_gradient_bound(0.5, geometry, -150.0, -101.0).unwrap(),
+            0.0
+        );
+        assert!(tropo_gradient_bound(0.5, geometry, -100.0, 0.0).unwrap() > 0.0);
+        assert_eq!(
+            tropo_gradient_bound(0.5, geometry, -101.0, -99.0).unwrap_err(),
+            AtmosphereBoundError::HeightBranchMayChange
+        );
     }
 }

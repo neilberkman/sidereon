@@ -61,17 +61,19 @@ pub const DEFAULT_ROBUST_SCALE_FLOOR_M: f64 = 1.0;
 /// Default maximum outer IRLS reweighting iterations (the warm-started static
 /// solve at iteration 0 plus reweighted resolves up to this many total).
 ///
-/// The reweighting ends when it settles (the position moves less than
-/// [`DEFAULT_ROBUST_OUTER_TOL_M`] and the selection holds), so this is a safety
-/// cap, not a working budget: a solve that reaches it has not converged and
+/// The reweighting ends when it settles (the combined position and keyed
+/// receiver-clock change is less than [`DEFAULT_ROBUST_OUTER_TOL_M`] and the
+/// selection holds), so this is a safety cap, not a working budget: a solve
+/// that reaches it has not converged and
 /// reports [`crate::astro::math::least_squares::Status::OuterBudgetExhausted`].
 /// A +300 m fault on one of eight satellites settles within 7 to 28 solves;
 /// the cap of 100 leaves more than three times that.
 pub const DEFAULT_ROBUST_MAX_OUTER: usize = 100;
 
-/// Default outer-loop position step tolerance (m): the outer IRLS loop stops
-/// when the L2 norm of the position change between successive reweighted solves
-/// drops below this.
+/// Default outer-loop state-step tolerance (m): the outer IRLS loop stops when
+/// the combined Euclidean change in position and keyed receiver-clock estimates
+/// between successive reweighted solves drops below this, with a stable
+/// satellite selection.
 pub const DEFAULT_ROBUST_OUTER_TOL_M: f64 = 1e-4;
 
 /// Maximum number of passes one SPP solve runs, RTKLIB `estpos` `MAXITR`. Each
