@@ -18,7 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --version 0.13.2 --locked
+        run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
       - name: Run committed fuzz corpus
         run: |
           set -euo pipefail
@@ -43,7 +43,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --version 0.13.2 --locked
+        run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
       - name: Run bounded fuzzing
         run: |
           set -euo pipefail

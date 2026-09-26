@@ -24,6 +24,6 @@ jobs:
     runs-on: [self-hosted, linux, x64, no-avx512]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - name: bit-exact gate
         run: bash crates/trust-region-least-squares/scripts/bitexact_gate.sh
