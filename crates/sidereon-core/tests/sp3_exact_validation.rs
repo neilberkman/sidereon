@@ -270,6 +270,76 @@ fn exact_sp3_at(
 }
 
 #[test]
+fn exact_start_validation_keeps_the_low_order_digits_of_each_header_field() {
+    let request = ExactSp3Request::new(START, Some("0001"), "05M", "05M").unwrap();
+    let replace_field =
+        |source: &str, line_prefix: &str, range: std::ops::Range<usize>, value: &str| {
+            let mut lines = source.lines().map(str::to_owned).collect::<Vec<_>>();
+            let line = lines
+                .iter_mut()
+                .find(|line| line.starts_with(line_prefix))
+                .expect("header line exists");
+            assert_eq!(
+                line.get(range.clone()).expect("field range").len(),
+                value.len()
+            );
+            line.replace_range(range, value);
+            format!("{}\n", lines.join("\n"))
+        };
+
+    let midnight = exact_sp3_at(
+        &[60, 360],
+        2,
+        "300.00000000",
+        2020,
+        1,
+        1,
+        2086,
+        259_260.0,
+        58_849,
+        "TST",
+    );
+    let line1_minute = replace_field(&midnight, "#dP", 17..19, " 1");
+    let sow_at_minute = replace_field(&line1_minute, "##", 8..23, "259260.00000000");
+    let control = replace_field(&sow_at_minute, "##", 45..60, "0.0006944444444");
+    assert!(parse_exact_sp3(control.as_bytes(), &request).is_ok());
+
+    // The line-1 field's 10 ns step is below the ULP of J2000-sized seconds.
+    let line1 = replace_field(&control, "#dP", 20..31, " 0.00000001");
+    assert_ne!(line1, control);
+    assert!(matches!(
+        parse_exact_sp3(line1.as_bytes(), &request),
+        Err(ExactSp3ValidationError::DeclaredStartMismatch {
+            requested_tick,
+            declared_tick: Some(declared_tick),
+            ..
+        }) if declared_tick - requested_tick == 1
+    ));
+
+    // The SOW field's 10 ns unit is compared before any day or week origin is
+    // added to it.
+    let sow = replace_field(&control, "##", 8..23, "259260.00000001");
+    assert_ne!(sow, control);
+    assert!(matches!(
+        parse_exact_sp3(sow.as_bytes(), &request),
+        Err(ExactSp3ValidationError::HeaderStartMetadataMismatch {
+            field: "seconds_of_week",
+            ..
+        })
+    ));
+
+    // One F15.13 fraction unit is 8.64 ns. Comparing MJD and its fraction in
+    // separate fields keeps it visible instead of adding it to an MJD-sized
+    // floating value.
+    let mjd = replace_field(&control, "##", 45..60, "0.0006944444445");
+    assert_ne!(mjd, control);
+    assert!(matches!(
+        parse_exact_sp3(mjd.as_bytes(), &request),
+        Err(ExactSp3ValidationError::HeaderStartMetadataMismatch { field: "mjd", .. })
+    ));
+}
+
+#[test]
 fn accepts_regular_24_hour_five_minute_half_open_grid() {
     let text = exact_sp3(&regular_offsets(288, 300), 288, "300.00000000", 1);
     let (product, coverage) = parse_exact_sp3(text.as_bytes(), &request("05M").unwrap()).unwrap();

@@ -7,9 +7,11 @@ use sha2::{Digest, Sha256};
 
 use crate::data::{ArchiveCompression, DistributionSource, ProductIdentity, ProductType};
 
-use super::combine::TARGET_EPOCH_INTERVAL_FIELD;
+use super::combine::{
+    check_merge_tolerance, MergeToleranceError, MergeToleranceField, TARGET_EPOCH_INTERVAL_FIELD,
+};
 use super::continuity::ContinuityOptionsError;
-use super::grid::{checked_epoch_interval_ticks, Sp3EpochIntervalError};
+use super::grid::{checked_merge_epoch_interval_ticks, Sp3EpochIntervalError};
 use super::{MergeCombine, MergeOptions, MergePrecedenceScope};
 
 /// Version of the canonical merged-SP3 input identity encoding.
@@ -82,7 +84,12 @@ pub enum Sp3MergeInputIdentityError {
     /// Merge controls cannot be represented as a valid executable policy.
     #[error("invalid merged-SP3 policy: {0}")]
     InvalidPolicy(&'static str),
-    /// [`MergeOptions::target_epoch_interval_s`] is not an SP3 epoch interval.
+    /// A merge tolerance is negative or non-finite; the error retains which
+    /// tolerance failed and the supplied value.
+    #[error("{0}")]
+    InvalidTolerance(MergeToleranceError),
+    /// [`MergeOptions::target_epoch_interval_s`] is not a supported SP3 merge
+    /// interval.
     /// [`merge`](crate::ephemeris::merge) refuses exactly the same values, with
     /// the same error in [`crate::Error::Sp3EpochInterval`].
     #[error("invalid merged-SP3 policy: {0}")]
@@ -279,14 +286,10 @@ fn canonical_contributor_bytes(
 }
 
 fn validate_policy(policy: &MergeOptions) -> Result<(), Sp3MergeInputIdentityError> {
-    if !finite_nonnegative(policy.position_tolerance_m) {
-        return Err(Sp3MergeInputIdentityError::InvalidPolicy(
-            "position tolerance",
-        ));
-    }
-    if !finite_nonnegative(policy.clock_tolerance_s) {
-        return Err(Sp3MergeInputIdentityError::InvalidPolicy("clock tolerance"));
-    }
+    check_merge_tolerance(policy.position_tolerance_m, MergeToleranceField::Position)
+        .map_err(Sp3MergeInputIdentityError::InvalidTolerance)?;
+    check_merge_tolerance(policy.clock_tolerance_s, MergeToleranceField::Clock)
+        .map_err(Sp3MergeInputIdentityError::InvalidTolerance)?;
     if policy.min_agree == 0 {
         return Err(Sp3MergeInputIdentityError::InvalidPolicy(
             "minimum agreement",
@@ -298,16 +301,16 @@ fn validate_policy(policy: &MergeOptions) -> Result<(), Sp3MergeInputIdentityErr
         ));
     }
     if let Some(value) = policy.outlier_reject {
-        if !finite_nonnegative(value.position_tolerance_m)
-            || !finite_nonnegative(value.clock_tolerance_s)
-        {
-            return Err(Sp3MergeInputIdentityError::InvalidPolicy(
-                "outlier rejection",
-            ));
-        }
+        check_merge_tolerance(
+            value.position_tolerance_m,
+            MergeToleranceField::OutlierPosition,
+        )
+        .map_err(Sp3MergeInputIdentityError::InvalidTolerance)?;
+        check_merge_tolerance(value.clock_tolerance_s, MergeToleranceField::OutlierClock)
+            .map_err(Sp3MergeInputIdentityError::InvalidTolerance)?;
     }
     if let Some(value) = policy.target_epoch_interval_s {
-        checked_epoch_interval_ticks(TARGET_EPOCH_INTERVAL_FIELD, value)
+        checked_merge_epoch_interval_ticks(TARGET_EPOCH_INTERVAL_FIELD, value)
             .map_err(Sp3MergeInputIdentityError::TargetEpochInterval)?;
     }
     // Continuity verification does not change the merged product, so it is not
@@ -417,10 +420,6 @@ fn canonical_policy_bytes(policy: &MergeOptions, precedence: &[Vec<u8>]) -> Vec<
     bytes
 }
 
-fn finite_nonnegative(value: f64) -> bool {
-    value.is_finite() && value >= 0.0
-}
-
 fn canonical_nonnegative_f64_bits(value: f64) -> u64 {
     if value == 0.0 {
         0.0_f64.to_bits()
@@ -447,4 +446,54 @@ fn put_field(output: &mut Vec<u8>, value: &[u8]) {
 
 fn put_u64(output: &mut Vec<u8>, value: u64) {
     output.extend_from_slice(&value.to_be_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_policy, Sp3MergeInputIdentityError};
+    use crate::sp3::{MergeOptions, MergeToleranceField};
+
+    #[test]
+    fn identity_rejects_tolerances_with_the_same_typed_value_as_merge() {
+        let policy = MergeOptions {
+            position_tolerance_m: f64::NEG_INFINITY,
+            ..MergeOptions::default()
+        };
+        assert!(matches!(
+            validate_policy(&policy),
+            Err(Sp3MergeInputIdentityError::InvalidTolerance(error))
+                if error.field == MergeToleranceField::Position
+                    && error.value == f64::NEG_INFINITY
+        ));
+
+        let policy = MergeOptions {
+            outlier_reject: Some(crate::sp3::OutlierRejectOptions {
+                position_tolerance_m: 0.5,
+                clock_tolerance_s: f64::NAN,
+            }),
+            ..MergeOptions::default()
+        };
+        assert!(matches!(
+            validate_policy(&policy),
+            Err(Sp3MergeInputIdentityError::InvalidTolerance(error))
+                if error.field == MergeToleranceField::OutlierClock
+                    && error.value.is_nan()
+        ));
+    }
+
+    #[test]
+    fn identity_refuses_explicit_interval_at_the_specification_limit() {
+        let policy = MergeOptions {
+            target_epoch_interval_s: Some(100_000.0),
+            ..MergeOptions::default()
+        };
+        assert!(matches!(
+            validate_policy(&policy),
+            Err(Sp3MergeInputIdentityError::TargetEpochInterval(error))
+                if error.field == "target_epoch_interval_s"
+                    && error.value == 100_000.0
+                    && error.reason
+                        == crate::sp3::Sp3EpochIntervalRejection::OutsideSpecificationRange
+        ));
+    }
 }

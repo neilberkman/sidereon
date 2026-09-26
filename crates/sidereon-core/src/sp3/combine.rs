@@ -25,8 +25,8 @@ use crate::astro::time::civil::{
 use crate::astro::time::model::Instant;
 
 use super::grid::{
-    checked_epoch_interval_ticks, gcd, interval_seconds, product_grid, product_ticks, tick_seconds,
-    TICKS_PER_SECOND,
+    checked_merge_epoch_interval_ticks, checked_merge_output_ticks, gcd, interval_seconds,
+    product_grid, product_ticks, tick_seconds, TICKS_PER_SECOND,
 };
 use super::interp::{precise_node_j2000_seconds_from_instant, Sp3InterpolationOptions};
 use super::{
@@ -39,12 +39,60 @@ use crate::frame_catalog::{
     self, HelmertParameters, HelmertRates, TerrestrialFrame, TerrestrialPositionM,
     TerrestrialVelocityMPerYear,
 };
+
+/// Which merge tolerance failed its finite, nonnegative constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MergeToleranceField {
+    /// Maximum position difference for consensus.
+    Position,
+    /// Maximum clock difference for consensus.
+    Clock,
+    /// Position difference for the optional outlier guard.
+    OutlierPosition,
+    /// Clock difference for the optional outlier guard.
+    OutlierClock,
+}
+
+/// A merge tolerance that is negative or non-finite.
+#[derive(Debug, Clone, Copy)]
+pub struct MergeToleranceError {
+    /// The tolerance field that failed validation.
+    pub field: MergeToleranceField,
+    /// The supplied value.
+    pub value: f64,
+}
+
+impl PartialEq for MergeToleranceError {
+    fn eq(&self, other: &Self) -> bool {
+        self.field == other.field && self.value.to_bits() == other.value.to_bits()
+    }
+}
+
+impl Eq for MergeToleranceError {}
+
+impl core::fmt::Display for MergeToleranceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let field = match self.field {
+            MergeToleranceField::Position => "position tolerance (m)",
+            MergeToleranceField::Clock => "clock tolerance (s)",
+            MergeToleranceField::OutlierPosition => "outlier position tolerance (m)",
+            MergeToleranceField::OutlierClock => "outlier clock tolerance (s)",
+        };
+        write!(
+            f,
+            "SP3 merge {field} {} must be finite and nonnegative",
+            self.value
+        )
+    }
+}
+
+impl std::error::Error for MergeToleranceError {}
 use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::sp3::continuity::{
     check_validated_continuity, ContinuityDefect, ContinuityOptions, ContinuityReport, EpochWindow,
     InterpolationNodes, WindowContinuityDecision, WindowContinuityVerdict,
 };
-use crate::validate;
 use crate::{Error, Result};
 
 const MAX_EXACT_CLIQUE_NODES: usize = 32;
@@ -278,13 +326,16 @@ pub struct MergeOptions {
     /// the historical contested-cell behavior.
     pub outlier_reject: Option<OutlierRejectOptions>,
     /// Optional target epoch interval, in seconds; it must be a positive whole
-    /// number of the 10-nanosecond ticks an SP3 epoch states, given as the
+    /// number of the 10-nanosecond ticks an SP3 epoch states and less than
+    /// 100000 s as SP3 requires, given as the
     /// `f64` its eight-decimal text reads back as (`450.5` is one,
     /// `600.0000000001` is not). Any other value is refused before the inputs
     /// are read, with [`crate::Error::Sp3EpochInterval`] naming this field, the
     /// value and the [`Sp3EpochIntervalRejection`](crate::ephemeris::Sp3EpochIntervalRejection);
     /// [`Sp3MergeInputIdentity`](crate::ephemeris::Sp3MergeInputIdentity)
-    /// accepts and refuses exactly the same values. When unset the output
+    /// accepts and refuses exactly the same values. The computed default grid
+    /// is subject to the same strict upper bound; it is refused with
+    /// [`crate::Error::Sp3EpochInterval`] rather than silently densified. When unset the output
     /// grid is the greatest common divisor of the inputs' grid steps and epoch
     /// offsets, which holds every input epoch. When set, the grid is anchored
     /// at the earliest input epoch, inputs contribute at the grid epochs they
@@ -1360,6 +1411,7 @@ fn emit_merged_product(
         // Line 1 states the header's start: the first epoch written, or for a
         // merge that wrote none, the first union-grid epoch.
         declared_start_j2000_s: Some(tick_seconds(header_tick)),
+        declared_start_tick: Some(header_tick),
         terminal_record: TerminalRecordState::valid(),
         satellite_header_lines: mandatory_header_lines,
         accuracy_header_lines: mandatory_header_lines,
@@ -2350,6 +2402,8 @@ fn prepare_merge_timing(sources: &[Sp3], opts: &MergeOptions) -> Result<MergeTim
             step
         }
     };
+    checked_merge_output_ticks(MERGED_EPOCH_INTERVAL_FIELD, step_ticks)
+        .map_err(Error::Sp3EpochInterval)?;
 
     // Union of epochs by exact tick, retaining the representative Instant from
     // the earliest-listed source on duplicate ticks. This is what lets a dense
@@ -3035,10 +3089,10 @@ fn precedence_sources_for_satellites(
 }
 
 fn validate_merge_options(opts: &MergeOptions) -> Result<()> {
-    validate::finite_nonneg(opts.position_tolerance_m, "merge position tolerance meters")
-        .map_err(|error| Error::InvalidInput(error.to_string()))?;
-    validate::finite_nonneg(opts.clock_tolerance_s, "merge clock tolerance seconds")
-        .map_err(|error| Error::InvalidInput(error.to_string()))?;
+    check_merge_tolerance(opts.position_tolerance_m, MergeToleranceField::Position)
+        .map_err(Error::Sp3MergeTolerance)?;
+    check_merge_tolerance(opts.clock_tolerance_s, MergeToleranceField::Clock)
+        .map_err(Error::Sp3MergeTolerance)?;
     if opts.min_agree == 0 {
         return Err(Error::InvalidInput(
             "merge minimum agreement must be at least one".into(),
@@ -3050,16 +3104,13 @@ fn validate_merge_options(opts: &MergeOptions) -> Result<()> {
         ));
     }
     if let Some(reject) = opts.outlier_reject {
-        validate::finite_nonneg(
+        check_merge_tolerance(
             reject.position_tolerance_m,
-            "merge outlier position tolerance meters",
+            MergeToleranceField::OutlierPosition,
         )
-        .map_err(|error| Error::InvalidInput(error.to_string()))?;
-        validate::finite_nonneg(
-            reject.clock_tolerance_s,
-            "merge outlier clock tolerance seconds",
-        )
-        .map_err(|error| Error::InvalidInput(error.to_string()))?;
+        .map_err(Error::Sp3MergeTolerance)?;
+        check_merge_tolerance(reject.clock_tolerance_s, MergeToleranceField::OutlierClock)
+            .map_err(Error::Sp3MergeTolerance)?;
     }
     if opts
         .systems
@@ -3090,12 +3141,26 @@ fn validate_merge_options(opts: &MergeOptions) -> Result<()> {
 /// by the rule [`super::Sp3MergeInputIdentity`] also applies to it
 /// ([`super::grid::epoch_interval_ticks`]).
 fn target_epoch_interval_ticks(target_s: f64) -> Result<i128> {
-    checked_epoch_interval_ticks(TARGET_EPOCH_INTERVAL_FIELD, target_s)
+    checked_merge_epoch_interval_ticks(TARGET_EPOCH_INTERVAL_FIELD, target_s)
         .map_err(Error::Sp3EpochInterval)
 }
 
 /// The field name a refused [`MergeOptions::target_epoch_interval_s`] reports.
 pub(super) const TARGET_EPOCH_INTERVAL_FIELD: &str = "target_epoch_interval_s";
+
+/// The field name used when the computed union-grid interval cannot be written.
+pub(super) const MERGED_EPOCH_INTERVAL_FIELD: &str = "merged_epoch_interval_s";
+
+pub(super) fn check_merge_tolerance(
+    value: f64,
+    field: MergeToleranceField,
+) -> core::result::Result<(), MergeToleranceError> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(())
+    } else {
+        Err(MergeToleranceError { field, value })
+    }
+}
 
 /// Indices of the largest subset of `items` whose members are *mutually* within
 /// `within`. Exact max-clique over normal source counts; deterministic greedy
@@ -3462,7 +3527,8 @@ mod tests {
     use crate::frame::ItrfPositionM;
     use crate::id::{GnssSatelliteId, GnssSystem};
     use crate::sp3::{
-        Sp3AccuracyBase, Sp3DataType, Sp3RecordAccuracyCodes, StoredAccuracyCodeGroup,
+        MergeToleranceField, Sp3AccuracyBase, Sp3DataType, Sp3RecordAccuracyCodes,
+        StoredAccuracyCodeGroup,
     };
     use sha2::{Digest, Sha256};
     use std::collections::BTreeSet;
@@ -3473,6 +3539,32 @@ mod tests {
 
     fn gps(prn: u8) -> GnssSatelliteId {
         GnssSatelliteId::new(GnssSystem::Gps, prn).expect("valid satellite id")
+    }
+
+    #[test]
+    fn merge_tolerance_refusals_keep_the_field_and_value() {
+        let cases = [
+            (f64::NAN, MergeToleranceField::Position),
+            (f64::INFINITY, MergeToleranceField::Clock),
+            (-0.25, MergeToleranceField::OutlierPosition),
+            (f64::NEG_INFINITY, MergeToleranceField::OutlierClock),
+        ];
+        for (value, field) in cases {
+            let error = super::check_merge_tolerance(value, field).unwrap_err();
+            assert_eq!(error.field, field);
+            assert_eq!(error.value.to_bits(), value.to_bits());
+        }
+
+        let options = MergeOptions {
+            clock_tolerance_s: f64::NAN,
+            ..MergeOptions::default()
+        };
+        assert!(matches!(
+            super::validate_merge_options(&options),
+            Err(Error::Sp3MergeTolerance(error))
+                if error.field == MergeToleranceField::Clock
+                    && error.value.is_nan()
+        ));
     }
 
     // Single-epoch SP3-c from explicit `(satellite, [x,y,z] km, clock us, flag
@@ -3583,6 +3675,71 @@ mod tests {
         }
         body.push_str("EOF\n");
         Sp3::parse(body.as_bytes()).expect("parse test sp3")
+    }
+
+    fn sp3_100000_second_gap() -> Sp3 {
+        let mut satellite_slots = String::from("G01");
+        for _ in 1..17 {
+            satellite_slots.push_str("  0");
+        }
+        let mut body = String::from(
+            "#cP2020  6 25  0  0  0.00000000       2 ORBIT IGS14 FIT  TST\n\
+             ## 2111 345600.00000000 50000.00000000 59025 0.0000000000000\n",
+        );
+        body.push_str(&format!("+    1   {satellite_slots}\n"));
+        body.push_str("++         0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0\n");
+        body.push_str("%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc\n");
+        body.push_str("%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc\n");
+        body.push_str("%f  1.2500000  1.025000000  0.00000000000  0.000000000000000\n");
+        body.push_str("%f  0.0000000  0.000000000  0.00000000000  0.000000000000000\n");
+        body.push_str("%i    0    0    0    0      0      0      0      0         0\n");
+        body.push_str("%i    0    0    0    0      0      0      0      0         0\n");
+        body.push_str("/* LONG-CADENCE MERGE TEST\n");
+        body.push_str("*  2020  6 25  0  0  0.00000000\n");
+        body.push_str("PG01  15000.000000 -20000.000000   5000.000000 999999.999999\n");
+        body.push_str("*  2020  6 26  3 46 40.00000000\n");
+        body.push_str("PG01  15100.000000 -20100.000000   5100.000000 999999.999999\n");
+        body.push_str("EOF\n");
+        Sp3::parse(body.as_bytes()).expect("parse long-gap source")
+    }
+
+    #[test]
+    fn merge_rejects_unwritable_computed_interval_and_writes_limit_predecessor() {
+        let source = sp3_100000_second_gap();
+        let error = merge(std::slice::from_ref(&source), &MergeOptions::default()).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Sp3EpochInterval(error)
+                if error.field == "merged_epoch_interval_s"
+                    && error.value == 100_000.0
+                    && error.reason
+                        == super::super::Sp3EpochIntervalRejection::OutsideSpecificationRange
+        ));
+
+        let explicit_limit = MergeOptions {
+            target_epoch_interval_s: Some(100_000.0),
+            ..MergeOptions::default()
+        };
+        assert!(matches!(
+            merge(std::slice::from_ref(&source), &explicit_limit),
+            Err(Error::Sp3EpochInterval(error))
+                if error.field == "target_epoch_interval_s"
+                    && error.value == 100_000.0
+                    && error.reason
+                        == super::super::Sp3EpochIntervalRejection::OutsideSpecificationRange
+        ));
+
+        let target = "99999.99999999".parse::<f64>().unwrap();
+        let options = MergeOptions {
+            target_epoch_interval_s: Some(target),
+            ..MergeOptions::default()
+        };
+        let (merged, _) = merge(&[source], &options).expect("below-limit target merges");
+        assert_eq!(merged.header.epoch_interval_s, target);
+        assert_eq!(merged.epoch_count(), 1);
+        let bytes = merged.to_sp3_string().expect("below-limit merge writes");
+        assert!(bytes.contains("99999.99999999"));
+        Sp3::parse(bytes.as_bytes()).expect("below-limit merge reads back");
     }
 
     // N consecutive epochs spaced `interval_s` apart from 2020-06-25 00:00:00.
