@@ -1,13 +1,53 @@
 {
-  "date_utc": "2026-09-24",
+  "date_utc": "2026-09-25",
   "sidereon_version": "0.15.0",
   "status": "scored",
   "product": {
-    "name": "IGS0OPSULT_20262670600_02D_15M_ORB.SP3",
+    "name": "IGS0OPSULT_20262680600_02D_15M_ORB.SP3",
     "agency": "IGS",
     "parser_skipped_records": 0
   },
   "attempted_candidates": [
+    {
+      "date_utc": "2026-09-26",
+      "cadence": "rapid",
+      "source": "BKG IGS",
+      "name": "IGS0OPSRAP_20262690000_01D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSRAP_20262690000_01D_15M_ORB.SP3.gz",
+      "http_status": 404
+    },
+    {
+      "date_utc": "2026-09-26",
+      "cadence": "ultra_rapid",
+      "source": "BKG IGS",
+      "name": "IGS0OPSULT_20262691800_02D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262691800_02D_15M_ORB.SP3.gz",
+      "http_status": 404
+    },
+    {
+      "date_utc": "2026-09-26",
+      "cadence": "ultra_rapid",
+      "source": "BKG IGS",
+      "name": "IGS0OPSULT_20262691200_02D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262691200_02D_15M_ORB.SP3.gz",
+      "http_status": 404
+    },
+    {
+      "date_utc": "2026-09-26",
+      "cadence": "ultra_rapid",
+      "source": "BKG IGS",
+      "name": "IGS0OPSULT_20262690600_02D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262690600_02D_15M_ORB.SP3.gz",
+      "http_status": 404
+    },
+    {
+      "date_utc": "2026-09-26",
+      "cadence": "ultra_rapid",
+      "source": "BKG IGS",
+      "name": "IGS0OPSULT_20262690000_02D_15M_ORB.SP3",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262690000_02D_15M_ORB.SP3.gz",
+      "http_status": 404
+    },
     {
       "date_utc": "2026-09-25",
       "cadence": "rapid",
@@ -38,46 +78,6 @@
       "source": "BKG IGS",
       "name": "IGS0OPSULT_20262680600_02D_15M_ORB.SP3",
       "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262680600_02D_15M_ORB.SP3.gz",
-      "http_status": 404
-    },
-    {
-      "date_utc": "2026-09-25",
-      "cadence": "ultra_rapid",
-      "source": "BKG IGS",
-      "name": "IGS0OPSULT_20262680000_02D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262680000_02D_15M_ORB.SP3.gz",
-      "http_status": 404
-    },
-    {
-      "date_utc": "2026-09-24",
-      "cadence": "rapid",
-      "source": "BKG IGS",
-      "name": "IGS0OPSRAP_20262670000_01D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSRAP_20262670000_01D_15M_ORB.SP3.gz",
-      "http_status": 404
-    },
-    {
-      "date_utc": "2026-09-24",
-      "cadence": "ultra_rapid",
-      "source": "BKG IGS",
-      "name": "IGS0OPSULT_20262671800_02D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262671800_02D_15M_ORB.SP3.gz",
-      "http_status": 404
-    },
-    {
-      "date_utc": "2026-09-24",
-      "cadence": "ultra_rapid",
-      "source": "BKG IGS",
-      "name": "IGS0OPSULT_20262671200_02D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262671200_02D_15M_ORB.SP3.gz",
-      "http_status": 404
-    },
-    {
-      "date_utc": "2026-09-24",
-      "cadence": "ultra_rapid",
-      "source": "BKG IGS",
-      "name": "IGS0OPSULT_20262670600_02D_15M_ORB.SP3",
-      "url": "https://igs.bkg.bund.de/root_ftp/IGS/products/2437/IGS0OPSULT_20262670600_02D_15M_ORB.SP3.gz",
       "http_status": null
     }
   ],
@@ -86,8 +86,8 @@
       "sat_count": 31,
       "fit_count": 31,
       "skipped": 0,
-      "median_rms_3d_m": 93.28737733897425,
-      "worst_rms_3d_m": 135.85505350933886
+      "median_rms_3d_m": 94.09487270609338,
+      "worst_rms_3d_m": 135.34800637474817
     }
   },
   "per_sat": {
@@ -95,30 +95,30 @@
       {
         "satellite": "G19",
         "constellation": "GPS",
-        "rms_3d_m": 46.96114270031665,
-        "radial_rms_m": 9.182045747329383,
-        "along_rms_m": 26.240016008001756,
-        "cross_rms_m": 37.848388598634756,
+        "rms_3d_m": 45.9027438859714,
+        "radial_rms_m": 8.831438099858637,
+        "along_rms_m": 25.570257964005407,
+        "cross_rms_m": 37.08408695119334,
         "n": 192,
         "low_sample_count": false
       },
       {
         "satellite": "G17",
         "constellation": "GPS",
-        "rms_3d_m": 50.63950820192762,
-        "radial_rms_m": 10.031189959388175,
-        "along_rms_m": 34.008519131157634,
-        "cross_rms_m": 36.15460752708359,
+        "rms_3d_m": 49.689848767022305,
+        "radial_rms_m": 9.632109552313196,
+        "along_rms_m": 33.564107661566055,
+        "cross_rms_m": 35.35186293456949,
         "n": 192,
         "low_sample_count": false
       },
       {
         "satellite": "G29",
         "constellation": "GPS",
-        "rms_3d_m": 52.0570614244558,
-        "radial_rms_m": 17.73430315412246,
-        "along_rms_m": 34.45137164368338,
-        "cross_rms_m": 34.763991825681586,
+        "rms_3d_m": 51.93648123776938,
+        "radial_rms_m": 18.00617775172943,
+        "along_rms_m": 34.86586733787104,
+        "cross_rms_m": 34.02274152551897,
         "n": 192,
         "low_sample_count": false
       }
@@ -127,30 +127,30 @@
       {
         "satellite": "G27",
         "constellation": "GPS",
-        "rms_3d_m": 135.85505350933886,
-        "radial_rms_m": 56.58319757443006,
-        "along_rms_m": 119.39077297616795,
-        "cross_rms_m": 31.635117265966635,
+        "rms_3d_m": 135.34800637474817,
+        "radial_rms_m": 56.408490516745786,
+        "along_rms_m": 119.05071399781444,
+        "cross_rms_m": 31.049839353073395,
         "n": 192,
         "low_sample_count": false
       },
       {
         "satellite": "G07",
         "constellation": "GPS",
-        "rms_3d_m": 126.84087062658558,
-        "radial_rms_m": 53.91194086398538,
-        "along_rms_m": 108.81832353585817,
-        "cross_rms_m": 36.61531860347062,
+        "rms_3d_m": 126.86674257289309,
+        "radial_rms_m": 53.9602068364535,
+        "along_rms_m": 109.11566738242892,
+        "cross_rms_m": 35.73846080780504,
         "n": 192,
         "low_sample_count": false
       },
       {
         "satellite": "G10",
         "constellation": "GPS",
-        "rms_3d_m": 126.25303155655487,
-        "radial_rms_m": 53.58101860004907,
-        "along_rms_m": 110.5801374128503,
-        "cross_rms_m": 28.998890198709013,
+        "rms_3d_m": 126.0974707663842,
+        "radial_rms_m": 53.484487885549875,
+        "along_rms_m": 110.47683219072375,
+        "cross_rms_m": 28.893792385255537,
         "n": 192,
         "low_sample_count": false
       }
