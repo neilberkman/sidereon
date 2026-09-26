@@ -117,7 +117,8 @@
     "changed_resolved_format_version": "SP3-c",
     "changed_clock_tolerance_s": 3.5e-9,
     "malformed_product_sha256": "not-a-digest",
-    "fractional_target_epoch_interval_s": 1.5,
+    "accepted_fractional_target_epoch_interval_s": 450.5,
+    "refused_off_tick_target_epoch_interval_s": 600.0000000001,
     "empty_systems": []
   }
 }

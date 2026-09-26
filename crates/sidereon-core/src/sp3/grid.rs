@@ -9,12 +9,33 @@
 //! [`product_grid`] is the one rule for which grid a product's epochs lie on.
 //! The merge applies it to each input and [`Sp3::satellite_coverage`] reports
 //! it, so the two cannot disagree about a product's cadence.
+//!
+//! [`epoch_interval_ticks`] is the one rule for which `f64` seconds state an
+//! epoch interval on that axis. The merge's target grid, the merge-input
+//! identity's policy check, the exact-product cadence check and the grid a
+//! header interval declares all apply it, so none of them accepts an interval
+//! another refuses.
+//!
+//! The reader and writer hold the line-2 interval as the value its `F14.8`
+//! field states. That field has the same 10-nanosecond resolution, so every
+//! positive value it holds is an interval by this rule. It is also narrower,
+//! below 100000 s as SP3 requires, and it holds zero and negative values: the
+//! reader keeps what a file states rather than refusing the file, and a header
+//! whose value is not an interval declares no grid ([`product_grid`]).
+//! A merged product whose grid step is too wide for the field keeps the step,
+//! and the writer refuses it by name.
+
+use core::fmt;
 
 use super::write::epoch_tick;
 use super::Sp3;
 
 /// Ticks per second of the SP3 epoch axis (the `F11.8` seconds field).
 pub(super) const TICKS_PER_SECOND: i128 = 100_000_000;
+
+/// Tick counts below this convert to `f64` seconds exactly: the count itself
+/// is an exact `f64`, so [`interval_seconds`] rounds once.
+const EXACT_TICK_LIMIT: i128 = 1 << 53;
 
 /// The seconds a whole number of ticks spans, for a step or an interval. The
 /// count is below 2^53 for any interval a header field can state, so the
@@ -24,6 +45,138 @@ pub(super) fn interval_seconds(ticks: i128) -> f64 {
     ticks as f64 / TICKS_PER_SECOND as f64
 }
 
+/// Why a value given in seconds is not an SP3 epoch interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Sp3EpochIntervalRejection {
+    /// The value is NaN or an infinity.
+    NotFinite,
+    /// The value is zero or negative. An epoch interval is a step forward in
+    /// time.
+    NotPositive,
+    /// The value is not the seconds of any whole number of the 10-nanosecond
+    /// ticks an SP3 epoch record resolves: no eight-decimal seconds text reads
+    /// back as it, as `600.0000000001` or `1e-9` does not.
+    NotWholeTicks,
+    /// The value is too large for `f64` seconds to name one whole number of
+    /// ticks. From 2^26 s (about 777 days) adjacent tick counts can read back as
+    /// the same `f64`, and a value that more than one count reads back as is
+    /// refused rather than resolved to either. A value within a tick of 2^53
+    /// ticks or past it (about 1042 days) is beyond the range where ticks and
+    /// seconds convert exactly.
+    BeyondTickResolution,
+}
+
+impl fmt::Display for Sp3EpochIntervalRejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFinite => write!(f, "it is not finite"),
+            Self::NotPositive => write!(f, "it is not positive"),
+            Self::NotWholeTicks => write!(
+                f,
+                "it is not a whole number of the 10-nanosecond ticks an SP3 epoch states"
+            ),
+            Self::BeyondTickResolution => write!(
+                f,
+                "at this size f64 seconds do not name one whole number of 10-nanosecond ticks"
+            ),
+        }
+    }
+}
+
+/// A value refused as an SP3 epoch interval: the field that held it, the value
+/// as supplied, and why.
+///
+/// An SP3 epoch interval is a positive whole number of the 10-nanosecond ticks
+/// an epoch record's `F11.8` seconds field resolves, given in seconds as the
+/// `f64` that the interval's eight-decimal text reads back as. `450.5` and
+/// `0.00000003` are intervals; `600.0000000001` is not, although it is within a
+/// microsecond of a whole second.
+#[derive(Debug, Clone, Copy)]
+pub struct Sp3EpochIntervalError {
+    /// The option or field that held the value, such as
+    /// `"target_epoch_interval_s"`.
+    pub field: &'static str,
+    /// The value as supplied.
+    pub value: f64,
+    /// Why it is not an epoch interval.
+    pub reason: Sp3EpochIntervalRejection,
+}
+
+/// Values compare by their bits, so a refused NaN equals itself and the error
+/// can sit in `Eq` error enums.
+impl PartialEq for Sp3EpochIntervalError {
+    fn eq(&self, other: &Self) -> bool {
+        self.field == other.field
+            && self.value.to_bits() == other.value.to_bits()
+            && self.reason == other.reason
+    }
+}
+
+impl Eq for Sp3EpochIntervalError {}
+
+impl fmt::Display for Sp3EpochIntervalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} s is not an SP3 epoch interval: {}",
+            self.field, self.value, self.reason
+        )
+    }
+}
+
+impl std::error::Error for Sp3EpochIntervalError {}
+
+/// The whole number of ticks an epoch interval states, or why `interval_s`
+/// states none.
+///
+/// `interval_s` states `ticks` when it is the `f64` nearest `ticks` / 10^8 s:
+/// the value the interval's eight-decimal text reads back as, and the value
+/// [`interval_seconds`] gives for `ticks`. It must state exactly one positive
+/// count below [`EXACT_TICK_LIMIT`].
+pub(super) fn epoch_interval_ticks(interval_s: f64) -> Result<i128, Sp3EpochIntervalRejection> {
+    if !interval_s.is_finite() {
+        return Err(Sp3EpochIntervalRejection::NotFinite);
+    }
+    if interval_s <= 0.0 {
+        return Err(Sp3EpochIntervalRejection::NotPositive);
+    }
+    // Every count that reads back as `interval_s` lies within one of this
+    // estimate. Such a count differs from `interval_s * 10^8` by at most half
+    // an `f64` spacing of `interval_s`, times 10^8: below 2^27 s that is under
+    // 0.75. Forming the product rounds by at most half a spacing of a value
+    // below 2^53, 0.5, and rounding to a whole number moves it at most 0.5
+    // more, so the estimate is under 1.75 from the count; both are whole
+    // numbers, so they differ by at most one.
+    let estimate = (interval_s * TICKS_PER_SECOND as f64).round();
+    if estimate >= (EXACT_TICK_LIMIT - 1) as f64 {
+        return Err(Sp3EpochIntervalRejection::BeyondTickResolution);
+    }
+    let estimate = estimate as i128;
+    let mut stated = None;
+    for ticks in (estimate - 1).max(1)..=estimate + 1 {
+        if interval_seconds(ticks) == interval_s {
+            if stated.is_some() {
+                return Err(Sp3EpochIntervalRejection::BeyondTickResolution);
+            }
+            stated = Some(ticks);
+        }
+    }
+    stated.ok_or(Sp3EpochIntervalRejection::NotWholeTicks)
+}
+
+/// [`epoch_interval_ticks`] with the refusal typed for `field`.
+pub(super) fn checked_epoch_interval_ticks(
+    field: &'static str,
+    interval_s: f64,
+) -> Result<i128, Sp3EpochIntervalError> {
+    epoch_interval_ticks(interval_s).map_err(|reason| Sp3EpochIntervalError {
+        field,
+        value: interval_s,
+        reason,
+    })
+}
+
 /// Seconds since J2000 for a whole number of ticks since J2000, whole seconds
 /// and remainder converted separately so a whole-second epoch is exact.
 pub(super) fn tick_seconds(ticks: i128) -> f64 {
@@ -31,19 +184,10 @@ pub(super) fn tick_seconds(ticks: i128) -> f64 {
         + ticks.rem_euclid(TICKS_PER_SECOND) as f64 / TICKS_PER_SECOND as f64
 }
 
-/// The whole number of ticks an interval states, when it is positive and is
-/// the `f64` nearest a whole number of ticks - the value an eight-decimal field
-/// reads back as. `None` otherwise.
+/// The whole number of ticks an interval states by [`epoch_interval_ticks`],
+/// or `None` when it states none.
 pub(super) fn interval_ticks(interval_s: f64) -> Option<i128> {
-    if !interval_s.is_finite() || interval_s <= 0.0 {
-        return None;
-    }
-    let scaled = (interval_s * TICKS_PER_SECOND as f64).round();
-    if !(1.0..9_007_199_254_740_992.0).contains(&scaled) {
-        return None;
-    }
-    let ticks = scaled as i128;
-    (interval_seconds(ticks) == interval_s).then_some(ticks)
+    epoch_interval_ticks(interval_s).ok()
 }
 
 /// Each epoch of `sp3` on the tick axis, in file order; `None` for an epoch no
@@ -153,4 +297,156 @@ pub(super) fn gcd(a: i128, b: i128) -> i128 {
         (a, b) = (b, a % b);
     }
     a
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::{
+        checked_epoch_interval_ticks, epoch_interval_ticks, interval_ticks, Sp3EpochIntervalError,
+        Sp3EpochIntervalRejection,
+    };
+
+    /// The tick count an eight-decimal seconds text states, read from its
+    /// digits, and the `f64` the text reads back as. The count comes from the
+    /// text alone, never from the rule under test.
+    fn text_interval(text: &str) -> (i128, f64) {
+        let (whole, fraction) = text.split_once('.').expect("eight-decimal text");
+        assert_eq!(fraction.len(), 8, "{text}");
+        let ticks = format!("{whole}{fraction}").parse::<i128>().unwrap();
+        (ticks, text.parse::<f64>().unwrap())
+    }
+
+    #[test]
+    fn every_eight_decimal_interval_states_its_own_tick_count() {
+        for text in [
+            "0.00000001",
+            "0.00000002",
+            "0.00000003",
+            "0.00000007",
+            "0.10000000",
+            "0.29999999",
+            "1.00000000",
+            "1.50000000",
+            "30.00000000",
+            "300.00000000",
+            "450.50000000",
+            "599.99999999",
+            "600.00000001",
+            "900.00000000",
+            "86400.00000000",
+            "99999.99999999",
+        ] {
+            let (ticks, value) = text_interval(text);
+            assert_eq!(epoch_interval_ticks(value), Ok(ticks), "{text}");
+            assert_eq!(interval_ticks(value), Some(ticks), "{text}");
+        }
+        // Every whole multiple of 10 ns from 1 to 10^5 ticks, and a spread of
+        // larger counts, written as its eight-decimal text.
+        let larger = (1..=100_000_i128)
+            .chain((0..2_000_i128).map(|index| 1_000_003 * index * index + 7 * index + 100_001));
+        for ticks in larger {
+            let text = format!("{}.{:08}", ticks / 100_000_000, ticks % 100_000_000);
+            let (expected, value) = text_interval(&text);
+            assert_eq!(expected, ticks);
+            assert_eq!(epoch_interval_ticks(value), Ok(ticks), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_value_off_the_tick_grid_is_refused_however_near_a_whole_second() {
+        for value in [
+            600.0000000001,
+            599.9999999999,
+            1.0e-9,
+            5.0e-9,
+            1.5e-8,
+            0.123456789,
+            300.000000005,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+        ] {
+            assert_eq!(
+                epoch_interval_ticks(value),
+                Err(Sp3EpochIntervalRejection::NotWholeTicks),
+                "{value:e}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_negative_and_non_finite_values_are_refused_by_reason() {
+        for value in [0.0, -0.0, -1.0e-8, -300.0, f64::MIN] {
+            assert_eq!(
+                epoch_interval_ticks(value),
+                Err(Sp3EpochIntervalRejection::NotPositive),
+                "{value:e}"
+            );
+        }
+        for value in [f64::NAN, -f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                epoch_interval_ticks(value),
+                Err(Sp3EpochIntervalRejection::NotFinite),
+                "{value:e}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_that_names_more_than_one_tick_count_is_refused() {
+        // 2^26 s is exactly 6_710_886_400_000_000 ticks and no neighbouring
+        // count reads back as it; 7e7 s is exactly 7e15 ticks, likewise.
+        assert_eq!(
+            epoch_interval_ticks(67_108_864.0),
+            Ok(6_710_886_400_000_000)
+        );
+        assert_eq!(epoch_interval_ticks(7.0e7), Ok(7_000_000_000_000_000));
+        // The next f64 above 2^26 s, 0x1.0000000000001p+26, lies within half a
+        // spacing of both 6_710_886_400_000_001 and 6_710_886_400_000_002
+        // ticks, so it names neither.
+        let shared = f64::from_bits(0x4190_0000_0000_0001);
+        assert_eq!(
+            epoch_interval_ticks(shared),
+            Err(Sp3EpochIntervalRejection::BeyondTickResolution)
+        );
+        // Within a tick of 2^53 ticks or past it, ticks and seconds no longer
+        // convert exactly.
+        for value in [1.0e8, 90071992.5474099, 1.0e300, f64::MAX] {
+            assert_eq!(
+                epoch_interval_ticks(value),
+                Err(Sp3EpochIntervalRejection::BeyondTickResolution),
+                "{value:e}"
+            );
+        }
+        // 2^53 - 3 ticks is below the limit and states only itself.
+        assert_eq!(
+            epoch_interval_ticks(90071992.54740989),
+            Ok(9_007_199_254_740_989)
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_field_the_value_and_the_reason() {
+        let error = checked_epoch_interval_ticks("target_epoch_interval_s", 600.0000000001)
+            .expect_err("off the tick grid");
+        assert_eq!(
+            error,
+            Sp3EpochIntervalError {
+                field: "target_epoch_interval_s",
+                value: 600.0000000001,
+                reason: Sp3EpochIntervalRejection::NotWholeTicks,
+            }
+        );
+        assert!(
+            error
+                .to_string()
+                .starts_with("target_epoch_interval_s 600.0000000001 s"),
+            "{error}"
+        );
+        // A refused NaN compares equal to itself, so the error is `Eq`.
+        let nan = checked_epoch_interval_ticks("target_epoch_interval_s", f64::NAN).unwrap_err();
+        let same = nan;
+        assert_eq!(nan, same);
+        assert_eq!(nan.reason, Sp3EpochIntervalRejection::NotFinite);
+    }
 }

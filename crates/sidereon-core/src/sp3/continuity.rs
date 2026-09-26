@@ -163,7 +163,9 @@ impl StencilExtent {
     /// [`ContinuityReport::verdict_for_window`] would accept a window whose
     /// interpolation selects a node the defect sits on.
     ///
-    /// A non-finite or non-positive declared interval is rejected.
+    /// A non-finite or non-positive declared interval is rejected. The interval
+    /// is used here only as a length for the reach floor, not as a grid step,
+    /// so it need not be a whole number of ticks.
     pub fn for_sp3(sp3: &Sp3) -> Result<Self> {
         let interval_s = sp3.header.epoch_interval_s;
         if !interval_s.is_finite() || interval_s <= 0.0 {

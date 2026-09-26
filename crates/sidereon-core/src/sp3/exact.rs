@@ -11,6 +11,7 @@ use crate::astro::time::civil::j2000_seconds;
 use crate::data::{AnalysisCenter, DataCatalogError, ProductDate, ProductIdentity, ProductType};
 use crate::tolerances::WHOLE_SECOND_EPS_S;
 
+use super::grid::{interval_seconds, interval_ticks, product_ticks, TICKS_PER_SECOND};
 use super::{Sp3, Sp3DataType, Sp3Version};
 
 /// Maximum legal epoch interval from the SP3-d specification, in seconds.
@@ -366,13 +367,17 @@ pub enum ExactSp3ValidationError {
         /// First parsed epoch, seconds since J2000.
         actual_j2000_s: f64,
     },
-    /// Parsed epochs are not a strictly increasing regular requested-cadence grid.
+    /// Parsed epochs are not a strictly increasing regular requested-cadence
+    /// grid: a step between consecutive epochs is not the requested cadence as
+    /// an exact whole number of 10-nanosecond ticks.
     IrregularEpochGrid {
         /// Index of the later epoch in the failing pair.
         epoch_index: usize,
         /// Exact requested cadence.
         requested_s: f64,
-        /// Difference between this epoch and its predecessor.
+        /// The step from its predecessor to this epoch, counted exactly in
+        /// ticks and rounded once to seconds. For an epoch no SP3 record states
+        /// exactly, the difference of the two epochs' J2000 seconds.
         actual_s: f64,
     },
     /// The declared span is not an integer multiple of the requested cadence.
@@ -635,7 +640,12 @@ pub fn validate_exact_sp3(
             actual_s: header_cadence_s,
         });
     }
-    if !seconds_match(header_cadence_s, cadence_s as f64) {
+    // The header states the requested cadence when it states the same whole
+    // number of 10-nanosecond ticks, by the rule every SP3 interval check
+    // applies; a header a microsecond off a whole second states a different
+    // interval.
+    let cadence_ticks = i128::from(cadence_s) * TICKS_PER_SECOND;
+    if interval_ticks(header_cadence_s) != Some(cadence_ticks) {
         return Err(ExactSp3ValidationError::CadenceMismatch {
             requested_s: cadence_s as f64,
             header_s: header_cadence_s,
@@ -666,18 +676,35 @@ pub fn validate_exact_sp3(
         .first()
         .copied()
         .ok_or(ExactSp3ValidationError::EmptyEpochGrid)?;
-    if !seconds_match(first_j2000_s, requested_start_j2000_s) {
+    // The first epoch and every step are compared on the exact tick axis the
+    // epoch records state. The requested start is a whole number of seconds,
+    // so the first record states it only at exactly that many ticks, and a
+    // step is the requested cadence only when it is that many ticks exactly.
+    let ticks = product_ticks(product);
+    let requested_start_tick = requested_start_j2000_s as i128 * TICKS_PER_SECOND;
+    if ticks.first().copied().flatten() != Some(requested_start_tick) {
         return Err(ExactSp3ValidationError::FirstEpochMismatch {
             requested_j2000_s: requested_start_j2000_s,
             actual_j2000_s: first_j2000_s,
         });
     }
-
-    for (index, pair) in product.epoch_j2000_s.windows(2).enumerate() {
-        let actual_s = pair[1] - pair[0];
-        if !actual_s.is_finite() || !seconds_match(actual_s, cadence_s as f64) {
+    for index in 1..ticks.len() {
+        let step = ticks[index]
+            .zip(ticks[index - 1])
+            .map(|(later, earlier)| later - earlier);
+        if step != Some(cadence_ticks) {
+            let actual_s = match step {
+                Some(step) => interval_seconds(step),
+                None => match (
+                    product.epoch_j2000_s.get(index),
+                    product.epoch_j2000_s.get(index - 1),
+                ) {
+                    (Some(later), Some(earlier)) => later - earlier,
+                    _ => f64::NAN,
+                },
+            };
             return Err(ExactSp3ValidationError::IrregularEpochGrid {
-                epoch_index: index + 1,
+                epoch_index: index,
                 requested_s: cadence_s as f64,
                 actual_s,
             });

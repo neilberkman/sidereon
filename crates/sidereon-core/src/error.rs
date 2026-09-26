@@ -101,6 +101,10 @@ pub enum Error {
     /// products to merge, or products on mismatched time scales, epoch grids, or
     /// coordinate-system labels).
     InvalidInput(String),
+    /// A value given as an SP3 epoch interval is not a positive whole number of
+    /// the 10-nanosecond ticks an SP3 epoch states. It names the field, the
+    /// value and the reason.
+    Sp3EpochInterval(crate::sp3::Sp3EpochIntervalError),
     /// An SBAS block holds a value the SBAS wire form cannot carry as held.
     SbasEncode(Box<crate::sbas::SbasEncodeError>),
     /// An RTCM encoder refuses a value it cannot write as held.
@@ -173,6 +177,7 @@ impl fmt::Display for Error {
                 "{sat}: {nodes} precise orbit nodes serve the query, {required} are needed"
             ),
             Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
+            Error::Sp3EpochInterval(error) => write!(f, "invalid input: {error}"),
             Error::SbasEncode(error) => write!(f, "SBAS encode error: {error}"),
             Error::RtcmEncode(error) => write!(f, "invalid input: {error}"),
             Error::RtcmConversion(error) => write!(f, "invalid input: {error}"),

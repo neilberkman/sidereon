@@ -492,7 +492,12 @@ canonical identifier from those records. Single-contributor and
 multi-contributor merges use the same schema.
 
 Accepted negative-zero tolerances canonicalize to positive zero because both
-values execute identically. The literal public contract vectors in
+values execute identically. A target epoch interval is admitted by the rule
+`merge` applies to it: a positive whole number of the 10-nanosecond ticks an
+SP3 epoch states, given as the `f64` its eight-decimal text reads back as. A
+450.5 s target is bound; a 600.0000000001 s target is refused with the same
+typed `Sp3EpochIntervalError` by the identity and by `merge`. The literal
+public contract vectors in
 [`sp3-merge-input-v1.json`](../crates/sidereon-core/golden/sp3-merge-input-v1.json) bind
 the complete policy and exact artifacts for Rust, Python, Elixir, C, and WASM.
 

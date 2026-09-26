@@ -377,6 +377,70 @@ fn rejects_zero_nonfinite_out_of_range_and_mismatched_header_cadence() {
     );
 }
 
+/// Cadence and steps are compared exactly in the 10-nanosecond ticks an SP3
+/// epoch states. A header interval or an epoch step within a microsecond of
+/// the requested cadence, but not equal to it, was accepted as that cadence.
+#[test]
+fn header_cadence_and_epoch_steps_must_equal_the_request_to_the_tick() {
+    let offsets = regular_offsets(288, 300);
+    for (header_cadence, header_s) in [
+        ("300.00000001", 300.00000001),
+        ("300.00000099", 300.00000099),
+        ("299.99999999", 299.99999999),
+    ] {
+        let text = exact_sp3(&offsets, 288, header_cadence, 1);
+        assert_eq!(
+            parse_exact_sp3(text.as_bytes(), &request("05M").unwrap()).unwrap_err(),
+            ExactSp3ValidationError::CadenceMismatch {
+                requested_s: 300.0,
+                header_s,
+            },
+            "{header_cadence}"
+        );
+    }
+
+    // Epoch 100 (08:20) half a microsecond late: the step into it is
+    // 30_000_000_050 ticks, not 30_000_000_000.
+    let regular = exact_sp3(&offsets, 288, "300.00000000", 1);
+    let on_time = format!(
+        "*  {:4} {:>2} {:>2} {:>2} {:>2} {:11.8}\n",
+        2020, 1, 1, 8, 20, 0.0
+    );
+    let late = format!(
+        "*  {:4} {:>2} {:>2} {:>2} {:>2} {:11.8}\n",
+        2020, 1, 1, 8, 20, 5.0e-7
+    );
+    assert_eq!(regular.matches(&on_time).count(), 1);
+    let text = regular.replace(&on_time, &late);
+    assert_eq!(
+        parse_exact_sp3(text.as_bytes(), &request("05M").unwrap()).unwrap_err(),
+        ExactSp3ValidationError::IrregularEpochGrid {
+            epoch_index: 100,
+            requested_s: 300.0,
+            actual_s: 300.0000005,
+        }
+    );
+
+    // Every epoch half a microsecond late: each step is exact, so the first
+    // record is where the product departs from the request.
+    let mut all_late = String::new();
+    for line in regular.lines() {
+        match line.strip_suffix(" 0.00000000") {
+            Some(head) if line.starts_with("*  ") => {
+                all_late.push_str(head);
+                all_late.push_str(" 0.00000050");
+            }
+            _ => all_late.push_str(line),
+        }
+        all_late.push('\n');
+    }
+    assert_eq!(all_late.matches(" 0.00000050\n").count(), 288);
+    assert!(matches!(
+        parse_exact_sp3(all_late.as_bytes(), &request("05M").unwrap()),
+        Err(ExactSp3ValidationError::FirstEpochMismatch { .. })
+    ));
+}
+
 #[test]
 fn rejects_zero_unknown_and_unsupported_sample_tokens() {
     for sample in ["00M", "00U", "05X", "1M", "01W", "05m", "99Q"] {
