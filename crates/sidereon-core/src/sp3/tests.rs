@@ -2059,7 +2059,9 @@ fn continuity_options_carry_the_default_interpretation_policy() {
     use super::continuity::{ContinuityOptions, OrbitClass};
 
     assert_eq!(
-        ContinuityOptions::new(None, Some(1.0)).interpolation,
+        ContinuityOptions::new(None, Some(1.0))
+            .unwrap()
+            .interpolation,
         Sp3InterpolationOptions::default()
     );
     assert_eq!(
@@ -2069,6 +2071,7 @@ fn continuity_options_carry_the_default_interpretation_policy() {
     let wide = Sp3InterpolationOptions::new(13.0).unwrap();
     assert_eq!(
         ContinuityOptions::new(None, Some(1.0))
+            .unwrap()
             .with_interpolation_options(wide)
             .interpolation,
         wide
@@ -2087,8 +2090,9 @@ fn the_hold_out_replay_reads_nodes_under_the_continuity_options_policy() {
     let hole_edge_j2000_s = 646_254_900.0;
     let residual_at_edge = |factor: f64| -> (usize, f64) {
         let options = ContinuityOptions::new(None, Some(1.0))
+            .unwrap()
             .with_interpolation_options(Sp3InterpolationOptions::new(factor).unwrap());
-        let report = check_continuity(&samples, &options);
+        let report = check_continuity(&samples, &options).unwrap();
         let residual_m = report
             .defects
             .iter()

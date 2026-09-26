@@ -5,9 +5,10 @@ use sidereon_core::data::{
     DistributionSource, ProductDate, ProductType,
 };
 use sidereon_core::ephemeris::{
-    merge, MergeCombine, MergeOptions, MergePrecedenceScope, OutlierRejectOptions, Sp3,
-    Sp3ArtifactIdentity, Sp3EpochIntervalError, Sp3EpochIntervalRejection, Sp3FrameLabelSet,
-    Sp3FrameReconciliationOptions, Sp3MergeInputIdentity, Sp3MergeInputIdentityError,
+    merge, ContinuityOptionRejection, ContinuityOptions, ContinuityOptionsError, MergeCombine,
+    MergeOptions, MergePrecedenceScope, OrbitClass, OutlierRejectOptions, Sp3, Sp3ArtifactIdentity,
+    Sp3EpochIntervalError, Sp3EpochIntervalRejection, Sp3FrameLabelSet,
+    Sp3FrameReconciliationOptions, Sp3MergeInputIdentity, Sp3MergeInputIdentityError, SpeedBound,
 };
 use sidereon_core::GnssSystem;
 
@@ -583,5 +584,77 @@ fn merge_and_its_input_identity_accept_and_refuse_the_same_target_intervals() {
             Some(sidereon_core::Error::Sp3EpochInterval(expected)),
             "{value}"
         );
+    }
+}
+
+/// A merge verifying continuity with a bound no sample can exceed reported the
+/// merged product attested without testing it. `merge` refuses such options
+/// before it reads the inputs, and the identity refuses the same policy.
+#[test]
+fn merge_and_its_input_identity_refuse_the_same_continuity_bounds() {
+    let contributor = artifact(AnalysisCenter::Esa, 0x11);
+    let product = two_epoch_product();
+
+    let cases = [
+        (
+            "residual_tolerance_m",
+            f64::NAN,
+            ContinuityOptionRejection::NotFinite,
+        ),
+        (
+            "residual_tolerance_m",
+            f64::INFINITY,
+            ContinuityOptionRejection::NotFinite,
+        ),
+        (
+            "residual_tolerance_m",
+            -1.0,
+            ContinuityOptionRejection::Negative,
+        ),
+        (
+            "speed_bound",
+            f64::NAN,
+            ContinuityOptionRejection::NotFinite,
+        ),
+        (
+            "speed_bound",
+            f64::INFINITY,
+            ContinuityOptionRejection::NotFinite,
+        ),
+        ("speed_bound", -6_000.0, ContinuityOptionRejection::Negative),
+    ];
+    for (field, value, reason) in cases {
+        let mut continuity = ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss);
+        if field == "speed_bound" {
+            continuity.speed_bound = Some(SpeedBound::ExplicitMaxSpeed(value));
+        } else {
+            continuity.residual_tolerance_m = Some(value);
+        }
+        let expected = ContinuityOptionsError {
+            field,
+            value,
+            reason,
+        };
+        let mut policy = MergeOptions::default();
+        policy.verify_continuity = Some(continuity);
+        assert_eq!(
+            Sp3MergeInputIdentity::new(std::slice::from_ref(&contributor), &policy),
+            Err(Sp3MergeInputIdentityError::ContinuityOptions(expected)),
+            "{field} {value}"
+        );
+        assert_eq!(
+            merge(std::slice::from_ref(&product), &policy).err(),
+            Some(sidereon_core::Error::ContinuityOptions(expected)),
+            "{field} {value}"
+        );
+    }
+
+    let mut policy = MergeOptions::default();
+    policy.verify_continuity = Some(ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss));
+    Sp3MergeInputIdentity::new(std::slice::from_ref(&contributor), &policy)
+        .expect("finite continuity bounds");
+    match merge(std::slice::from_ref(&product), &policy) {
+        Ok((_, report)) => assert!(report.continuity.is_some()),
+        Err(error) => panic!("merge refused finite continuity bounds: {error}"),
     }
 }

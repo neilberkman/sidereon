@@ -2302,9 +2302,10 @@ pub use combine::{
     Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions, TransitionReason,
 };
 pub use continuity::{
-    check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport,
-    EpochWindow, InterpolationNodes, OrbitClass, SpeedBound, StencilExtent,
-    WindowContinuityDecision, WindowContinuityVerdict,
+    check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptionRejection,
+    ContinuityOptions, ContinuityOptionsError, ContinuityReport, EpochWindow, InterpolationNodes,
+    OrbitClass, SpeedBound, StencilExtent, UnusableSampleReason, WindowContinuityDecision,
+    WindowContinuityVerdict,
 };
 pub use coverage::{
     Sp3ChannelCoverage, Sp3Coverage, Sp3CoverageGap, Sp3CoverageSpan, Sp3SatelliteCoverage,

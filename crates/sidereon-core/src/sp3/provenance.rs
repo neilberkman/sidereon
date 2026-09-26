@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::data::{ArchiveCompression, DistributionSource, ProductIdentity, ProductType};
 
 use super::combine::TARGET_EPOCH_INTERVAL_FIELD;
+use super::continuity::ContinuityOptionsError;
 use super::grid::{checked_epoch_interval_ticks, Sp3EpochIntervalError};
 use super::{MergeCombine, MergeOptions, MergePrecedenceScope};
 
@@ -86,6 +87,12 @@ pub enum Sp3MergeInputIdentityError {
     /// the same error in [`crate::Error::Sp3EpochInterval`].
     #[error("invalid merged-SP3 policy: {0}")]
     TargetEpochInterval(Sp3EpochIntervalError),
+    /// [`MergeOptions::verify_continuity`] holds a bound
+    /// [`ContinuityOptions::validate`](crate::ephemeris::ContinuityOptions::validate)
+    /// refuses. [`merge`](crate::ephemeris::merge) refuses the same options,
+    /// with the same error in [`crate::Error::ContinuityOptions`].
+    #[error("invalid merged-SP3 policy: {0}")]
+    ContinuityOptions(ContinuityOptionsError),
 }
 
 impl Sp3MergeInputIdentity {
@@ -302,6 +309,13 @@ fn validate_policy(policy: &MergeOptions) -> Result<(), Sp3MergeInputIdentityErr
     if let Some(value) = policy.target_epoch_interval_s {
         checked_epoch_interval_ticks(TARGET_EPOCH_INTERVAL_FIELD, value)
             .map_err(Sp3MergeInputIdentityError::TargetEpochInterval)?;
+    }
+    // Continuity verification does not change the merged product, so it is not
+    // bound into the identity, but a policy `merge` refuses has no identity.
+    if let Some(continuity) = &policy.verify_continuity {
+        continuity
+            .validate()
+            .map_err(Sp3MergeInputIdentityError::ContinuityOptions)?;
     }
     if policy
         .systems

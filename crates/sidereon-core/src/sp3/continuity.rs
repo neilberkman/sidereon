@@ -71,7 +71,13 @@
 //! [`ContinuityReport::attested`]. The bounds themselves are physical and are
 //! never inferred from the data being validated: a check that can be widened
 //! until it passes is not a check.
+//!
+//! The options are refused, though, when a bound is not a finite non-negative
+//! number ([`ContinuityOptionsError`]). No sample exceeds a NaN or infinite
+//! bound, so such a check would find nothing and report the series attested
+//! without having tested it.
 
+use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::astro::constants::earth::OMEGA_E_DOT_RAD_S;
@@ -446,6 +452,87 @@ pub enum SpeedBound {
     ExplicitMaxSpeed(f64),
 }
 
+/// Why a [`ContinuityOptions`] bound is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ContinuityOptionRejection {
+    /// The bound is NaN or an infinity. No implied speed or residual exceeds
+    /// it, so the check would find nothing and attest a series it never
+    /// tested.
+    NotFinite,
+    /// The bound is below zero. A speed or a distance bound is a magnitude,
+    /// and every sample would exceed a negative one.
+    Negative,
+}
+
+impl fmt::Display for ContinuityOptionRejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFinite => write!(f, "it is not finite"),
+            Self::Negative => write!(f, "it is negative"),
+        }
+    }
+}
+
+/// A [`ContinuityOptions`] bound refused: the field that held it, the value as
+/// supplied, and why.
+///
+/// A bound must be a finite number at least zero. `None` is how a check is
+/// disabled; a NaN or infinite bound is not.
+#[derive(Debug, Clone, Copy)]
+pub struct ContinuityOptionsError {
+    /// The field that held the value: `"speed_bound"` for
+    /// [`SpeedBound::ExplicitMaxSpeed`], or `"residual_tolerance_m"`.
+    pub field: &'static str,
+    /// The value as supplied.
+    pub value: f64,
+    /// Why it is refused.
+    pub reason: ContinuityOptionRejection,
+}
+
+/// Values compare by their bits, so a refused NaN equals itself and the error
+/// can sit in `Eq` error enums.
+impl PartialEq for ContinuityOptionsError {
+    fn eq(&self, other: &Self) -> bool {
+        self.field == other.field
+            && self.value.to_bits() == other.value.to_bits()
+            && self.reason == other.reason
+    }
+}
+
+impl Eq for ContinuityOptionsError {}
+
+impl fmt::Display for ContinuityOptionsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "continuity {} {} is refused: {}",
+            self.field, self.value, self.reason
+        )
+    }
+}
+
+impl std::error::Error for ContinuityOptionsError {}
+
+/// The continuity bound rule: a finite number at least zero.
+fn checked_bound(
+    field: &'static str,
+    value: f64,
+) -> core::result::Result<(), ContinuityOptionsError> {
+    let reason = if !value.is_finite() {
+        ContinuityOptionRejection::NotFinite
+    } else if value < 0.0 {
+        ContinuityOptionRejection::Negative
+    } else {
+        return Ok(());
+    };
+    Err(ContinuityOptionsError {
+        field,
+        value,
+        reason,
+    })
+}
+
 impl SpeedBound {
     fn value_m_s(self) -> f64 {
         match self {
@@ -459,14 +546,38 @@ impl ContinuityOptions {
     /// Build continuity settings from the optional speed and residual checks.
     ///
     /// `None` disables the corresponding check; assign `Some` bounds when the
-    /// check is required.
-    #[must_use]
-    pub const fn new(speed_bound: Option<SpeedBound>, residual_tolerance_m: Option<f64>) -> Self {
-        Self {
+    /// check is required. An explicit speed bound or a residual tolerance that
+    /// is not a finite number at least zero is refused
+    /// ([`ContinuityOptions::validate`]).
+    pub fn new(
+        speed_bound: Option<SpeedBound>,
+        residual_tolerance_m: Option<f64>,
+    ) -> core::result::Result<Self, ContinuityOptionsError> {
+        let options = Self {
             speed_bound,
             residual_tolerance_m,
             interpolation: Sp3InterpolationOptions::DEFAULT,
+        };
+        options.validate()?;
+        Ok(options)
+    }
+
+    /// Check every bound these options hold: an explicit speed bound and the
+    /// residual tolerance must each be a finite number at least zero.
+    ///
+    /// The fields are public, so a value set after construction is checked
+    /// again wherever the options are used: [`check_continuity`] and a merge
+    /// with [`MergeOptions::verify_continuity`](crate::ephemeris::MergeOptions::verify_continuity)
+    /// refuse options this refuses. A class-derived bound is always finite, and
+    /// [`Sp3InterpolationOptions`] is validated when it is built.
+    pub fn validate(&self) -> core::result::Result<(), ContinuityOptionsError> {
+        if let Some(SpeedBound::ExplicitMaxSpeed(bound_m_s)) = self.speed_bound {
+            checked_bound("speed_bound", bound_m_s)?;
         }
+        if let Some(tolerance_m) = self.residual_tolerance_m {
+            checked_bound("residual_tolerance_m", tolerance_m)?;
+        }
+        Ok(())
     }
 
     /// Both checks, with the class bound and a 1 m residual tolerance.
@@ -487,8 +598,8 @@ impl ContinuityOptions {
     }
 }
 
-/// One continuity defect. Every variant names the satellite and locates itself
-/// in time.
+/// One continuity defect. Every variant names the satellite, and each locates
+/// itself in time where it has an epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContinuityDefect {
     /// Two or more samples share one epoch. Reported, never deduplicated: which
@@ -506,6 +617,21 @@ pub enum ContinuityDefect {
     SingleSampleSeries {
         /// The satellite.
         sat: GnssSatelliteId,
+    },
+    /// A sample no check can use: its epoch names no finite J2000 second, or
+    /// its position is not finite. It takes no part in any comparison, and its
+    /// neighbours are compared across the hole it leaves, so it is reported
+    /// rather than dropped. Not a pass, even when every sample of a satellite
+    /// is unusable.
+    UnusableSample {
+        /// The satellite.
+        sat: GnssSatelliteId,
+        /// Index of the sample in the slice given to [`check_continuity`].
+        sample_index: usize,
+        /// The sample's epoch, seconds since J2000, when it names one.
+        epoch_j2000_s: Option<f64>,
+        /// Why no check can use it.
+        reason: UnusableSampleReason,
     },
     /// An adjacent pair implies an earth-fixed speed above the physical bound.
     SpeedBound {
@@ -561,6 +687,7 @@ impl ContinuityDefect {
         match self {
             Self::DuplicateEpoch { sat, .. }
             | Self::SingleSampleSeries { sat }
+            | Self::UnusableSample { sat, .. }
             | Self::SpeedBound { sat, .. }
             | Self::HoldOutResidual { sat, .. } => *sat,
         }
@@ -579,6 +706,9 @@ impl ContinuityDefect {
         let support = match self {
             Self::DuplicateEpoch { epoch_j2000_s, .. } => Some((*epoch_j2000_s, *epoch_j2000_s)),
             Self::SingleSampleSeries { .. } => None,
+            Self::UnusableSample { epoch_j2000_s, .. } => {
+                epoch_j2000_s.map(|epoch_j2000_s| (epoch_j2000_s, epoch_j2000_s))
+            }
             Self::SpeedBound {
                 from_j2000_s,
                 to_j2000_s,
@@ -596,18 +726,30 @@ impl ContinuityDefect {
 
         match support {
             Some((from, through)) => from <= needed_through && through >= needed_from,
-            // The existing variant has no epoch. Querying the existing report
-            // must therefore treat it conservatively rather than invent a
-            // location or hide an unresolved input defect.
+            // A single-sample series, or a sample whose epoch names no second,
+            // has no epoch. Querying the existing report must therefore treat
+            // it conservatively rather than invent a location or hide an
+            // unresolved input defect.
             None => true,
         }
     }
 }
 
+/// Why [`ContinuityDefect::UnusableSample`] took no part in a check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnusableSampleReason {
+    /// The epoch names no finite second on the J2000 axis.
+    EpochNotPlaced,
+    /// A position coordinate is NaN or infinite.
+    NonFinitePosition,
+}
+
 /// Which check produced a defect, for callers filtering a report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContinuityCheck {
-    /// Input well-formedness: duplicate epochs, single-sample series.
+    /// Input well-formedness: duplicate epochs, single-sample series,
+    /// unusable samples.
     Input,
     /// The physical earth-fixed speed gate.
     SpeedBound,
@@ -646,7 +788,8 @@ impl ContinuityReport {
         self.defects.iter().filter(move |defect| {
             let source = match defect {
                 ContinuityDefect::DuplicateEpoch { .. }
-                | ContinuityDefect::SingleSampleSeries { .. } => ContinuityCheck::Input,
+                | ContinuityDefect::SingleSampleSeries { .. }
+                | ContinuityDefect::UnusableSample { .. } => ContinuityCheck::Input,
                 ContinuityDefect::SpeedBound { .. } => ContinuityCheck::SpeedBound,
                 ContinuityDefect::HoldOutResidual { .. } => ContinuityCheck::HoldOutResidual,
             };
@@ -658,7 +801,8 @@ impl ContinuityReport {
     ///
     /// This filters the existing report. It does not rerun continuity checks or
     /// alter their defaults. A [`ContinuityDefect::SingleSampleSeries`] has no
-    /// stored epoch, so it conservatively influences every window.
+    /// stored epoch, so it conservatively influences every window, as does a
+    /// [`ContinuityDefect::UnusableSample`] whose epoch names no second.
     pub fn defects_influencing(
         &self,
         window: EpochWindow,
@@ -716,25 +860,38 @@ struct OrderedSeries {
 impl OrderedSeries {
     /// Sort `samples` by epoch and split out duplicates as defects.
     ///
-    /// Non-representable epochs are dropped from the comparison path and counted
-    /// as duplicates of nothing - they cannot be placed on the axis at all, so
-    /// they are excluded here and surface as a short series.
+    /// A sample whose epoch names no finite J2000 second, or whose position is
+    /// not finite, cannot be placed on the comparison path. It is withheld from
+    /// every check and reported as [`ContinuityDefect::UnusableSample`], so a
+    /// series left short by it is never attested silently.
     fn build(
         sat: GnssSatelliteId,
-        samples: &[&PreciseEphemerisSample],
+        samples: &[(usize, &PreciseEphemerisSample)],
         defects: &mut Vec<ContinuityDefect>,
     ) -> Option<Self> {
         let mut placed: Vec<(f64, [f64; 3])> = Vec::with_capacity(samples.len());
-        for sample in samples {
-            let Some(seconds) = instant_to_j2000_seconds(&sample.epoch) else {
+        for &(sample_index, sample) in samples {
+            let node = instant_to_j2000_seconds(&sample.epoch)
+                .filter(|seconds| seconds.is_finite())
+                .and_then(|_| precise_node_j2000_seconds_from_instant(&sample.epoch))
+                .filter(|node| node.is_finite());
+            let unusable = |epoch_j2000_s, reason| ContinuityDefect::UnusableSample {
+                sat,
+                sample_index,
+                epoch_j2000_s,
+                reason,
+            };
+            let Some(node) = node else {
+                defects.push(unusable(None, UnusableSampleReason::EpochNotPlaced));
                 continue;
             };
-            if !seconds.is_finite() || !sample.position_ecef_m.iter().all(|c| c.is_finite()) {
+            if !sample.position_ecef_m.iter().all(|c| c.is_finite()) {
+                defects.push(unusable(
+                    Some(node),
+                    UnusableSampleReason::NonFinitePosition,
+                ));
                 continue;
             }
-            let Some(node) = precise_node_j2000_seconds_from_instant(&sample.epoch) else {
-                continue;
-            };
             placed.push((node, sample.position_ecef_m));
         }
 
@@ -803,14 +960,29 @@ impl OrderedSeries {
 ///
 /// This never refuses a series. Every finding lands in
 /// [`ContinuityReport::defects`], and whether a product with defects is
-/// acceptable is the caller's decision.
+/// acceptable is the caller's decision. It refuses options whose bounds
+/// [`ContinuityOptions::validate`] refuses, before reading any sample: a NaN
+/// or infinite bound would find nothing and attest the series untested.
 pub fn check_continuity(
     samples: &[PreciseEphemerisSample],
     options: &ContinuityOptions,
+) -> core::result::Result<ContinuityReport, ContinuityOptionsError> {
+    options.validate()?;
+    Ok(check_validated_continuity(samples, options))
+}
+
+/// [`check_continuity`] over options already validated.
+pub(super) fn check_validated_continuity(
+    samples: &[PreciseEphemerisSample],
+    options: &ContinuityOptions,
 ) -> ContinuityReport {
-    let mut by_sat: BTreeMap<GnssSatelliteId, Vec<&PreciseEphemerisSample>> = BTreeMap::new();
-    for sample in samples {
-        by_sat.entry(sample.sat).or_default().push(sample);
+    let mut by_sat: BTreeMap<GnssSatelliteId, Vec<(usize, &PreciseEphemerisSample)>> =
+        BTreeMap::new();
+    for (sample_index, sample) in samples.iter().enumerate() {
+        by_sat
+            .entry(sample.sat)
+            .or_default()
+            .push((sample_index, sample));
     }
 
     let mut report = ContinuityReport::default();
@@ -1003,6 +1175,9 @@ fn defect_sort_key(defect: &ContinuityDefect) -> f64 {
     match defect {
         ContinuityDefect::DuplicateEpoch { epoch_j2000_s, .. } => *epoch_j2000_s,
         ContinuityDefect::SingleSampleSeries { .. } => f64::NEG_INFINITY,
+        ContinuityDefect::UnusableSample { epoch_j2000_s, .. } => {
+            epoch_j2000_s.unwrap_or(f64::NEG_INFINITY)
+        }
         ContinuityDefect::SpeedBound { from_j2000_s, .. } => *from_j2000_s,
         ContinuityDefect::HoldOutResidual { epoch_j2000_s, .. } => *epoch_j2000_s,
     }
