@@ -346,7 +346,7 @@ pub enum ScoreboardError {
         name: String,
         /// Exact-content validation diagnostic.
         #[source]
-        error: ExactSp3ValidationError,
+        error: Box<ExactSp3ValidationError>,
     },
     /// Fetched bytes did not match a separately declared product digest.
     #[error(
@@ -429,7 +429,7 @@ pub fn resolve_latest_available_rapid_sp3(
                     ScoreboardError::ExactSp3Integrity {
                         archive_source: candidate.source.to_string(),
                         name: candidate.name.clone(),
-                        error,
+                        error: Box::new(error),
                     }
                 })?;
                 attempted_http_statuses.push(None);

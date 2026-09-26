@@ -10,11 +10,10 @@
 //! The merge applies it to each input and [`Sp3::satellite_coverage`] reports
 //! it, so the two cannot disagree about a product's cadence.
 //!
-//! [`epoch_interval_ticks`] is the one rule for which `f64` seconds state an
-//! epoch interval on that axis. The merge's target grid, the merge-input
-//! identity's policy check, the exact-product cadence check and the grid a
-//! header interval declares all apply it, so none of them accepts an interval
-//! another refuses.
+//! [`epoch_interval_ticks`] is the one rule for whether `f64` seconds name an
+//! interval on that axis. The merge's target grid, its input identity and the
+//! exact-product cadence check all apply it. Merge output adds SP3's strict
+//! upper bound; general header inspection remains permissive.
 //!
 //! The reader and writer hold the line-2 interval as the value its `F14.8`
 //! field states. That field has the same 10-nanosecond resolution, so every
@@ -22,8 +21,10 @@
 //! below 100000 s as SP3 requires, and it holds zero and negative values: the
 //! reader keeps what a file states rather than refusing the file, and a header
 //! whose value is not an interval declares no grid ([`product_grid`]).
-//! A merged product whose grid step is too wide for the field keeps the step,
-//! and the writer refuses it by name.
+//! The merge refuses a computed grid step at or above the field's strict
+//! 100000-second limit, preserving actual input cadence instead of silently
+//! densifying it. The writer retains its own field-width refusal for products
+//! whose public header has been changed after merging.
 
 use core::fmt;
 
@@ -32,6 +33,8 @@ use super::Sp3;
 
 /// Ticks per second of the SP3 epoch axis (the `F11.8` seconds field).
 pub(super) const TICKS_PER_SECOND: i128 = 100_000_000;
+/// Ticks per day on the SP3 epoch axis.
+pub(super) const TICKS_PER_DAY: i128 = 86_400 * TICKS_PER_SECOND;
 
 /// Tick counts below this convert to `f64` seconds exactly: the count itself
 /// is an exact `f64`, so [`interval_seconds`] rounds once.
@@ -65,6 +68,9 @@ pub enum Sp3EpochIntervalRejection {
     /// ticks or past it (about 1042 days) is beyond the range where ticks and
     /// seconds convert exactly.
     BeyondTickResolution,
+    /// The positive interval is whole ticks but is at least the SP3-d
+    /// specification's strict 100000-second upper limit.
+    OutsideSpecificationRange,
 }
 
 impl fmt::Display for Sp3EpochIntervalRejection {
@@ -80,6 +86,12 @@ impl fmt::Display for Sp3EpochIntervalRejection {
                 f,
                 "at this size f64 seconds do not name one whole number of 10-nanosecond ticks"
             ),
+            Self::OutsideSpecificationRange => {
+                write!(
+                    f,
+                    "it is outside the SP3 requirement that intervals be below 100000 s"
+                )
+            }
         }
     }
 }
@@ -175,6 +187,46 @@ pub(super) fn checked_epoch_interval_ticks(
         value: interval_s,
         reason,
     })
+}
+
+/// Check a merge output interval against both the exact tick rule and SP3-d's
+/// strict `0 < interval < 100000 s` contract.
+pub(super) fn checked_merge_epoch_interval_ticks(
+    field: &'static str,
+    interval_s: f64,
+) -> Result<i128, Sp3EpochIntervalError> {
+    let ticks = checked_epoch_interval_ticks(field, interval_s)?;
+    if ticks >= 100_000 * TICKS_PER_SECOND {
+        return Err(Sp3EpochIntervalError {
+            field,
+            value: interval_s,
+            reason: Sp3EpochIntervalRejection::OutsideSpecificationRange,
+        });
+    }
+    Ok(ticks)
+}
+
+/// Check a computed merge output interval against SP3-d's strict upper bound.
+pub(super) fn checked_merge_output_ticks(
+    field: &'static str,
+    ticks: i128,
+) -> Result<i128, Sp3EpochIntervalError> {
+    let interval_s = interval_seconds(ticks);
+    if ticks <= 0 {
+        return Err(Sp3EpochIntervalError {
+            field,
+            value: interval_s,
+            reason: Sp3EpochIntervalRejection::NotPositive,
+        });
+    }
+    if ticks >= 100_000 * TICKS_PER_SECOND {
+        return Err(Sp3EpochIntervalError {
+            field,
+            value: interval_s,
+            reason: Sp3EpochIntervalRejection::OutsideSpecificationRange,
+        });
+    }
+    Ok(ticks)
 }
 
 /// Seconds since J2000 for a whole number of ticks since J2000, whole seconds
@@ -303,8 +355,9 @@ pub(super) fn gcd(a: i128, b: i128) -> i128 {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::{
-        checked_epoch_interval_ticks, epoch_interval_ticks, interval_ticks, Sp3EpochIntervalError,
-        Sp3EpochIntervalRejection,
+        checked_epoch_interval_ticks, checked_merge_epoch_interval_ticks,
+        checked_merge_output_ticks, epoch_interval_ticks, interval_ticks, Sp3EpochIntervalError,
+        Sp3EpochIntervalRejection, TICKS_PER_SECOND,
     };
 
     /// The tick count an eight-decimal seconds text states, read from its
@@ -390,6 +443,50 @@ mod tests {
                 "{value:e}"
             );
         }
+    }
+
+    #[test]
+    fn merge_output_interval_obeys_the_specification_boundary() {
+        let below = "99999.99999999".parse::<f64>().unwrap();
+        let below_ticks = 9_999_999_999_999_i128;
+        assert_eq!(
+            checked_merge_epoch_interval_ticks("target_epoch_interval_s", below),
+            Ok(below_ticks)
+        );
+        assert_eq!(
+            checked_merge_output_ticks("merged_epoch_interval_s", below_ticks),
+            Ok(below_ticks)
+        );
+
+        for (field, value, ticks) in [
+            (
+                "target_epoch_interval_s",
+                100_000.0,
+                10_000_000_000_000_i128,
+            ),
+            (
+                "target_epoch_interval_s",
+                100_000.00000001,
+                10_000_000_000_001_i128,
+            ),
+        ] {
+            let error = checked_merge_epoch_interval_ticks(field, value).unwrap_err();
+            assert_eq!(error.field, field);
+            assert_eq!(error.value, value);
+            assert_eq!(
+                error.reason,
+                Sp3EpochIntervalRejection::OutsideSpecificationRange
+            );
+            assert_eq!(
+                checked_merge_output_ticks("merged_epoch_interval_s", ticks),
+                Err(Sp3EpochIntervalError {
+                    field: "merged_epoch_interval_s",
+                    value,
+                    reason: Sp3EpochIntervalRejection::OutsideSpecificationRange,
+                })
+            );
+        }
+        assert_eq!(100_000 * TICKS_PER_SECOND, 10_000_000_000_000_i128);
     }
 
     #[test]

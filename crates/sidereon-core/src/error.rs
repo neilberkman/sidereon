@@ -102,9 +102,12 @@ pub enum Error {
     /// coordinate-system labels).
     InvalidInput(String),
     /// A value given as an SP3 epoch interval is not a positive whole number of
-    /// the 10-nanosecond ticks an SP3 epoch states. It names the field, the
-    /// value and the reason.
+    /// the 10-nanosecond ticks an SP3 epoch states, or is outside the format's
+    /// strict range. It names the field, value and reason.
     Sp3EpochInterval(crate::sp3::Sp3EpochIntervalError),
+    /// An SP3 merge tolerance is negative or non-finite; the typed value names
+    /// the field and retains the supplied value.
+    Sp3MergeTolerance(crate::sp3::MergeToleranceError),
     /// A continuity check's speed bound or residual tolerance is not a finite
     /// number at least zero. It names the field, the value and the reason.
     ContinuityOptions(crate::sp3::ContinuityOptionsError),
@@ -181,6 +184,7 @@ impl fmt::Display for Error {
             ),
             Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Error::Sp3EpochInterval(error) => write!(f, "invalid input: {error}"),
+            Error::Sp3MergeTolerance(error) => write!(f, "invalid input: {error}"),
             Error::ContinuityOptions(error) => write!(f, "invalid input: {error}"),
             Error::SbasEncode(error) => write!(f, "SBAS encode error: {error}"),
             Error::RtcmEncode(error) => write!(f, "invalid input: {error}"),

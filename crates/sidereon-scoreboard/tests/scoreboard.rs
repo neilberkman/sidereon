@@ -372,41 +372,24 @@ fn exact_product_integrity_failures_are_terminal() {
         let error = resolve_latest_available_rapid_sp3(date(2026, 7, 15), 0, &fetcher)
             .expect_err("integrity failure must not try a later valid candidate");
         assert_eq!(fetcher.calls.get(), 1, "case {invalid:?}");
-        match (invalid, error) {
+        let exact_error = match error {
+            ScoreboardError::ExactSp3Integrity { error, .. } => *error,
+            other => panic!("unexpected error for {invalid:?}: {other:?}"),
+        };
+        match (invalid, exact_error) {
             (
                 InvalidCandidateBytes::Malformed | InvalidCandidateBytes::ParseInvalid,
-                ScoreboardError::ExactSp3Integrity {
-                    error: ExactSp3ValidationError::Parse(_),
-                    ..
-                },
+                ExactSp3ValidationError::Parse(_),
             ) => {}
-            (
-                InvalidCandidateBytes::Cadence,
-                ScoreboardError::ExactSp3Integrity {
-                    error: ExactSp3ValidationError::CadenceMismatch { .. },
-                    ..
-                },
-            ) => {}
-            (
-                InvalidCandidateBytes::Span,
-                ScoreboardError::ExactSp3Integrity {
-                    error: ExactSp3ValidationError::SpanMismatch { .. },
-                    ..
-                },
-            ) => {}
+            (InvalidCandidateBytes::Cadence, ExactSp3ValidationError::CadenceMismatch { .. }) => {}
+            (InvalidCandidateBytes::Span, ExactSp3ValidationError::SpanMismatch { .. }) => {}
             (
                 InvalidCandidateBytes::Start,
-                ScoreboardError::ExactSp3Integrity {
-                    error: ExactSp3ValidationError::DeclaredStartMismatch { .. },
-                    ..
-                },
+                ExactSp3ValidationError::DeclaredStartMismatch { .. },
             ) => {}
             (
                 InvalidCandidateBytes::AgencySubstitution,
-                ScoreboardError::ExactSp3Integrity {
-                    error: ExactSp3ValidationError::AgencyMismatch { expected, actual },
-                    ..
-                },
+                ExactSp3ValidationError::AgencyMismatch { expected, actual },
             ) => {
                 assert_eq!(expected, "IGS");
                 assert_eq!(actual, "ESOC");
@@ -447,10 +430,8 @@ fn absence_followed_by_integrity_failure_returns_the_integrity_failure() {
     assert_eq!(fetcher.calls.get(), 2);
     assert!(matches!(
         error,
-        ScoreboardError::ExactSp3Integrity {
-            error: ExactSp3ValidationError::SpanMismatch { .. },
-            ..
-        }
+        ScoreboardError::ExactSp3Integrity { error, .. }
+            if matches!(*error, ExactSp3ValidationError::SpanMismatch { .. })
     ));
 }
 

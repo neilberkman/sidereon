@@ -7,12 +7,10 @@
 
 use core::fmt;
 
-use crate::astro::time::civil::j2000_seconds;
-use crate::data::{AnalysisCenter, DataCatalogError, ProductDate, ProductIdentity, ProductType};
-use crate::tolerances::WHOLE_SECOND_EPS_S;
-
 use super::grid::{interval_seconds, interval_ticks, product_ticks, TICKS_PER_SECOND};
 use super::{Sp3, Sp3DataType, Sp3Version};
+use crate::astro::time::civil::j2000_seconds;
+use crate::data::{AnalysisCenter, DataCatalogError, ProductDate, ProductIdentity, ProductType};
 
 /// Maximum legal epoch interval from the SP3-d specification, in seconds.
 /// The interval must be strictly less than this value.
@@ -332,6 +330,11 @@ pub enum ExactSp3ValidationError {
         requested_j2000_s: f64,
         /// Header line 1 start, seconds since J2000.
         declared_j2000_s: f64,
+        /// Exact requested start as 10 ns ticks since J2000.
+        requested_tick: i128,
+        /// Exact line-1 start ticks, or `None` if line 1 could not be placed
+        /// on the epoch record's 10 ns grid.
+        declared_tick: Option<i128>,
     },
     /// The requested start predates the GPS week-numbering epoch that SP3 line
     /// 2 uses.
@@ -520,9 +523,11 @@ impl fmt::Display for ExactSp3ValidationError {
             Self::DeclaredStartMismatch {
                 requested_j2000_s,
                 declared_j2000_s,
+                requested_tick,
+                declared_tick,
             } => write!(
                 f,
-                "SP3 declared start mismatch: requested {requested_j2000_s} J2000 s, header declares {declared_j2000_s} J2000 s"
+                "SP3 declared start mismatch: requested {requested_j2000_s} J2000 s ({requested_tick} ticks), header declares {declared_j2000_s} J2000 s ({declared_tick:?} ticks)"
             ),
             Self::RequestBeforeGpsEpoch => {
                 write!(f, "exact SP3 request starts before the GPS week epoch")
@@ -663,10 +668,13 @@ pub fn validate_exact_sp3(
     let declared_start_j2000_s = product
         .declared_start_j2000_s
         .ok_or(ExactSp3ValidationError::MissingDeclaredStart)?;
-    if !seconds_match(declared_start_j2000_s, requested_start_j2000_s) {
+    let requested_start_tick = requested_start_j2000_s as i128 * TICKS_PER_SECOND;
+    if product.declared_start_tick != Some(requested_start_tick) {
         return Err(ExactSp3ValidationError::DeclaredStartMismatch {
             requested_j2000_s: requested_start_j2000_s,
             declared_j2000_s: declared_start_j2000_s,
+            requested_tick: requested_start_tick,
+            declared_tick: product.declared_start_tick,
         });
     }
     validate_line2_start_metadata(product, requested_start_j2000_s)?;
@@ -681,7 +689,6 @@ pub fn validate_exact_sp3(
     // so the first record states it only at exactly that many ticks, and a
     // step is the requested cadence only when it is that many ticks exactly.
     let ticks = product_ticks(product);
-    let requested_start_tick = requested_start_j2000_s as i128 * TICKS_PER_SECOND;
     if ticks.first().copied().flatten() != Some(requested_start_tick) {
         return Err(ExactSp3ValidationError::FirstEpochMismatch {
             requested_j2000_s: requested_start_j2000_s,
@@ -979,7 +986,8 @@ fn validate_line2_start_metadata(
     }
 
     let requested_week = since_gps_zero_s.div_euclid(SECONDS_PER_WEEK_I64);
-    let requested_sow_s = since_gps_zero_s.rem_euclid(SECONDS_PER_WEEK_I64) as f64;
+    let requested_sow_ticks =
+        since_gps_zero_s.rem_euclid(SECONDS_PER_WEEK_I64) as i128 * TICKS_PER_SECOND;
     if i64::from(product.header.gnss_week) != requested_week {
         return Err(ExactSp3ValidationError::HeaderStartMetadataMismatch {
             field: "gps_week",
@@ -1000,10 +1008,10 @@ fn validate_line2_start_metadata(
             actual: header_sow_s,
         });
     }
-    if !seconds_match(header_sow_s, requested_sow_s) {
+    if decimal_field_units(header_sow_s, 8) != Some(requested_sow_ticks) {
         return Err(ExactSp3ValidationError::HeaderStartMetadataMismatch {
             field: "seconds_of_week",
-            requested: requested_sow_s,
+            requested: requested_sow_ticks as f64 / TICKS_PER_SECOND as f64,
             actual: header_sow_s,
         });
     }
@@ -1020,9 +1028,18 @@ fn validate_line2_start_metadata(
             actual: header_mjd_fraction,
         });
     }
-    let header_mjd_total_s =
-        i64::from(product.header.mjd) as f64 * 86_400.0 + header_mjd_fraction * 86_400.0;
-    if !seconds_match(header_mjd_total_s, requested_mjd_total_s as f64) {
+    let requested_mjd_day = requested_mjd_total_s.div_euclid(SECONDS_PER_DAY_I64);
+    let requested_second_of_day = requested_mjd_total_s.rem_euclid(SECONDS_PER_DAY_I64);
+    // Round to the nearest F15.13 fractional-day unit; for nonnegative values
+    // the integer expression below implements ties upward without float math.
+    let expected_fraction_units = (i128::from(requested_second_of_day) * 10_000_000_000_000_i128
+        + 43_200)
+        / i128::from(SECONDS_PER_DAY_I64);
+    if i64::from(product.header.mjd) != requested_mjd_day
+        || decimal_field_units(header_mjd_fraction, 13) != Some(expected_fraction_units)
+    {
+        let header_mjd_total_s =
+            f64::from(product.header.mjd) * 86_400.0 + header_mjd_fraction * 86_400.0;
         return Err(ExactSp3ValidationError::HeaderStartMetadataMismatch {
             field: "mjd",
             requested: requested_mjd_total_s as f64 / 86_400.0,
@@ -1032,8 +1049,19 @@ fn validate_line2_start_metadata(
     Ok(())
 }
 
-fn seconds_match(left: f64, right: f64) -> bool {
-    (left - right).abs() <= WHOLE_SECOND_EPS_S
+/// Integer units carried by a fixed-decimal SP3 field, without adding a large
+/// date origin before comparing its low-order digits.
+fn decimal_field_units(value: f64, decimals: u32) -> Option<i128> {
+    let decimals_usize = usize::try_from(decimals).ok()?;
+    if !crate::validate::representable_in_fixed_field(value, None, decimals_usize) {
+        return None;
+    }
+    let scale = 10_i128.checked_pow(decimals)?;
+    let scaled = value * scale as f64;
+    if !scaled.is_finite() || scaled < 0.0 || scaled > i128::MAX as f64 {
+        return None;
+    }
+    Some(scaled.round() as i128)
 }
 
 fn validate_format_version(

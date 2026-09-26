@@ -558,6 +558,10 @@ pub struct Sp3 {
     /// parser could not interpret those otherwise-unused line-1 fields; exact
     /// product validation rejects that condition.
     declared_start_j2000_s: Option<f64>,
+    /// Line-1 start on the epoch record's 10 ns axis. Kept separately because
+    /// reducing a civil epoch near J2000 to one `f64` loses distinctions the
+    /// F11.8 field carries.
+    declared_start_tick: Option<i128>,
     /// Exact-integrity facts about the logical terminal record. The general
     /// parser remains permissive; exact validation interprets this state.
     terminal_record: TerminalRecordState,
@@ -1092,6 +1096,7 @@ struct Parser {
     data_type: Option<Sp3DataType>,
     num_epochs: u64,
     declared_start_j2000_s: Option<f64>,
+    declared_start_tick: Option<i128>,
     coordinate_system: String,
     orbit_type: String,
     agency: String,
@@ -1159,6 +1164,7 @@ impl Parser {
             data_type: None,
             num_epochs: 0,
             declared_start_j2000_s: None,
+            declared_start_tick: None,
             coordinate_system: String::new(),
             orbit_type: String::new(),
             agency: String::new(),
@@ -1349,6 +1355,7 @@ impl Parser {
         // parse here: malformed values remain parse-compatible but are rejected
         // by the exact validator as unavailable declared metadata.
         self.declared_start_j2000_s = parse_declared_start_j2000_s(line);
+        self.declared_start_tick = parse_declared_start_tick(line);
         let raw_data_used = field(line, 40, 45).trim();
         self.data_used = if raw_data_used.is_empty() {
             None
@@ -1940,6 +1947,7 @@ impl Parser {
             epochs: self.epochs,
             declared_num_epochs: self.num_epochs,
             declared_start_j2000_s: self.declared_start_j2000_s,
+            declared_start_tick: self.declared_start_tick,
             terminal_record: self.terminal_record,
             satellite_header_lines: self.satellite_header_lines,
             accuracy_header_lines: self.accuracy_header_lines,
@@ -1995,6 +2003,70 @@ fn parse_declared_start_j2000_s(line: &str) -> Option<f64> {
         civil.minute as i32,
         civil.second,
     ))
+}
+
+/// Parse line 1's civil start directly onto the epoch record's 10 ns axis.
+/// The whole civil second is converted in integer calendar arithmetic; the
+/// F11.8 seconds text supplies subsecond ticks without adding it to a large
+/// floating J2000 origin.
+fn parse_declared_start_tick(line: &str) -> Option<i128> {
+    use self::grid::{TICKS_PER_DAY, TICKS_PER_SECOND};
+
+    let year = field(line, 3, 7).trim().parse::<i32>().ok()?;
+    let month = field(line, 8, 10).trim().parse::<i32>().ok()?;
+    let day = field(line, 11, 13).trim().parse::<i32>().ok()?;
+    let hour = field(line, 14, 16).trim().parse::<i32>().ok()?;
+    let minute = field(line, 17, 19).trim().parse::<i32>().ok()?;
+    let raw_second = field(line, 20, 31).trim();
+    let second = raw_second.parse::<f64>().ok()?;
+    let civil = validate::civil_datetime_with_second_policy(
+        i64::from(year),
+        i64::from(month),
+        i64::from(day),
+        i64::from(hour),
+        i64::from(minute),
+        second,
+        validate::CivilSecondPolicy::UtcLike,
+    )
+    .ok()?;
+    let fractional_ticks = decimal_seconds_to_ticks(raw_second)?;
+    let day_delta = crate::astro::time::scales::julian_day_number(
+        civil.year as i32,
+        civil.month as i32,
+        civil.day as i32,
+    ) as i128
+        - crate::astro::time::scales::julian_day_number(2000, 1, 1) as i128;
+    Some(
+        day_delta * TICKS_PER_DAY - 43_200_i128 * TICKS_PER_SECOND
+            + i128::from(civil.hour) * 3_600 * TICKS_PER_SECOND
+            + i128::from(civil.minute) * 60 * TICKS_PER_SECOND
+            + fractional_ticks,
+    )
+}
+
+/// Convert a nonnegative decimal second token to exact 10 ns ticks. Tokens
+/// beyond F11.8 precision are unavailable to exact validation, while the base
+/// parser remains permissive.
+fn decimal_seconds_to_ticks(raw: &str) -> Option<i128> {
+    let (whole, fraction) = raw.split_once('.').unwrap_or((raw, ""));
+    if whole.is_empty() || !whole.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let significant_fraction = fraction.trim_end_matches('0');
+    if significant_fraction.len() > 8 {
+        return None;
+    }
+    let whole = whole.parse::<i128>().ok()?;
+    let fraction_value = if significant_fraction.is_empty() {
+        0
+    } else {
+        significant_fraction.parse::<i128>().ok()?
+            * 10_i128.pow((8 - significant_fraction.len()) as u32)
+    };
+    Some(whole * 100_000_000 + fraction_value)
 }
 
 /// Parse a fixed-column float coordinate, mapping failures to a parse error
@@ -2297,9 +2369,10 @@ pub use combine::{
     CellSelection, ClockOmission, ClockOmissionReason, ClockReferenceOffset, ContributorCoverage,
     DroppedEpochReason, DroppedInputEpoch, EpochAgreement, MergeCombine, MergeContinuityCell,
     MergeContinuityCellRole, MergeContinuityReport, MergeContinuityViolation, MergeFlag,
-    MergeOptions, MergePrecedenceScope, MergeProvenance, MergeReport, OutlierRejectOptions,
-    PrecedenceTransition, ProvenanceMode, Sp3FrameLabelSet, Sp3FrameReconciliation,
-    Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions, TransitionReason,
+    MergeOptions, MergePrecedenceScope, MergeProvenance, MergeReport, MergeToleranceError,
+    MergeToleranceField, OutlierRejectOptions, PrecedenceTransition, ProvenanceMode,
+    Sp3FrameLabelSet, Sp3FrameReconciliation, Sp3FrameReconciliationMethod,
+    Sp3FrameReconciliationOptions, TransitionReason,
 };
 pub use continuity::{
     check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptionRejection,
