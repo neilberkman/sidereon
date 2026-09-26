@@ -75,7 +75,8 @@ fn real_product_window_query_preserves_global_attestation() {
     let report = check_continuity(
         &product.precise_ephemeris_samples(),
         &ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss),
-    );
+    )
+    .expect("valid continuity options");
     assert!(report.attested(), "real product must attest globally");
 
     let window = EpochWindow::new(epochs[72], epochs[216]).expect("daytime window");

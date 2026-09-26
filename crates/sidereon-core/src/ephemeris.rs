@@ -64,9 +64,10 @@ pub use crate::sp3::{
     Sp3Version, Sp3WriteError, SP3_MERGE_INPUT_ID_PREFIX, SP3_MERGE_INPUT_SCHEMA_VERSION,
 };
 pub use crate::sp3::{
-    check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport,
-    EpochWindow, InterpolationNodes, OrbitClass, SpeedBound, StencilExtent,
-    WindowContinuityDecision, WindowContinuityVerdict,
+    check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptionRejection,
+    ContinuityOptions, ContinuityOptionsError, ContinuityReport, EpochWindow, InterpolationNodes,
+    OrbitClass, SpeedBound, StencilExtent, UnusableSampleReason, WindowContinuityDecision,
+    WindowContinuityVerdict,
 };
 pub use crate::sp3::{
     CellProvenance, CellSelection, ClockOmission, ClockOmissionReason, ContributorCoverage,

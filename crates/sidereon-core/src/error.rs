@@ -105,6 +105,9 @@ pub enum Error {
     /// the 10-nanosecond ticks an SP3 epoch states. It names the field, the
     /// value and the reason.
     Sp3EpochInterval(crate::sp3::Sp3EpochIntervalError),
+    /// A continuity check's speed bound or residual tolerance is not a finite
+    /// number at least zero. It names the field, the value and the reason.
+    ContinuityOptions(crate::sp3::ContinuityOptionsError),
     /// An SBAS block holds a value the SBAS wire form cannot carry as held.
     SbasEncode(Box<crate::sbas::SbasEncodeError>),
     /// An RTCM encoder refuses a value it cannot write as held.
@@ -178,6 +181,7 @@ impl fmt::Display for Error {
             ),
             Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Error::Sp3EpochInterval(error) => write!(f, "invalid input: {error}"),
+            Error::ContinuityOptions(error) => write!(f, "invalid input: {error}"),
             Error::SbasEncode(error) => write!(f, "SBAS encode error: {error}"),
             Error::RtcmEncode(error) => write!(f, "invalid input: {error}"),
             Error::RtcmConversion(error) => write!(f, "invalid input: {error}"),

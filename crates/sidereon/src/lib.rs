@@ -447,10 +447,12 @@ pub use sidereon_core::astro::{
 pub use sidereon_core::ephemeris::{
     check_continuity, fit_precise_ephemeris_state_sample_orbit,
     fit_precise_ephemeris_state_sample_orbits, precise_interpolant_store_checksum64,
-    sp3_ecef_state_to_eci, ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport,
-    EpochWindow, MmapPreciseEphemerisInterpolant, OrbitClass, OrientedPreciseEphemerisStateSample,
+    sp3_ecef_state_to_eci, ContinuityCheck, ContinuityDefect, ContinuityOptionRejection,
+    ContinuityOptions, ContinuityOptionsError, ContinuityReport, EpochWindow,
+    MmapPreciseEphemerisInterpolant, OrbitClass, OrientedPreciseEphemerisStateSample,
     PreciseEphemerisInterpolant, PreciseEphemerisStateSample, PreciseInterpolantStoreError,
-    SpeedBound, StencilExtent, WindowContinuityDecision, WindowContinuityVerdict,
+    SpeedBound, StencilExtent, UnusableSampleReason, WindowContinuityDecision,
+    WindowContinuityVerdict,
 };
 
 /// Root-level shortcut for satellite-relative frames and CW propagation.

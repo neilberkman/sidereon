@@ -7,8 +7,9 @@
 use sidereon_core::astro::time::civil::split_julian_date_from_j2000_seconds;
 use sidereon_core::astro::time::model::{Instant, InstantRepr, JulianDateSplit, TimeScale};
 use sidereon_core::ephemeris::{
-    check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptions, OrbitClass,
-    PreciseEphemerisSample, Sp3, SpeedBound,
+    check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptionRejection,
+    ContinuityOptions, ContinuityOptionsError, OrbitClass, PreciseEphemerisSample, Sp3, SpeedBound,
+    UnusableSampleReason,
 };
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 
@@ -68,7 +69,7 @@ fn continuous_multi_day_arc_across_boundaries_attests() {
     let start = 819_244_800.0;
     let samples = arc(1, start, 4 * 288);
 
-    let report = check_continuity(&samples, &options());
+    let report = check_continuity(&samples, &options()).unwrap();
 
     assert!(
         report.attested(),
@@ -94,7 +95,7 @@ fn synthetic_splice_is_reported_with_its_displacement_and_epoch_pair() {
         sample.position_ecef_m[0] += splice_m;
     }
 
-    let report = check_continuity(&samples, &options());
+    let report = check_continuity(&samples, &options()).unwrap();
 
     assert!(!report.attested(), "a 500 m splice must be reported");
 
@@ -178,8 +179,9 @@ fn a_metre_scale_splice_is_caught_while_the_speed_gate_stays_silent() {
     }
 
     let options =
-        ContinuityOptions::new(Some(SpeedBound::OrbitClass(OrbitClass::MeoGnss)), Some(1.0));
-    let report = check_continuity(&samples, &options);
+        ContinuityOptions::new(Some(SpeedBound::OrbitClass(OrbitClass::MeoGnss)), Some(1.0))
+            .unwrap();
+    let report = check_continuity(&samples, &options).unwrap();
 
     assert_eq!(
         report.defects_from(ContinuityCheck::SpeedBound).count(),
@@ -206,7 +208,7 @@ fn shuffled_input_produces_the_identical_verdict() {
         sample.position_ecef_m[1] += 750.0;
     }
 
-    let sorted_report = check_continuity(&samples, &options());
+    let sorted_report = check_continuity(&samples, &options()).unwrap();
 
     // A deterministic shuffle: reverse, then interleave halves. No RNG, so a
     // failure here reproduces exactly.
@@ -220,7 +222,7 @@ fn shuffled_input_produces_the_identical_verdict() {
         .collect();
     shuffled = interleaved;
 
-    let shuffled_report = check_continuity(&shuffled, &options());
+    let shuffled_report = check_continuity(&shuffled, &options()).unwrap();
 
     assert_eq!(
         sorted_report, shuffled_report,
@@ -237,7 +239,7 @@ fn duplicate_epochs_are_their_own_defect_class_and_are_not_deduplicated() {
     duplicate.position_ecef_m[2] += 3.0;
     samples.push(duplicate);
 
-    let report = check_continuity(&samples, &options());
+    let report = check_continuity(&samples, &options()).unwrap();
 
     let duplicates: Vec<_> = report
         .defects
@@ -262,7 +264,7 @@ fn duplicate_epochs_are_their_own_defect_class_and_are_not_deduplicated() {
 fn single_sample_series_is_reported_rather_than_passing() {
     let samples = arc(1, 800_000_000.0, 1);
 
-    let report = check_continuity(&samples, &options());
+    let report = check_continuity(&samples, &options()).unwrap();
 
     assert!(
         !report.attested(),
@@ -283,7 +285,7 @@ fn an_implausible_arc_still_fails_the_physical_gate() {
         sample.position_ecef_m[0] += 40_000_000.0;
     }
 
-    let report = check_continuity(&samples, &options());
+    let report = check_continuity(&samples, &options()).unwrap();
 
     let bound_defects: Vec<_> = report.defects_from(ContinuityCheck::SpeedBound).collect();
     assert!(
@@ -340,7 +342,7 @@ fn each_satellite_is_checked_independently() {
     }
     samples.extend(second);
 
-    let report = check_continuity(&samples, &options());
+    let report = check_continuity(&samples, &options()).unwrap();
 
     assert!(!report.attested());
     assert!(
@@ -357,8 +359,8 @@ fn each_satellite_is_checked_independently() {
 fn an_explicit_bound_overrides_the_class_bound() {
     let samples = arc(1, 800_000_000.0, 10);
 
-    let strict = ContinuityOptions::new(Some(SpeedBound::ExplicitMaxSpeed(100.0)), None);
-    let report = check_continuity(&samples, &strict);
+    let strict = ContinuityOptions::new(Some(SpeedBound::ExplicitMaxSpeed(100.0)), None).unwrap();
+    let report = check_continuity(&samples, &strict).unwrap();
 
     assert_eq!(
         report.defects_from(ContinuityCheck::SpeedBound).count(),
@@ -384,7 +386,7 @@ fn a_published_igs_final_product_attests() {
     let samples = product.precise_ephemeris_samples();
     assert!(!samples.is_empty(), "fixture must yield samples");
 
-    let report = check_continuity(&samples, &options());
+    let report = check_continuity(&samples, &options()).unwrap();
 
     assert!(
         report.attested(),
@@ -416,7 +418,7 @@ fn a_published_product_with_a_splice_is_caught() {
         }
     }
 
-    let report = check_continuity(&samples, &options());
+    let report = check_continuity(&samples, &options()).unwrap();
 
     assert!(
         !report.attested(),
@@ -429,4 +431,144 @@ fn a_published_product_with_a_splice_is_caught() {
             .all(|defect| defect.satellite() == target),
         "only the spliced satellite may be reported"
     );
+}
+
+/// No sample exceeds a NaN or infinite bound. With such a speed bound or
+/// residual tolerance the check reported a spliced arc attested, a false pass,
+/// so such options are refused by name wherever they arrive.
+#[test]
+fn a_bound_that_no_sample_can_exceed_is_refused_not_attested() {
+    let mut samples = arc(1, 800_000_000.0, 50);
+    for sample in samples.iter_mut().skip(25) {
+        sample.position_ecef_m[2] += 5.0;
+    }
+    // The splice is found under a real tolerance.
+    let control = check_continuity(
+        &samples,
+        &ContinuityOptions::new(None, Some(1.0)).expect("finite tolerance"),
+    )
+    .expect("valid options");
+    assert!(!control.attested());
+
+    let refused = |field: &'static str, value: f64, reason: ContinuityOptionRejection| {
+        ContinuityOptionsError {
+            field,
+            value,
+            reason,
+        }
+    };
+    for (value, reason) in [
+        (f64::NAN, ContinuityOptionRejection::NotFinite),
+        (f64::INFINITY, ContinuityOptionRejection::NotFinite),
+        (f64::NEG_INFINITY, ContinuityOptionRejection::NotFinite),
+        (-1.0, ContinuityOptionRejection::Negative),
+        (-1.0e-300, ContinuityOptionRejection::Negative),
+    ] {
+        // At construction.
+        assert_eq!(
+            ContinuityOptions::new(None, Some(value)),
+            Err(refused("residual_tolerance_m", value, reason)),
+            "{value}"
+        );
+        assert_eq!(
+            ContinuityOptions::new(Some(SpeedBound::ExplicitMaxSpeed(value)), None),
+            Err(refused("speed_bound", value, reason)),
+            "{value}"
+        );
+
+        // And at entry, for a value set on the public fields afterwards.
+        let mut tolerance = ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss);
+        tolerance.residual_tolerance_m = Some(value);
+        assert_eq!(
+            check_continuity(&samples, &tolerance),
+            Err(refused("residual_tolerance_m", value, reason)),
+            "{value}"
+        );
+        let mut speed = ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss);
+        speed.speed_bound = Some(SpeedBound::ExplicitMaxSpeed(value));
+        assert_eq!(
+            speed.validate(),
+            Err(refused("speed_bound", value, reason)),
+            "{value}"
+        );
+        assert_eq!(
+            check_continuity(&samples, &speed),
+            Err(refused("speed_bound", value, reason)),
+            "{value}"
+        );
+    }
+
+    // Zero is a bound: every movement exceeds a zero speed bound, and the
+    // splice exceeds a zero residual tolerance.
+    let zero = ContinuityOptions::new(Some(SpeedBound::ExplicitMaxSpeed(0.0)), Some(0.0))
+        .expect("zero bounds");
+    let report = check_continuity(&samples, &zero).expect("valid options");
+    assert_eq!(
+        report.defects_from(ContinuityCheck::SpeedBound).count(),
+        report.pairs_checked
+    );
+    assert!(
+        report
+            .defects_from(ContinuityCheck::HoldOutResidual)
+            .count()
+            > 0
+    );
+    // Disabling a check is `None`, and remains allowed.
+    assert!(ContinuityOptions::new(None, None).is_ok());
+}
+
+/// A sample no check can use was dropped without a trace, so a satellite
+/// whose samples were all unusable was attested with nothing checked. Each
+/// is reported with its index in the input and the reason.
+#[test]
+fn a_sample_no_check_can_use_is_reported_not_dropped() {
+    let mut samples = arc(1, 800_000_000.0, 20);
+    samples[7].position_ecef_m[1] = f64::NAN;
+    samples[12].epoch = Instant {
+        scale: TimeScale::Gpst,
+        repr: InstantRepr::JulianDate(JulianDateSplit {
+            jd_whole: f64::NAN,
+            fraction: 0.0,
+        }),
+    };
+    let report = check_continuity(&samples, &options()).expect("valid options");
+    assert!(!report.attested());
+    let unusable: Vec<(usize, Option<f64>, UnusableSampleReason)> = report
+        .defects
+        .iter()
+        .filter_map(|defect| match defect {
+            ContinuityDefect::UnusableSample {
+                sat,
+                sample_index,
+                epoch_j2000_s,
+                reason,
+            } => {
+                assert_eq!(*sat, satellite(1));
+                Some((*sample_index, *epoch_j2000_s, *reason))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(unusable.len(), 2, "{unusable:?}");
+    assert!(unusable.iter().any(|&(index, epoch, reason)| index == 7
+        && epoch.is_some()
+        && reason == UnusableSampleReason::NonFinitePosition));
+    assert!(unusable.contains(&(12, None, UnusableSampleReason::EpochNotPlaced)));
+
+    // A satellite whose every sample is unusable is reported, not attested.
+    let mut all_unusable = arc(2, 800_000_000.0, 5);
+    for sample in &mut all_unusable {
+        sample.position_ecef_m[0] = f64::INFINITY;
+    }
+    let report = check_continuity(&all_unusable, &options()).expect("valid options");
+    assert!(!report.attested());
+    assert_eq!(report.pairs_checked, 0);
+    assert_eq!(report.defects.len(), 5);
+    assert!(report.defects.iter().all(|defect| matches!(
+        defect,
+        ContinuityDefect::UnusableSample {
+            reason: UnusableSampleReason::NonFinitePosition,
+            ..
+        }
+    )));
 }

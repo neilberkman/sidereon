@@ -41,7 +41,7 @@ use crate::frame_catalog::{
 };
 use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::sp3::continuity::{
-    check_continuity, ContinuityDefect, ContinuityOptions, ContinuityReport, EpochWindow,
+    check_validated_continuity, ContinuityDefect, ContinuityOptions, ContinuityReport, EpochWindow,
     InterpolationNodes, WindowContinuityDecision, WindowContinuityVerdict,
 };
 use crate::validate;
@@ -307,8 +307,12 @@ pub struct MergeOptions {
     /// attribute each violation to the contributors on both sides.
     ///
     /// `None` (the default) runs no check. Enabling it never changes the merged
-    /// product and never fails the merge: violations are reported on
-    /// [`MergeReport::continuity`] and refusing is the caller's decision.
+    /// product and never fails the merge on the product's account: violations
+    /// are reported on [`MergeReport::continuity`] and refusing is the caller's
+    /// decision. Options whose bounds [`ContinuityOptions::validate`] refuses
+    /// are refused before the inputs are read, with
+    /// [`crate::Error::ContinuityOptions`]: a NaN or infinite bound would find
+    /// nothing and report the merged product attested untested.
     pub verify_continuity: Option<ContinuityOptions>,
 }
 
@@ -903,7 +907,10 @@ impl MergeContinuityViolation {
     /// Whether the interpolations of `window` rest on this violation; see
     /// [`MergeContinuityReport::violations_influencing`].
     fn influences(&self, window: EpochWindow, nodes: &InterpolationNodes) -> bool {
-        if matches!(self.defect, ContinuityDefect::SingleSampleSeries { .. }) {
+        if matches!(
+            self.defect,
+            ContinuityDefect::SingleSampleSeries { .. } | ContinuityDefect::UnusableSample { .. }
+        ) {
             return true;
         }
         let selected = nodes.selected_nodes(self.defect.satellite(), window);
@@ -2415,7 +2422,8 @@ fn verify_merged_continuity(
     options: &ContinuityOptions,
     selection: &BTreeMap<(GnssSatelliteId, i64), CellSelection>,
 ) -> MergeContinuityReport {
-    let report = check_continuity(&merged.precise_ephemeris_samples(), options);
+    // `validate_merge_options` refused these options unless they validate.
+    let report = check_validated_continuity(&merged.precise_ephemeris_samples(), options);
 
     let violations = report
         .defects
@@ -2507,7 +2515,11 @@ fn defect_cells(defect: &ContinuityDefect) -> Vec<(f64, MergeContinuityCellRole)
         ContinuityDefect::DuplicateEpoch { epoch_j2000_s, .. } => {
             vec![(*epoch_j2000_s, MergeContinuityCellRole::RepeatedEpoch)]
         }
-        ContinuityDefect::SingleSampleSeries { .. } => Vec::new(),
+        // A merged product's samples come from its own finite records, so it
+        // never holds an unusable sample; there is no record to name.
+        ContinuityDefect::SingleSampleSeries { .. } | ContinuityDefect::UnusableSample { .. } => {
+            Vec::new()
+        }
     }
 }
 
@@ -2527,7 +2539,9 @@ fn defect_epoch_pair(defect: &ContinuityDefect) -> (Option<i64>, Option<i64>) {
         ContinuityDefect::DuplicateEpoch { epoch_j2000_s, .. } => {
             (Some(*epoch_j2000_s as i64), Some(*epoch_j2000_s as i64))
         }
-        ContinuityDefect::SingleSampleSeries { .. } => (None, None),
+        ContinuityDefect::SingleSampleSeries { .. } | ContinuityDefect::UnusableSample { .. } => {
+            (None, None)
+        }
     }
 }
 
@@ -3065,6 +3079,9 @@ fn validate_merge_options(opts: &MergeOptions) -> Result<()> {
     }
     if let Some(target) = opts.target_epoch_interval_s {
         target_epoch_interval_ticks(target)?;
+    }
+    if let Some(continuity) = &opts.verify_continuity {
+        continuity.validate().map_err(Error::ContinuityOptions)?;
     }
     Ok(())
 }

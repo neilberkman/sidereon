@@ -2,8 +2,10 @@
 
 `check_continuity` and the optional continuity post-condition on `merge` remain
 product-wide reporters. They retain every defect and keep their existing
-defaults and return values. A bounded evaluator can now ask those existing
-reports which findings can enter an interpolation neighbourhood for a requested
+defaults. Both refuse options whose speed bound or residual tolerance is not a
+finite number at least zero (`ContinuityOptionsError`), since no sample exceeds
+a NaN or infinite bound. A bounded evaluator can now ask those existing reports
+which findings can enter an interpolation neighbourhood for a requested
 inclusive epoch window.
 
 ## Decision

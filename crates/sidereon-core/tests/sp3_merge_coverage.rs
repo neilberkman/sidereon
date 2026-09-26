@@ -454,7 +454,8 @@ fn merge_window_verdicts_refuse_only_windows_that_use_the_handover_or_a_record_a
     let plain = check_continuity(
         &merged.precise_ephemeris_samples(),
         &ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss),
-    );
+    )
+    .expect("valid continuity options");
     let stencil = StencilExtent::for_sp3(&merged).expect("stencil");
     assert_eq!(stencil.before_s(), 3_300.0);
     for (index, &epoch) in epochs.iter().enumerate() {

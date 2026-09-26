@@ -912,7 +912,7 @@ fn print_window_continuity(sp3: &Sp3, from_j2000_s: f64, through_j2000_s: f64) -
     let report = check_continuity(
         &sp3.precise_ephemeris_samples(),
         &ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss),
-    );
+    )?;
     let window = EpochWindow::new(from_j2000_s, through_j2000_s)?;
     let stencil = StencilExtent::for_sp3(sp3)?;
     let verdict = report.verdict_for_window(window, stencil);
