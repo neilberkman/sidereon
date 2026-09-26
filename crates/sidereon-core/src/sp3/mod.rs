@@ -2312,7 +2312,7 @@ pub use coverage::{
 pub use exact::{
     parse_exact_sp3, validate_exact_sp3, ExactSp3Coverage, ExactSp3Request, ExactSp3ValidationError,
 };
-pub use grid::Sp3EpochGrid;
+pub use grid::{Sp3EpochGrid, Sp3EpochIntervalError, Sp3EpochIntervalRejection};
 pub(crate) use interp::precise_accuracy_variance_m2;
 pub use interp::{Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR};
 pub use interpolant::{PreciseEphemerisInterpolant, PreciseInterpolantError};

@@ -25,7 +25,7 @@ use crate::astro::time::civil::{
 use crate::astro::time::model::Instant;
 
 use super::grid::{
-    gcd, interval_seconds, interval_ticks, product_grid, product_ticks, tick_seconds,
+    checked_epoch_interval_ticks, gcd, interval_seconds, product_grid, product_ticks, tick_seconds,
     TICKS_PER_SECOND,
 };
 use super::interp::{precise_node_j2000_seconds_from_instant, Sp3InterpolationOptions};
@@ -277,8 +277,14 @@ pub struct MergeOptions {
     /// Optional consensus guard for precedence-selected values. `None` preserves
     /// the historical contested-cell behavior.
     pub outlier_reject: Option<OutlierRejectOptions>,
-    /// Optional target epoch interval, in seconds; it must be a whole number of
-    /// the 10-nanosecond ticks an SP3 interval states. When unset the output
+    /// Optional target epoch interval, in seconds; it must be a positive whole
+    /// number of the 10-nanosecond ticks an SP3 epoch states, given as the
+    /// `f64` its eight-decimal text reads back as (`450.5` is one,
+    /// `600.0000000001` is not). Any other value is refused before the inputs
+    /// are read, with [`crate::Error::Sp3EpochInterval`] naming this field, the
+    /// value and the [`Sp3EpochIntervalRejection`](crate::ephemeris::Sp3EpochIntervalRejection);
+    /// [`Sp3MergeInputIdentity`](crate::ephemeris::Sp3MergeInputIdentity)
+    /// accepts and refuses exactly the same values. When unset the output
     /// grid is the greatest common divisor of the inputs' grid steps and epoch
     /// offsets, which holds every input epoch. When set, the grid is anchored
     /// at the earliest input epoch, inputs contribute at the grid epochs they
@@ -2321,18 +2327,7 @@ fn prepare_merge_timing(sources: &[Sp3], opts: &MergeOptions) -> Result<MergeTim
     };
 
     let step_ticks = match opts.target_epoch_interval_s {
-        Some(target) => {
-            if !target.is_finite() || target <= 0.0 {
-                return Err(Error::InvalidInput(format!(
-                    "merge target epoch interval must be positive and finite, got {target}"
-                )));
-            }
-            interval_ticks(target).ok_or_else(|| {
-                Error::InvalidInput(format!(
-                    "merge target epoch interval {target} s is not a whole number of the 10-nanosecond ticks an SP3 interval states"
-                ))
-            })?
-        }
+        Some(target) => target_epoch_interval_ticks(target)?,
         None => {
             let mut step = steps.iter().fold(0, |acc, &step| gcd(acc, step));
             for ticks in &source_ticks {
@@ -3068,8 +3063,22 @@ fn validate_merge_options(opts: &MergeOptions) -> Result<()> {
             ));
         }
     }
+    if let Some(target) = opts.target_epoch_interval_s {
+        target_epoch_interval_ticks(target)?;
+    }
     Ok(())
 }
+
+/// The whole number of ticks [`MergeOptions::target_epoch_interval_s`] states,
+/// by the rule [`super::Sp3MergeInputIdentity`] also applies to it
+/// ([`super::grid::epoch_interval_ticks`]).
+fn target_epoch_interval_ticks(target_s: f64) -> Result<i128> {
+    checked_epoch_interval_ticks(TARGET_EPOCH_INTERVAL_FIELD, target_s)
+        .map_err(Error::Sp3EpochInterval)
+}
+
+/// The field name a refused [`MergeOptions::target_epoch_interval_s`] reports.
+pub(super) const TARGET_EPOCH_INTERVAL_FIELD: &str = "target_epoch_interval_s";
 
 /// Indices of the largest subset of `items` whose members are *mutually* within
 /// `within`. Exact max-clique over normal source counts; deterministic greedy
@@ -4743,13 +4752,38 @@ mod tests {
             ]
         );
 
-        // A target no whole number of ticks states is refused by name.
+        // A target no whole number of ticks states is refused by name, with
+        // the field, the value and the reason.
         let finer = MergeOptions {
             target_epoch_interval_s: Some(1.0e-9),
             ..MergeOptions::default()
         };
         let err = merge(&[mk()], &finer).expect_err("sub-tick target");
+        assert_eq!(
+            err,
+            Error::Sp3EpochInterval(super::super::Sp3EpochIntervalError {
+                field: "target_epoch_interval_s",
+                value: 1.0e-9,
+                reason: super::super::Sp3EpochIntervalRejection::NotWholeTicks,
+            })
+        );
         assert!(err.to_string().contains("10-nanosecond ticks"), "{err}");
+
+        // A target within a microsecond of a whole second is still refused
+        // when it is not a whole number of ticks.
+        let near_whole = MergeOptions {
+            target_epoch_interval_s: Some(600.0000000001),
+            ..MergeOptions::default()
+        };
+        assert!(matches!(
+            merge(&[mk()], &near_whole),
+            Err(Error::Sp3EpochInterval(
+                super::super::Sp3EpochIntervalError {
+                    reason: super::super::Sp3EpochIntervalRejection::NotWholeTicks,
+                    ..
+                }
+            ))
+        ));
     }
 
     #[test]

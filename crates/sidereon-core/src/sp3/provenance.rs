@@ -6,8 +6,9 @@ use std::fmt::Write as _;
 use sha2::{Digest, Sha256};
 
 use crate::data::{ArchiveCompression, DistributionSource, ProductIdentity, ProductType};
-use crate::tolerances::WHOLE_SECOND_EPS_S;
 
+use super::combine::TARGET_EPOCH_INTERVAL_FIELD;
+use super::grid::{checked_epoch_interval_ticks, Sp3EpochIntervalError};
 use super::{MergeCombine, MergeOptions, MergePrecedenceScope};
 
 /// Version of the canonical merged-SP3 input identity encoding.
@@ -80,6 +81,11 @@ pub enum Sp3MergeInputIdentityError {
     /// Merge controls cannot be represented as a valid executable policy.
     #[error("invalid merged-SP3 policy: {0}")]
     InvalidPolicy(&'static str),
+    /// [`MergeOptions::target_epoch_interval_s`] is not an SP3 epoch interval.
+    /// [`merge`](crate::ephemeris::merge) refuses exactly the same values, with
+    /// the same error in [`crate::Error::Sp3EpochInterval`].
+    #[error("invalid merged-SP3 policy: {0}")]
+    TargetEpochInterval(Sp3EpochIntervalError),
 }
 
 impl Sp3MergeInputIdentity {
@@ -294,14 +300,8 @@ fn validate_policy(policy: &MergeOptions) -> Result<(), Sp3MergeInputIdentityErr
         }
     }
     if let Some(value) = policy.target_epoch_interval_s {
-        if !value.is_finite()
-            || (value - value.round()).abs() > WHOLE_SECOND_EPS_S
-            || value.round() < 1.0
-        {
-            return Err(Sp3MergeInputIdentityError::InvalidPolicy(
-                "target epoch interval",
-            ));
-        }
+        checked_epoch_interval_ticks(TARGET_EPOCH_INTERVAL_FIELD, value)
+            .map_err(Sp3MergeInputIdentityError::TargetEpochInterval)?;
     }
     if policy
         .systems
@@ -356,6 +356,9 @@ fn canonical_policy_bytes(policy: &MergeOptions, precedence: &[Vec<u8>]) -> Vec<
         None => bytes.push(0),
     }
     match policy.target_epoch_interval_s {
+        // `validate_policy` admits only values that state exactly one tick
+        // count, so the bits are canonical: two accepted values are the same
+        // grid exactly when their bits are equal.
         Some(value) => {
             bytes.push(1);
             put_u64(&mut bytes, value.to_bits());

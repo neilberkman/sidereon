@@ -76,7 +76,7 @@ pub use crate::sp3::{
 };
 pub use crate::sp3::{
     Sp3ChannelCoverage, Sp3Coverage, Sp3CoverageGap, Sp3CoverageSpan, Sp3EpochGrid,
-    Sp3SatelliteCoverage,
+    Sp3EpochIntervalError, Sp3EpochIntervalRejection, Sp3SatelliteCoverage,
 };
 pub use crate::sp3::{Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR};
 pub use crate::spp::{EphemerisSource, PositionClock, PositionClockGroupDelay};

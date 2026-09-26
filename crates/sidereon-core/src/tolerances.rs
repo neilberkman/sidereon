@@ -13,7 +13,12 @@ pub const FREQUENCY_MATCH_EPS_HZ: f64 = 1.0e-6;
 /// considered degenerate.
 pub const FREQUENCY_DENOMINATOR_EPS_HZ: f64 = 1.0;
 
-/// Whole-second epoch-lattice tolerance used by SP3 merge/decimation.
+/// Tolerance for comparing SP3 epoch instants carried as `f64` seconds: an
+/// exact product's header start fields against the requested start, and two
+/// statements of one epoch in the interpolator's node lookup. SP3 epoch intervals, grid steps and
+/// the first epoch record are not compared with it: the merge, the merge-input
+/// identity and exact-product validation count them exactly in the
+/// 10-nanosecond ticks an SP3 epoch record states.
 pub const WHOLE_SECOND_EPS_S: f64 = 1.0e-6;
 
 /// Threshold below which a fitted eccentricity uses the circular fast path.

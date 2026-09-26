@@ -5,9 +5,9 @@ use sidereon_core::data::{
     DistributionSource, ProductDate, ProductType,
 };
 use sidereon_core::ephemeris::{
-    MergeCombine, MergeOptions, MergePrecedenceScope, OutlierRejectOptions, Sp3ArtifactIdentity,
-    Sp3FrameLabelSet, Sp3FrameReconciliationOptions, Sp3MergeInputIdentity,
-    Sp3MergeInputIdentityError,
+    merge, MergeCombine, MergeOptions, MergePrecedenceScope, OutlierRejectOptions, Sp3,
+    Sp3ArtifactIdentity, Sp3EpochIntervalError, Sp3EpochIntervalRejection, Sp3FrameLabelSet,
+    Sp3FrameReconciliationOptions, Sp3MergeInputIdentity, Sp3MergeInputIdentityError,
 };
 use sidereon_core::GnssSystem;
 
@@ -217,6 +217,34 @@ fn public_v1_golden_vectors_are_literal_and_cross_surface_stable() {
         Sp3MergeInputIdentity::new(&[second.clone(), first.clone()], &reordered_policy).unwrap();
     assert_eq!(reordered.stable_id, mean.stable_id);
 
+    // A target interval of whole 10-nanosecond ticks is bound, fraction and
+    // all; one off the tick grid is refused, however near a whole second.
+    let mut fractional_target = complete_policy(MergeCombine::Mean);
+    fractional_target.target_epoch_interval_s = Some(
+        mutations["accepted_fractional_target_epoch_interval_s"]
+            .as_f64()
+            .unwrap(),
+    );
+    let fractional_target =
+        Sp3MergeInputIdentity::new(&[first.clone(), second.clone()], &fractional_target).unwrap();
+    assert_ne!(fractional_target.stable_id, mean.stable_id);
+
+    let off_tick = mutations["refused_off_tick_target_epoch_interval_s"]
+        .as_f64()
+        .unwrap();
+    let mut off_tick_target = complete_policy(MergeCombine::Mean);
+    off_tick_target.target_epoch_interval_s = Some(off_tick);
+    assert_eq!(
+        Sp3MergeInputIdentity::new(&[first.clone(), second.clone()], &off_tick_target),
+        Err(Sp3MergeInputIdentityError::TargetEpochInterval(
+            Sp3EpochIntervalError {
+                field: "target_epoch_interval_s",
+                value: off_tick,
+                reason: Sp3EpochIntervalRejection::NotWholeTicks,
+            }
+        ))
+    );
+
     let mut malformed = first;
     malformed.product_sha256 = mutations["malformed_product_sha256"]
         .as_str()
@@ -331,21 +359,15 @@ fn non_executable_merge_policies_fail_closed() {
         Err(Sp3MergeInputIdentityError::InvalidPolicy("systems filter"))
     ));
 
-    let mut fractional_interval = MergeOptions::default();
-    fractional_interval.target_epoch_interval_s = Some(1.5);
-    assert!(matches!(
-        Sp3MergeInputIdentity::new(&[contributor], &fractional_interval),
-        Err(Sp3MergeInputIdentityError::InvalidPolicy(
-            "target epoch interval"
-        ))
-    ));
-
     let mut near_zero_interval = MergeOptions::default();
     near_zero_interval.target_epoch_interval_s = Some(1.0e-12);
     assert!(matches!(
         Sp3MergeInputIdentity::new(&[artifact(AnalysisCenter::Esa, 0x22)], &near_zero_interval),
-        Err(Sp3MergeInputIdentityError::InvalidPolicy(
-            "target epoch interval"
+        Err(Sp3MergeInputIdentityError::TargetEpochInterval(
+            Sp3EpochIntervalError {
+                reason: Sp3EpochIntervalRejection::NotWholeTicks,
+                ..
+            }
         ))
     ));
 
@@ -475,4 +497,91 @@ fn four_center_ultra_consensus_includes_igs_and_wum() {
     reversed.reverse();
     let reversed_input = Sp3MergeInputIdentity::new(&reversed, &policy).expect("merge input");
     assert_eq!(merge_input, reversed_input);
+}
+
+/// A GPS product of one satellite at 2020-06-25 00:00 and 00:15, declaring a
+/// 900 s interval.
+fn two_epoch_product() -> Sp3 {
+    let mut text = String::new();
+    text.push_str("#cP2020  6 25  0  0  0.00000000       2 ORBIT IGS14 FIT  TST\n");
+    text.push_str("## 2111 432000.00000000   900.00000000 59025 0.0000000000000\n");
+    text.push_str("+    1   G01");
+    for _ in 1..17 {
+        text.push_str("  0");
+    }
+    text.push('\n');
+    text.push_str("++         0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0\n");
+    text.push_str("%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc\n");
+    text.push_str("%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc\n");
+    text.push_str("%f  1.2500000  1.025000000  0.00000000000  0.000000000000000\n");
+    text.push_str("%f  0.0000000  0.000000000  0.00000000000  0.000000000000000\n");
+    text.push_str("%i    0    0    0    0      0      0      0      0         0\n");
+    text.push_str("%i    0    0    0    0      0      0      0      0         0\n");
+    text.push_str("/* MERGE TARGET INTERVAL FIXTURE\n");
+    text.push_str("*  2020  6 25  0  0  0.00000000\n");
+    text.push_str("PG01  15000.000000 -20000.000000   5000.000000    100.000000\n");
+    text.push_str("*  2020  6 25  0 15  0.00000000\n");
+    text.push_str("PG01  15001.000000 -20001.000000   5001.000000    101.000000\n");
+    text.push_str("EOF\n");
+    Sp3::parse(text.as_bytes()).unwrap()
+}
+
+/// `merge` and `Sp3MergeInputIdentity` apply one rule to the target epoch
+/// interval: each accepts exactly the values the other accepts, and refuses
+/// the rest with the same typed error. The identity once took any value within
+/// a microsecond of a whole second, so it refused a 450.5 s target the merge
+/// runs and accepted a 600.0000000001 s target the merge refuses.
+#[test]
+fn merge_and_its_input_identity_accept_and_refuse_the_same_target_intervals() {
+    let contributor = artifact(AnalysisCenter::Esa, 0x11);
+    let product = two_epoch_product();
+
+    // Whole numbers of 10 ns ticks, fractional seconds included, down to one
+    // tick. The merged header states the target exactly.
+    for value in [900.0, 450.5, 1.5, 0.01, 0.1, 1.0e-8, 3.0e-8, 99999.99999999] {
+        let mut policy = MergeOptions::default();
+        policy.target_epoch_interval_s = Some(value);
+        Sp3MergeInputIdentity::new(std::slice::from_ref(&contributor), &policy)
+            .unwrap_or_else(|error| panic!("identity refused {value}: {error}"));
+        match merge(std::slice::from_ref(&product), &policy) {
+            Ok((merged, _)) => assert_eq!(
+                merged.header.epoch_interval_s.to_bits(),
+                value.to_bits(),
+                "{value}"
+            ),
+            Err(error) => panic!("merge refused {value}: {error}"),
+        }
+    }
+
+    for (value, reason) in [
+        (600.0000000001, Sp3EpochIntervalRejection::NotWholeTicks),
+        (599.9999999999, Sp3EpochIntervalRejection::NotWholeTicks),
+        (1.0e-9, Sp3EpochIntervalRejection::NotWholeTicks),
+        (1.0e-12, Sp3EpochIntervalRejection::NotWholeTicks),
+        (0.0, Sp3EpochIntervalRejection::NotPositive),
+        (-0.0, Sp3EpochIntervalRejection::NotPositive),
+        (-900.0, Sp3EpochIntervalRejection::NotPositive),
+        (f64::NAN, Sp3EpochIntervalRejection::NotFinite),
+        (f64::INFINITY, Sp3EpochIntervalRejection::NotFinite),
+        (f64::NEG_INFINITY, Sp3EpochIntervalRejection::NotFinite),
+        (1.0e9, Sp3EpochIntervalRejection::BeyondTickResolution),
+    ] {
+        let expected = Sp3EpochIntervalError {
+            field: "target_epoch_interval_s",
+            value,
+            reason,
+        };
+        let mut policy = MergeOptions::default();
+        policy.target_epoch_interval_s = Some(value);
+        assert_eq!(
+            Sp3MergeInputIdentity::new(std::slice::from_ref(&contributor), &policy),
+            Err(Sp3MergeInputIdentityError::TargetEpochInterval(expected)),
+            "{value}"
+        );
+        assert_eq!(
+            merge(std::slice::from_ref(&product), &policy).err(),
+            Some(sidereon_core::Error::Sp3EpochInterval(expected)),
+            "{value}"
+        );
+    }
 }
