@@ -1454,7 +1454,15 @@ fn epoch_day_jdn(epoch_j2000_s: f64) -> Result<i64, SpaceWeatherError> {
             epoch_j2000_s_bits: epoch_j2000_s.to_bits(),
         });
     }
-    let from_midnight = floor_second as i64 + J2000_NOON_OFFSET_S;
+    // `i64::MAX as f64` rounds up to 2^63, so the float comparison above
+    // alone cannot prove that the conversion and offset addition are safe.
+    // Preserve the caller's exact epoch bits in the typed error if the
+    // civil-day offset cannot be represented.
+    let Some(from_midnight) = (floor_second as i64).checked_add(J2000_NOON_OFFSET_S) else {
+        return Err(SpaceWeatherError::InvalidEpoch {
+            epoch_j2000_s_bits: epoch_j2000_s.to_bits(),
+        });
+    };
     let day_index = from_midnight.div_euclid(SECONDS_PER_DAY_I64);
     let jdn = day_index + J2000_JULIAN_DAY_NUMBER;
     let min_jdn = julian_day_number(0, 1, 1);
@@ -1470,7 +1478,12 @@ fn epoch_day_jdn(epoch_j2000_s: f64) -> Result<i64, SpaceWeatherError> {
 fn epoch_day_and_ap_bin(epoch_j2000_s: f64) -> Result<(i64, u8), SpaceWeatherError> {
     let jdn = epoch_day_jdn(epoch_j2000_s)?;
     let floor_second = epoch_j2000_s.floor() as i64;
-    let from_midnight = floor_second + J2000_NOON_OFFSET_S;
+    let from_midnight =
+        floor_second
+            .checked_add(J2000_NOON_OFFSET_S)
+            .ok_or(SpaceWeatherError::InvalidEpoch {
+                epoch_j2000_s_bits: epoch_j2000_s.to_bits(),
+            })?;
     let second_of_day = from_midnight.rem_euclid(SECONDS_PER_DAY_I64);
     Ok((jdn, (second_of_day / (3 * 3600)) as u8))
 }
@@ -1514,6 +1527,42 @@ mod tests {
         );
         assert_eq!(sample.class, ObservationClass::Observed);
         assert!(!sample.ap_defaulted);
+    }
+
+    #[test]
+    fn epoch_day_overflow_is_a_typed_error_with_original_bits() {
+        let table = parse_csv(CSV).expect("csv parses").value;
+        let two_to_63 = 2.0_f64.powi(63);
+        let invalid_epochs = [
+            two_to_63,
+            f64::from_bits(two_to_63.to_bits() - 1),
+            f64::from_bits(two_to_63.to_bits() - 2),
+            f64::MAX,
+            f64::NEG_INFINITY,
+            -two_to_63,
+            f64::NAN,
+        ];
+
+        for epoch in invalid_epochs {
+            let expected_bits = epoch.to_bits();
+            assert!(matches!(
+                table.sample_at(epoch),
+                Err(SpaceWeatherError::InvalidEpoch { epoch_j2000_s_bits })
+                    if epoch_j2000_s_bits == expected_bits
+            ));
+            assert!(matches!(
+                table.ap_history_at_with_policy(epoch, SpaceWeatherPolicy::default()),
+                Err(SpaceWeatherError::InvalidEpoch { epoch_j2000_s_bits })
+                    if epoch_j2000_s_bits == expected_bits
+            ));
+        }
+
+        let valid_epoch = j2000_seconds(2024, 5, 10, 12, 0, 0.0);
+        let sample = table
+            .sample_at(valid_epoch)
+            .expect("valid epoch is unchanged");
+        assert_eq!(sample.space_weather.f107, 165.1);
+        assert_eq!(sample.space_weather.ap, 66.0);
     }
 
     #[test]
