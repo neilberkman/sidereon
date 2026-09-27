@@ -364,3 +364,93 @@ fn push_bytes_is_bounded_line_numbered_and_split_independent() {
     assert_eq!(whole_out.snapshots, split_snapshots);
     assert_eq!(whole_tail, split_tail);
 }
+
+#[test]
+fn finish_with_output_preserves_final_parse_skips_and_open_epoch() {
+    let mut accumulator = NmeaAccumulator::new();
+    accumulator.push_bytes(b"bad line");
+
+    let output = accumulator.finish_with_output();
+    assert_eq!(output.snapshots.len(), 0);
+    assert_eq!(output.sentences.len(), 0);
+    assert_eq!(output.diagnostics.skips.len(), 1);
+    assert_eq!(output.diagnostics.skips[0].at.line, Some(1));
+    assert_eq!(
+        output.diagnostics.skips[0].reason,
+        SkipReason::UnknownBlock("no NMEA start delimiter".to_string())
+    );
+    assert_eq!(accumulator.retained_len(), 0);
+}
+
+#[test]
+fn finish_with_output_keeps_prior_and_final_epochs_and_final_warning() {
+    let mut accumulator = NmeaAccumulator::new();
+    let first = b"$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n";
+    let final_line = b"$GPGGA,123520,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,";
+    assert!(accumulator.push_bytes(first).snapshots.is_empty());
+    accumulator.push_bytes(final_line);
+
+    let output = accumulator.finish_with_output();
+    assert_eq!(output.snapshots.len(), 2);
+    assert_eq!(output.sentences.len(), 1);
+    assert_eq!(
+        output.snapshots[0].time_of_day,
+        Some(NmeaTime {
+            hour: 12,
+            minute: 35,
+            second: 19,
+            nanos: 0,
+            decimals: 0,
+        })
+    );
+    assert_eq!(
+        output.snapshots[1].time_of_day,
+        Some(NmeaTime {
+            hour: 12,
+            minute: 35,
+            second: 20,
+            nanos: 0,
+            decimals: 0,
+        })
+    );
+    assert_eq!(output.diagnostics.warnings.len(), 1);
+    assert_eq!(output.diagnostics.warnings[0].at.line, Some(2));
+    assert_eq!(
+        output.diagnostics.warnings[0].kind,
+        WarningKind::MissingMetadata
+    );
+}
+
+#[test]
+fn finish_with_output_without_remainder_is_idempotent_and_legacy_finish_keeps_contract() {
+    let mut accumulator = NmeaAccumulator::new();
+    accumulator.push_bytes(GGA_SAMPLE.as_bytes());
+    let output = accumulator.finish_with_output();
+    assert_eq!(output.snapshots.len(), 1);
+    assert!(output.sentences.is_empty());
+    assert!(output.diagnostics.is_empty());
+    assert!(accumulator.finish_with_output().snapshots.is_empty());
+
+    let mut legacy = NmeaAccumulator::new();
+    legacy.push_bytes(GGA_SAMPLE.as_bytes());
+    assert!(legacy.finish().is_some());
+    assert!(legacy.finish().is_none());
+
+    let mut legacy_with_unterminated_epoch = NmeaAccumulator::new();
+    legacy_with_unterminated_epoch
+        .push_bytes(b"$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n");
+    legacy_with_unterminated_epoch
+        .push_bytes(b"$GPGGA,123520,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,");
+    assert_eq!(
+        legacy_with_unterminated_epoch
+            .finish()
+            .and_then(|epoch| epoch.time_of_day),
+        Some(NmeaTime {
+            hour: 12,
+            minute: 35,
+            second: 20,
+            nanos: 0,
+            decimals: 0,
+        })
+    );
+}

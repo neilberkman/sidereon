@@ -124,9 +124,7 @@ pub fn group_epochs(log: &NmeaLog) -> Vec<EpochSnapshot> {
             snapshots.push(snapshot);
         }
     }
-    if let Some(snapshot) = accumulator.finish() {
-        snapshots.push(snapshot);
-    }
+    snapshots.extend(accumulator.finish_with_output().snapshots);
     snapshots
 }
 

@@ -309,16 +309,27 @@ impl NmeaAccumulator {
         output
     }
 
-    /// Processes a nonempty unterminated remainder as one final line, then returns the final open snapshot, if any.
-    /// The temporary output produced while parsing that remainder is discarded, including any snapshot completed during that processing.
-    pub fn finish(&mut self) -> Option<EpochSnapshot> {
+    /// Processes a nonempty unterminated remainder as one final line and returns the complete output.
+    /// The returned snapshots include any epochs completed while parsing the remainder, followed by the final open epoch.
+    /// Parser diagnostics and accepted sentences produced by the remainder are included as well.
+    pub fn finish_with_output(&mut self) -> NmeaChunkOutput {
+        let mut output = NmeaChunkOutput::default();
         if !self.retained.is_empty() {
             let line = std::mem::take(&mut self.retained);
-            let mut output = NmeaChunkOutput::default();
             push_line(self, &line, self.next_line, &mut output);
             self.next_line += 1;
         }
-        self.current.take().map(|epoch| epoch.snapshot)
+        if let Some(epoch) = self.current.take() {
+            output.snapshots.push(epoch.snapshot);
+        }
+        output
+    }
+
+    /// Processes a nonempty unterminated remainder as one final line, then returns the final open snapshot, if any.
+    /// For compatibility, this drops parser diagnostics and epochs completed while processing the remainder;
+    /// use [`Self::finish_with_output`] when all final input results must be retained.
+    pub fn finish(&mut self) -> Option<EpochSnapshot> {
+        self.finish_with_output().snapshots.pop()
     }
 
     /// Returns the number of bytes currently buffered without a line terminator.
@@ -649,12 +660,12 @@ fn push_line(
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-/// Per-chunk results returned by [`NmeaAccumulator::push_bytes`].
+/// Results returned by [`NmeaAccumulator::push_bytes`] or [`NmeaAccumulator::finish_with_output`].
 /// Completed snapshots and parsed sentences are kept separate from parser diagnostics, while epoch-assembly warnings remain on each snapshot.
 pub struct NmeaChunkOutput {
-    /// Snapshots completed while complete lines in the chunk were processed, in processing order; the still-open epoch is omitted.
+    /// Snapshots completed while processing the input, followed by the final open epoch when called from `finish_with_output`.
     pub snapshots: Vec<EpochSnapshot>,
-    /// Successfully parsed sentences from complete lines in input order; skipped or still-buffered lines are omitted.
+    /// Successfully parsed sentences in input order; skipped or still-buffered lines are omitted.
     pub sentences: Vec<NmeaSentence>,
     /// Parser skips and warnings with one-based line references, including the retained-line length-cap skip.
     pub diagnostics: Diagnostics,
