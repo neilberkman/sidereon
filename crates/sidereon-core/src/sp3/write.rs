@@ -2123,6 +2123,13 @@ fn epochless_start_tick(sp3: &Sp3) -> Result<i128, Sp3WriteError> {
     // MJD 51544 is the civil day of the J2000 origin (MJD 51544.5).
     const J2000_MJD_DAY: i128 = 51_544;
     let h = &sp3.header;
+    // A parsed line-1 start has an exact 10 ns tick alongside its approximate
+    // J2000-seconds `f64`. Prefer the tick: converting the large seconds value
+    // back to ticks can move it by multiple ticks because its ULP exceeds 10 ns.
+    // This also makes a canonical epochless write stable after it is parsed.
+    if let Some(tick) = sp3.declared_start_tick {
+        return Ok(tick);
+    }
     let Some(seconds) = sp3.declared_start_j2000_s else {
         check_exact(
             h.mjd_fraction,

@@ -3180,6 +3180,30 @@ fn test_writer_refuses_a_product_whose_stored_arrays_disagree() {
     assert_eq!(reread.to_sp3_string().expect("rewrite"), text);
 }
 
+/// An epochless file with unreadable line-1 seconds gets its start from line 2.
+/// Once the writer states that start canonically on line 1, the exact tick must
+/// take precedence over the rounded large J2000-seconds `f64` on the next write.
+#[test]
+fn epochless_writer_preserves_exact_declared_start_tick_on_rewrite() {
+    let crash_input = include_bytes!(
+        "../../../../fuzz/corpus/sp3_round_trip/regression-epochless-start-tick-stability.sp3"
+    );
+    let parsed = Sp3::parse(crash_input).expect("fuzz input stays parseable");
+    assert!(parsed.epochs.is_empty());
+    assert_eq!(parsed.declared_start_j2000_s, None);
+    assert_eq!(parsed.declared_start_tick, None);
+
+    let first = parsed.to_sp3_string().expect("canonicalize MJD start");
+    assert!(
+        first.starts_with("#cP2020  6 24  0  0  0.00006912       0 "),
+        "{first}"
+    );
+    let reread = Sp3::parse(first.as_bytes()).expect("parse canonical start");
+    let expected_tick = (59024_i128 - 51_544) * 86_400 * 100_000_000 - 43_200 * 100_000_000 + 6_912;
+    assert_eq!(reread.declared_start_tick, Some(expected_tick));
+    assert_eq!(reread.to_sp3_string().expect("rewrite exact tick"), first);
+}
+
 // --- record values must restate what the product holds ----------------------
 
 /// The value-level round trip, checked in the units the product stores: every
