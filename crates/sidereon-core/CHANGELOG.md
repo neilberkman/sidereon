@@ -4,6 +4,8 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-10-04
+
 ### Added
 
 - `astro::time::ExactEpochQuery` retains an exact epoch and computed binary-second offsets without rounding an absolute query to `f64`. `ExactEpoch::query` starts from a decimal epoch label; `ExactEpoch::from_binary_j2000_seconds` starts from the exact binary value supplied by the caller. Binary-offset arithmetic remains distinct from the shortest-decimal semantics of `ExactEpoch::checked_add_seconds` and `checked_sub_seconds`.
