@@ -97,6 +97,10 @@ The Rust interface is the `sidereon` crate above. The other language interfaces 
 - Elixir: [`sidereon-ex`](https://github.com/neilberkman/sidereon-ex) (Hex: `sidereon`)
 - JavaScript / WebAssembly: [`sidereon-wasm`](https://github.com/neilberkman/sidereon-wasm) (npm: `@neilberkman/sidereon`)
 
+All Sidereon libraries release at the same version. New API and behavior
+changes are reviewed for equivalent coverage across the interfaces; see the
+[coordinated release policy](docs/release-policy.md).
+
 ## Validation
 
 Evaluation is deterministic: the same product, the same version, and the same platform give

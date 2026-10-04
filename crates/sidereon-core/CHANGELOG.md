@@ -4,6 +4,15 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-10-04
+
+### Changed
+
+- Coordinate the Rust engine and facade version with the 3.0.1 C, Go,
+  WASM, Python and Elixir bindings. This patch release delivers binding
+  fixes, consumer migration documentation and additional public API
+  regression coverage. The engine's numerical algorithms are unchanged.
+
 ## [3.0.0] - 2026-10-04
 
 ### Added
