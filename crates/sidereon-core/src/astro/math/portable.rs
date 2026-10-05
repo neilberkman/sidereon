@@ -685,6 +685,9 @@ impl UlpsEq for Portable {
 
     #[inline]
     fn ulps_eq(&self, other: &Self, epsilon: Self::Epsilon, max_ulps: u32) -> bool {
+        if self.0.is_nan() || other.0.is_nan() {
+            return false;
+        }
         self.0.to_bits().abs_diff(other.0.to_bits()) <= u64::from(max_ulps)
             || self.abs_diff_eq(other, epsilon)
     }
@@ -1105,6 +1108,26 @@ impl FromStr for Portable {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn portable_ulps_comparison_rejects_nan_payloads() {
+        let epsilon = Portable::default_epsilon();
+        let max_ulps = Portable::default_max_ulps();
+        let quiet = Portable(f64::from_bits(0x7ff8_0000_0000_0000));
+        let adjacent_quiet = Portable(f64::from_bits(0x7ff8_0000_0000_0001));
+        let signaling = Portable(f64::from_bits(0x7ff0_0000_0000_0001));
+        let infinity = Portable(f64::INFINITY);
+
+        for (left, right) in [
+            (quiet, quiet),
+            (quiet, adjacent_quiet),
+            (signaling, infinity),
+            (infinity, signaling),
+        ] {
+            assert!(!left.ulps_eq(&right, epsilon, max_ulps));
+            assert!(left.ulps_ne(&right, epsilon, max_ulps));
+        }
+    }
 
     #[derive(Default)]
     struct LossHookProbe {

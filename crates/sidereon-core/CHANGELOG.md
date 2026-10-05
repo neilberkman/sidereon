@@ -4,6 +4,19 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [3.0.2] - 2026-10-05
+
+### Fixed
+
+- Portable scalar ULP comparisons reject NaN operands, including identical or
+  adjacent NaN payloads. Finite-value comparisons and numerical algorithms are
+  unchanged.
+
+### Changed
+
+- Coordinate the Rust core and facade with the 3.0.2 C, Go, WASM, Python and
+  Elixir fixes while preserving existing public APIs.
+
 ## [3.0.1] - 2026-10-04
 
 ### Changed
