@@ -252,6 +252,37 @@ fn structure_preamble_tow_and_subframe_id() {
 }
 
 #[test]
+fn full_subframe_how_helpers_remove_tlm_d30_complement() {
+    for integrity in [0, 1] {
+        let opts = LnavOptions {
+            tow: i(54_321),
+            integrity: i(integrity),
+            ..default_opts()
+        };
+        let [sf1, _, _] = encode(&example(), &opts).unwrap();
+
+        assert_eq!(sf1[WORD_LENGTH - 1], integrity as u8);
+        assert_eq!(tow(&sf1), Some(54_321));
+        assert_eq!(subframe_id(&sf1), Some(1));
+    }
+}
+
+#[test]
+fn standalone_how_helpers_preserve_supplied_bit_contract() {
+    let opts = LnavOptions {
+        tow: i(54_321),
+        integrity: i(1),
+        ..default_opts()
+    };
+    let [sf1, _, _] = encode(&example(), &opts).unwrap();
+    let transmitted_how = &sf1[WORD_LENGTH..2 * WORD_LENGTH];
+
+    assert_eq!(sf1[WORD_LENGTH - 1], 1);
+    assert_eq!(tow(transmitted_how), Some(0x1ffff ^ 54_321));
+    assert_eq!(subframe_id(transmitted_how), Some(0b111 ^ 1));
+}
+
+#[test]
 fn out_of_range_fields_return_tagged_errors() {
     let p = LnavParams {
         week_number: i(2000),
