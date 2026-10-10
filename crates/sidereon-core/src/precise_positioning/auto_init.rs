@@ -13,8 +13,9 @@
 //! binding delegation is bit-for-bit:
 //!
 //! 1. **SPP seed** - per epoch, a code-only single-point solve with the
-//!    ionosphere correction off (the troposphere optional), each epoch using the
-//!    caller's cold-start guess. The first SPP failure aborts the whole driver.
+//!    ionosphere correction off (the Saastamoinen/Niell troposphere correction
+//!    optional), each epoch using the caller's cold-start guess and surface
+//!    meteorology. The first SPP failure aborts the whole driver.
 //! 2. **Mean-position seed** - the static position seed is the unweighted
 //!    arithmetic mean of every epoch's SPP position, summed in reverse-epoch
 //!    order to match the reference's floating-point reduction.
@@ -67,10 +68,12 @@ pub struct PppAutoInitOptions {
     /// SPP cold-start guess `[x_m, y_m, z_m, b_m]` for every per-epoch seed solve
     /// (the Elixir `:spp_initial_guess`, default all-zero).
     pub spp_initial_guess: [f64; 4],
-    /// Apply the troposphere correction in the SPP seed solve (the Elixir
-    /// `:troposphere`, default off). The ionosphere is always off in the seed.
+    /// Apply the Saastamoinen/Niell troposphere correction in the SPP seed solve
+    /// (the Elixir `:troposphere`, default off). The ionosphere is always off in
+    /// the seed.
     pub spp_troposphere: bool,
-    /// Surface meteorology used by the SPP seed troposphere (when enabled).
+    /// Surface meteorology used by the SPP seed's Saastamoinen/Niell model when
+    /// enabled.
     pub spp_met: SurfaceMet,
 }
 
@@ -387,7 +390,7 @@ fn spp_seed_inputs(epoch: &FloatEpoch, options: PppAutoInitOptions) -> spp::Solv
         // group delay applies (RTKLIB `prange` under IFLC).
         pseudorange_code: crate::spp::PseudorangeCode::IonosphereFree,
         qzss_clock: crate::spp::QzssClock::Gps,
-        troposphere_model: crate::spp::TroposphereModel::Rtklib,
+        troposphere_model: crate::spp::TroposphereModel::SaastamoinenNiell,
     }
 }
 
@@ -604,6 +607,107 @@ mod tests {
             residual_screen: false,
             estimate_residual_ionosphere: false,
         }
+    }
+
+    fn seed_test_arc() -> (SeedSource, Vec<FloatEpoch>, [f64; 3]) {
+        let (source, ids) = source_and_ids();
+        let truth = [3_512_900.0, 780_500.0, 5_248_700.0];
+        let ambiguities_m: BTreeMap<String, f64> = ids
+            .iter()
+            .enumerate()
+            .map(|(idx, id)| (id.to_string(), 0.25 + idx as f64 * 0.1))
+            .collect();
+        let epochs = [12.5, 13.0]
+            .iter()
+            .enumerate()
+            .map(|(idx, &clock_m)| {
+                make_epoch(&source, &ids, truth, clock_m, &ambiguities_m, idx as f64)
+            })
+            .collect();
+        (source, epochs, truth)
+    }
+
+    fn invalid_met() -> SurfaceMet {
+        SurfaceMet {
+            pressure_hpa: 0.0,
+            temperature_k: 288.15,
+            relative_humidity: 0.5,
+        }
+    }
+
+    #[test]
+    fn enabled_spp_troposphere_rejects_invalid_met_as_code_seed_failure() {
+        let (source, epochs, _) = seed_test_arc();
+        let options = PppAutoInitOptions {
+            spp_troposphere: true,
+            spp_met: invalid_met(),
+            ..PppAutoInitOptions::default()
+        };
+
+        let error = solve_ppp_auto_init_float(&source, &epochs, options, float_config())
+            .expect_err("enabled SPP troposphere must validate its meteorology");
+        assert!(matches!(
+            error,
+            PppAutoInitError::CodeSeedFailed {
+                epoch_index: 0,
+                source: SppError::InvalidInput {
+                    field: "met.pressure_hpa",
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn enabled_spp_troposphere_uses_met_in_the_solved_seed() {
+        let (source, epochs, _) = seed_test_arc();
+        let standard = PppAutoInitOptions {
+            spp_troposphere: true,
+            ..PppAutoInitOptions::default()
+        };
+        let alternate = PppAutoInitOptions {
+            spp_met: SurfaceMet {
+                pressure_hpa: 850.0,
+                temperature_k: 303.15,
+                relative_humidity: 0.1,
+            },
+            ..standard
+        };
+
+        let standard_seed = seed_state(&source, &epochs, standard).expect("standard met seed");
+        let alternate_seed = seed_state(&source, &epochs, alternate).expect("alternate met seed");
+
+        assert_ne!(standard_seed.position_m, alternate_seed.position_m);
+        assert_ne!(standard_seed.clocks_m, alternate_seed.clocks_m);
+    }
+
+    #[test]
+    fn disabled_spp_troposphere_ignores_invalid_met() {
+        let (source, epochs, _) = seed_test_arc();
+        let options = PppAutoInitOptions {
+            spp_met: invalid_met(),
+            ..PppAutoInitOptions::default()
+        };
+
+        solve_ppp_auto_init_float(&source, &epochs, options, float_config())
+            .expect("disabled SPP troposphere must not validate unused meteorology");
+    }
+
+    #[test]
+    fn explicit_initial_guess_bypasses_invalid_spp_met() {
+        let (source, epochs, truth) = seed_test_arc();
+        let options = PppAutoInitOptions {
+            initial_guess: Some(PppInitialGuess {
+                position_m: truth,
+                clock_m: 12.5,
+            }),
+            spp_troposphere: true,
+            spp_met: invalid_met(),
+            ..PppAutoInitOptions::default()
+        };
+
+        solve_ppp_auto_init_float(&source, &epochs, options, float_config())
+            .expect("explicit initial guess must bypass SPP meteorology validation");
     }
 
     fn fixed_config(ids: &[GnssSatelliteId], wavelength_m: f64) -> FixedSolveConfig {
