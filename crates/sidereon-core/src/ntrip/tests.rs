@@ -295,7 +295,24 @@ fn sourcetable_finish_accepts_eof_and_case_insensitive_terminator() {
     machine.connection_request().unwrap();
     let events = machine
         .push(b"SOURCETABLE 200 OK\r\nSTR;MP;ID;RTCM;;;;;;;;;;;;;;;N;;tail\r\nendsourcetable\r\n");
+    assert_eq!(events.len(), 1);
     assert!(matches!(events[0], NtripEvent::Sourcetable(_)));
+    assert!(machine.finish().is_empty());
+}
+
+#[test]
+fn sourcetable_finish_emits_unterminated_terminator_once() {
+    let mut machine = NtripClientMachine::new(config(NtripVersion::Rev1));
+    machine.connection_request().unwrap();
+    let events = machine
+        .push(b"SOURCETABLE 200 OK\r\nSTR;MP;ID;RTCM;;;;;;;;;;;;;;;N;;tail\r\nENDSOURCETABLE");
+    assert!(events.is_empty());
+
+    let events = machine.finish();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0], NtripEvent::Sourcetable(_)));
+    assert_eq!(machine.state(), NtripState::Closed);
+    assert!(machine.finish().is_empty());
 }
 
 #[test]

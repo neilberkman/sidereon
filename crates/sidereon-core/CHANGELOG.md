@@ -8,6 +8,7 @@ All notable changes to `sidereon-core` are documented here.
 
 - Restore complemented LNAV hand-over data before extracting time of week and subframe ID from a full subframe; standalone 30-bit hand-over words retain their existing contract.
 - Use caller-supplied surface meteorology in the optional PPP auto-init SPP troposphere correction, including validation when that correction is enabled.
+- Emit one terminal sourcetable event when an NTRIP response ends with an unterminated `ENDSOURCETABLE` line, and keep repeated finish calls empty.
 
 ## [3.0.2] - 2026-10-05
 
