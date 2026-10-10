@@ -454,15 +454,20 @@ fn round_half_away(x: f64) -> i64 {
 /// Extracts the 17-bit time-of-week count from a hand-over word.
 ///
 /// Accepts either a 30-bit HOW word or a full 300-bit subframe (whose word 2 is
-/// the HOW). Returns `None` on any other length.
+/// the HOW). For a full subframe, the HOW data bits are restored using the
+/// preceding TLM word's `D30*` bit. A standalone HOW has no preceding bit, so
+/// its data bits are interpreted as supplied. Returns `None` on any other
+/// length.
 pub fn tow(bits: &[u8]) -> Option<u64> {
     how_word(bits).map(|how| bits_to_uint(&how[0..17]))
 }
 
 /// Extracts the 3-bit subframe ID from a hand-over word.
 ///
-/// Accepts a 30-bit HOW word or a full 300-bit subframe. Returns `None` on any
-/// other length.
+/// Accepts a 30-bit HOW word or a full 300-bit subframe. For a full subframe,
+/// the HOW data bits are restored using the preceding TLM word's `D30*` bit. A
+/// standalone HOW has no preceding bit, so its data bits are interpreted as
+/// supplied. Returns `None` on any other length.
 pub fn subframe_id(bits: &[u8]) -> Option<u64> {
     how_word(bits).map(|how| bits_to_uint(&how[19..22]))
 }
@@ -470,7 +475,14 @@ pub fn subframe_id(bits: &[u8]) -> Option<u64> {
 fn how_word(bits: &[u8]) -> Option<Vec<u8>> {
     match bits.len() {
         WORD_LENGTH => Some(bits.to_vec()),
-        SUBFRAME_LENGTH => Some(bits[WORD_LENGTH..2 * WORD_LENGTH].to_vec()),
+        SUBFRAME_LENGTH => {
+            let d30_prev = bits[WORD_LENGTH - 1];
+            let mut how = bits[WORD_LENGTH..2 * WORD_LENGTH].to_vec();
+            for bit in &mut how[..24] {
+                *bit ^= d30_prev;
+            }
+            Some(how)
+        }
         _ => None,
     }
 }

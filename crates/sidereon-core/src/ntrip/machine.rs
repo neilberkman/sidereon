@@ -409,7 +409,9 @@ impl NtripClientMachine {
                 let line: Vec<u8> = std::mem::take(&mut self.carry);
                 self.push_sourcetable_line(&line, &mut events);
             }
-            self.finish_sourcetable(&mut events);
+            if self.state == NtripState::Sourcetable {
+                self.finish_sourcetable(&mut events);
+            }
         }
         events
     }
