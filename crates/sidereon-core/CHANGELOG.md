@@ -4,6 +4,8 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [3.0.3] - 2026-10-12
+
 ### Fixed
 
 - Restore complemented LNAV hand-over data before extracting time of week and subframe ID from a full subframe; standalone 30-bit hand-over words retain their existing contract.
