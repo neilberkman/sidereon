@@ -8839,6 +8839,66 @@ fn version_two_headers_review_found_the_reader_took_without_what_writing_needs()
 }
 
 #[test]
+fn version_two_empty_epochs_require_types_in_effect_in_both_layouts() {
+    let version = v2_record(
+        "     2.11           OBSERVATION DATA    G (GPS)",
+        "RINEX VERSION / TYPE",
+    );
+    let types = v2_record("     1    C1", "# / TYPES OF OBSERV");
+    let end = v2_record("", "END OF HEADER");
+    for native in [false, true] {
+        let event = if native {
+            " 20  1  1  0  0  0.0000000  4  1\n"
+        } else {
+            "> 2020 01 01 00 00  0.0000000  4  1\n"
+        };
+        for flag in [0, 1, CYCLE_SLIP_FLAG] {
+            let epoch = if native {
+                format!(" 20  1  1  0  0  0.0000000  {flag}  0\n")
+            } else {
+                format!("> 2020 01 01 00 00  0.0000000  {flag}  0\n")
+            };
+            // A later declaration must not hide the earlier missing list.
+            let late = [
+                version.as_str(),
+                end.as_str(),
+                epoch.as_str(),
+                event,
+                types.as_str(),
+            ]
+            .concat();
+            let error = RinexObs::parse(&late).expect_err("types were not yet declared");
+            assert!(
+                error.to_string().contains("no # / TYPES OF OBSERV"),
+                "native={native}, flag={flag}: {error}"
+            );
+            // Declaring the list in the header or in a preceding event is valid.
+            for text in [
+                [
+                    version.as_str(),
+                    types.as_str(),
+                    end.as_str(),
+                    epoch.as_str(),
+                ]
+                .concat(),
+                [
+                    version.as_str(),
+                    end.as_str(),
+                    event,
+                    types.as_str(),
+                    epoch.as_str(),
+                ]
+                .concat(),
+            ] {
+                let obs = RinexObs::parse(&text).expect("types are in effect");
+                let written = obs.to_rinex_string().expect("writes");
+                assert_eq!(RinexObs::parse(&written).expect("reads back"), obs);
+            }
+        }
+    }
+}
+
+#[test]
 fn version_two_type_names_keep_what_counts_and_flags_mean() {
     // Review built these. A version 2 count for a constellation with no
     // observation reads by the file's type names, and the writer and downgrade
