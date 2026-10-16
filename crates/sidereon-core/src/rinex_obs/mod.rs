@@ -2409,6 +2409,13 @@ impl Parser {
 
             // Cycle slip records are read exactly as observation records are,
             // and kept apart from them.
+            if self.is_rinex2() {
+                // As in the native version 2 layout, the type list must be in
+                // effect for every observation or cycle slip epoch, even one
+                // with no satellites. A later event cannot declare it for an
+                // earlier epoch.
+                self.rinex2_obs_lines_per_sat()?;
+            }
             let mut sats = BTreeMap::new();
             for _ in 0..numsat {
                 let sat_line = lines.next().ok_or_else(|| {
@@ -2443,9 +2450,6 @@ impl Parser {
                 // A version 2 file's observation records are read by its own
                 // type list, epoch records in version 3 layout included.
                 if self.is_rinex2() {
-                    // With no list there is nothing to read them by, as for
-                    // records in version 2 layout.
-                    self.rinex2_obs_lines_per_sat()?;
                     if let Some(sat) = parse_sv_token(field(&normalized, 0, 3)) {
                         self.ensure_rinex2_system_obs_codes(sat.system);
                     }
