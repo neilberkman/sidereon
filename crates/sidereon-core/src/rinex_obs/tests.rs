@@ -8874,7 +8874,13 @@ fn version_two_empty_epochs_require_types_in_effect_in_both_layouts() {
             );
             // Declaring the list in the header or in a preceding event is valid.
             for text in [
-                [version.as_str(), types.as_str(), end.as_str(), epoch.as_str()].concat(),
+                [
+                    version.as_str(),
+                    types.as_str(),
+                    end.as_str(),
+                    epoch.as_str(),
+                ]
+                .concat(),
                 [
                     version.as_str(),
                     end.as_str(),
