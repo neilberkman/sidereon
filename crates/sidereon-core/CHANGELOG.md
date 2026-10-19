@@ -4,6 +4,10 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Normalize quaternions with large finite components without overflowing their norm.
+
 ## [3.0.4] - 2026-10-18
 
 ### Fixed
