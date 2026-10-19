@@ -97,15 +97,21 @@ impl AttitudeQuaternion {
         validate_finite(x, "quaternion.x")?;
         validate_finite(y, "quaternion.y")?;
         validate_finite(z, "quaternion.z")?;
-        let norm = (w * w + x * x + y * y + z * z).sqrt();
-        if norm <= 0.0 {
+        let scale = w.abs().max(x.abs()).max(y.abs()).max(z.abs());
+        if scale <= 0.0 {
             return Err(InertialError::DegenerateAttitude);
         }
+        let scaled = [w / scale, x / scale, y / scale, z / scale];
+        let norm = scaled
+            .iter()
+            .map(|component| component * component)
+            .sum::<f64>()
+            .sqrt();
         Ok(Self {
-            w: w / norm,
-            x: x / norm,
-            y: y / norm,
-            z: z / norm,
+            w: scaled[0] / norm,
+            x: scaled[1] / norm,
+            y: scaled[2] / norm,
+            z: scaled[3] / norm,
         })
     }
 }
@@ -301,6 +307,15 @@ mod tests {
         let back = dcm_to_quaternion(&dcm).expect("back");
         assert!((back.w - half).abs() <= 2.0e-16);
         assert!((back.z - half).abs() <= 2.0e-16);
+    }
+
+    #[test]
+    fn quaternion_normalization_handles_large_finite_components() {
+        let q = AttitudeQuaternion::new(1.0e308, 1.0e308, 0.0, 0.0).expect("quaternion");
+        assert_eq!(q.w, core::f64::consts::FRAC_1_SQRT_2);
+        assert_eq!(q.x, core::f64::consts::FRAC_1_SQRT_2);
+        assert_eq!(q.y, 0.0);
+        assert_eq!(q.z, 0.0);
     }
 }
 
