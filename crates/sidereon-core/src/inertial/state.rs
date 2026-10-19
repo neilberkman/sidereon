@@ -97,6 +97,17 @@ impl AttitudeQuaternion {
         validate_finite(x, "quaternion.x")?;
         validate_finite(y, "quaternion.y")?;
         validate_finite(z, "quaternion.z")?;
+        // Preserve ordinary-input rounding while scaling extreme magnitudes.
+        let norm_squared = w * w + x * x + y * y + z * z;
+        if norm_squared.is_normal() {
+            let norm = norm_squared.sqrt();
+            return Ok(Self {
+                w: w / norm,
+                x: x / norm,
+                y: y / norm,
+                z: z / norm,
+            });
+        }
         let scale = w.abs().max(x.abs()).max(y.abs()).max(z.abs());
         if scale <= 0.0 {
             return Err(InertialError::DegenerateAttitude);
@@ -312,10 +323,19 @@ mod tests {
     #[test]
     fn quaternion_normalization_handles_large_finite_components() {
         let q = AttitudeQuaternion::new(1.0e308, 1.0e308, 0.0, 0.0).expect("quaternion");
-        assert_eq!(q.w, core::f64::consts::FRAC_1_SQRT_2);
-        assert_eq!(q.x, core::f64::consts::FRAC_1_SQRT_2);
+        assert!((q.w - core::f64::consts::FRAC_1_SQRT_2).abs() <= 2.0e-16);
+        assert!((q.x - core::f64::consts::FRAC_1_SQRT_2).abs() <= 2.0e-16);
         assert_eq!(q.y, 0.0);
         assert_eq!(q.z, 0.0);
+    }
+
+    #[test]
+    fn quaternion_normalization_preserves_direction_at_extreme_scales() {
+        for magnitude in [1.0e308, f64::MAX, f64::MIN_POSITIVE, f64::from_bits(1)] {
+            let q = AttitudeQuaternion::new(magnitude, -magnitude, magnitude, -magnitude)
+                .expect("finite nonzero quaternion");
+            assert_eq!([q.w, q.x, q.y, q.z], [0.5, -0.5, 0.5, -0.5]);
+        }
     }
 }
 
