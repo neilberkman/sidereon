@@ -7,6 +7,7 @@ All notable changes to `sidereon-core` are documented here.
 ### Fixed
 
 - Normalize quaternions with large finite components without overflowing their norm.
+- Enforce the documented open `(0, 1)` probability domain for estimation NIS confidence and CA-CFAR false-alarm inputs, including rejection of positive and negative zero.
 
 ## [3.0.4] - 2026-10-18
 
