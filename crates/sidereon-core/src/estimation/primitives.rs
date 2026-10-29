@@ -530,7 +530,7 @@ fn validate_fraction_or_one(value: f64, field: &'static str) -> Result<(), Primi
 
 fn validate_probability(value: f64, field: &'static str) -> Result<(), PrimitiveError> {
     validate_finite(value, field)?;
-    if (0.0..1.0).contains(&value) {
+    if value > 0.0 && value < 1.0 {
         Ok(())
     } else {
         Err(invalid_input(field, "must be in (0,1)"))
@@ -628,6 +628,35 @@ mod tests {
         assert_eq!(gate.dof, 1);
         assert!(gate.in_gate);
         assert_eq!(nis_expected_value(3).expect("dof"), 3.0);
+    }
+
+    #[test]
+    fn probability_validation_enforces_the_documented_open_interval() {
+        let interval_error = Err(invalid_input("probability", "must be in (0,1)"));
+        assert_eq!(validate_probability(0.0, "probability"), interval_error);
+        assert_eq!(validate_probability(-0.0, "probability"), interval_error);
+        assert_eq!(validate_probability(1.0, "probability"), interval_error);
+        assert_eq!(validate_probability(-0.25, "probability"), interval_error);
+
+        let finite_error = Err(invalid_input("probability", "not finite"));
+        assert_eq!(
+            validate_probability(f64::INFINITY, "probability"),
+            finite_error
+        );
+        assert_eq!(validate_probability(f64::NAN, "probability"), finite_error);
+        assert_eq!(validate_probability(0.25, "probability"), Ok(()));
+    }
+
+    #[test]
+    fn public_cfar_pfa_routes_reject_signed_zero() {
+        for pfa in [0.0, -0.0] {
+            let expected = Err(invalid_input(
+                "false_alarm_probability",
+                "must be in (0,1)",
+            ));
+            assert_eq!(cfar_ca_multiplier_from_pfa(4, pfa), expected);
+            assert_eq!(cfar_ca_threshold(4, pfa, 5.0), expected);
+        }
     }
 
     #[test]
