@@ -1,0 +1,21 @@
+name: Published SP3 accuracy reproduction
+
+on:
+  push:
+    branches:
+      - audit/sp3-accuracy-published-305
+    paths:
+      - .github/workflows/sp3-accuracy-published-305.yml
+      - rust-repro/**
+
+permissions:
+  contents: read
+
+jobs:
+  published-305:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test against published Rust crates 3.0.5
+        run: cargo test --locked --manifest-path rust-repro/Cargo.toml

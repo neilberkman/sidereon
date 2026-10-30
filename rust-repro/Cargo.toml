@@ -1,0 +1,11 @@
+[package]
+name = "sidereon-sp3-accuracy-305-repro"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+sidereon = "=3.0.5"
+sidereon-core = "=3.0.5"
+
+[workspace]
