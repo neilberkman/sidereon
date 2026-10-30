@@ -27,7 +27,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             artifact: sidereon-darwin
           - os: ubuntu-latest
             artifact: sidereon-linux
@@ -54,7 +54,7 @@ jobs:
           key: mcpb-${{ matrix.os }}
 
       - name: Build (macOS universal)
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-15'
         run: |
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
           cargo build --release -p sidereon-cli --target aarch64-apple-darwin
