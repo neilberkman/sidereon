@@ -530,13 +530,13 @@ pub struct DroppedInputEpoch {
 }
 
 /// Per-(epoch, satellite) agreement statistics for one accepted consensus cell:
-/// how tightly the consensus member values cluster about the combined value that
-/// was actually written to the merged product.
+/// how tightly the consensus member values cluster about the combined value,
+/// before final SP3 record-column quantization.
 ///
 /// The dispersion is measured about the *combined* value (the mean, median, or
-/// precedence pick - whatever the strategy wrote), not about the cluster centroid,
-/// so it reflects the agreement of the product the merge emitted. A single-source
-/// cell has one member and zero dispersion.
+/// precedence pick), not necessarily about the cluster centroid. It describes
+/// contributor agreement independently of the final column rounding; a
+/// single-source cell has one member and zero dispersion.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AgreementMetric {
     /// The epoch.
@@ -1285,9 +1285,10 @@ fn fold_max(acc: Option<f64>, value: f64) -> f64 {
 /// parser unit conversion, derived output values are quantized to those record
 /// columns. This includes arithmetic means that fall between input column
 /// values. The quantization also updates the retained raw interpolation and
-/// clock caches. If any input carries higher precision, the merge preserves
-/// derived precision and the strict writer may refuse values its columns
-/// cannot restate.
+/// clock caches. Agreement metrics retain the dispersion about the combined
+/// values before this final quantization. If any input carries higher precision,
+/// the merge preserves derived precision and the strict writer may refuse
+/// values its columns cannot restate.
 ///
 /// Preservation of velocities and rates: merge policy intentionally drops
 /// velocities and clock rates for all records (both position states and clock-only
