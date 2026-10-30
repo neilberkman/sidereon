@@ -1985,9 +1985,9 @@ mod rounding_tests {
         let mut product = Sp3::parse(FIXTURE.as_bytes()).expect("fixture parses");
         let sat = product.header.satellites[0];
         let state = product.states[0].get_mut(&sat).expect("first state");
-        state.position.x_m = 26_560_000.0004;
-        state.position.y_m = -20_000_000.0003;
-        state.position.z_m = 5_000_000.0006;
+        state.position.x_m = 26_560_000.000_4;
+        state.position.y_m = -20_000_000.000_3;
+        state.position.z_m = 5_000_000.000_6;
         state.clock_s = Some(1.234_567_89e-6);
         let before = product.clone();
 
@@ -2037,9 +2037,9 @@ mod rounding_tests {
         let first = product.header.satellites[0];
         let second = product.header.satellites[1];
         let state = product.states[0].get_mut(&first).expect("first state");
-        state.position.x_m = 26_560_000.0004;
-        state.position.y_m = -20_000_000.0003;
-        state.position.z_m = 5_000_000.0006;
+        state.position.x_m = 26_560_000.000_4;
+        state.position.y_m = -20_000_000.000_3;
+        state.position.z_m = 5_000_000.000_6;
         state.clock_s = Some(1.234_567_89e-6);
         state.velocity = Some(ItrfVelocityMS {
             vx_m_s: 2_500.000_040_04,
@@ -2050,7 +2050,7 @@ mod rounding_tests {
         let other = product.states[1]
             .get_mut(&second)
             .expect("second epoch state");
-        other.position.x_m = 11_111_000.0001;
+        other.position.x_m = 11_111_000.000_1;
         other.velocity = Some(ItrfVelocityMS {
             vx_m_s: 1_000.000_010_01,
             vy_m_s: -900.000_010_01,

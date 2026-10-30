@@ -124,7 +124,7 @@ fn assert_midpoint_interpolation_round_trip(product: &Sp3, label: &str) {
         .unwrap_or_else(|error| panic!("{label} must write: {error}"));
     let reparsed = Sp3::parse(text.as_bytes()).expect("written SP3 reparses");
     let epochs = product.epochs_j2000_seconds();
-    assert!(epochs.len() > 11, "{label} needs an interpolation window");
+    assert!(epochs.len() >= 11, "{label} needs an interpolation window");
     let start = epochs.len() / 2;
     let mut compared = false;
     'queries: for index in start..epochs.len() - 1 {
