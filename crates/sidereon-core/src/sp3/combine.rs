@@ -4583,19 +4583,46 @@ mod tests {
 
         let g02 = merged.states_at(0).expect("epoch 0")[&gps(2)];
         let got = g02.position.as_array();
-        let expected = [
+        let analytic = [
             14_999_999.992_3,
             -19_999_999.993_048_087,
             5_000_000.000_396_175,
         ];
+        let expected = [
+            14_999.999_992 * 1_000.0,
+            -19_999.999_993 * 1_000.0,
+            5_000.0 * 1_000.0,
+        ];
+        assert_eq!(
+            got.map(f64::to_bits),
+            expected.map(f64::to_bits),
+            "transformed positions match the parser-scaled F14.6 columns"
+        );
         for axis in 0..3 {
             assert!(
-                (got[axis] - expected[axis]).abs() < 2.0e-9,
-                "axis {axis}: got {}, expected {}",
-                got[axis],
-                expected[axis]
+                (expected[axis] - analytic[axis]).abs() < 0.0005,
+                "axis {axis}: column value {}, analytic Helmert result {}",
+                expected[axis],
+                analytic[axis]
             );
         }
+        let text = merged
+            .to_sp3_string()
+            .expect("quantized Helmert merge writes");
+        let reparsed = Sp3::parse(text.as_bytes()).expect("quantized Helmert merge reparses");
+        let reparsed_position = reparsed.states_at(0).expect("reparsed epoch")[&gps(2)]
+            .position
+            .as_array();
+        assert_eq!(
+            reparsed_position.map(f64::to_bits),
+            got.map(f64::to_bits),
+            "write/read preserves the parser-scaled transformed positions"
+        );
+        assert_eq!(
+            merged.interp_raw[0].get(&gps(2)).expect("raw G02 node").km,
+            [14_999.999_992, -19_999.999_993, 5_000.0],
+            "interpolation cache stays synchronized with the written columns"
+        );
         assert_eq!(merged.header.coordinate_system, "IGS14");
         assert_eq!(report.frame_reconciliations.len(), 1);
         let reconciliation = &report.frame_reconciliations[0];
@@ -5882,9 +5909,26 @@ mod tests {
             .get(&g02)
             .expect("G02 diff raw node");
         let g02_diff_state = diff_merged.state(g02, 0).expect("G02 state");
-        let computed_us = g02_diff_state.clock_s.expect("G02 clock_s") * 1.0e6;
-        assert_eq!(g02_diff_raw.clock_us, Some(computed_us));
+        let expected_clock_us = 100.000_001;
+        let expected_clock_s = expected_clock_us * 1.0e-6;
+        assert_eq!(g02_diff_raw.clock_us, Some(expected_clock_us));
+        assert_eq!(g02_diff_state.clock_s, Some(expected_clock_s));
         assert_ne!(g02_diff_raw.clock_us, Some(100.0));
+
+        let text = diff_merged
+            .to_sp3_string()
+            .expect("quantized clock consensus writes");
+        let reparsed = Sp3::parse(text.as_bytes()).expect("quantized clock consensus reparses");
+        let reparsed_raw = reparsed.interp_raw[0]
+            .get(&g02)
+            .expect("reparsed G02 raw node");
+        let reparsed_state = reparsed.state(g02, 0).expect("reparsed G02 state");
+        let reparsed_clock = reparsed.clock_record(g02, 0).expect("reparsed G02 clock");
+        assert_eq!(reparsed_raw.clock_us, Some(expected_clock_us));
+        assert_eq!(reparsed_state.clock_s, Some(expected_clock_s));
+        assert_eq!(reparsed_clock.clock_us, expected_clock_us);
+        assert_eq!(reparsed_clock.clock_s, expected_clock_s);
+        assert_eq!(g02_diff_raw.clock_us, reparsed_raw.clock_us);
     }
 
     #[test]
