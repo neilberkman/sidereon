@@ -365,6 +365,196 @@ fn changed_base_refuses_nontrivial_accuracy_reencoding() {
 }
 
 #[test]
+fn conservative_accuracy_writer_reports_each_sigma_field_and_preserves_source() {
+    let codes = format!("{:>2} {:>2} {:>2} {:>3}  ", -1, -1, -1, -1);
+    let mut product = Sp3::parse(accuracy_fixture(&codes, &codes).as_bytes()).unwrap();
+    product.header.pos_vel_base = Some(1.5);
+    product.header.clock_rate_base = Some(1.05);
+    let before = product.clone();
+
+    let (text, report) = product
+        .to_sp3_string_with_accuracy_rounding(Sp3AccuracyRoundingPolicy::Conservative)
+        .unwrap();
+    assert_eq!(product, before);
+    for change in [
+        report.accuracy_sigmas.position_sigma_x_m,
+        report.accuracy_sigmas.position_sigma_y_m,
+        report.accuracy_sigmas.position_sigma_z_m,
+        report.accuracy_sigmas.velocity_sigma_x_m_s,
+        report.accuracy_sigmas.velocity_sigma_y_m_s,
+        report.accuracy_sigmas.velocity_sigma_z_m_s,
+        report.accuracy_sigmas.clock_sigma_m,
+        report.accuracy_sigmas.clock_rate_sigma_m_s,
+    ] {
+        assert!(change > 0.0);
+    }
+    let reparsed = Sp3::parse(text.as_bytes()).unwrap();
+    let codes = reparsed.record_accuracy_codes(sat(), 0).unwrap();
+    assert_eq!(codes.p.unwrap().axis_exponents, [Some(0); 3]);
+    assert_eq!(codes.p.unwrap().clock_exponent, Some(0));
+    assert_eq!(codes.v.unwrap().axis_exponents, [Some(0); 3]);
+    assert_eq!(codes.v.unwrap().clock_exponent, Some(0));
+    let (_, second) = reparsed
+        .to_sp3_string_with_accuracy_rounding(Sp3AccuracyRoundingPolicy::Conservative)
+        .unwrap();
+    assert_eq!(second.accuracy_sigmas, Sp3AccuracyRoundingReport::default());
+}
+
+#[test]
+fn conservative_accuracy_writer_refuses_downward_or_sentinel_conversion() {
+    let p_codes = format!("{:>2} {:>2} {:>2} {:>3}  ", 98, 99, 99, 0);
+    let mut product =
+        Sp3::parse(accuracy_fixture_with_bases(&p_codes, "              ", 2.0, 1.025).as_bytes())
+            .unwrap();
+    product.header.pos_vel_base = Some(1.25);
+    assert!(matches!(
+        product.to_sp3_string_with_accuracy_rounding(Sp3AccuracyRoundingPolicy::Conservative),
+        Err(Sp3WriteError::AccuracyNotRepresentable {
+            component: "position x",
+            exponent: Some(98),
+            ..
+        })
+    ));
+    assert!(matches!(
+        product.to_sp3_string(),
+        Err(Sp3WriteError::AccuracyNotRepresentable { .. })
+    ));
+
+    let sentinels = format!("{:>2} {:>2} {:>2} {:>3}  ", 99, 99, 99, 999);
+    let mut sentinel_product =
+        Sp3::parse(accuracy_fixture(&sentinels, &sentinels).as_bytes()).unwrap();
+    sentinel_product.header.pos_vel_base = Some(1.5);
+    sentinel_product.header.clock_rate_base = Some(1.05);
+    let (text, report) = sentinel_product
+        .to_sp3_string_with_accuracy_rounding(Sp3AccuracyRoundingPolicy::Conservative)
+        .unwrap();
+    assert_eq!(report.accuracy_sigmas, Sp3AccuracyRoundingReport::default());
+    let reparsed = Sp3::parse(text.as_bytes()).unwrap();
+    let raw = reparsed.record_accuracy_codes(sat(), 0).unwrap().p.unwrap();
+    assert_eq!(raw.axis_exponents, [Some(99); 3]);
+    assert_eq!(raw.clock_exponent, Some(999));
+    assert_eq!(
+        reparsed
+            .record_accuracy(sat(), 0)
+            .unwrap()
+            .p
+            .unwrap()
+            .position_sigma_m,
+        [Sp3AccuracyValue::TooLarge; 3]
+    );
+}
+
+#[test]
+fn merge_reconciles_a_shared_base_without_losing_unknown_or_known_codes() {
+    let blanks = "              ";
+    let source_a = accuracy_fixture_with_bases(blanks, blanks, 0.0, 0.0).replace("G05", "G01");
+    let b_codes = format!("{:>2} {:>2} {:>2} {:>3}  ", 13, 99, 99, 999);
+    let source_b = accuracy_fixture_with_bases(&b_codes, blanks, 1.25, 1.025).replace("G05", "G12");
+    let a = Sp3::parse(source_a.as_bytes()).unwrap();
+    let b = Sp3::parse(source_b.as_bytes()).unwrap();
+
+    for (inputs, expected_base) in [
+        ([a.clone(), b.clone()], Some(1.25)),
+        ([b.clone(), a.clone()], Some(1.25)),
+    ] {
+        let (merged, _) = merge(&inputs, &MergeOptions::default()).unwrap();
+        assert_eq!(merged.header.pos_vel_base, expected_base);
+        assert_eq!(
+            merged
+                .record_accuracy(GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap(), 0)
+                .unwrap()
+                .p
+                .unwrap()
+                .position_sigma_m[0],
+            Sp3AccuracyValue::Unknown
+        );
+        let before = b
+            .record_accuracy(GnssSatelliteId::new(GnssSystem::Gps, 12).unwrap(), 0)
+            .unwrap()
+            .p
+            .unwrap()
+            .position_sigma_m[0];
+        assert_eq!(
+            merged
+                .record_accuracy(GnssSatelliteId::new(GnssSystem::Gps, 12).unwrap(), 0)
+                .unwrap()
+                .p
+                .unwrap()
+                .position_sigma_m[0],
+            before
+        );
+        let strict = merged.to_sp3_string().unwrap();
+        let parsed = Sp3::parse(strict.as_bytes()).unwrap();
+        assert_eq!(
+            parsed
+                .record_accuracy(GnssSatelliteId::new(GnssSystem::Gps, 12).unwrap(), 0)
+                .unwrap()
+                .p
+                .unwrap()
+                .position_sigma_m[0],
+            before
+        );
+    }
+}
+
+#[test]
+fn incompatible_merged_bases_keep_strict_refusal_and_report_conservative_conversion() {
+    let blanks = "              ";
+    let a_codes = format!("{:>2} {:>2} {:>2} {:>3}  ", 1, 99, 99, 999);
+    let b_codes = format!("{:>2} {:>2} {:>2} {:>3}  ", 13, 99, 99, 999);
+    let a = Sp3::parse(
+        accuracy_fixture_with_bases(&a_codes, blanks, 2.0, 0.0)
+            .replace("G05", "G01")
+            .as_bytes(),
+    )
+    .unwrap();
+    let b = Sp3::parse(
+        accuracy_fixture_with_bases(&b_codes, blanks, 1.25, 1.025)
+            .replace("G05", "G12")
+            .as_bytes(),
+    )
+    .unwrap();
+
+    let (merged, _) = merge(&[a, b], &MergeOptions::default()).unwrap();
+    assert_eq!(merged.header.pos_vel_base, Some(2.0));
+    assert!(matches!(
+        merged.to_sp3_string(),
+        Err(Sp3WriteError::AccuracyNotRepresentable {
+            component: "position x",
+            exponent: Some(13),
+            ..
+        })
+    ));
+    let (text, report) = merged
+        .to_sp3_string_with_accuracy_rounding(Sp3AccuracyRoundingPolicy::Conservative)
+        .unwrap();
+    assert_eq!(
+        report.accuracy_sigmas.position_sigma_x_m,
+        0.032 - 0.018189894035458565
+    );
+    assert_eq!(report.accuracy_sigmas.position_sigma_y_m, 0.0);
+    let reparsed = Sp3::parse(text.as_bytes()).unwrap();
+    assert_eq!(
+        reparsed
+            .record_accuracy_codes(GnssSatelliteId::new(GnssSystem::Gps, 12).unwrap(), 0)
+            .unwrap()
+            .p
+            .unwrap()
+            .axis_exponents[0],
+        Some(5)
+    );
+    assert_eq!(
+        reparsed
+            .record_accuracy(GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap(), 0)
+            .unwrap()
+            .p
+            .unwrap()
+            .position_sigma_m[0],
+        Sp3AccuracyValue::Known(2.0e-3)
+    );
+}
+
+#[test]
 fn zero_exponent_survives_changed_valid_base() {
     let p_codes = format!("{:>2} {:>2} {:>2} {:>3}  ", 0, 99, 99, 0);
     let v_codes = format!("{:>2} {:>2} {:>2} {:>3}  ", 0, 99, 99, 0);

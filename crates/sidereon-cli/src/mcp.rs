@@ -1460,7 +1460,7 @@ mod tests {
         assert!(result["capabilities"]["tools"].is_object());
         assert!(result["capabilities"]["resources"].is_object());
         assert_eq!(result["serverInfo"]["name"], "sidereon");
-        assert!(result["serverInfo"]["version"].is_string());
+        assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
