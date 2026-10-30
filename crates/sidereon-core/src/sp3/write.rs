@@ -1799,12 +1799,12 @@ fn bases_equal(left: Option<f64>, right: Option<f64>) -> bool {
     }
 }
 
-fn accuracy_field<'a>(
+fn accuracy_field(
     velocity: bool,
     axis: usize,
     source: Sp3AccuracyBase,
     target: Sp3AccuracyBase,
-    report: &'a mut Sp3AccuracyRoundingReport,
+    report: &mut Sp3AccuracyRoundingReport,
 ) -> (
     Option<f64>,
     Option<f64>,
@@ -1813,7 +1813,7 @@ fn accuracy_field<'a>(
     i16,
     f64,
     &'static str,
-    &'a mut f64,
+    &mut f64,
 ) {
     match (velocity, axis) {
         (false, 0) => (
