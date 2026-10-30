@@ -803,7 +803,7 @@ impl Sp3 {
             return false;
         }
         self.states.iter().enumerate().all(|(epoch_index, states)| {
-            states.iter().all(|(sat, state)| {
+            states.values().all(|state| {
                 let p = state.position;
                 [
                     (p.x_m / KM_TO_M, p.x_m, KM_TO_M),
