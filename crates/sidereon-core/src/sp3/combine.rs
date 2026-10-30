@@ -1281,6 +1281,14 @@ fn fold_max(acc: Option<f64>, value: f64) -> f64 {
 /// the thirteen decimals its field holds, so an off-midnight start such as
 /// 05:00 writes and reads back as the value a real file holds.
 ///
+/// If every input's present record value exactly survives its SP3 column and
+/// parser unit conversion, derived output values are quantized to those record
+/// columns. This includes arithmetic means that fall between input column
+/// values. The quantization also updates the retained raw interpolation and
+/// clock caches. If any input carries higher precision, the merge preserves
+/// derived precision and the strict writer may refuse values its columns
+/// cannot restate.
+///
 /// Preservation of velocities and rates: merge policy intentionally drops
 /// velocities and clock rates for all records (both position states and clock-only
 /// records) in the merged product. Merged states retain combined positions and
@@ -1296,6 +1304,9 @@ fn fold_max(acc: Option<f64>, value: f64) -> f64 {
 /// normal source counts and uses a deterministic greedy fallback above the exact
 /// search cap, so hostile disagreement graphs remain bounded.
 pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)> {
+    // Test the supplied products before frame reconciliation introduces its
+    // own sub-column values. The final derived product still uses SP3 columns.
+    let inputs_on_grid = sources.iter().all(Sp3::record_values_on_grid);
     let prepared = prepare_merge_inputs(sources, opts)?;
     let prepared_sources = prepared.sources;
     let frame_reconciliations = prepared.frame_reconciliations;
@@ -1332,6 +1343,28 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
     )?;
     let (merged, mut report, continuity_selection) =
         emit_merged_product(sources, synthesized, header_tick, cells);
+
+    // Parsed SP3 records carry the column values alongside the converted
+    // physical values. Means and datum subtraction can introduce a final-bit
+    // difference even when every input is exactly on its SP3 record grid. In
+    // that case, restate the derived records on the same grid so the product
+    // remains writable. A caller-created higher-resolution input keeps its
+    // precision, and the strict writer continues to report unrepresentable
+    // values. The helper updates the interpolation cache and clock-only raw
+    // values together with the public records.
+    let merged = if inputs_on_grid {
+        let mut rounded = merged.clone();
+        if rounded.round_record_values().is_ok() {
+            rounded
+        } else {
+            // The merge itself remains useful when a derived value exceeds a
+            // record field's limits; leave it intact for the strict writer to
+            // identify precisely.
+            merged
+        }
+    } else {
+        merged
+    };
 
     if let Some(continuity_options) = opts.verify_continuity.as_ref() {
         report.continuity = Some(verify_merged_continuity(
@@ -3326,7 +3359,11 @@ fn combine_axis(members: &[(usize, f64)], how: MergeCombine) -> f64 {
 /// Epochs where the offset could not be estimated are left unchanged - they are
 /// *not* on `reference`'s datum, so a caller mixing aligned and unaligned epochs
 /// should consult [`clock_reference_offset`] to see which epochs were aligned.
-/// The returned product interpolates like any other [`Sp3`].
+/// If both inputs' present record values exactly survive their SP3 columns and
+/// parser unit conversion, the derived product's record values are quantized to
+/// those columns, with its raw interpolation and clock caches updated as well.
+/// Higher-precision input products retain higher precision. The returned
+/// product interpolates like any other [`Sp3`].
 pub fn align_clock_reference(reference: &Sp3, other: &Sp3, min_common: usize) -> Sp3 {
     let other_ticks = product_ticks(other);
     let offsets: BTreeMap<i128, f64> = clock_offsets_by_tick(
@@ -3340,6 +3377,7 @@ pub fn align_clock_reference(reference: &Sp3, other: &Sp3, min_common: usize) ->
     .map(|(tick, offset)| (tick, offset.offset_s))
     .collect();
 
+    let round_on_grid = reference.record_values_on_grid() && other.record_values_on_grid();
     let mut aligned = other.clone();
     for ei in 0..aligned.epochs.len() {
         let Some(tick) = other_ticks.get(ei).copied().flatten() else {
@@ -3361,6 +3399,15 @@ pub fn align_clock_reference(reference: &Sp3, other: &Sp3, min_common: usize) ->
         for clock_rec in aligned.clock_records[ei].values_mut() {
             clock_rec.clock_s -= off;
             clock_rec.clock_us -= off * 1.0e6;
+        }
+    }
+    if round_on_grid {
+        // Alignment is infallible by API contract. If the derived field cannot
+        // be represented (for example, it exceeds the column width), retain
+        // the full aligned value so the strict writer can return its refusal.
+        let mut rounded = aligned.clone();
+        if rounded.round_record_values().is_ok() {
+            return rounded;
         }
     }
     aligned
@@ -3960,73 +4007,27 @@ mod tests {
             ];
             let (merged, _) = merge(&sources, &MergeOptions::default()).expect("real frozen merge");
 
-            // This case froze the bytes of a *mean-combined* merge, which meant
-            // freezing numbers the format cannot state: the default combine
-            // averages the agreeing centers, and the mean of millimetre-
-            // resolution positions is not a millimetre. The writer now reports
-            // that by name instead of rounding it away, so what is asserted
-            // here is the refusal and the value behind it. A byte golden for
-            // real data needs a merge whose values SP3 can state - precedence,
-            // which keeps each contributor's own numbers.
-            let refusal = merged
+            // The input records are on their SP3 columns. Averaging them can
+            // create binary rounding noise (or a finer arithmetic mean), so
+            // the derived product is restated on those columns before writing.
+            let mean_text = merged
                 .to_sp3_string()
-                .expect_err("a mean-combined merge is finer than the record columns");
-            let crate::sp3::Sp3WriteError::RecordValueNotRepresentable {
-                field,
-                sat,
-                epoch_index,
-                stored,
-                column_value,
-                ..
-            } = refusal
-            else {
-                panic!("expected a record-value refusal; got {refusal:?}");
-            };
+                .expect("a mean merge of column-grid inputs is writable");
+            let mean_reparsed = Sp3::parse(mean_text.as_bytes()).expect("mean merge reparses");
+            for idx in 0..merged.epoch_count() {
+                assert_eq!(
+                    mean_reparsed.states_at(idx).ok(),
+                    merged.states_at(idx).ok(),
+                    "mean merge states survive write/read at epoch {idx}"
+                );
+                assert_eq!(
+                    mean_reparsed.clock_records_at(idx).ok(),
+                    merged.clock_records_at(idx).ok(),
+                    "mean merge clock-only records survive write/read at epoch {idx}"
+                );
+            }
 
-            // The refusal names a value the merged product really holds ...
-            let (held, scale) = match merged.state(sat, epoch_index) {
-                Ok(state) => match field {
-                    "position x" => (state.position.x_m, crate::constants::KM_TO_M),
-                    "position y" => (state.position.y_m, crate::constants::KM_TO_M),
-                    "position z" => (state.position.z_m, crate::constants::KM_TO_M),
-                    "clock" => (
-                        state.clock_s.expect("a refused clock column holds a clock"),
-                        crate::constants::US_TO_S,
-                    ),
-                    other => panic!("unexpected refused record field {other:?}"),
-                },
-                Err(_) => {
-                    // A cell with no orbit is a clock-only record, which has
-                    // only the one column.
-                    assert_eq!(field, "clock", "a clock-only record has one column");
-                    let record = merged
-                        .clock_record(sat, epoch_index)
-                        .expect("the refused cell holds a record");
-                    (record.clock_s, crate::constants::US_TO_S)
-                }
-            };
-            assert_eq!(
-                held.to_bits(),
-                stored.to_bits(),
-                "the refusal states the value the product holds"
-            );
-            // ... and a column that really cannot state it: read the column
-            // back the way the parser does and the value does not return.
-            let read: f64 = format!("{column_value:.6}")
-                .parse()
-                .expect("a formatted column re-reads as a number");
-            assert_ne!(
-                (read * scale).to_bits(),
-                stored.to_bits(),
-                "the column the writer refused would in fact have restated the value"
-            );
-
-            // The positive half of the same case. The refusal above is only
-            // the right answer if a real three-center merge whose values the
-            // format *can* state still serializes - and comes back from the
-            // text value for value. Precedence keeps each cell's numbers from
-            // the contributor that supplied them, and those came out of an
-            // `F14.6` column, so they go back into one.
+            // Precedence remains writable too, retaining contributor values.
             let precedence = MergeOptions {
                 combine: MergeCombine::Precedence,
                 precedence_scope: MergePrecedenceScope::Cell,

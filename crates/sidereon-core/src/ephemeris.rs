@@ -61,7 +61,7 @@ pub use crate::sp3::{
     Sp3Flags, Sp3FrameLabelSet, Sp3FrameReconciliation, Sp3FrameReconciliationMethod,
     Sp3FrameReconciliationOptions, Sp3Header, Sp3MergeInputIdentity, Sp3MergeInputIdentityError,
     Sp3PositionClockAccuracy, Sp3PredictionSummary, Sp3RawRecordAccuracy, Sp3RecordAccuracy,
-    Sp3State, Sp3TimeSystem, Sp3VelocityAccuracy, Sp3Version, Sp3WriteError,
+    Sp3RoundingReport, Sp3State, Sp3TimeSystem, Sp3VelocityAccuracy, Sp3Version, Sp3WriteError,
     SP3_MERGE_INPUT_ID_PREFIX, SP3_MERGE_INPUT_SCHEMA_VERSION,
 };
 pub use crate::sp3::{
