@@ -229,10 +229,8 @@ fn helmert_reconciled_grid_inputs_merge_to_a_writable_product() {
     assert_round_trip(&cod, "IGS14 COD input");
     assert_round_trip(&gfz, "IGS20 GFZ input");
 
-    let options = MergeOptions {
-        frame_reconciliation: Sp3FrameReconciliationOptions::helmert(),
-        ..MergeOptions::default()
-    };
+    let mut options = MergeOptions::default();
+    options.frame_reconciliation = Sp3FrameReconciliationOptions::helmert();
     let (merged, report) = merge(&[cod, gfz], &options).expect("Helmert merge succeeds");
 
     assert_eq!(report.frame_reconciliations.len(), 1);
@@ -272,11 +270,9 @@ fn deterministic_column_grid_matrix_preserves_round_trip_for_all_merge_rules() {
         MergeCombine::Median,
         MergeCombine::Precedence,
     ] {
-        let options = MergeOptions {
-            combine,
-            clock_min_common: 3,
-            ..MergeOptions::default()
-        };
+        let mut options = MergeOptions::default();
+        options.combine = combine;
+        options.clock_min_common = 3;
         let (merged, _) = merge(&[source_a.clone(), source_b.clone()], &options)
             .unwrap_or_else(|error| panic!("{combine:?} merge: {error}"));
         assert_round_trip(&merged, &format!("{combine:?} small merge"));
@@ -296,11 +292,9 @@ fn deterministic_column_grid_matrix_preserves_round_trip_for_all_merge_rules() {
         MergeCombine::Median,
         MergeCombine::Precedence,
     ] {
-        let options = MergeOptions {
-            combine,
-            clock_min_common: 3,
-            ..MergeOptions::default()
-        };
+        let mut options = MergeOptions::default();
+        options.combine = combine;
+        options.clock_min_common = 3;
         let (merged, _) = merge(
             &[source_a.clone(), source_b.clone(), source_c.clone()],
             &options,
