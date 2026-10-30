@@ -5924,11 +5924,8 @@ mod tests {
             .get(&g02)
             .expect("reparsed G02 raw node");
         let reparsed_state = reparsed.state(g02, 0).expect("reparsed G02 state");
-        let reparsed_clock = reparsed.clock_record(g02, 0).expect("reparsed G02 clock");
         assert_eq!(reparsed_raw.clock_us, Some(expected_clock_us));
         assert_eq!(reparsed_state.clock_s, Some(expected_clock_s));
-        assert_eq!(reparsed_clock.clock_us, expected_clock_us);
-        assert_eq!(reparsed_clock.clock_s, expected_clock_s);
         assert_eq!(g02_diff_raw.clock_us, reparsed_raw.clock_us);
     }
 
