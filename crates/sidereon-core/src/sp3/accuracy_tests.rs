@@ -775,6 +775,93 @@ fn conservative_accuracy_conversion_preserves_clock_codes_with_a_shared_datum_an
 }
 
 #[test]
+fn conservative_clock_accuracy_respects_i3_lower_and_upper_finite_bounds() {
+    let anchor = GnssSatelliteId::new(GnssSystem::Gps, 2).unwrap();
+    let options = MergeOptions {
+        clock_min_common: 1,
+        ..MergeOptions::default()
+    };
+    let sentinels_and_clock =
+        |clock_exponent| format!("{:>2} {:>2} {:>2} {:>3}  ", 99, 99, 99, clock_exponent);
+
+    let mut upper_a = Sp3::parse(
+        accuracy_fixture_with_bases(&sentinels_and_clock(1), "              ", 2.0, 1.025)
+            .replace("G05", "G01")
+            .as_bytes(),
+    )
+    .unwrap();
+    let mut upper_b = Sp3::parse(
+        accuracy_fixture_with_bases(&sentinels_and_clock(998), "              ", 2.0, 2.0)
+            .replace("G05", "G12")
+            .as_bytes(),
+    )
+    .unwrap();
+    add_accuracy_clock_anchor(&mut upper_a, anchor);
+    add_accuracy_clock_anchor(&mut upper_b, anchor);
+    let (upper, _) = merge(&[upper_a, upper_b], &options).unwrap();
+    assert_eq!(upper.header.clock_rate_base, Some(1.025));
+    assert!(matches!(
+        upper.to_sp3_string(),
+        Err(Sp3WriteError::AccuracyNotRepresentable {
+            component: "clock",
+            exponent: Some(998),
+            ..
+        })
+    ));
+    assert!(matches!(
+        upper.to_sp3_string_with_accuracy_rounding(Sp3AccuracyRoundingPolicy::Conservative),
+        Err(Sp3WriteError::AccuracyNotRepresentable {
+            component: "clock",
+            exponent: Some(998),
+            ..
+        })
+    ));
+
+    let mut lower_a = Sp3::parse(
+        accuracy_fixture_with_bases(&sentinels_and_clock(-99), "              ", 2.0, 2.0)
+            .replace("G05", "G01")
+            .as_bytes(),
+    )
+    .unwrap();
+    let mut lower_b = Sp3::parse(
+        accuracy_fixture_with_bases(&sentinels_and_clock(-50), "              ", 2.0, 4.0)
+            .replace("G05", "G12")
+            .as_bytes(),
+    )
+    .unwrap();
+    add_accuracy_clock_anchor(&mut lower_a, anchor);
+    add_accuracy_clock_anchor(&mut lower_b, anchor);
+    let (lower, _) = merge(&[lower_a, lower_b], &options).unwrap();
+    assert_eq!(lower.header.clock_rate_base, Some(2.0));
+    assert!(matches!(
+        lower.to_sp3_string(),
+        Err(Sp3WriteError::AccuracyNotRepresentable {
+            component: "clock",
+            exponent: Some(-50),
+            ..
+        })
+    ));
+    let (text, report) = lower
+        .to_sp3_string_with_accuracy_rounding(Sp3AccuracyRoundingPolicy::Conservative)
+        .unwrap();
+    let sigma_scale = crate::constants::C_M_S * 1e-12;
+    assert_eq!(
+        report.accuracy_sigmas.clock_sigma_m,
+        2.0_f64.powi(-99) * sigma_scale - 4.0_f64.powi(-50) * sigma_scale
+    );
+    assert_eq!(
+        Sp3::parse(text.as_bytes())
+            .unwrap()
+            .record_accuracy_codes(GnssSatelliteId::new(GnssSystem::Gps, 12).unwrap(), 0)
+            .unwrap()
+            .p
+            .unwrap()
+            .clock_exponent,
+        Some(-99)
+    );
+}
+
+#[test]
 fn zero_exponent_survives_changed_valid_base() {
     let p_codes = format!("{:>2} {:>2} {:>2} {:>3}  ", 0, 99, 99, 0);
     let v_codes = format!("{:>2} {:>2} {:>2} {:>3}  ", 0, 99, 99, 0);
@@ -801,6 +888,39 @@ fn zero_exponent_survives_changed_valid_base() {
             .position_sigma_m[0],
         Sp3AccuracyValue::Known(1.0e-3)
     );
+}
+
+#[test]
+fn strict_cross_base_conversion_preserves_decoded_floating_point_sigma() {
+    let p_codes = format!("{:>2} {:>2} {:>2} {:>3}  ", 17, 99, 99, 0);
+    let mut product = Sp3::parse(
+        accuracy_fixture_with_bases(&p_codes, "              ", 3.375, 1.025).as_bytes(),
+    )
+    .unwrap();
+    let before = product
+        .record_accuracy(sat(), 0)
+        .unwrap()
+        .p
+        .unwrap()
+        .position_sigma_m[0];
+    product.header.pos_vel_base = Some(1.5);
+    match product.to_sp3_string() {
+        Ok(text) => assert_eq!(
+            Sp3::parse(text.as_bytes())
+                .unwrap()
+                .record_accuracy(sat(), 0)
+                .unwrap()
+                .p
+                .unwrap()
+                .position_sigma_m[0],
+            before
+        ),
+        Err(Sp3WriteError::AccuracyNotRepresentable {
+            component: "position x",
+            ..
+        }) => {}
+        Err(error) => panic!("unexpected writer error: {error}"),
+    }
 }
 
 #[test]

@@ -976,38 +976,47 @@ impl Sp3 {
             header_ok
                 && self.record_accuracy_codes.iter().all(|epoch| {
                     epoch.values().all(|codes| {
-                        [codes.p, codes.v].into_iter().flatten().all(|group| {
-                            let source = self.accuracy_bases[group.basis_index];
-                            let source_base = if clock {
-                                source.clock_rate
-                            } else {
-                                source.position_velocity
-                            };
-                            let minimum = if clock { -99 } else { -9 };
-                            let maximum = if clock { 998 } else { 98 };
-                            let sentinel = if clock { 999 } else { 99 };
-                            let range = if clock { 3..4 } else { 0..3 };
-                            let same_base = bases_equal(source_base, *candidate);
-                            group.exponents[range].iter().all(|code| match code {
-                                None => true,
-                                Some(code) if *code == sentinel => true,
-                                Some(code) if same_base => (minimum..=maximum).contains(code),
-                                Some(code) => match (source_base, *candidate) {
-                                    (Some(source), Some(target))
-                                        if source.is_finite()
-                                            && source > 0.0
-                                            && target.is_finite()
-                                            && target > 0.0 =>
-                                    {
-                                        exact_reencoded_exponent(
-                                            source, *code, target, minimum, maximum,
-                                        )
-                                        .is_some()
-                                    }
-                                    _ => false,
-                                },
+                        [codes.p, codes.v]
+                            .into_iter()
+                            .enumerate()
+                            .filter_map(|(index, group)| group.map(|group| (index == 1, group)))
+                            .all(|(velocity, group)| {
+                                let source = self.accuracy_bases[group.basis_index];
+                                let source_base = if clock {
+                                    source.clock_rate
+                                } else {
+                                    source.position_velocity
+                                };
+                                let minimum = if clock { -99 } else { -9 };
+                                let maximum = if clock { 998 } else { 98 };
+                                let sentinel = if clock { 999 } else { 99 };
+                                let range = if clock { 3..4 } else { 0..3 };
+                                let same_base = bases_equal(source_base, *candidate);
+                                group.exponents[range].iter().all(|code| match code {
+                                    None => true,
+                                    Some(code) if *code == sentinel => true,
+                                    Some(code) if same_base => (minimum..=maximum).contains(code),
+                                    Some(code) => match (source_base, *candidate) {
+                                        (Some(source), Some(target))
+                                            if source.is_finite()
+                                                && source > 0.0
+                                                && target.is_finite()
+                                                && target > 0.0 =>
+                                        {
+                                            exact_reencoded_exponent(
+                                                source,
+                                                *code,
+                                                target,
+                                                minimum,
+                                                maximum,
+                                                accuracy_scale(velocity, clock),
+                                            )
+                                            .is_some()
+                                        }
+                                        _ => false,
+                                    },
+                                })
                             })
-                        })
                     })
                 })
         })
@@ -1763,6 +1772,7 @@ fn write_accuracy_fields(
             98,
             source.position_velocity,
             target.position_velocity,
+            accuracy_scale(velocity, false),
             2,
             axis_names[index],
             site,
@@ -1775,6 +1785,7 @@ fn write_accuracy_fields(
         998,
         source.clock_rate,
         target.clock_rate,
+        accuracy_scale(velocity, true),
         3,
         if velocity { "clock rate" } else { "clock" },
         site,
@@ -1796,6 +1807,15 @@ fn bases_equal(left: Option<f64>, right: Option<f64>) -> bool {
         (None, None) => true,
         (Some(a), Some(b)) => a.to_bits() == b.to_bits(),
         _ => false,
+    }
+}
+
+fn accuracy_scale(velocity: bool, clock: bool) -> f64 {
+    match (velocity, clock) {
+        (false, false) => 1e-3,
+        (true, false) => 1e-7,
+        (false, true) => crate::constants::C_M_S * 1e-12,
+        (true, true) => crate::constants::C_M_S * 1e-16,
     }
 }
 
@@ -1907,6 +1927,7 @@ fn format_accuracy_exponent(
     maximum: i16,
     source_base: Option<f64>,
     target_base: Option<f64>,
+    scale: f64,
     width: usize,
     component: &'static str,
     site: RecordSite,
@@ -1929,7 +1950,7 @@ fn format_accuracy_exponent(
         let source_base = source_base.filter(|base| base.is_finite() && *base > 0.0);
         match (source_base, output_base) {
             (Some(source), Some(target)) => exact_reencoded_exponent(
-                source, exponent, target, minimum, maximum,
+                source, exponent, target, minimum, maximum, scale,
             )
             .ok_or(Sp3WriteError::AccuracyNotRepresentable {
                 sat: site.sat,
@@ -2063,6 +2084,7 @@ fn exact_reencoded_exponent(
     target_base: f64,
     minimum: i16,
     maximum: i16,
+    scale: f64,
 ) -> Option<i16> {
     if source_base == 1.0 || source_exponent == 0 {
         return (minimum..=maximum).contains(&0).then_some(0);
@@ -2073,6 +2095,8 @@ fn exact_reencoded_exponent(
     let source = ExactPositiveRational::from_f64(source_base, source_exponent < 0)?;
     (minimum..=maximum).find(|&target_exponent| {
         exact_accuracy_powers_equal(source, source_exponent, target_base, target_exponent)
+            && decode_accuracy(Some(source_exponent), i16::MAX, Some(source_base), scale)
+                == decode_accuracy(Some(target_exponent), i16::MAX, Some(target_base), scale)
     })
 }
 
