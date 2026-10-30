@@ -4,6 +4,14 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [3.0.6] - 2026-10-30
+
+### Added
+
+- Add `Sp3::to_sp3_string_with_accuracy_rounding(Conservative)` for callers who explicitly accept conservative rounding of retained accuracy standard deviations. The detailed report returns maximum absolute changes in SI units for the three position axes, three velocity axes, clock, and clock rate. The existing strict writer and record-only rounding API keep their previous behavior. The facade re-exports the policy, report, and writer through `sidereon::ephemeris`.
+- Merge products now select a shared `%f` accuracy base only when every retained code can be restated exactly under it. When no common basis preserves all codes, the selected output base remains and the strict writer reports the unrepresentable code; the explicit conservative writer can convert finite known deviations and reports the change.
+- Align the distributed CLI and MCP server version with the 3.0.6 core and facade release.
+
 ## [3.0.5] - 2026-10-30
 
 ### Added
