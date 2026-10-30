@@ -650,10 +650,7 @@ mod tests {
     #[test]
     fn public_cfar_pfa_routes_reject_signed_zero() {
         for pfa in [0.0, -0.0] {
-            let expected = Err(invalid_input(
-                "false_alarm_probability",
-                "must be in (0,1)",
-            ));
+            let expected = Err(invalid_input("false_alarm_probability", "must be in (0,1)"));
             assert_eq!(cfar_ca_multiplier_from_pfa(4, pfa), expected);
             assert_eq!(cfar_ca_threshold(4, pfa, 5.0), expected);
         }
