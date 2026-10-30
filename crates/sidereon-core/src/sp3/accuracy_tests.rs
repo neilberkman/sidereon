@@ -413,7 +413,26 @@ fn exactly_compatible_bases_reencode_without_rounding_or_sigma_change() {
 #[test]
 fn conservative_accuracy_writer_reports_each_sigma_field_and_preserves_source() {
     let codes = format!("{:>2} {:>2} {:>2} {:>3}  ", -1, -1, -1, -1);
-    let mut product = Sp3::parse(accuracy_fixture(&codes, &codes).as_bytes()).unwrap();
+    let one_epoch = accuracy_fixture(&codes, &codes).replace("       1 ORBIT", "       2 ORBIT");
+    let second_epoch = format!(
+        "*  2022  1  2  3  9  5.00000000\n{}\nVG05{:14.6}{:14.6}{:14.6}{:14.6} {}\nEOF\n",
+        p_record(10_000.0, 20_000.0, 30_000.0, -50.0, &codes),
+        10_000.0,
+        -20_000.0,
+        30_000.0,
+        1.0,
+        codes,
+    );
+    let mut product = Sp3::parse(one_epoch.replace("EOF\n", &second_epoch).as_bytes()).unwrap();
+    let second_basis = product.accuracy_bases.len();
+    product.accuracy_bases.push(Sp3AccuracyBase {
+        position_velocity: Some(1.49),
+        clock_rate: Some(1.049),
+    });
+    let mut second_codes = product.record_accuracy_codes[1][&sat()];
+    second_codes.p.as_mut().unwrap().basis_index = second_basis;
+    second_codes.v.as_mut().unwrap().basis_index = second_basis;
+    product.record_accuracy_codes[1].insert(sat(), second_codes);
     product.header.pos_vel_base = Some(1.5);
     product.header.clock_rate_base = Some(1.05);
     let before = product.clone();
@@ -422,18 +441,41 @@ fn conservative_accuracy_writer_reports_each_sigma_field_and_preserves_source() 
         .to_sp3_string_with_accuracy_rounding(Sp3AccuracyRoundingPolicy::Conservative)
         .unwrap();
     assert_eq!(product, before);
-    for change in [
+    let expected_position_delta = 1e-3 - 1.49_f64.powi(-1) * 1e-3;
+    let expected_velocity_delta = 1e-7 - 1.49_f64.powi(-1) * 1e-7;
+    let clock_scale = crate::constants::C_M_S * 1e-12;
+    let rate_scale = crate::constants::C_M_S * 1e-16;
+    let expected_clock_delta = clock_scale - 1.049_f64.powi(-1) * clock_scale;
+    let expected_rate_delta = rate_scale - 1.049_f64.powi(-1) * rate_scale;
+    assert_eq!(
         report.accuracy_sigmas.position_sigma_x_m,
+        expected_position_delta
+    );
+    assert_eq!(
         report.accuracy_sigmas.position_sigma_y_m,
+        expected_position_delta
+    );
+    assert_eq!(
         report.accuracy_sigmas.position_sigma_z_m,
+        expected_position_delta
+    );
+    assert_eq!(
         report.accuracy_sigmas.velocity_sigma_x_m_s,
+        expected_velocity_delta
+    );
+    assert_eq!(
         report.accuracy_sigmas.velocity_sigma_y_m_s,
+        expected_velocity_delta
+    );
+    assert_eq!(
         report.accuracy_sigmas.velocity_sigma_z_m_s,
-        report.accuracy_sigmas.clock_sigma_m,
+        expected_velocity_delta
+    );
+    assert_eq!(report.accuracy_sigmas.clock_sigma_m, expected_clock_delta);
+    assert_eq!(
         report.accuracy_sigmas.clock_rate_sigma_m_s,
-    ] {
-        assert!(change > 0.0);
-    }
+        expected_rate_delta
+    );
     let reparsed = Sp3::parse(text.as_bytes()).unwrap();
     let codes = reparsed.record_accuracy_codes(sat(), 0).unwrap();
     assert_eq!(codes.p.unwrap().axis_exponents, [Some(0); 3]);
