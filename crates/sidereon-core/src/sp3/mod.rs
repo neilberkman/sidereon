@@ -2405,7 +2405,10 @@ pub use samples::{
 pub use verify::{
     compare_position_series, InterpolationComparison, InterpolationDivergence, ReferenceState,
 };
-pub use write::{Sp3RoundingReport, Sp3WriteError};
+pub use write::{
+    Sp3AccuracyRoundingPolicy, Sp3AccuracyRoundingReport, Sp3DetailedRoundingReport,
+    Sp3RoundingReport, Sp3WriteError,
+};
 
 #[cfg(all(test, sidereon_repo_tests))]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]

@@ -1342,8 +1342,9 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
         &cells.position_header_sources,
         epoch_interval_s,
     )?;
-    let (merged, mut report, continuity_selection) =
+    let (mut merged, mut report, continuity_selection) =
         emit_merged_product(sources, synthesized, header_tick, cells);
+    merged.reconcile_accuracy_header_bases();
 
     // Parsed SP3 records carry the column values alongside the converted
     // physical values. Means and datum subtraction can introduce a final-bit

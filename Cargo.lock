@@ -1410,7 +1410,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sidereon"
-version = "3.0.5"
+version = "3.0.6"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "sidereon-cli"
-version = "0.6.0"
+version = "3.0.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "sidereon-core"
-version = "3.0.5"
+version = "3.0.6"
 dependencies = [
  "approx",
  "cc",

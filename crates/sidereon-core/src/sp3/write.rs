@@ -45,6 +45,13 @@
 //! case - or on structure no record states, such as a velocity read under a
 //! `P` header.
 //!
+//! Accuracy exponents are retained with the bases that define them. Strict
+//! writers preserve their decoded standard deviations or refuse when the
+//! output header cannot state them. Callers that explicitly accept a
+//! conservative increase can use
+//! [`Sp3::to_sp3_string_with_accuracy_rounding`]; its report gives the maximum
+//! standard-deviation increase in SI units for each field.
+//!
 //! The format spells some absences with a value: an all-zero position is a
 //! missing orbit, an all-zero velocity is a missing velocity, and a clock column
 //! at or beyond `999999.999999` is "no estimate". A stored value that would land
@@ -105,11 +112,10 @@
 //! # What a successful write does and does not claim
 //!
 //! Success states that the product's modeled content is expressed exactly; it is
-//! not a certificate of full SP3 conformance. Position and velocity
-//! standard-deviation exponents, the `EP`/`EV` correlation records, and records
-//! for satellites outside the header list are not part of the parsed product, so
-//! they are absent from the output. A source file carrying them does not
-//! reproduce byte for byte through a read/write cycle.
+//! not a certificate of full SP3 conformance. `EP`/`EV` correlation records and
+//! records for satellites outside the header list are not part of the parsed
+//! product, so they are absent from the output. A source file carrying them does
+//! not reproduce byte for byte through a read/write cycle.
 //!
 //! A satellite absent at an epoch is written as the SP3 missing-orbit sentinel
 //! (`0.0 0.0 0.0`, bad clock), never a fabricated position - so a quarantined
@@ -129,13 +135,14 @@ use crate::id::GnssSatelliteId;
 use crate::validate;
 
 use super::{
-    Sp3, Sp3AccuracyBase, Sp3ClockRecord, Sp3DataType, Sp3Flags, Sp3RecordAccuracyCodes, Sp3State,
-    Sp3TimeSystem, Sp3Version, StoredAccuracyCodeGroup, BAD_CLOCK_US, CLOCK_RATE_TO_S_PER_S,
-    DM_S_TO_M_S, EPOCH_SECONDS_DECIMALS, EPOCH_SECONDS_WIDTH, LINE2_INTERVAL_DECIMALS,
-    LINE2_INTERVAL_WIDTH, LINE2_MJD_FRACTION_DECIMALS, LINE2_SECONDS_OF_WEEK_DECIMALS,
-    LINE2_SECONDS_OF_WEEK_WIDTH, LINE_PF_CLOCK_RATE_BASE_DECIMALS, LINE_PF_CLOCK_RATE_BASE_WIDTH,
-    LINE_PF_POS_VEL_BASE_DECIMALS, LINE_PF_POS_VEL_BASE_WIDTH, MISSING_POSITION_KM,
-    MISSING_VELOCITY_DM_S, RECORD_VALUE_DECIMALS, RECORD_VALUE_WIDTH,
+    decode_accuracy, intern_accuracy_base, Sp3, Sp3AccuracyBase, Sp3AccuracyValue, Sp3ClockRecord,
+    Sp3DataType, Sp3Flags, Sp3RecordAccuracyCodes, Sp3State, Sp3TimeSystem, Sp3Version,
+    StoredAccuracyCodeGroup, BAD_CLOCK_US, CLOCK_RATE_TO_S_PER_S, DM_S_TO_M_S,
+    EPOCH_SECONDS_DECIMALS, EPOCH_SECONDS_WIDTH, LINE2_INTERVAL_DECIMALS, LINE2_INTERVAL_WIDTH,
+    LINE2_MJD_FRACTION_DECIMALS, LINE2_SECONDS_OF_WEEK_DECIMALS, LINE2_SECONDS_OF_WEEK_WIDTH,
+    LINE_PF_CLOCK_RATE_BASE_DECIMALS, LINE_PF_CLOCK_RATE_BASE_WIDTH, LINE_PF_POS_VEL_BASE_DECIMALS,
+    LINE_PF_POS_VEL_BASE_WIDTH, MISSING_POSITION_KM, MISSING_VELOCITY_DM_S, RECORD_VALUE_DECIMALS,
+    RECORD_VALUE_WIDTH,
 };
 
 /// Maximum SP3 satellite-id slots per `+` / `++` header line.
@@ -706,6 +713,45 @@ pub struct Sp3RoundingReport {
     pub clock_rate_s_s: f64,
 }
 
+/// The explicitly selected rule for converting retained SP3 standard deviations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Sp3AccuracyRoundingPolicy {
+    /// Choose the smallest finite SP3 value whose decoded standard deviation is
+    /// at least the source value. Values above the finite SP3 range are refused.
+    Conservative,
+}
+
+/// Maximum increase in decoded standard deviation for each SP3 accuracy field.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Sp3AccuracyRoundingReport {
+    /// Position X standard-deviation change, metres.
+    pub position_sigma_x_m: f64,
+    /// Position Y standard-deviation change, metres.
+    pub position_sigma_y_m: f64,
+    /// Position Z standard-deviation change, metres.
+    pub position_sigma_z_m: f64,
+    /// Velocity X standard-deviation change, metres per second.
+    pub velocity_sigma_x_m_s: f64,
+    /// Velocity Y standard-deviation change, metres per second.
+    pub velocity_sigma_y_m_s: f64,
+    /// Velocity Z standard-deviation change, metres per second.
+    pub velocity_sigma_z_m_s: f64,
+    /// Clock standard-deviation change, metres.
+    pub clock_sigma_m: f64,
+    /// Clock-rate standard-deviation change, metres per second.
+    pub clock_rate_sigma_m_s: f64,
+}
+
+/// Record-value and accuracy-standard-deviation changes made by the opt-in writer.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Sp3DetailedRoundingReport {
+    /// Changes to numeric record values.
+    pub record_values: Sp3RoundingReport,
+    /// Changes to decoded standard deviations.
+    pub accuracy_sigmas: Sp3AccuracyRoundingReport,
+}
+
 fn exact_record_value(column: f64, stored: f64, scale: f64) -> bool {
     column_read_back(column).is_some_and(|read| scaled_bits(read, scale) == stored.to_bits())
 }
@@ -796,6 +842,30 @@ impl Sp3 {
         Ok((text, report))
     }
 
+    /// Serialize after explicitly rounding record values and conservatively
+    /// converting retained standard-deviation codes to the output `%f` bases.
+    ///
+    /// The returned accuracy deltas are maximum absolute changes to decoded
+    /// standard deviations in SI units. Unknown values and SP3 too-large
+    /// sentinels are retained unchanged. The source product is never modified.
+    pub fn to_sp3_string_with_accuracy_rounding(
+        &self,
+        policy: Sp3AccuracyRoundingPolicy,
+    ) -> Result<(String, Sp3DetailedRoundingReport), Sp3WriteError> {
+        self.check_structure()?;
+        let mut rounded = self.clone();
+        let record_values = rounded.round_record_values_without_validation()?;
+        let accuracy_sigmas = rounded.round_accuracy_sigmas(policy)?;
+        let text = rounded.to_sp3_string()?;
+        Ok((
+            text,
+            Sp3DetailedRoundingReport {
+                record_values,
+                accuracy_sigmas,
+            },
+        ))
+    }
+
     /// Whether every present record value already survives the exact record
     /// column conversion and parser unit scaling unchanged.
     pub(crate) fn record_values_on_grid(&self) -> bool {
@@ -852,6 +922,109 @@ impl Sp3 {
     /// on a clone; the public writer does so automatically.
     pub(crate) fn round_record_values(&mut self) -> Result<Sp3RoundingReport, Sp3WriteError> {
         self.check_structure()?;
+        let report = self.round_record_values_without_validation()?;
+        self.to_sp3_string()?;
+        Ok(report)
+    }
+
+    /// Pick a shared header basis only when every retained exponent can be
+    /// exactly restated under it. A failed search deliberately leaves the
+    /// original header value so the strict writer can report the conflict.
+    pub(crate) fn reconcile_accuracy_header_bases(&mut self) {
+        if let Some(base) = self.select_common_accuracy_base(false) {
+            self.header.pos_vel_base = base;
+        }
+        if let Some(base) = self.select_common_accuracy_base(true) {
+            self.header.clock_rate_base = base;
+        }
+    }
+
+    fn select_common_accuracy_base(&self, clock: bool) -> Option<Option<f64>> {
+        let current = if clock {
+            self.header.clock_rate_base
+        } else {
+            self.header.pos_vel_base
+        };
+        let mut candidates = vec![current];
+        for basis in &self.accuracy_bases {
+            let base = if clock {
+                basis.clock_rate
+            } else {
+                basis.position_velocity
+            };
+            if !candidates.iter().any(|item| bases_equal(*item, base)) {
+                candidates.push(base);
+            }
+        }
+        candidates.into_iter().find(|candidate| {
+            let header_ok = candidate.is_none_or(|value| {
+                let (field, columns, decimals) = if clock {
+                    (
+                        "clock/rate base",
+                        LINE_PF_CLOCK_RATE_BASE_WIDTH,
+                        LINE_PF_CLOCK_RATE_BASE_DECIMALS,
+                    )
+                } else {
+                    (
+                        "pos/vel base",
+                        LINE_PF_POS_VEL_BASE_WIDTH,
+                        LINE_PF_POS_VEL_BASE_DECIMALS,
+                    )
+                };
+                check_exact(value, field, columns, decimals).is_ok()
+            });
+            header_ok
+                && self.record_accuracy_codes.iter().all(|epoch| {
+                    epoch.values().all(|codes| {
+                        [codes.p, codes.v]
+                            .into_iter()
+                            .enumerate()
+                            .filter_map(|(index, group)| group.map(|group| (index == 1, group)))
+                            .all(|(velocity, group)| {
+                                let source = self.accuracy_bases[group.basis_index];
+                                let source_base = if clock {
+                                    source.clock_rate
+                                } else {
+                                    source.position_velocity
+                                };
+                                let minimum = if clock { -99 } else { -9 };
+                                let maximum = if clock { 998 } else { 98 };
+                                let sentinel = if clock { 999 } else { 99 };
+                                let range = if clock { 3..4 } else { 0..3 };
+                                let same_base = bases_equal(source_base, *candidate);
+                                group.exponents[range].iter().all(|code| match code {
+                                    None => true,
+                                    Some(code) if *code == sentinel => true,
+                                    Some(code) if same_base => (minimum..=maximum).contains(code),
+                                    Some(code) => match (source_base, *candidate) {
+                                        (Some(source), Some(target))
+                                            if source.is_finite()
+                                                && source > 0.0
+                                                && target.is_finite()
+                                                && target > 0.0 =>
+                                        {
+                                            exact_reencoded_exponent(
+                                                source,
+                                                *code,
+                                                target,
+                                                minimum,
+                                                maximum,
+                                                accuracy_scale(velocity, clock),
+                                            )
+                                            .is_some()
+                                        }
+                                        _ => false,
+                                    },
+                                })
+                            })
+                    })
+                })
+        })
+    }
+
+    fn round_record_values_without_validation(
+        &mut self,
+    ) -> Result<Sp3RoundingReport, Sp3WriteError> {
         let mut report = Sp3RoundingReport::default();
         for epoch_index in 0..self.states.len() {
             for (sat, state) in &mut self.states[epoch_index] {
@@ -993,7 +1166,111 @@ impl Sp3 {
                 }
             }
         }
-        self.to_sp3_string()?;
+        Ok(report)
+    }
+
+    fn round_accuracy_sigmas(
+        &mut self,
+        policy: Sp3AccuracyRoundingPolicy,
+    ) -> Result<Sp3AccuracyRoundingReport, Sp3WriteError> {
+        let mut report = Sp3AccuracyRoundingReport::default();
+        match policy {
+            Sp3AccuracyRoundingPolicy::Conservative => {}
+        }
+        for (epoch_index, entries) in self.record_accuracy_codes.iter_mut().enumerate() {
+            for (sat, codes) in entries {
+                for (group, velocity) in [(&mut codes.p, false), (&mut codes.v, true)] {
+                    let Some(mut stored) = *group else { continue };
+                    let source = self.accuracy_bases[stored.basis_index];
+                    let target = Sp3AccuracyBase {
+                        position_velocity: self.header.pos_vel_base,
+                        clock_rate: self.header.clock_rate_base,
+                    };
+                    let mut rebase = false;
+                    for axis in 0..4 {
+                        let (
+                            source_base,
+                            target_base,
+                            minimum,
+                            maximum,
+                            sentinel,
+                            scale,
+                            component,
+                            delta,
+                        ) = accuracy_field(velocity, axis, source, target, &mut report);
+                        let Some(exponent) = stored.exponents[axis] else {
+                            continue;
+                        };
+                        if exponent == sentinel {
+                            continue;
+                        }
+                        let same_base = bases_equal(source_base, target_base);
+                        let source_sigma =
+                            decode_accuracy(Some(exponent), sentinel, source_base, scale);
+                        let Sp3AccuracyValue::Known(source_sigma) = source_sigma else {
+                            if !same_base {
+                                return Err(Sp3WriteError::AccuracyNotRepresentable {
+                                    sat: *sat,
+                                    epoch_index,
+                                    component,
+                                    exponent: Some(exponent),
+                                });
+                            }
+                            continue;
+                        };
+                        if same_base && (minimum..=maximum).contains(&exponent) {
+                            continue;
+                        }
+                        let base = target_base.filter(|b| b.is_finite() && *b > 0.0).ok_or(
+                            Sp3WriteError::AccuracyNotRepresentable {
+                                sat: *sat,
+                                epoch_index,
+                                component,
+                                exponent: Some(exponent),
+                            },
+                        )?;
+                        let output_exp = (minimum..=maximum)
+                            .filter_map(|candidate| {
+                                match decode_accuracy(Some(candidate), sentinel, Some(base), scale)
+                                {
+                                    Sp3AccuracyValue::Known(value) if value >= source_sigma => {
+                                        Some((value, candidate))
+                                    }
+                                    _ => None,
+                                }
+                            })
+                            .min_by(|(a, _), (b, _)| a.total_cmp(b))
+                            .map(|(_, exponent)| exponent)
+                            .ok_or(Sp3WriteError::AccuracyNotRepresentable {
+                                sat: *sat,
+                                epoch_index,
+                                component,
+                                exponent: Some(exponent),
+                            })?;
+                        let output_sigma =
+                            match decode_accuracy(Some(output_exp), sentinel, Some(base), scale) {
+                                Sp3AccuracyValue::Known(value) => value,
+                                _ => {
+                                    return Err(Sp3WriteError::AccuracyNotRepresentable {
+                                        sat: *sat,
+                                        epoch_index,
+                                        component,
+                                        exponent: Some(exponent),
+                                    })
+                                }
+                            };
+                        let change = (output_sigma - source_sigma).abs();
+                        *delta = delta.max(change);
+                        stored.exponents[axis] = Some(output_exp);
+                        rebase = true;
+                    }
+                    if rebase {
+                        stored.basis_index = intern_accuracy_base(&mut self.accuracy_bases, target);
+                    }
+                    *group = Some(stored);
+                }
+            }
+        }
         Ok(report)
     }
 
@@ -1495,6 +1772,7 @@ fn write_accuracy_fields(
             98,
             source.position_velocity,
             target.position_velocity,
+            accuracy_scale(velocity, false),
             2,
             axis_names[index],
             site,
@@ -1507,6 +1785,7 @@ fn write_accuracy_fields(
         998,
         source.clock_rate,
         target.clock_rate,
+        accuracy_scale(velocity, true),
         3,
         if velocity { "clock rate" } else { "clock" },
         site,
@@ -1523,6 +1802,123 @@ fn write_accuracy_fields(
     Ok(true)
 }
 
+fn bases_equal(left: Option<f64>, right: Option<f64>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.to_bits() == b.to_bits(),
+        _ => false,
+    }
+}
+
+fn accuracy_scale(velocity: bool, clock: bool) -> f64 {
+    match (velocity, clock) {
+        (false, false) => 1e-3,
+        (true, false) => 1e-7,
+        (false, true) => crate::constants::C_M_S * 1e-12,
+        (true, true) => crate::constants::C_M_S * 1e-16,
+    }
+}
+
+fn accuracy_field(
+    velocity: bool,
+    axis: usize,
+    source: Sp3AccuracyBase,
+    target: Sp3AccuracyBase,
+    report: &mut Sp3AccuracyRoundingReport,
+) -> (
+    Option<f64>,
+    Option<f64>,
+    i16,
+    i16,
+    i16,
+    f64,
+    &'static str,
+    &mut f64,
+) {
+    match (velocity, axis) {
+        (false, 0) => (
+            source.position_velocity,
+            target.position_velocity,
+            -9,
+            98,
+            99,
+            1e-3,
+            "position x",
+            &mut report.position_sigma_x_m,
+        ),
+        (false, 1) => (
+            source.position_velocity,
+            target.position_velocity,
+            -9,
+            98,
+            99,
+            1e-3,
+            "position y",
+            &mut report.position_sigma_y_m,
+        ),
+        (false, 2) => (
+            source.position_velocity,
+            target.position_velocity,
+            -9,
+            98,
+            99,
+            1e-3,
+            "position z",
+            &mut report.position_sigma_z_m,
+        ),
+        (false, _) => (
+            source.clock_rate,
+            target.clock_rate,
+            -99,
+            998,
+            999,
+            crate::constants::C_M_S * 1e-12,
+            "clock",
+            &mut report.clock_sigma_m,
+        ),
+        (true, 0) => (
+            source.position_velocity,
+            target.position_velocity,
+            -9,
+            98,
+            99,
+            1e-7,
+            "velocity x",
+            &mut report.velocity_sigma_x_m_s,
+        ),
+        (true, 1) => (
+            source.position_velocity,
+            target.position_velocity,
+            -9,
+            98,
+            99,
+            1e-7,
+            "velocity y",
+            &mut report.velocity_sigma_y_m_s,
+        ),
+        (true, 2) => (
+            source.position_velocity,
+            target.position_velocity,
+            -9,
+            98,
+            99,
+            1e-7,
+            "velocity z",
+            &mut report.velocity_sigma_z_m_s,
+        ),
+        (true, _) => (
+            source.clock_rate,
+            target.clock_rate,
+            -99,
+            998,
+            999,
+            crate::constants::C_M_S * 1e-16,
+            "clock rate",
+            &mut report.clock_rate_sigma_m_s,
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn format_accuracy_exponent(
     exponent: Option<i16>,
@@ -1531,6 +1927,7 @@ fn format_accuracy_exponent(
     maximum: i16,
     source_base: Option<f64>,
     target_base: Option<f64>,
+    scale: f64,
     width: usize,
     component: &'static str,
     site: RecordSite,
@@ -1553,7 +1950,7 @@ fn format_accuracy_exponent(
         let source_base = source_base.filter(|base| base.is_finite() && *base > 0.0);
         match (source_base, output_base) {
             (Some(source), Some(target)) => exact_reencoded_exponent(
-                source, exponent, target, minimum, maximum,
+                source, exponent, target, minimum, maximum, scale,
             )
             .ok_or(Sp3WriteError::AccuracyNotRepresentable {
                 sat: site.sat,
@@ -1687,6 +2084,7 @@ fn exact_reencoded_exponent(
     target_base: f64,
     minimum: i16,
     maximum: i16,
+    scale: f64,
 ) -> Option<i16> {
     if source_base == 1.0 || source_exponent == 0 {
         return (minimum..=maximum).contains(&0).then_some(0);
@@ -1697,6 +2095,8 @@ fn exact_reencoded_exponent(
     let source = ExactPositiveRational::from_f64(source_base, source_exponent < 0)?;
     (minimum..=maximum).find(|&target_exponent| {
         exact_accuracy_powers_equal(source, source_exponent, target_base, target_exponent)
+            && decode_accuracy(Some(source_exponent), i16::MAX, Some(source_base), scale)
+                == decode_accuracy(Some(target_exponent), i16::MAX, Some(target_base), scale)
     })
 }
 
