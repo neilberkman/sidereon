@@ -33,11 +33,11 @@
 //! The record columns are `F14.6`: millimetres for a position, picoseconds for
 //! a clock. A product holding a finer value - the mean of several analysis
 //! centers, an interpolated state written into a product - cannot be stated in
-//! them, and the writer reports
+//! them, and the strict writer reports
 //! [`Sp3WriteError::RecordValueNotRepresentable`], naming the satellite, the
-//! epoch, and the value. Rounding it to fit would publish numbers the product
-//! does not hold under a header that says they are the product; a caller that
-//! wants SP3-resolution output rounds its own values first, deliberately. The
+//! epoch, and the value. Callers that explicitly want SP3-resolution output
+//! can use [`Sp3::to_sp3_string_with_rounding`], which rounds a copy and reports
+//! the maximum change for each record field. The
 //! parser applies the same rule to every record value it reads, so a record
 //! value read from a file always writes back. That scope is the record value,
 //! not the whole product: a parsed product can still be refused on a header
@@ -684,6 +684,72 @@ impl core::fmt::Display for Sp3WriteError {
 
 impl std::error::Error for Sp3WriteError {}
 
+/// Maximum absolute quantization change per SP3 record field, in the SI units
+/// used by the corresponding product values.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Sp3RoundingReport {
+    /// Maximum position X change, meters.
+    pub position_x_m: f64,
+    /// Maximum position Y change, meters.
+    pub position_y_m: f64,
+    /// Maximum position Z change, meters.
+    pub position_z_m: f64,
+    /// Maximum velocity X change, meters per second.
+    pub velocity_x_m_s: f64,
+    /// Maximum velocity Y change, meters per second.
+    pub velocity_y_m_s: f64,
+    /// Maximum velocity Z change, meters per second.
+    pub velocity_z_m_s: f64,
+    /// Maximum clock offset change, seconds.
+    pub clock_s: f64,
+    /// Maximum clock-rate change, seconds per second.
+    pub clock_rate_s_s: f64,
+}
+
+fn exact_record_value(column: f64, stored: f64, scale: f64) -> bool {
+    column_read_back(column).is_some_and(|read| scaled_bits(read, scale) == stored.to_bits())
+}
+
+fn quantize_record_value(
+    stored: f64,
+    scale: f64,
+    field: &'static str,
+    site: RecordSite,
+    maximum_change: &mut f64,
+) -> Result<(f64, f64), Sp3WriteError> {
+    let column = stored / scale;
+    if !column.is_finite() {
+        return Err(Sp3WriteError::RecordValueNonFinite {
+            field,
+            sat: site.sat,
+            epoch_index: site.epoch_index,
+        });
+    }
+    let Some(read) = column_read_back(column) else {
+        return Err(Sp3WriteError::RecordValueTooWide {
+            field,
+            sat: site.sat,
+            epoch_index: site.epoch_index,
+            columns: RECORD_VALUE_WIDTH,
+            decimals: RECORD_VALUE_DECIMALS,
+            column_value: column,
+        });
+    };
+    let rounded = read * scale;
+    if !rounded.is_finite() {
+        return Err(Sp3WriteError::RecordValueNonFinite {
+            field,
+            sat: site.sat,
+            epoch_index: site.epoch_index,
+        });
+    }
+    let change = (rounded - stored).abs();
+    if change.is_finite() {
+        *maximum_change = maximum_change.max(change);
+    }
+    Ok((rounded, read))
+}
+
 impl Sp3 {
     /// Serialize this product to standard SP3 text (the format named by its
     /// header version, `c` or `d`).
@@ -709,6 +775,226 @@ impl Sp3 {
         self.write_records(&mut out)?;
         out.push_str("EOF\n");
         Ok(out)
+    }
+
+    /// Serialize after explicitly quantizing modeled record values to the
+    /// six decimal places carried by SP3 record columns.
+    ///
+    /// Quantization rounds to nearest at the column's decimal precision, with
+    /// ties to even, using Rust's fixed precision formatter, then parses that
+    /// decimal text back before applying the parser's unit conversion. It
+    /// preserves the sign of zero where the formatted decimal does. Headers and epochs are never quantized. The source product
+    /// is not modified; ordinary structural, width, finite-value, and sentinel
+    /// checks still apply to the quantized copy.
+    pub fn to_sp3_string_with_rounding(
+        &self,
+    ) -> Result<(String, Sp3RoundingReport), Sp3WriteError> {
+        self.check_structure()?;
+        let mut rounded = self.clone();
+        let report = rounded.round_record_values()?;
+        let text = rounded.to_sp3_string()?;
+        Ok((text, report))
+    }
+
+    /// Whether every present record value already survives the exact record
+    /// column conversion and parser unit scaling unchanged.
+    pub(crate) fn record_values_on_grid(&self) -> bool {
+        if self.check_structure().is_err() {
+            return false;
+        }
+        self.states.iter().enumerate().all(|(epoch_index, states)| {
+            states.values().all(|state| {
+                let p = state.position;
+                [
+                    (p.x_m / KM_TO_M, p.x_m, KM_TO_M),
+                    (p.y_m / KM_TO_M, p.y_m, KM_TO_M),
+                    (p.z_m / KM_TO_M, p.z_m, KM_TO_M),
+                ]
+                .into_iter()
+                .all(|(column, stored, scale)| exact_record_value(column, stored, scale))
+                    && state
+                        .clock_s
+                        .is_none_or(|v| exact_record_value(v / US_TO_S, v, US_TO_S))
+                    && state.velocity.is_none_or(|v| {
+                        exact_record_value(v.vx_m_s / DM_S_TO_M_S, v.vx_m_s, DM_S_TO_M_S)
+                            && exact_record_value(v.vy_m_s / DM_S_TO_M_S, v.vy_m_s, DM_S_TO_M_S)
+                            && exact_record_value(v.vz_m_s / DM_S_TO_M_S, v.vz_m_s, DM_S_TO_M_S)
+                    })
+                    && state.clock_rate_s_s.is_none_or(|v| {
+                        exact_record_value(v / CLOCK_RATE_TO_S_PER_S, v, CLOCK_RATE_TO_S_PER_S)
+                    })
+                    && self.interp_raw.get(epoch_index).is_some()
+            })
+        }) && self
+            .clock_records
+            .iter()
+            .enumerate()
+            .all(|(epoch_index, records)| {
+                records.values().all(|r| {
+                    exact_record_value(r.clock_us, r.clock_s, US_TO_S)
+                        && r.velocity.is_none_or(|v| {
+                            exact_record_value(v.vx_m_s / DM_S_TO_M_S, v.vx_m_s, DM_S_TO_M_S)
+                                && exact_record_value(v.vy_m_s / DM_S_TO_M_S, v.vy_m_s, DM_S_TO_M_S)
+                                && exact_record_value(v.vz_m_s / DM_S_TO_M_S, v.vz_m_s, DM_S_TO_M_S)
+                        })
+                        && r.clock_rate_s_s.is_none_or(|v| {
+                            r.clock_rate_raw.is_some_and(|raw| {
+                                exact_record_value(raw, v, CLOCK_RATE_TO_S_PER_S)
+                            })
+                        })
+                        && epoch_index < self.interp_raw.len()
+                })
+            })
+    }
+
+    /// Quantize all modeled record values in place and return maximum absolute
+    /// changes in each SI field. Callers handling derived products should work
+    /// on a clone; the public writer does so automatically.
+    pub(crate) fn round_record_values(&mut self) -> Result<Sp3RoundingReport, Sp3WriteError> {
+        self.check_structure()?;
+        let mut report = Sp3RoundingReport::default();
+        for epoch_index in 0..self.states.len() {
+            for (sat, state) in &mut self.states[epoch_index] {
+                let site = RecordSite {
+                    sat: *sat,
+                    epoch_index,
+                };
+                let p = &mut state.position;
+                let (x, raw_x) = quantize_record_value(
+                    p.x_m,
+                    KM_TO_M,
+                    "position x",
+                    site,
+                    &mut report.position_x_m,
+                )?;
+                let (y, raw_y) = quantize_record_value(
+                    p.y_m,
+                    KM_TO_M,
+                    "position y",
+                    site,
+                    &mut report.position_y_m,
+                )?;
+                let (z, raw_z) = quantize_record_value(
+                    p.z_m,
+                    KM_TO_M,
+                    "position z",
+                    site,
+                    &mut report.position_z_m,
+                )?;
+                p.x_m = x;
+                p.y_m = y;
+                p.z_m = z;
+                let raw_clock = state
+                    .clock_s
+                    .map(|v| quantize_record_value(v, US_TO_S, "clock", site, &mut report.clock_s))
+                    .transpose()?;
+                state.clock_s = raw_clock.map(|(v, _)| v);
+                if let Some(v) = &mut state.velocity {
+                    v.vx_m_s = quantize_record_value(
+                        v.vx_m_s,
+                        DM_S_TO_M_S,
+                        "velocity x",
+                        site,
+                        &mut report.velocity_x_m_s,
+                    )?
+                    .0;
+                    v.vy_m_s = quantize_record_value(
+                        v.vy_m_s,
+                        DM_S_TO_M_S,
+                        "velocity y",
+                        site,
+                        &mut report.velocity_y_m_s,
+                    )?
+                    .0;
+                    v.vz_m_s = quantize_record_value(
+                        v.vz_m_s,
+                        DM_S_TO_M_S,
+                        "velocity z",
+                        site,
+                        &mut report.velocity_z_m_s,
+                    )?
+                    .0;
+                }
+                state.clock_rate_s_s = state
+                    .clock_rate_s_s
+                    .map(|v| {
+                        quantize_record_value(
+                            v,
+                            CLOCK_RATE_TO_S_PER_S,
+                            "clock rate",
+                            site,
+                            &mut report.clock_rate_s_s,
+                        )
+                        .map(|pair| pair.0)
+                    })
+                    .transpose()?;
+                if let Some(raw) = self.interp_raw[epoch_index].get_mut(sat) {
+                    raw.km = [raw_x, raw_y, raw_z];
+                    raw.clock_us = raw_clock.map(|(_, raw_value)| raw_value);
+                }
+            }
+            for (sat, record) in &mut self.clock_records[epoch_index] {
+                let site = RecordSite {
+                    sat: *sat,
+                    epoch_index,
+                };
+                let (new_clock, raw_clock) = quantize_record_value(
+                    record.clock_s,
+                    US_TO_S,
+                    "clock",
+                    site,
+                    &mut report.clock_s,
+                )?;
+                record.clock_us = raw_clock;
+                record.clock_s = new_clock;
+                if let Some(v) = &mut record.velocity {
+                    v.vx_m_s = quantize_record_value(
+                        v.vx_m_s,
+                        DM_S_TO_M_S,
+                        "velocity x",
+                        site,
+                        &mut report.velocity_x_m_s,
+                    )?
+                    .0;
+                    v.vy_m_s = quantize_record_value(
+                        v.vy_m_s,
+                        DM_S_TO_M_S,
+                        "velocity y",
+                        site,
+                        &mut report.velocity_y_m_s,
+                    )?
+                    .0;
+                    v.vz_m_s = quantize_record_value(
+                        v.vz_m_s,
+                        DM_S_TO_M_S,
+                        "velocity z",
+                        site,
+                        &mut report.velocity_z_m_s,
+                    )?
+                    .0;
+                }
+                let rounded_rate = record
+                    .clock_rate_s_s
+                    .map(|v| {
+                        quantize_record_value(
+                            v,
+                            CLOCK_RATE_TO_S_PER_S,
+                            "clock rate",
+                            site,
+                            &mut report.clock_rate_s_s,
+                        )
+                    })
+                    .transpose()?;
+                if let Some((value, raw)) = rounded_rate {
+                    record.clock_rate_raw = Some(raw);
+                    record.clock_rate_s_s = Some(value);
+                } else {
+                    record.clock_rate_raw = None;
+                }
+            }
+        }
+        self.to_sp3_string()?;
+        Ok(report)
     }
 
     /// Check the product's shape before any value is formatted: the header
@@ -1684,6 +1970,194 @@ fn column_read_back(value: f64) -> Option<f64> {
         return None;
     }
     text.parse::<f64>().ok()
+}
+
+#[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod rounding_tests {
+    use super::*;
+    use crate::frame::ItrfVelocityMS;
+
+    const FIXTURE: &str = include_str!("../../tests/fixtures/sp3/trimmed_go_static.sp3");
+
+    #[test]
+    fn rounds_real_sub_column_values_and_reports_literal_si_changes_without_mutation() {
+        let mut product = Sp3::parse(FIXTURE.as_bytes()).expect("fixture parses");
+        let sat = product.header.satellites[0];
+        let state = product.states[0].get_mut(&sat).expect("first state");
+        state.position.x_m = 26_560_000.000_4;
+        state.position.y_m = -20_000_000.000_3;
+        state.position.z_m = 5_000_000.000_6;
+        state.clock_s = Some(1.234_567_89e-6);
+        let before = product.clone();
+
+        assert!(matches!(
+            product.to_sp3_string(),
+            Err(Sp3WriteError::RecordValueNotRepresentable { .. })
+        ));
+        let (text, report) = product
+            .to_sp3_string_with_rounding()
+            .expect("explicit rounding write");
+
+        assert_eq!(product, before);
+        assert!(text.contains("26560.000000"));
+        assert!((report.position_x_m - 0.0004).abs() < 1e-8);
+        assert!((report.position_y_m - 0.0003).abs() < 1e-8);
+        assert!((report.position_z_m - 0.0004).abs() < 1e-8);
+        assert!((report.clock_s - 1.1e-13).abs() < 1e-14);
+    }
+
+    #[test]
+    fn refuses_quantization_that_would_turn_a_present_orbit_into_missing() {
+        let mut product = Sp3::parse(FIXTURE.as_bytes()).expect("fixture parses");
+        let sat = product.header.satellites[0];
+        let state = product.states[0].get_mut(&sat).expect("first state");
+        state.position.x_m = 0.0001;
+        state.position.y_m = 0.0;
+        state.position.z_m = 0.0;
+
+        assert!(matches!(
+            product.to_sp3_string_with_rounding(),
+            Err(Sp3WriteError::RecordReadsAsAbsent {
+                field: "position",
+                ..
+            })
+        ));
+    }
+
+    fn velocity_product() -> Sp3 {
+        let mut product = Sp3::parse(FIXTURE.as_bytes()).expect("fixture parses");
+        product.header.data_type = Sp3DataType::Velocity;
+        product
+    }
+
+    #[test]
+    fn reports_all_eight_si_maxima_across_records_and_is_idempotent() {
+        let mut product = velocity_product();
+        let first = product.header.satellites[0];
+        let second = product.header.satellites[1];
+        let state = product.states[0].get_mut(&first).expect("first state");
+        state.position.x_m = 26_560_000.000_4;
+        state.position.y_m = -20_000_000.000_3;
+        state.position.z_m = 5_000_000.000_6;
+        state.clock_s = Some(1.234_567_89e-6);
+        state.velocity = Some(ItrfVelocityMS {
+            vx_m_s: 2_500.000_040_04,
+            vy_m_s: -1_500.000_060_06,
+            vz_m_s: 500.000_060_06,
+        });
+        state.clock_rate_s_s = Some(1.234_567_890_1e-10);
+        let other = product.states[1]
+            .get_mut(&second)
+            .expect("second epoch state");
+        other.position.x_m = 11_111_000.000_1;
+        other.velocity = Some(ItrfVelocityMS {
+            vx_m_s: 1_000.000_010_01,
+            vy_m_s: -900.000_010_01,
+            vz_m_s: 800.000_010_01,
+        });
+        other.clock_rate_s_s = Some(4.000_000_1e-10);
+        let before = product.clone();
+
+        assert!(matches!(
+            product.to_sp3_string(),
+            Err(Sp3WriteError::RecordValueNotRepresentable { .. })
+        ));
+        let (text, report) = product
+            .to_sp3_string_with_rounding()
+            .expect("explicit rounding write");
+        assert_eq!(product, before);
+        assert!(text.contains("26560.000000"));
+        assert!((report.position_x_m - 0.0004).abs() < 1e-8);
+        assert!((report.position_y_m - 0.0003).abs() < 1e-8);
+        assert!((report.position_z_m - 0.0004).abs() < 1e-8);
+        assert!((report.velocity_x_m_s - 0.000_000_04).abs() < 1e-10);
+        assert!((report.velocity_y_m_s - 0.000_000_04).abs() < 1e-10);
+        assert!((report.velocity_z_m_s - 0.000_000_04).abs() < 1e-10);
+        assert!((report.clock_s - 1.1e-13).abs() < 1e-14);
+        assert!((report.clock_rate_s_s - 1.1e-17).abs() < 1e-18);
+
+        let mut quantized = product.clone();
+        quantized.round_record_values().expect("first quantization");
+        assert_eq!(
+            quantized
+                .round_record_values()
+                .expect("idempotent quantization"),
+            Sp3RoundingReport::default()
+        );
+        let reread = Sp3::parse(text.as_bytes()).expect("rounded text parses");
+        let epochs = quantized.epochs_j2000_seconds();
+        let query = (epochs[0] + epochs[1]) / 2.0;
+        assert_eq!(
+            quantized
+                .position_at_j2000_seconds(first, query)
+                .expect("quantized interpolation"),
+            reread
+                .position_at_j2000_seconds(first, query)
+                .expect("roundtrip interpolation")
+        );
+    }
+
+    #[test]
+    fn refuses_clock_and_velocity_sentinels_created_by_rounding() {
+        let mut clock = Sp3::parse(FIXTURE.as_bytes()).expect("fixture parses");
+        let sat = clock.header.satellites[0];
+        clock.states[0].get_mut(&sat).expect("first state").clock_s =
+            Some(999_999.999_998_9 * US_TO_S);
+        assert!(matches!(
+            clock.to_sp3_string_with_rounding(),
+            Err(Sp3WriteError::RecordReadsAsAbsent { field: "clock", .. })
+        ));
+
+        let mut velocity = velocity_product();
+        let sat = velocity.header.satellites[0];
+        let state = velocity.states[0].get_mut(&sat).expect("first state");
+        state.velocity = Some(ItrfVelocityMS {
+            vx_m_s: 0.000_000_01,
+            vy_m_s: 0.0,
+            vz_m_s: 0.0,
+        });
+        assert!(matches!(
+            velocity.to_sp3_string_with_rounding(),
+            Err(Sp3WriteError::RecordReadsAsAbsent {
+                field: "velocity",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn refuses_non_finite_and_overwide_record_values() {
+        let mut non_finite = Sp3::parse(FIXTURE.as_bytes()).expect("fixture parses");
+        let sat = non_finite.header.satellites[0];
+        non_finite.states[0]
+            .get_mut(&sat)
+            .expect("first state")
+            .position
+            .x_m = f64::NAN;
+        assert!(matches!(
+            non_finite.to_sp3_string_with_rounding(),
+            Err(Sp3WriteError::RecordValueNonFinite {
+                field: "position x",
+                ..
+            })
+        ));
+
+        let mut overwide = Sp3::parse(FIXTURE.as_bytes()).expect("fixture parses");
+        let sat = overwide.header.satellites[0];
+        overwide.states[0]
+            .get_mut(&sat)
+            .expect("first state")
+            .position
+            .x_m = 1.0e99;
+        assert!(matches!(
+            overwide.to_sp3_string_with_rounding(),
+            Err(Sp3WriteError::RecordValueTooWide {
+                field: "position x",
+                ..
+            })
+        ));
+    }
 }
 
 /// A `%f` base column: the value in its canonical `Fw.d` form, or the blank

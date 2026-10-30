@@ -4,6 +4,18 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [3.0.5] - 2026-10-30
+
+### Added
+
+- Opt-in `Sp3::to_sp3_string_with_rounding()` rounds a copy of record values to SP3 column precision and reports the largest absolute change in each of eight SI fields. The existing writer remains strict; neither writer rounds headers or epochs or accepts missing-value sentinel collisions.
+
+### Fixed
+
+- Merging or clock-aligning products whose input records are on the SP3 column grid returns record values on that grid, including arithmetic residuals and finer averages. Interpolation caches use the same canonical values, so subsequent writing and parsing preserve the derived product. Inputs with finer record precision retain that precision. Unrepresentable derived values, such as overflow, remain explicit writer errors.
+- Normalize quaternions with large finite components without overflowing their norm.
+- Enforce the documented open `(0, 1)` probability domain for estimation NIS confidence and CA-CFAR false-alarm inputs, including rejection of positive and negative zero.
+
 ## [3.0.4] - 2026-10-18
 
 ### Fixed

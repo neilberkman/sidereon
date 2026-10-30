@@ -3322,12 +3322,11 @@ fn test_writer_refuses_a_record_value_finer_than_its_column() {
     );
 }
 
-/// A merged value the format cannot state is refused the same way, naming the
-/// cell and the merged number. The merge arithmetic is untouched: the mean of
-/// two millimetre-resolution positions is half a millimetre, and no `F14.6`
-/// kilometre column says that.
+/// Grid inputs yield writable merged records. Deliberately finer inputs keep
+/// their precision and the strict writer still identifies an unrepresentable
+/// merged value by cell and field.
 #[test]
-fn test_writer_refuses_a_merged_mean_finer_than_the_record_column() {
+fn test_grid_merge_writes_and_finer_inputs_retain_strict_writer_refusal() {
     fn source(x_km: f64) -> Sp3 {
         let file = format!(
             "\
@@ -3361,6 +3360,24 @@ EOF
     .expect("merge two agreeing sources");
 
     let g01 = id(GnssSystem::Gps, 1);
+    let text = merged.to_sp3_string().expect("grid-in merge writes");
+    let reread = Sp3::parse(text.as_bytes()).expect("merged text parses");
+    assert_eq!(reread.state(g01, 0), merged.state(g01, 0));
+
+    let mut fine = source(15_000.000_000);
+    fine.states[0]
+        .get_mut(&g01)
+        .expect("fine input G01")
+        .position
+        .x_m += 0.0004;
+    let (merged, _) = merge(
+        &[fine, source(15_000.000_001)],
+        &MergeOptions {
+            min_agree: 1,
+            ..MergeOptions::default()
+        },
+    )
+    .expect("merge preserves finer inputs");
     let mean_m = merged.state(g01, 0).expect("merged G01 state").position.x_m;
     assert!(
         mean_m > 15_000_000.0 && mean_m < 15_000_000.001,
