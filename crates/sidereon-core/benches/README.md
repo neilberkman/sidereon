@@ -1,5 +1,13 @@
 # Hotpath benchmark
 
+`cargo bench -p sidereon-core --bench quality_cost` reports mean microseconds
+per `chi2_inv` and `chi2_isf` call at degrees of freedom 1, 4, 8, 12, 30, 50,
+100, 1000 and 100000. After an untimed warmup, each mean covers 200 repetitions of the same thirteen
+probabilities, from 1e-300 through 1-1e-9. There is no wall-clock assertion.
+`cargo test --release -p sidereon-core --lib distribution_cost_components -- --ignored --nocapture`
+also reports normalization/residual costs and the full noncentral reference-grid
+cost, separately from normal tests.
+
 `hotpath.rs` measures the observable batch paths and the dynamic linear
 algebra sizes used by precise positioning: normal products and Cholesky
 decompositions at orders 50, 200, and 500, plus `J^T J` for a 2000 by 200

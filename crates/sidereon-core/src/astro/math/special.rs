@@ -112,6 +112,59 @@ impl Quad {
     fn to_f64(self) -> f64 {
         self.values.iter().copied().sum()
     }
+
+    fn div(self, denominator: Self) -> Self {
+        let mut quotient = Self::from(0.0);
+        let mut remainder = self;
+        for _ in 0..3 {
+            let digit = remainder.to_f64() / denominator.to_f64();
+            quotient = quotient.add(Self::from(digit));
+            remainder = remainder.add(denominator.scale(-digit));
+        }
+        quotient
+    }
+
+    fn logarithm(self) -> Self {
+        let leading = self.to_f64();
+        let remainder = self.add(Self::from(-leading)).scale(1.0 / leading);
+        quad_logarithm(leading).add(remainder)
+    }
+
+    // A two-limb product suffices for the bounded sine polynomial: its
+    // relative error is O(u²), even after the radial kernel's conditioning.
+    fn pair_product(self, other: Self) -> Self {
+        let (leading, error) = two_prod(self.values[0], other.values[0]);
+        let (leading, error) = two_sum(
+            leading,
+            error + self.values[0] * other.values[1] + self.values[1] * other.values[0],
+        );
+        Self {
+            values: [leading, error, 0.0, 0.0],
+        }
+    }
+
+    fn pair_divide_scalar(self, divisor: f64) -> Self {
+        let leading = self.values[0] / divisor;
+        let (product, error) = two_prod(leading, divisor);
+        let remainder = ((self.values[0] - product) - error) + self.values[1];
+        Self::from(leading).pair_sum(Self::from(remainder / divisor))
+    }
+
+    fn pair_sum(self, other: Self) -> Self {
+        let (leading, error) = two_sum(self.values[0], other.values[0]);
+        let (leading, error) = two_sum(leading, error + self.values[1] + other.values[1]);
+        Self {
+            values: [leading, error, 0.0, 0.0],
+        }
+    }
+
+    fn pair_divide(self, divisor: Self) -> Self {
+        let leading = self.values[0] / divisor.values[0];
+        let (product, error) = two_prod(leading, divisor.values[0]);
+        let remainder =
+            (((self.values[0] - product) - error) + self.values[1]) - leading * divisor.values[1];
+        Self::from(leading).pair_sum(Self::from(remainder / divisor.values[0]))
+    }
 }
 
 #[inline]
@@ -149,15 +202,17 @@ fn quad_logarithm(x: f64) -> Quad {
     let (product, product_error) = two_prod(z, denominator);
     let correction = ((numerator - product) - product_error - z * denominator_error) / denominator;
     let z = Quad::from(z).add(Quad::from(correction));
-    let square = z.mul(z);
+    let square = z.pair_product(z);
     let mut term = z;
     let mut sum = z;
     for odd in (3..=201).step_by(2) {
-        term = term.mul(square);
+        term = term.pair_product(square);
         let reciprocal = 1.0 / odd as f64;
         let (product, error) = two_prod(reciprocal, odd as f64);
         let remainder = ((1.0 - product) - error) / odd as f64;
-        sum = sum.add(term.scale(reciprocal)).add(term.scale(remainder));
+        sum = sum
+            .pair_sum(term.pair_product(Quad::from(reciprocal)))
+            .pair_sum(term.pair_product(Quad::from(remainder)));
         if term.values[0].abs() < 1.0e-36 {
             break;
         }
@@ -176,6 +231,37 @@ fn quad_logarithm(x: f64) -> Quad {
 }
 
 fn gamma_exponent(a: f64, x: f64) -> Quad {
+    if a < 32.0 {
+        if 2.0 * a == libm::floor(2.0 * a) {
+            // Integer and half-integer shapes have an exact finite gamma
+            // product. Retaining that product avoids repeated logarithms and
+            // the cancellation of a shifted Stirling expansion.
+            let half_integer = a != libm::floor(a);
+            let mut product = Quad::from(1.0);
+            let mut factor = if half_integer { 0.5 } else { 1.0 };
+            while factor < a {
+                product = product.scale(factor);
+                factor += 1.0;
+            }
+            let mut log_gamma = product.logarithm();
+            if half_integer {
+                let pi =
+                    Quad::from(core::f64::consts::PI).add(Quad::from(1.224_646_799_147_353_2e-16));
+                log_gamma = log_gamma.add(pi.logarithm().scale(0.5));
+            }
+            return quad_logarithm(x)
+                .scale(a)
+                .add(Quad::from(-x))
+                .add(log_gamma.scale(-1.0));
+        }
+        let shift = libm::ceil(32.0 - a) as usize;
+        let mut result =
+            gamma_exponent(a + shift as f64, x).add(quad_logarithm(x).scale(-(shift as f64)));
+        for index in 0..shift {
+            result = result.add(quad_logarithm(a + index as f64));
+        }
+        return result;
+    }
     let r = 1.0 / a;
     let r2 = r * r;
     let stirling = r
@@ -192,19 +278,194 @@ fn gamma_exponent(a: f64, x: f64) -> Quad {
         .add(Quad::from(-stirling))
 }
 
-/// Logarithm of the gamma normalization divided by a probability. Subtract
-/// before condensing the limbs, so subnormal-tail inversion retains its
-/// significant bits even when both logarithms are close to -745.
-pub(crate) fn gamma_scale_log_ratio(a: f64, x: f64, probability: f64) -> f64 {
-    gamma_exponent(a, x)
-        .add(quad_logarithm(probability).scale(-1.0))
-        .values
-        .iter()
-        .sum()
+fn gamma_normalization_uncached(a: f64) -> Quad {
+    if a < 32.0 {
+        return gamma_exponent(a, 1.0).add(Quad::from(1.0));
+    }
+    // The lower and upper tails must share an absolute normalization, not
+    // merely the same rounded scale: a scale error e moves their inverse
+    // roots in opposite directions when one tail is complemented. Retain the
+    // low limb of log(sqrt(2*pi)) and the rational Stirling coefficients.
+    // For a>=32 the first omitted term is <4e-29 (the alternating-remainder
+    // bound), below the two-limb tail recurrence error near the median.
+    let r = Quad::from(1.0).pair_divide_scalar(a);
+    let r2 = r.pair_product(r);
+    let mut stirling = Quad::from(43_867.0).pair_divide_scalar(244_188.0);
+    for (numerator, denominator) in [
+        (-3_617.0, 122_400.0),
+        (1.0, 156.0),
+        (-691.0, 360_360.0),
+        (1.0, 1_188.0),
+        (-1.0, 1_680.0),
+        (1.0, 1_260.0),
+        (-1.0, 360.0),
+        (1.0, 12.0),
+    ] {
+        stirling = stirling
+            .pair_product(r2)
+            .pair_sum(Quad::from(numerator).pair_divide_scalar(denominator));
+    }
+    let stirling = stirling.pair_product(r);
+    quad_logarithm(a)
+        .scale(0.5 - a)
+        .add(Quad::from(a))
+        .add(Quad::from(-0.918_938_533_204_672_8))
+        .add(Quad::from(3.878_294_158_067_241_4e-17))
+        .add(stirling.scale(-1.0))
+}
+
+/// Compensated gamma-tail comparison for inverse distributions. The same
+/// positive series or continued fraction defines every probability regime;
+/// subtracting the target before rounding preserves subnormal inputs.
+pub(crate) struct GammaTailComparison {
+    a: f64,
+    constant: Quad,
+}
+
+fn gamma_normalization_constant(a: f64) -> Quad {
+    if (0.5..=32.0).contains(&a) && 2.0 * a == libm::floor(2.0 * a) {
+        static CONSTANTS: std::sync::OnceLock<[Quad; 64]> = std::sync::OnceLock::new();
+        let values = CONSTANTS.get_or_init(|| {
+            std::array::from_fn(|index| gamma_normalization_uncached(0.5 * (index + 1) as f64))
+        });
+        values[(2.0 * a - 1.0) as usize]
+    } else {
+        gamma_normalization_uncached(a)
+    }
+}
+
+impl GammaTailComparison {
+    pub(crate) fn new(a: f64, probability: f64, complement: bool) -> Self {
+        let target = if complement {
+            Quad::from(1.0).add(Quad::from(-probability)).logarithm()
+        } else {
+            quad_logarithm(probability)
+        };
+        Self {
+            a,
+            constant: gamma_normalization_constant(a).add(target.scale(-1.0)),
+        }
+    }
+
+    pub(crate) fn evaluate(&self, x: f64, upper: bool) -> (f64, f64) {
+        let a = self.a;
+        let sum = if upper {
+            let mut b = Quad::from(x).add(Quad::from(1.0 - a));
+            let mut c = Quad::from(1.0e300);
+            let mut d = Quad::from(1.0).pair_divide(b);
+            let mut h = d;
+            for index in 1..100_000 {
+                let n = index as f64;
+                let an = -n * (n - a);
+                b = b.pair_sum(Quad::from(2.0));
+                d = Quad::from(1.0).pair_divide(d.scale(an).pair_sum(b));
+                c = b.pair_sum(Quad::from(an).pair_divide(c));
+                let delta = d.pair_product(c);
+                h = h.pair_product(delta);
+                if delta.add(Quad::from(-1.0)).to_f64().abs() < 1.0e-30 {
+                    break;
+                }
+            }
+            h
+        } else {
+            let mut term = Quad::from(1.0).pair_divide_scalar(a);
+            let mut sum = term;
+            for index in 1..100_000 {
+                term = term
+                    .pair_product(Quad::from(x))
+                    .pair_divide_scalar(a + index as f64);
+                sum = sum.pair_sum(term);
+                if term.to_f64() < sum.to_f64() * 1.0e-32 {
+                    break;
+                }
+            }
+            sum
+        };
+        let ratio = self
+            .constant
+            .add(quad_logarithm(x).scale(a))
+            .add(Quad::from(-x))
+            .add(sum.logarithm())
+            .to_f64();
+        (ratio, sum.to_f64())
+    }
 }
 
 pub(crate) fn gamma_scale(a: f64, x: f64) -> f64 {
     let exponent = gamma_exponent(a, x);
+    gamma_exponential(exponent)
+}
+
+fn quad_sqrt(value: Quad) -> Quad {
+    let root = libm::sqrt(value.to_f64());
+    Quad::from(root).add(
+        value
+            .add(Quad::from(root).mul(Quad::from(-root)))
+            .scale(0.5 / root),
+    )
+}
+
+/// Complementary folded-normal probability on the circle rho²+s²=x.
+/// Product residuals and square-root corrections keep the normal argument
+/// accurate before applying its sharply conditioned complementary error.
+pub(crate) struct RadialNormalKernel {
+    x: f64,
+    a: f64,
+    root_x: Quad,
+    displacement: Quad,
+    constant: Quad,
+}
+
+impl RadialNormalKernel {
+    pub(crate) fn new(x: f64, a: f64, lambda: f64) -> Self {
+        Self {
+            x,
+            a,
+            root_x: quad_sqrt(Quad::from(x)),
+            displacement: quad_sqrt(Quad::from(lambda)),
+            constant: gamma_normalization_constant(a).add(quad_logarithm(2.0).scale(1.0 - a)),
+        }
+    }
+
+    pub(crate) fn evaluate(&self, panel: usize, width: f64, node: f64) -> f64 {
+        let angle = Quad::from(panel as f64 + 0.5)
+            .add(Quad::from(0.5 * node))
+            .scale(width);
+        let square = angle.pair_product(angle).scale(-1.0);
+        let mut term = angle;
+        let mut sine = angle;
+        // On [0,pi/2], the omitted degree-43 term is below 5e-45.
+        for index in 1..=20 {
+            term = term
+                .pair_product(square)
+                .pair_divide_scalar((2 * index * (2 * index + 1)) as f64);
+            sine = sine.add(term);
+        }
+        let radius = self.root_x.mul(sine);
+        let radius_square = radius.mul(radius);
+        let density = gamma_exponential(
+            self.constant
+                .add(radius.logarithm().scale(2.0 * self.a - 1.0))
+                .add(radius_square.scale(-0.5)),
+        );
+        let remaining = quad_sqrt(Quad::from(self.x).add(radius_square.scale(-1.0)));
+        let sqrt_two =
+            Quad::from(core::f64::consts::SQRT_2).add(Quad::from(-9.667_293_313_452_913e-17));
+        let tail = |argument: Quad| {
+            let z = argument.div(sqrt_two);
+            let leading = z.to_f64();
+            let residual = z.add(Quad::from(-leading)).to_f64();
+            0.5 * libm::erfc(leading)
+                - residual * libm::exp(-leading * leading) / libm::sqrt(core::f64::consts::PI)
+        };
+        density
+            * remaining.to_f64()
+            * (tail(remaining.add(self.displacement.scale(-1.0)))
+                + tail(remaining.add(self.displacement)))
+    }
+}
+
+fn gamma_exponential(exponent: Quad) -> f64 {
     if exponent.values[0] < libm::log(f64::MIN_POSITIVE) {
         // The low limbs are not individually bounded by the exponential's
         // range. Condense before exponentiation when the leading exponential
@@ -371,6 +632,15 @@ fn normal_pdf(x: f64) -> f64 {
 }
 
 fn inverse_normal_cdf_approx(p: f64) -> Option<f64> {
+    inverse_normal_with_log(p, portable_log)
+}
+
+/// Approximation only: final gamma inversion does not depend on its rounding.
+pub(crate) fn gamma_normal_seed(p: f64) -> Option<f64> {
+    inverse_normal_with_log(p, libm::log)
+}
+
+fn inverse_normal_with_log(p: f64, logarithm: fn(f64) -> f64) -> Option<f64> {
     if !(0.0..1.0).contains(&p) || !p.is_finite() {
         return None;
     }
@@ -408,14 +678,14 @@ fn inverse_normal_cdf_approx(p: f64) -> Option<f64> {
     const P_HIGH: f64 = 1.0 - P_LOW;
 
     if p < P_LOW {
-        let q = (-2.0 * portable_log(p)).sqrt();
+        let q = (-2.0 * logarithm(p)).sqrt();
         Some(poly6(&C, q) / poly4p1(&D, q))
     } else if p <= P_HIGH {
         let q = p - 0.5;
         let r = q * q;
         Some(q * poly6(&A, r) / poly5p1(&B, r))
     } else {
-        let q = (-2.0 * portable_log(1.0 - p)).sqrt();
+        let q = (-2.0 * logarithm(1.0 - p)).sqrt();
         Some(-poly6(&C, q) / poly4p1(&D, q))
     }
 }

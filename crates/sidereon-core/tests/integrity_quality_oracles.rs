@@ -69,11 +69,73 @@ fn chi_square_lower_tail_series_switches_are_monotone() {
         let dof = switch["dof"].as_u64().unwrap() as usize;
         let mut previous = 0.0;
         for index in -128..=128 {
-            let probability = p * (1.0 + index as f64 * 1e-7);
+            let probability = f64::from_bits(p.to_bits().checked_add_signed(index).unwrap());
             let actual = chi2_inv(probability, dof).unwrap();
             assert!(actual >= previous, "dof={dof} p={probability}");
             previous = actual;
         }
+    }
+}
+
+#[test]
+fn chi_square_tail_equation_switches_are_monotone() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/chi2_extended_mpmath.json")).unwrap();
+    for switch in fixture["equation_switches"].as_array().unwrap() {
+        let p: f64 = switch["p"].as_str().unwrap().parse().unwrap();
+        let dof = switch["dof"].as_u64().unwrap() as usize;
+        // Check both directions at each equation boundary and its 1-p
+        // mirror, including all 513 adjacent inputs rather than a step size
+        // that could jump over a one-ulp reversal.
+        for (name, inverse, increasing) in [
+            (
+                "ppf",
+                chi2_inv as fn(f64, usize) -> Result<f64, sidereon_core::quality::QualityError>,
+                true,
+            ),
+            (
+                "isf",
+                chi2_isf as fn(f64, usize) -> Result<f64, sidereon_core::quality::QualityError>,
+                false,
+            ),
+        ] {
+            let mut previous = if increasing { 0.0 } else { f64::INFINITY };
+            for index in -256..=256 {
+                let probability = f64::from_bits(p.to_bits().checked_add_signed(index).unwrap());
+                if !(0.0..1.0).contains(&probability) || probability == 0.0 {
+                    continue;
+                }
+                let actual = inverse(probability, dof).unwrap();
+                assert!(
+                    if increasing {
+                        actual >= previous
+                    } else {
+                        actual <= previous
+                    },
+                    "{name} dof={dof} p={probability}: {previous} -> {actual}"
+                );
+                previous = actual;
+            }
+        }
+    }
+}
+
+#[test]
+fn chi_square_upper_tail_switch_selects_mpmath_endpoint() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/chi2_extended_mpmath.json")).unwrap();
+    for case in fixture["equation_switch_roots"].as_array().unwrap() {
+        let p: f64 = case["p"].as_str().unwrap().parse().unwrap();
+        let dof = case["dof"].as_u64().unwrap() as usize;
+        let expected: f64 = case["upper_endpoint"].as_str().unwrap().parse().unwrap();
+        // The public inverse selects the upper adjacent endpoint. These
+        // independent 90-digit roots distinguish that contract from nearest
+        // rounding and from either incorrectly normalized tail equation.
+        assert_eq!(
+            chi2_isf(p, dof).unwrap().to_bits(),
+            expected.to_bits(),
+            "dof={dof} p={p}"
+        );
     }
 }
 

@@ -2192,6 +2192,36 @@ fn no_ephemeris_satellite_is_rejected() {
 /// Duplicate observations for the same satellite are rejected deterministically
 /// (by the smallest repeated id), so the result can never depend on input order.
 #[test]
+fn invalid_rejection_order_is_independent_of_observation_order() {
+    let doc = read_fixture("spp_trace_L0_minimal.json");
+    let mut inputs = solve_inputs(&load_inputs(&doc, "L0_minimal"));
+    let source = sp3();
+    let satellite_id = "G08".parse().unwrap();
+    inputs.observations.push(Observation {
+        satellite_id,
+        pseudorange_m: f64::NAN,
+    });
+    inputs.observations.push(Observation {
+        satellite_id,
+        pseudorange_m: -1.0,
+    });
+    let first = solve(&source, &inputs, false).unwrap();
+    let first_fde = crate::quality::fde_spp(&source, &inputs, false, &Default::default()).unwrap();
+    inputs.observations.reverse();
+    assert_eq!(
+        format!("{:?}", solve(&source, &inputs, false).unwrap()),
+        format!("{first:?}")
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            crate::quality::fde_spp(&source, &inputs, false, &Default::default()).unwrap()
+        ),
+        format!("{first_fde:?}")
+    );
+}
+
+#[test]
 fn invalid_duplicate_is_rejected_before_duplicate_validation() {
     let doc = read_fixture("spp_trace_L0_minimal.json");
     let mut inputs = load_inputs(&doc, "L0_minimal");

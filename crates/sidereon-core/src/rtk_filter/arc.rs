@@ -4992,10 +4992,33 @@ mod tests {
                         .collect::<Vec<_>>(),
                     vec![&expected["reference"].as_str().unwrap()[1..]; if multi { 2 } else { 1 }]
                 );
-                for (id, &cycles) in &result.solution.final_state.fixed_cycles {
-                    let id = id.replacen('E', "G", 1);
-                    assert_eq!(cycles, expected["expected"][id]["cycles"].as_i64().unwrap());
-                }
+                // The synthetic carrier's original-reference integers are
+                // [0,2,6,5,8,9]; a reference change subtracts its integer.
+                let original = [0_i64, 2, 6, 5, 8, 9];
+                let reference_index = if end == 2 { 3 } else { 0 };
+                let expected_holds: BTreeMap<_, _> =
+                    (if multi { vec!['E', 'G'] } else { vec!['G'] })
+                        .into_iter()
+                        .flat_map(|system| {
+                            original
+                                .into_iter()
+                                .enumerate()
+                                .filter(move |(index, _)| *index != reference_index)
+                                .map(move |(index, integer)| {
+                                    (
+                                        format!("{system}{:02}", index + 1),
+                                        integer - original[reference_index],
+                                    )
+                                })
+                        })
+                        .collect();
+                assert!(!result.solution.final_state.fixed_cycles.is_empty());
+                assert!(result
+                    .solution
+                    .epochs
+                    .iter()
+                    .all(|epoch| epoch.released_holds.is_empty()));
+                assert_eq!(result.solution.final_state.fixed_cycles, expected_holds);
             }
         }
     }
@@ -5067,6 +5090,20 @@ mod tests {
             .released_holds
             .iter()
             .all(|hold| hold.reason == RtkHoldReleaseReason::UnheldReference));
+        let original = [0_i64, 2, 6, 5, 8, 9];
+        let reference_index = new_reference[1..].parse::<usize>().unwrap() - 1;
+        let expected: BTreeMap<_, _> = original
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| *index != 0 && *index != reference_index)
+            .map(|(index, integer)| {
+                (
+                    format!("G{:02}", index + 1),
+                    integer - original[reference_index],
+                )
+            })
+            .collect();
+        assert_eq!(changed.final_state.fixed_cycles, expected);
     }
 
     #[test]

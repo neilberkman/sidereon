@@ -226,6 +226,15 @@ def main():
         row["log_small_tail_or_bound"] = mp.nstr(mp.mpf(row["log_small_tail_or_bound"]), 30)
         row.pop("quadrature_log_tail_error_bound", None)
     cells = set()
+    accuracy_cells = set()
+    for x, dof, lam in ((1668.8015748023622, 64, 30.0),
+                        (1918.8543819998317, 100, 30.0),
+                        (459.5489420922293, 3, 30.0),
+                        (114549.90774876345, 100000, 1000.0),
+                        (38589.46638440411, 30000, 1000.0)):
+        accuracy_cells.update((dof, repr(value), repr(lam)) for value in
+                             (math.nextafter(x, 0.0), x, math.nextafter(x, math.inf)))
+    cells.update(accuracy_cells)
     for dof in DOFS:
         for lam in LAMBDAS:
             xs = {1e-40, 1e-30, 1e-20, 1e-10, 1e-6, 0.01, 1.0, 100.0, 1e3, 1e6, 1e9, 1e12,
@@ -317,6 +326,18 @@ def main():
             DEST.write_text(json.dumps(document, indent=2)+"\n")
             print(len(cache), len(cells), key, flush=True)
     document["cases"] = [cache[key] for key in keys]
+    for key, row in zip(keys, document["cases"]):
+        if key in accuracy_cells:
+            row["upper_tail_accuracy_case"] = True
+            dof, x_text, lambda_text = key
+            lam = mp.mpf(float(lambda_text))
+            if lam <= 100:
+                # The conditional Poisson-index moment bounds the weighted
+                # effect of the two binary64 rounds per weight recurrence.
+                x = mp.mpf(float(x_text))
+                moment = lam/2*mp.exp(mixture(x, dof+2, lam, True)
+                                     -mixture(x, dof, lam, True))
+                row["upper_tail_poisson_index_mean"] = mp.nstr(moment, 30)
     DEST.write_text(json.dumps(document, indent=2)+"\n")
 
 
