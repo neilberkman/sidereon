@@ -1232,8 +1232,9 @@ impl TleFile {
 ///
 /// Handles, in a single pass, the common variants: bare 2-line element sets,
 /// 3-line sets (a name line followed by lines 1 and 2), and CelesTrak `0 NAME`
-/// name lines. Blank lines, CRLF endings, and surrounding whitespace are
-/// tolerated. A record that fails is kept out of [`TleFile::satellites`] and
+/// name lines. Lines are split with [`str::lines`] (LF and CRLF), then trimmed;
+/// blank lines and surrounding whitespace are tolerated. A bare CR is not a
+/// delimiter. A record that fails is kept out of [`TleFile::satellites`] and
 /// listed in [`TleFile::rejected`] with its line number and reason; the rest of
 /// the file is still read.
 pub fn parse_tle_file(text: &str) -> TleFile {
@@ -1281,13 +1282,13 @@ pub fn parse_tle_file_with_policy(text: &str, opsmode: OpsMode, policy: tle::Tle
             i += 1;
             continue;
         }
-        if line.starts_with("1 ") {
+        if tle::element_line_label(line) == Some(1) {
             // A line 1: the next non-empty line must be its line 2.
             let mut j = i + 1;
             while j < lines.len() && lines[j].is_empty() {
                 j += 1;
             }
-            if j < lines.len() && lines[j].starts_with("2 ") {
+            if j < lines.len() && tle::element_line_label(lines[j]) == Some(2) {
                 match Satellite::from_tle_with_policy(line, lines[j], opsmode, policy) {
                     Ok((satellite, checksum_warnings)) => {
                         let name = pending_name
@@ -1320,7 +1321,7 @@ pub fn parse_tle_file_with_policy(text: &str, opsmode: OpsMode, policy: tle::Tle
             i += 1;
             continue;
         }
-        if line.starts_with("2 ") {
+        if tle::element_line_label(line) == Some(2) {
             reject_tle_lines(
                 &mut rejected,
                 &mut pending_name,
@@ -1366,6 +1367,82 @@ mod tests {
         RESONANCE_REACH_MINUTES,
     };
     use crate::astro::tle::TlePolicy;
+
+    #[test]
+    fn tle_file_framing_matches_base_corpus() {
+        fn corpus() -> Vec<String> {
+            let fixture = include_str!("../../../tests/fixtures/omm/25544.tle");
+            let lines = fixture.lines().collect::<Vec<_>>();
+            let whitespace = [
+                '\t', '\n', '\u{b}', '\u{c}', '\r', ' ', '\u{85}', '\u{a0}', '\u{1680}',
+                '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}',
+                '\u{2007}', '\u{2008}', '\u{2009}', '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}',
+                '\u{205f}', '\u{3000}',
+            ];
+            let mut bodies = Vec::new();
+            for ending in ["\n", "\r", "\r\n", "\n\r", "\r\r\n"] {
+                for space in whitespace {
+                    for (name, suffix) in [("ISS", ""), ("ISS\rDEB", ""), ("0 ISS", "\rjunk")] {
+                        bodies.push(format!("{space}{name}{space}{ending}{space}{}{suffix}{space}{ending}{space}{}{space}{ending}", lines[1], lines[2]));
+                    }
+                }
+            }
+            bodies
+        }
+        fn signature(file: super::TleFile) -> String {
+            format!(
+                "{:?}\t{:?}",
+                file.satellites
+                    .iter()
+                    .map(|s| (&s.name, s.line_number, &s.checksum_warnings))
+                    .collect::<Vec<_>>(),
+                file.rejected
+                    .iter()
+                    .map(|r| (r.line_number, &r.name, format!("{:?}", r.issue)))
+                    .collect::<Vec<_>>()
+            )
+        }
+
+        let expected = include_str!("../../../tests/fixtures/celestrak/base_file_framing.tsv");
+        let bodies = corpus();
+        assert_eq!(bodies.len(), expected.lines().skip(1).count());
+        for (body, expected) in bodies.iter().zip(expected.lines().skip(1)) {
+            assert_eq!(signature(parse_tle_file(body)), expected, "{body:?}");
+            for line in body.lines().map(str::trim) {
+                let expected = if line.starts_with("1 ") {
+                    Some(1)
+                } else if line.starts_with("2 ") {
+                    Some(2)
+                } else {
+                    None
+                };
+                assert_eq!(crate::astro::tle::element_line_label(line), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn tle_file_preserves_standard_lines_and_trim_framing() {
+        let fixture = include_str!("../../../tests/fixtures/omm/25544.tle");
+        let lines = fixture.lines().collect::<Vec<_>>();
+        // Expected framing follows the reader at 39e5f3d67866c24f08b01d51db7fc09b0d06cd88:
+        // str::lines, then str::trim; an embedded bare CR is not a delimiter.
+        for (body, name, line_number) in [
+            (format!("{}\rjunk\n{}\n", lines[1], lines[2]), "", 1),
+            (
+                format!("ISS\rDEB\n{}\n{}\n", lines[1], lines[2]),
+                "ISS\rDEB",
+                2,
+            ),
+            (fixture.replace('\n', "\r\r\n"), lines[0].trim(), 2),
+        ] {
+            let file = parse_tle_file(&body);
+            assert!(file.rejected.is_empty(), "{body:?}: {:?}", file.rejected);
+            assert_eq!(file.satellites.len(), 1);
+            assert_eq!(file.satellites[0].name, name);
+            assert_eq!(file.satellites[0].line_number, line_number);
+        }
+    }
 
     /// A TLE carrying a multibyte character inside a fixed-width column must
     /// return a typed [`Error::InvalidTle`] rather than panicking. The field

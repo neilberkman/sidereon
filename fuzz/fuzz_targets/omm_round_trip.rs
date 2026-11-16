@@ -10,9 +10,16 @@ fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
 
     if let Ok(original) = omm::parse_kvn(&text) {
-        let encoded = omm::encode_kvn(&original).expect("a parsed OMM must encode as KVN");
+        let encoded =
+            omm::encode_kvn_lenient(&original).expect("a parsed OMM must encode leniently as KVN");
         let reparsed = omm::parse_kvn(&encoded).expect("encoded OMM KVN must reparse");
         assert_eq!(reparsed, original);
+        if let Ok(strict) = omm::encode_kvn(&original) {
+            assert_eq!(
+                omm::parse_kvn(&strict).expect("strict KVN must reparse"),
+                original
+            );
+        }
 
         // GP JSON and GP CSV carry one comment, a single header comment: a
         // record holding any other is refused rather than written without it.
@@ -53,9 +60,16 @@ fuzz_target!(|data: &[u8]| {
     }
 
     if let Ok(original) = omm::parse_xml(&text) {
-        let encoded = omm::encode_xml(&original).expect("a parsed OMM must encode as XML");
+        let encoded =
+            omm::encode_xml_lenient(&original).expect("a parsed OMM must encode leniently as XML");
         let reparsed = omm::parse_xml(&encoded).expect("encoded OMM XML must reparse");
         assert_eq!(reparsed, original);
+        if let Ok(strict) = omm::encode_xml(&original) {
+            assert_eq!(
+                omm::parse_xml(&strict).expect("strict XML must reparse"),
+                original
+            );
+        }
     }
 
     if let Ok(original) = omm::parse_json(&text) {

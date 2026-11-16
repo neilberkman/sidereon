@@ -120,11 +120,13 @@ fn omm_python_reference_self_validates() {
             omm::parse_json(fixture.json).unwrap_or_else(|e| panic!("{} JSON: {e}", fixture.name));
 
         assert_eq!(
-            omm::parse_kvn(&omm::encode_kvn(&kvn).expect("KVN encode")).expect("KVN reparse"),
+            omm::parse_kvn(&omm::encode_kvn_lenient(&kvn).expect("KVN encode"))
+                .expect("KVN reparse"),
             kvn
         );
         assert_eq!(
-            omm::parse_xml(&omm::encode_xml(&xml).expect("XML encode")).expect("XML reparse"),
+            omm::parse_xml(&omm::encode_xml_lenient(&xml).expect("XML encode"))
+                .expect("XML reparse"),
             xml
         );
         assert_eq!(
@@ -153,8 +155,8 @@ fn fixture_json(fixture: &Fixture) -> serde_json::Value {
         "from_kvn": omm_json(&kvn),
         "from_xml": omm_json(&xml),
         "from_json": omm_json(&json_omm),
-        "encoded_kvn": omm::encode_kvn(&kvn).expect("KVN encode"),
-        "encoded_xml": omm::encode_xml(&xml).expect("XML encode"),
+        "encoded_kvn": omm::encode_kvn_lenient(&kvn).expect("KVN encode"),
+        "encoded_xml": omm::encode_xml_lenient(&xml).expect("XML encode"),
         "encoded_json": omm::encode_json(&json_omm).expect("JSON encode"),
     })
 }

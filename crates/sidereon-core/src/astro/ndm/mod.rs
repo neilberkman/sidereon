@@ -41,7 +41,8 @@ pub(crate) use epoch::NdmEpoch;
 pub(crate) use header::NdmHeader;
 /// Re-export the shared KVN line classifier and unit helpers.
 pub(crate) use kvn::{
-    check_unit, classify, expected_unit_label, kvn_lines, split_unit, KvnLine, UnitMismatch,
+    check_unit, classify, expected_unit_label, kvn_lines, physical_lines, source_line_number,
+    split_unit, KvnLine, PhysicalLine, UnitMismatch,
 };
 /// Re-export the scoped NDM/XML element helpers.
 pub(crate) use xml_tree::{

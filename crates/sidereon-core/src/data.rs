@@ -16,6 +16,9 @@ use crate::astro::time::civil::{civil_from_julian_day_number, day_of_year_int, d
 use crate::astro::time::gnss::{week_epoch_julian_day_number, week_from_calendar};
 use crate::astro::time::model::TimeScale;
 use crate::astro::time::scales::julian_day_number;
+use crate::astro::{omm, tle};
+use crate::constellation::celestrak_group;
+use crate::id::GnssSystem;
 use crate::terrain;
 
 // invariant: GPST is one of the built-in time scales and always has a week epoch.
@@ -582,6 +585,219 @@ pub struct SpaceWeatherSourceEntry {
     pub compression: ArchiveCompression,
     /// Archive root URL without trailing slash.
     pub root_url: &'static str,
+}
+
+/// Static catalog entry for CelesTrak general-perturbations element sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CelestrakGpSourceEntry {
+    /// Source URI scheme.
+    pub protocol: ArchiveProtocol,
+    /// Source host.
+    pub host: &'static str,
+    /// `gp.php` endpoint URL.
+    pub root_url: &'static str,
+}
+
+/// Static catalog entry for NAVCEN's GPS constellation-status page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NavcenSourceEntry {
+    /// Source URI scheme.
+    pub protocol: ArchiveProtocol,
+    /// Source host.
+    pub host: &'static str,
+    /// Page URL, checked 2026-11-15.
+    pub root_url: &'static str,
+}
+
+/// A selector accepted by CelesTrak's `gp.php` endpoint.
+///
+/// Parameter names and validity rules follow
+/// <https://celestrak.org/NORAD/documentation/gp-data-formats.php>.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CelestrakGpQuery<'a> {
+    /// A group from CelesTrak's current-data page (`GROUP`).
+    Group(&'a str),
+    /// A decimal catalog number from 1 through 999,999,999 (`CATNR`).
+    CatalogNumber(u32),
+    /// A launch designator in `yyyy-nnn` form (`INTDES`).
+    InternationalDesignator(&'a str),
+    /// A non-empty, partial satellite-name match (`NAME`).
+    Name(&'a str),
+    /// One of CelesTrak's named special data sets (`SPECIAL`).
+    Special(CelestrakGpSpecial),
+}
+
+/// A value accepted by CelesTrak's `SPECIAL` GP selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CelestrakGpSpecial {
+    /// GEO Protected Zone.
+    Gpz,
+    /// GEO Protected Zone Plus.
+    GpzPlus,
+    /// Potential decays.
+    Decaying,
+}
+
+/// A `FORMAT` value accepted by CelesTrak's `gp.php` endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CelestrakGpFormat {
+    /// CelesTrak `TLE`: three lines with an unprefixed satellite name on line 0.
+    Tle,
+    /// CelesTrak `3LE`: three lines with `0 ` before the satellite name on line 0.
+    ThreeLine,
+    /// Two-line element sets without the satellite name.
+    TwoLine,
+    /// CCSDS OMM XML.
+    Xml,
+    /// CCSDS OMM keyword-value notation.
+    Kvn,
+    /// Compact OMM JSON.
+    Json,
+    /// Pretty-printed OMM JSON.
+    JsonPretty,
+    /// OMM CSV.
+    Csv,
+}
+
+/// Parsed records and individually rejected records from one GP response.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CelestrakGpResponse {
+    /// Valid source records, in source order among valid records.
+    pub records: Vec<CelestrakGpRecord>,
+    /// Records that could not be parsed or validated.
+    pub rejected: Vec<CelestrakGpRejectedRecord>,
+}
+
+/// One valid record from a CelesTrak GP response.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CelestrakGpRecord {
+    /// One-based ordinal position, counting accepted and rejected records.
+    pub record_index: usize,
+    /// One-based absolute line of the first non-ignored record content:
+    /// the TLE name or line 1, first nonblank KVN line (including a comment),
+    /// XML `omm` opening tag, JSON value, or CSV data row.
+    pub line_number: Option<usize>,
+    /// Exact UTF-8 source bytes assigned to this record.
+    ///
+    /// A leading UTF-8 byte-order mark is response syntax and is not assigned
+    /// to a record. In TLE formats, whitespace preceding a record is assigned
+    /// to it, except that whitespace ending a rejected run stays in that
+    /// rejection. Trailing whitespace belongs to the final record or rejection.
+    pub raw: String,
+    /// Satellite name carried by a TLE/3LE name line or OMM `OBJECT_NAME`.
+    /// TLE names are trimmed at both ends; whitespace-only lines are skipped.
+    pub object_name: Option<String>,
+    /// Format-native payload used for conversion and propagation.
+    pub payload: CelestrakGpPayload,
+}
+
+/// Format-native payload of a valid CelesTrak GP record.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CelestrakGpPayload {
+    /// A two-line element set, retaining its source lines and checksum findings.
+    Tle(Box<CelestrakTleRecord>),
+    /// A canonical CCSDS orbit mean-elements message.
+    Omm(Box<omm::Omm>),
+}
+
+/// Parsed TLE data retained by a CelesTrak GP response record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CelestrakTleRecord {
+    /// Parsed fixed-column fields.
+    pub elements: tle::TleElements,
+    /// Element line 1 exactly as received, excluding its line ending.
+    pub line1: String,
+    /// Element line 2 exactly as received, excluding its line ending.
+    pub line2: String,
+    /// Checksum findings accepted by the TLE reader.
+    pub checksum_warnings: Vec<tle::ChecksumWarning>,
+}
+
+/// Failure converting a valid CelesTrak record into another orbital form.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CelestrakGpRecordError {
+    /// TLE conversion failed.
+    Tle(tle::TleError),
+    /// OMM-to-SGP4 conversion failed.
+    Omm(omm::OmmError),
+}
+
+impl CelestrakGpRecord {
+    /// Convert through the payload's native SGP4 path.
+    ///
+    /// TLE payloads use their parsed fixed-column values directly and are
+    /// therefore bit-identical to initializing from the same two source lines.
+    /// OMM payloads use [`omm::Omm::to_element_set`].
+    pub fn to_element_set(&self) -> Result<crate::astro::sgp4::ElementSet, CelestrakGpRecordError> {
+        match &self.payload {
+            CelestrakGpPayload::Tle(record) => record
+                .elements
+                .to_element_set()
+                .map_err(CelestrakGpRecordError::Tle),
+            CelestrakGpPayload::Omm(record) => {
+                record.to_element_set().map_err(CelestrakGpRecordError::Omm)
+            }
+        }
+    }
+
+    /// Convert this record to the canonical OMM representation.
+    ///
+    /// A TLE-to-OMM conversion is an ordinary OMM conversion. Its later SGP4
+    /// initialization follows the OMM path, whose decimal representation can
+    /// differ from direct TLE initialization in the last floating-point bit.
+    pub fn to_omm(&self) -> Result<omm::Omm, CelestrakGpRecordError> {
+        match &self.payload {
+            CelestrakGpPayload::Tle(record) => {
+                omm::Omm::from_tle(&record.elements, self.object_name.clone())
+                    .map_err(CelestrakGpRecordError::Tle)
+            }
+            CelestrakGpPayload::Omm(record) => Ok(record.as_ref().clone()),
+        }
+    }
+}
+
+/// One GP response record that could not be parsed or validated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CelestrakGpRejectedRecord {
+    /// One-based ordinal position in the response, counting accepted records
+    /// and each rejected run or record alike.
+    pub record_index: usize,
+    /// One-based absolute source line. TLE parse errors and located KVN errors
+    /// name the offending physical line. TLE element-validation errors name
+    /// line 1. Whole-record KVN and framing errors name the first nonblank line
+    /// of the raw text. XML, JSON, and CSV record errors name the parser's
+    /// record start (excluding container syntax and the CSV header).
+    /// Formats without line locations use `None`.
+    pub line_number: Option<usize>,
+    /// Typed source or structural error describing the rejection.
+    pub reason: CelestrakGpRejectionReason,
+    /// Exact byte slice of the UTF-8 response assigned to this rejected record.
+    /// A leading UTF-8 byte-order mark is response syntax and is not assigned.
+    pub raw: String,
+}
+
+/// Why an individual CelesTrak GP record was rejected.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CelestrakGpRejectionReason {
+    /// The fixed-column TLE reader rejected the record.
+    Tle(tle::TleError),
+    /// The canonical OMM reader rejected the record.
+    Omm(omm::OmmError),
+    /// The response did not follow the requested multi-record framing.
+    Structural(CelestrakGpStructuralError),
+}
+
+/// A framing or element-set-validation failure outside an individual format reader.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CelestrakGpStructuralError {
+    /// Text occurred where no record can begin.
+    UnexpectedContent,
+    /// A record ended before all of its required lines were present.
+    IncompleteRecord,
+    /// A TLE line appeared in the wrong structural position.
+    InvalidTleStructure,
+    /// The parsed record could not initialize the SGP4 model.
+    InvalidElementSet(crate::astro::sgp4::Error),
 }
 
 /// Product pair that is intentionally not offered because no open mirror exists.
@@ -1289,7 +1505,19 @@ const CELESTRAK_SPACE_WEATHER_SOURCE: SpaceWeatherSourceEntry = SpaceWeatherSour
     root_url: "https://celestrak.org/SpaceData",
 };
 
-const ALLOWED_HOSTS: [&str; 11] = [
+const CELESTRAK_GP_SOURCE: CelestrakGpSourceEntry = CelestrakGpSourceEntry {
+    protocol: ArchiveProtocol::Https,
+    host: "celestrak.org",
+    root_url: "https://celestrak.org/NORAD/elements/gp.php",
+};
+
+const NAVCEN_SOURCE: NavcenSourceEntry = NavcenSourceEntry {
+    protocol: ArchiveProtocol::Https,
+    host: "www.navcen.uscg.gov",
+    root_url: "https://www.navcen.uscg.gov/gps-constellation",
+};
+
+const ALLOWED_HOSTS: [&str; 12] = [
     "www.aiub.unibe.ch",
     "download.aiub.unibe.ch",
     "zhw-b.s3.cloud.switch.ch",
@@ -1301,6 +1529,7 @@ const ALLOWED_HOSTS: [&str; 11] = [
     "celestrak.org",
     "cddis.nasa.gov",
     "urs.earthdata.nasa.gov",
+    "www.navcen.uscg.gov",
 ];
 
 const NO_OPEN_MIRRORS: [NoOpenMirrorProduct; 7] = [
@@ -1337,6 +1566,35 @@ const NO_OPEN_MIRRORS: [NoOpenMirrorProduct; 7] = [
 /// Error returned by the pure data-product catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataCatalogError {
+    /// A CelesTrak GP selector value is outside its documented grammar.
+    InvalidCelestrakGpSelector {
+        /// Upper-case query parameter name.
+        selector: &'static str,
+        /// Rejected value.
+        value: String,
+    },
+    /// A fetched CelesTrak GP response body was empty.
+    EmptyCelestrakGpResponse,
+    /// CelesTrak returned its plain-text no-results response.
+    CelestrakGpDataNotFound,
+    /// CelesTrak refused a repeated download before its GP data changed.
+    CelestrakGpNotModified {
+        /// Query stated by the response, such as `GROUP=active`.
+        query: Option<String>,
+        /// UTC time stated for the last successful download.
+        last_successful_download: Option<String>,
+    },
+    /// A fetched CelesTrak GP response was an HTML page, not element data.
+    CelestrakGpHtmlResponse,
+    /// Element data did not parse completely in the requested format.
+    InvalidCelestrakGpResponse {
+        /// Parser validation detail.
+        reason: String,
+        /// Absolute one-based source line, when the parser reports a position.
+        line: Option<usize>,
+        /// One-based source column, when the parser reports a position.
+        column: Option<usize>,
+    },
     /// Unknown analysis-center code.
     UnknownCenter(String),
     /// Unknown product type code.
@@ -1489,6 +1747,41 @@ pub enum DataCatalogError {
 impl fmt::Display for DataCatalogError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidCelestrakGpSelector { selector, value } => {
+                write!(f, "invalid CelesTrak GP {selector} selector {value:?}")
+            }
+            Self::EmptyCelestrakGpResponse => write!(f, "empty CelesTrak GP response"),
+            Self::CelestrakGpDataNotFound => write!(f, "CelesTrak found no GP data"),
+            Self::CelestrakGpNotModified {
+                query,
+                last_successful_download,
+            } => write!(
+                f,
+                "CelesTrak GP data has not changed since the last successful download{}{}",
+                query
+                    .as_ref()
+                    .map(|value| format!(" of {value}"))
+                    .unwrap_or_default(),
+                last_successful_download
+                    .as_ref()
+                    .map(|value| format!(" at {value}"))
+                    .unwrap_or_default()
+            ),
+            Self::CelestrakGpHtmlResponse => write!(f, "CelesTrak GP response is HTML"),
+            Self::InvalidCelestrakGpResponse {
+                reason,
+                line,
+                column,
+            } => {
+                write!(f, "invalid CelesTrak GP response")?;
+                if let Some(line) = line {
+                    write!(f, " at line {line}")?;
+                    if let Some(column) = column {
+                        write!(f, ", column {column}")?;
+                    }
+                }
+                write!(f, ": {reason}")
+            }
             Self::UnknownCenter(center) => write!(f, "unknown analysis center {center:?}"),
             Self::UnknownProductType(product_type) => {
                 write!(f, "unknown product type {product_type:?}")
@@ -2677,6 +2970,796 @@ pub const fn skadi_source_entry() -> TerrainSourceEntry {
 #[must_use]
 pub const fn space_weather_source_entry() -> SpaceWeatherSourceEntry {
     CELESTRAK_SPACE_WEATHER_SOURCE
+}
+
+/// Catalog entry for CelesTrak's general-perturbations query endpoint.
+#[must_use]
+pub const fn celestrak_gp_source_entry() -> CelestrakGpSourceEntry {
+    CELESTRAK_GP_SOURCE
+}
+
+/// Catalog entry for NAVCEN's GPS constellation-status page.
+#[must_use]
+pub const fn navcen_source_entry() -> NavcenSourceEntry {
+    NAVCEN_SOURCE
+}
+
+/// Return NAVCEN's GPS constellation-status page URL.
+#[must_use]
+pub const fn navcen_constellation_url() -> &'static str {
+    NAVCEN_SOURCE.root_url
+}
+
+impl CelestrakGpSpecial {
+    /// The exact `SPECIAL` value used by CelesTrak.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gpz => "GPZ",
+            Self::GpzPlus => "GPZ-PLUS",
+            Self::Decaying => "DECAYING",
+        }
+    }
+}
+
+impl CelestrakGpFormat {
+    /// The exact `FORMAT` value used by CelesTrak.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tle => "TLE",
+            Self::ThreeLine => "3LE",
+            Self::TwoLine => "2LE",
+            Self::Xml => "XML",
+            Self::Kvn => "KVN",
+            Self::Json => "JSON",
+            Self::JsonPretty => "JSON-PRETTY",
+            Self::Csv => "CSV",
+        }
+    }
+}
+
+/// Build a documented CelesTrak `gp.php` query URL.
+///
+/// The query and format names follow
+/// <https://celestrak.org/NORAD/documentation/gp-data-formats.php>. `NAME` is
+/// UTF-8 percent-encoded; the other selector grammars are validated before a
+/// URL is produced.
+pub fn celestrak_gp_url(
+    query: CelestrakGpQuery<'_>,
+    format: CelestrakGpFormat,
+) -> Result<String, DataCatalogError> {
+    let (parameter, value) = match query {
+        CelestrakGpQuery::Group(group) => {
+            if group.is_empty()
+                || !group
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Err(invalid_gp_selector("GROUP", group));
+            }
+            ("GROUP", group.to_string())
+        }
+        CelestrakGpQuery::CatalogNumber(number) => {
+            if !(1..=999_999_999).contains(&number) {
+                return Err(invalid_gp_selector("CATNR", &number.to_string()));
+            }
+            ("CATNR", number.to_string())
+        }
+        CelestrakGpQuery::InternationalDesignator(designator) => {
+            let bytes = designator.as_bytes();
+            if bytes.len() != 8
+                || !bytes[..4].iter().all(u8::is_ascii_digit)
+                || bytes[4] != b'-'
+                || !bytes[5..].iter().all(u8::is_ascii_digit)
+            {
+                return Err(invalid_gp_selector("INTDES", designator));
+            }
+            ("INTDES", designator.to_string())
+        }
+        CelestrakGpQuery::Name(name) => {
+            if name.trim().is_empty() || name.chars().any(char::is_control) {
+                return Err(invalid_gp_selector("NAME", name));
+            }
+            ("NAME", percent_encode_query_value(name))
+        }
+        CelestrakGpQuery::Special(special) => ("SPECIAL", special.as_str().to_string()),
+    };
+    Ok(format!(
+        "{}?{parameter}={value}&FORMAT={}",
+        CELESTRAK_GP_SOURCE.root_url,
+        format.as_str()
+    ))
+}
+
+/// Build the CelesTrak feed URL used as the identity base for a GNSS system.
+///
+/// QZSS and NavIC have no dedicated GP groups and therefore use the combined
+/// `gnss` group; callers filter that response to the requested system. SBAS
+/// uses its dedicated `sbas` group.
+pub fn celestrak_constellation_url(
+    system: GnssSystem,
+    format: CelestrakGpFormat,
+) -> Result<String, DataCatalogError> {
+    celestrak_gp_url(CelestrakGpQuery::Group(celestrak_group(system)), format)
+}
+
+/// Parse and validate bytes returned by CelesTrak for a requested GP format.
+///
+/// Empty bodies, CelesTrak's documented no-data and repeat-download responses,
+/// and HTML pages are typed response errors. Individual malformed records or
+/// records that cannot initialize SGP4 are returned in
+/// [`CelestrakGpResponse::rejected`] without discarding valid records. All
+/// TLE formats retain their parsed fixed-column payload, source lines and
+/// checksum findings; OMM formats retain the canonical [`omm::Omm`]. Callers
+/// can derive either an element set or an OMM from [`CelestrakGpRecord`].
+///
+/// The three TLE formats compare trimmed lines and skip whitespace-only lines,
+/// like the crate's TLE-file reader. Here physical lines end at CR, LF, CRLF,
+/// or LFCR, whereas that reader uses [`str::lines`]; physical line numbers
+/// therefore need not agree when bare CRs occur. A bare CR embedded in a
+/// file-reader name also separates name lines here. For files with equivalent
+/// logical lines, accepted satellites and names agree (except that only `3LE`
+/// strips `0 ` here). Whitespace-only
+/// lines are skipped everywhere. Whitespace is included in the following
+/// record's `raw`, except that whitespace at the end of a rejected run stays
+/// in that rejection. Trailing whitespace belongs to the final record or
+/// rejection, so all response bytes except an optional leading UTF-8 BOM are
+/// accounted for exactly once. `2LE` records are line-1/line-2 pairs. `TLE`
+/// records have an optional unprefixed, trimmed name followed by that pair.
+/// A line starting with `1 ` or `2 ` after trimming is never consumed as a
+/// name, including a line with invalid fields or a bad checksum.
+/// A whitespace-only name is skipped rather than consuming the name slot.
+/// `3LE` requires a name line equal to `0` or beginning with `0 `; only this
+/// format strips that prefix, and `0` or `0 ` gives an absent name. Recovery
+/// resumes only
+/// at a complete format-shaped record whose element pair parses, has matching
+/// catalog numbers, and satisfies the checksum policy. Every line between the
+/// failed position and that record is one rejection; an incomplete final run
+/// is one rejection through the end of the response.
+///
+/// KVN comments and adjacent blank lines before a version keyword belong to
+/// the following message; trailing comments belong to the last message. A
+/// headerless message has no unambiguous delimiter, so consecutive headerless
+/// messages are parsed as the single message the underlying KVN grammar sees.
+///
+/// If no record is accepted, the body must still contain a record structure:
+/// a consecutive nonblank line-1/line-2 attempt with the TLE reader's minimum
+/// trimmed lengths (64 and 68 bytes) for TLE formats; a mandatory OMM keyword for KVN; an object
+/// with any OMM key for JSON; any OMM header column for CSV; or an `omm`
+/// element under an `omm`/`ndm` XML root. Otherwise the response is
+/// [`DataCatalogError::InvalidCelestrakGpResponse`] with a body excerpt.
+/// An empty, well-formed JSON array or XML `ndm` container, like a header-only
+/// OMM CSV table, returns [`DataCatalogError::CelestrakGpDataNotFound`].
+pub fn parse_celestrak_gp_response(
+    bytes: &[u8],
+    format: CelestrakGpFormat,
+) -> Result<CelestrakGpResponse, DataCatalogError> {
+    let text = core::str::from_utf8(bytes).map_err(invalid_gp_response)?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(DataCatalogError::EmptyCelestrakGpResponse);
+    }
+    if trimmed.starts_with("No GP data found") {
+        return Err(DataCatalogError::CelestrakGpDataNotFound);
+    }
+    if let Some(error) = parse_gp_not_modified(trimmed) {
+        return Err(error);
+    }
+    let lowercase = trimmed
+        .get(..trimmed.len().min(256))
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase();
+    if lowercase.starts_with("<!doctype html") || lowercase.starts_with("<html") {
+        return Err(DataCatalogError::CelestrakGpHtmlResponse);
+    }
+
+    let empty = || CelestrakGpResponse {
+        records: Vec::new(),
+        rejected: Vec::new(),
+    };
+    let (response, recognizable) = match format {
+        CelestrakGpFormat::Tle | CelestrakGpFormat::ThreeLine | CelestrakGpFormat::TwoLine => {
+            let lines = source_lines(text)
+                .into_iter()
+                .filter(|line| !line.text.trim().is_empty())
+                .collect::<Vec<_>>();
+            let recognizable = lines.windows(2).any(|pair| {
+                tle::element_line_label(pair[0].text) == Some(1)
+                    && tle::element_line_label(pair[1].text) == Some(2)
+                    && pair[0].text.trim().len() >= tle::LINE1_MIN_LEN
+                    && pair[1].text.trim().len() >= tle::LINE2_MIN_LEN
+            });
+            (parse_gp_tles(text, format), recognizable)
+        }
+        CelestrakGpFormat::Xml => {
+            let byte_offset = text.len() - text.trim_start().len();
+            match omm::parse_xml_all_omm_document(trimmed)
+                .map_err(|error| invalid_gp_response_at(error, text, byte_offset))?
+            {
+                Some(parsed) => (omm_array_response(Ok(parsed), text, byte_offset)?, true),
+                None => (empty(), false),
+            }
+        }
+        CelestrakGpFormat::Kvn => {
+            let recognizable = source_lines(text).iter().any(|line| matches!(
+                crate::astro::ndm::classify(line.text),
+                crate::astro::ndm::KvnLine::Assignment { key, .. } if omm::is_mandatory_omm_keyword(key)));
+            (parse_gp_kvn(text), recognizable)
+        }
+        CelestrakGpFormat::Json | CelestrakGpFormat::JsonPretty => {
+            let (parsed, recognizable) = omm::parse_json_array_with_structure(text)
+                .map_err(|error| invalid_gp_response_at(error, text, 0))?;
+            let recognizable = recognizable || parsed.spans.is_empty();
+            (omm_array_response(Ok(parsed), text, 0)?, recognizable)
+        }
+        CelestrakGpFormat::Csv => {
+            let recognizable = is_gp_csv_document(trimmed);
+            let response = if recognizable {
+                omm_array_response(
+                    omm::parse_csv_array(trimmed),
+                    text,
+                    text.len() - text.trim_start().len(),
+                )?
+            } else {
+                empty()
+            };
+            (response, recognizable)
+        }
+    };
+    response_with_record_or_error(response, text, recognizable)
+}
+
+fn is_gp_csv_document(text: &str) -> bool {
+    let header_end = text
+        .as_bytes()
+        .iter()
+        .position(|byte| matches!(byte, b'\r' | b'\n'))
+        .unwrap_or(text.len());
+    text[..header_end]
+        .split(',')
+        .any(|column| omm::is_omm_keyword(column.trim().trim_matches('"')))
+}
+
+fn parse_gp_not_modified(body: &str) -> Option<DataCatalogError> {
+    let words = body
+        .split_whitespace()
+        .scan(0usize, |search, word| {
+            let relative = body[*search..].find(word)?;
+            let start = *search + relative;
+            *search = start + word.len();
+            Some((start, *search, word))
+        })
+        .collect::<Vec<_>>();
+    const PREFIX: &[&str] = &[
+        "GP",
+        "data",
+        "has",
+        "not",
+        "updated",
+        "since",
+        "your",
+        "last",
+        "successful",
+        "download",
+        "of",
+    ];
+    if words.len() < PREFIX.len()
+        || !words
+            .iter()
+            .zip(PREFIX)
+            .all(|((_, _, actual), expected)| actual == expected)
+    {
+        return None;
+    }
+    let utc = words
+        .iter()
+        .position(|(_, _, word)| *word == "UTC." || *word == "UTC")?;
+    let at = (PREFIX.len()..utc)
+        .rev()
+        .find(|index| words[*index].2 == "at");
+    let (query, time) = at.map_or((None, None), |at| {
+        let query_start = words[PREFIX.len() - 1].1;
+        let query = &body[query_start..words[at].0];
+        let query = query.trim_matches(char::is_whitespace);
+        let time = body[words[at + 1].0..words[utc].1].trim_end_matches('.');
+        (nonempty_owned_exact(query), nonempty_owned_exact(time))
+    });
+    Some(DataCatalogError::CelestrakGpNotModified {
+        query,
+        last_successful_download: time,
+    })
+}
+
+fn nonempty_owned_exact(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn invalid_gp_selector(selector: &'static str, value: &str) -> DataCatalogError {
+    DataCatalogError::InvalidCelestrakGpSelector {
+        selector,
+        value: value.to_string(),
+    }
+}
+
+fn invalid_gp_response(error: impl fmt::Display) -> DataCatalogError {
+    DataCatalogError::InvalidCelestrakGpResponse {
+        reason: error.to_string(),
+        line: None,
+        column: None,
+    }
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
+}
+
+fn omm_array_response(
+    parsed: Result<omm::OmmArray, omm::OmmError>,
+    text: &str,
+    byte_offset: usize,
+) -> Result<CelestrakGpResponse, DataCatalogError> {
+    let array = parsed.map_err(|error| invalid_gp_response_at(error, text, byte_offset))?;
+    let mut skipped = array.skipped.into_iter().peekable();
+    let mut response = CelestrakGpResponse {
+        records: Vec::new(),
+        rejected: Vec::new(),
+    };
+    let spans = array.spans;
+    let mut accepted_spans = Vec::new();
+    for (position, span) in spans.iter().enumerate() {
+        let index = span.index;
+        let record_start = byte_offset + span.byte_start;
+        let start = if position == 0 { 0 } else { record_start };
+        let end = spans
+            .get(position + 1)
+            .map_or(text.len(), |next| byte_offset + next.byte_start);
+        let raw = &text[start..end];
+        let line = omm::source_line_number(text, record_start);
+        if let Some(item) = skipped.next_if(|item| item.index == index) {
+            response.rejected.push(CelestrakGpRejectedRecord {
+                record_index: index + 1,
+                line_number: Some(line),
+                reason: CelestrakGpRejectionReason::Omm(item.reason),
+                raw: raw.to_string(),
+            });
+        } else {
+            accepted_spans.push((index + 1, line, raw));
+        }
+    }
+    // Every parser appends either an OMM or a skipped entry at the same point
+    // that it appends its span, so these two sequences have equal lengths.
+    if accepted_spans.len() != array.omms.len() || skipped.next().is_some() {
+        return Err(invalid_gp_response(
+            "inconsistent OMM records and source spans",
+        ));
+    }
+    for ((record_index, line, raw), record) in accepted_spans.into_iter().zip(array.omms) {
+        match validate_gp_omm(record, record_index, Some(line), raw) {
+            Ok(record) => response.records.push(record),
+            Err(reason) => {
+                response.rejected.push(CelestrakGpRejectedRecord {
+                    record_index,
+                    line_number: Some(line),
+                    reason,
+                    raw: raw.to_string(),
+                });
+            }
+        }
+    }
+    response.rejected.sort_by_key(|record| record.record_index);
+    Ok(response)
+}
+
+fn invalid_gp_response_at(
+    error: omm::OmmError,
+    text: &str,
+    byte_offset: usize,
+) -> DataCatalogError {
+    let excerpt = text.chars().take(160).collect::<String>();
+    let reason = format!("{error}; response excerpt: {excerpt:?}");
+    let position = match error {
+        omm::OmmError::MalformedDocument {
+            byte_offset: Some(relative),
+            ..
+        } => source_position(text, byte_offset.saturating_add(relative)),
+        _ => None,
+    };
+    DataCatalogError::InvalidCelestrakGpResponse {
+        reason,
+        line: position.map(|value| value.0),
+        column: position.map(|value| value.1),
+    }
+}
+
+fn source_position(text: &str, byte_offset: usize) -> Option<(usize, usize)> {
+    if byte_offset > text.len() || !text.is_char_boundary(byte_offset) {
+        return None;
+    }
+    let lines = source_lines(text);
+    let line = lines
+        .iter()
+        .find(|line| byte_offset >= line.start && byte_offset < line.end)
+        .or_else(|| lines.last())?;
+    if byte_offset == text.len() && line.start + line.text.len() < line.end {
+        return Some((line.number + 1, 1));
+    }
+    let content_offset = byte_offset.min(line.start + line.text.len());
+    let column = text[line.start..content_offset].chars().count() + 1;
+    Some((line.number, column))
+}
+
+fn validate_gp_omm(
+    record: omm::Omm,
+    record_index: usize,
+    line_number: Option<usize>,
+    raw: &str,
+) -> Result<CelestrakGpRecord, CelestrakGpRejectionReason> {
+    crate::astro::sgp4::Satellite::from_omm(&record).map_err(|error| {
+        CelestrakGpRejectionReason::Structural(CelestrakGpStructuralError::InvalidElementSet(error))
+    })?;
+    Ok(CelestrakGpRecord {
+        record_index,
+        line_number,
+        raw: raw.to_string(),
+        object_name: record.object_name.clone(),
+        payload: CelestrakGpPayload::Omm(Box::new(record)),
+    })
+}
+
+fn structural_rejection(
+    record_index: usize,
+    line_number: Option<usize>,
+    raw: &str,
+    reason: CelestrakGpStructuralError,
+) -> CelestrakGpRejectedRecord {
+    CelestrakGpRejectedRecord {
+        record_index,
+        line_number,
+        reason: CelestrakGpRejectionReason::Structural(reason),
+        raw: raw.to_string(),
+    }
+}
+
+fn response_with_record_or_error(
+    response: CelestrakGpResponse,
+    body: &str,
+    recognizable: bool,
+) -> Result<CelestrakGpResponse, DataCatalogError> {
+    if recognizable && response.records.is_empty() && response.rejected.is_empty() {
+        Err(DataCatalogError::CelestrakGpDataNotFound)
+    } else if recognizable || !response.records.is_empty() {
+        Ok(response)
+    } else {
+        let excerpt = body.chars().take(160).collect::<String>();
+        Err(invalid_gp_response(format_args!(
+            "response contains no record in the requested format: {excerpt:?}"
+        )))
+    }
+}
+
+fn parse_gp_kvn(text: &str) -> CelestrakGpResponse {
+    let lines = source_lines(text);
+    let significant_start = lines
+        .iter()
+        .position(|line| !line.text.trim().is_empty())
+        .unwrap_or(lines.len());
+    let significant_end = lines
+        .iter()
+        .rposition(|line| !line.text.trim().is_empty())
+        .map_or(significant_start, |index| index + 1);
+    let lines = &lines[significant_start..significant_end];
+    let markers: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            matches!(
+                crate::astro::ndm::classify(line.text),
+                crate::astro::ndm::KvnLine::Assignment {
+                    key: "CCSDS_OMM_VERS",
+                    ..
+                }
+            )
+            .then_some(index)
+        })
+        .collect();
+    let mut response = CelestrakGpResponse {
+        records: Vec::new(),
+        rejected: Vec::new(),
+    };
+    if markers.is_empty() {
+        append_kvn_segment(&mut response, text, 1, 1);
+        return response;
+    }
+    let marker_starts = markers
+        .iter()
+        .map(|marker| {
+            let mut start = *marker;
+            while start > 0 {
+                match crate::astro::ndm::classify(lines[start - 1].text) {
+                    crate::astro::ndm::KvnLine::Blank | crate::astro::ndm::KvnLine::Comment(_) => {
+                        start -= 1
+                    }
+                    _ => break,
+                }
+            }
+            start
+        })
+        .collect::<Vec<_>>();
+    let mut record_index = 1;
+    let first_start = marker_starts[0];
+    if first_start > 0 {
+        let end = lines[first_start].start;
+        append_kvn_segment(&mut response, &text[..end], record_index, 1);
+        record_index += 1;
+    }
+    for position in 0..markers.len() {
+        let segment_line = marker_starts[position];
+        let start = if record_index == 1 && position == 0 {
+            0
+        } else {
+            lines[segment_line].start
+        };
+        let end = marker_starts
+            .get(position + 1)
+            .map_or(text.len(), |next| lines[*next].start);
+        let start_line = crate::astro::ndm::source_line_number(text, start);
+        append_kvn_segment(&mut response, &text[start..end], record_index, start_line);
+        record_index += 1;
+    }
+    response
+}
+
+fn append_kvn_segment(
+    response: &mut CelestrakGpResponse,
+    raw: &str,
+    record_index: usize,
+    start_line: usize,
+) {
+    let first_line = source_lines(raw)
+        .into_iter()
+        .find(|line| !line.text.trim().is_empty())
+        .map_or(start_line, |line| start_line + line.number - 1);
+    match omm::parse_kvn(raw) {
+        Err(reason) => {
+            let line_number = omm_error_line(&reason, raw)
+                .map(|relative| start_line + relative.saturating_sub(1));
+            let line_number = line_number.or(Some(first_line));
+            response.rejected.push(CelestrakGpRejectedRecord {
+                record_index,
+                line_number,
+                reason: CelestrakGpRejectionReason::Omm(reason),
+                raw: raw.to_string(),
+            });
+        }
+        Ok(record) => append_validated_kvn(response, record, record_index, first_line, raw),
+    }
+}
+
+fn append_validated_kvn(
+    response: &mut CelestrakGpResponse,
+    record: omm::Omm,
+    record_index: usize,
+    start_line: usize,
+    raw: &str,
+) {
+    match validate_gp_omm(record, record_index, Some(start_line), raw) {
+        Ok(record) => response.records.push(record),
+        Err(reason) => response.rejected.push(CelestrakGpRejectedRecord {
+            record_index,
+            line_number: Some(start_line),
+            reason,
+            raw: raw.to_string(),
+        }),
+    }
+}
+
+fn parse_gp_tles(text: &str, format: CelestrakGpFormat) -> CelestrakGpResponse {
+    let all = source_lines(text);
+    let lines = all
+        .iter()
+        .filter(|line| !line.text.trim().is_empty())
+        .copied()
+        .collect::<Vec<_>>();
+    let mut response = CelestrakGpResponse {
+        records: Vec::new(),
+        rejected: Vec::new(),
+    };
+    let mut cursor = 0;
+    let mut record_index = 1;
+    let mut segment_start = 0usize;
+    while cursor < lines.len() {
+        let group_size = tle_record_size(&lines, cursor, format);
+        if !tle_record_candidate(&lines, cursor, format, false) {
+            let next = (cursor + 1..lines.len())
+                .find(|index| tle_record_candidate(&lines, *index, format, true))
+                .unwrap_or(lines.len());
+            let end = if next < lines.len() {
+                lines[next].start
+            } else {
+                text.len()
+            };
+            response.rejected.push(structural_rejection(
+                record_index,
+                Some(lines[cursor].number),
+                &text[segment_start..end],
+                if format == CelestrakGpFormat::TwoLine
+                    && lines[cursor..next]
+                        .iter()
+                        .all(|line| tle::element_line_label(line.text).is_none())
+                {
+                    CelestrakGpStructuralError::UnexpectedContent
+                } else if lines.len() - cursor < group_size {
+                    CelestrakGpStructuralError::IncompleteRecord
+                } else {
+                    CelestrakGpStructuralError::InvalidTleStructure
+                },
+            ));
+            record_index += 1;
+            cursor = next;
+            segment_start = end;
+            continue;
+        }
+        let group = &lines[cursor..cursor + group_size];
+        let raw_end = if cursor + group_size == lines.len() {
+            text.len()
+        } else {
+            group[group_size - 1].end
+        };
+        let raw = &text[segment_start..raw_end];
+        let (name, line1, line2, line1_number) = if group_size == 2 {
+            (
+                None,
+                group[0].text.trim(),
+                group[1].text.trim(),
+                group[0].number,
+            )
+        } else {
+            let name_line = group[0].text.trim();
+            let name = if format == CelestrakGpFormat::ThreeLine {
+                name_line
+                    .strip_prefix("0 ")
+                    .or_else(|| (name_line == "0").then_some(""))
+                    .unwrap_or(name_line)
+            } else {
+                name_line
+            };
+            (
+                (!name.trim().is_empty()).then(|| name.trim().to_string()),
+                group[1].text.trim(),
+                group[2].text.trim(),
+                group[1].number,
+            )
+        };
+        let line2_number = group[group_size - 1].number;
+        let parsed = tle::parse(line1, line2);
+        let error_line = parsed.as_ref().err().map_or(line1_number, |error| {
+            if tle::error_line(line1, line2, error) == 2 {
+                line2_number
+            } else {
+                line1_number
+            }
+        });
+        match parsed {
+            Err(reason) => response.rejected.push(CelestrakGpRejectedRecord {
+                record_index,
+                line_number: Some(error_line),
+                reason: CelestrakGpRejectionReason::Tle(reason),
+                raw: raw.to_string(),
+            }),
+            Ok(parsed) => match parsed.elements.to_element_set() {
+                Err(reason) => response.rejected.push(CelestrakGpRejectedRecord {
+                    record_index,
+                    line_number: Some(line1_number),
+                    reason: CelestrakGpRejectionReason::Tle(reason),
+                    raw: raw.to_string(),
+                }),
+                Ok(_) => response.records.push(CelestrakGpRecord {
+                    record_index,
+                    line_number: Some(group[0].number),
+                    raw: raw.to_string(),
+                    object_name: name,
+                    payload: CelestrakGpPayload::Tle(Box::new(CelestrakTleRecord {
+                        elements: parsed.elements,
+                        line1: group[group_size - 2].text.to_string(),
+                        line2: group[group_size - 1].text.to_string(),
+                        checksum_warnings: parsed.checksum_warnings,
+                    })),
+                }),
+            },
+        }
+        record_index += 1;
+        cursor += group_size;
+        segment_start = raw_end;
+    }
+    response
+}
+
+type SourceLine<'a> = crate::astro::ndm::PhysicalLine<'a>;
+
+fn source_lines(text: &str) -> Vec<SourceLine<'_>> {
+    crate::astro::ndm::physical_lines(text)
+}
+
+fn tle_record_candidate(
+    lines: &[SourceLine<'_>],
+    start: usize,
+    format: CelestrakGpFormat,
+    resynchronizing: bool,
+) -> bool {
+    let size = tle_record_size(lines, start, format);
+    if start + size > lines.len() {
+        return false;
+    }
+    if size == 3 {
+        let name = lines[start].text.trim();
+        if format == CelestrakGpFormat::ThreeLine && !(name == "0" || name.starts_with("0 ")) {
+            return false;
+        }
+        if tle::element_line_label(name).is_some() {
+            return false;
+        }
+    }
+    let line1 = lines[start + size - 2].text.trim();
+    let line2 = lines[start + size - 1].text.trim();
+    let structural = line1.starts_with("1 ")
+        && line2.starts_with("2 ")
+        && line1.get(2..7).is_some()
+        && line1.get(2..7) == line2.get(2..7);
+    structural && (!resynchronizing || tle::parse(line1, line2).is_ok())
+}
+
+fn tle_record_size(lines: &[SourceLine<'_>], start: usize, format: CelestrakGpFormat) -> usize {
+    if format == CelestrakGpFormat::TwoLine
+        || (format == CelestrakGpFormat::Tle
+            && tle::element_line_label(lines[start].text) == Some(1))
+    {
+        2
+    } else {
+        3
+    }
+}
+
+fn omm_error_line(error: &omm::OmmError, raw: &str) -> Option<usize> {
+    match error {
+        omm::OmmError::MalformedLine { line, .. } => Some(*line),
+        omm::OmmError::InvalidField {
+            field: "civil datetime",
+            ..
+        } => kvn_field_line(raw, "EPOCH", false),
+        omm::OmmError::InvalidField { field, .. } => kvn_field_line(raw, field, false),
+        omm::OmmError::DuplicateField { field, .. } => kvn_field_line(raw, field, true),
+        omm::OmmError::UnitMismatch { field, .. } => kvn_field_line(raw, field, false),
+        omm::OmmError::Epoch(_) => kvn_field_line(raw, "EPOCH", false),
+        _ => None,
+    }
+}
+
+fn kvn_field_line(raw: &str, field: &str, last: bool) -> Option<usize> {
+    let mut matches = source_lines(raw).into_iter().filter_map(|line| {
+        line.text
+            .trim_start()
+            .strip_prefix(field)
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+            .then_some(line.number)
+    });
+    if last {
+        matches.next_back()
+    } else {
+        matches.next()
+    }
 }
 
 /// Filename for a CelesTrak space-weather product.
@@ -4919,6 +6002,16 @@ fn product_date_from_jdn(jdn: i64) -> Result<ProductDate, DataCatalogError> {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod content_start_tests {
     use super::*;
+
+    #[test]
+    fn gp_array_response_refuses_inconsistent_spans() {
+        let mut array =
+            omm::parse_json_array(include_str!("../tests/fixtures/omm/24876.json")).unwrap();
+        array.spans.clear();
+        assert!(matches!(omm_array_response(Ok(array), "[]", 0),
+            Err(DataCatalogError::InvalidCelestrakGpResponse { reason, .. })
+                if reason == "inconsistent OMM records and source spans"));
+    }
 
     const GFZ_ISSUES: [&str; 8] = [
         "0000", "0300", "0600", "0900", "1200", "1500", "1800", "2100",

@@ -1,0 +1,8 @@
+<!-- Source: https://web.archive.org/web/20250604153640id_/https://celestrak.org/NORAD/elements/ -->
+<!-- Snapshot: 2025-06-04 15:36:40 UTC -->
+	  <tr><td colspan=2 align=center>GNSS <a title="TLE Data" href="gp.php?GROUP=gnss&FORMAT=tle"><i class="fal fa-file-alt"></i></a> <a title="Table" href="table.php?GROUP=gnss&FORMAT=tle"><i class="fal fa-table"></i></a></td></tr>
+	  <tr><td align=center width=50%>GPS Operational <a title="TLE Data" href="gp.php?GROUP=gps-ops&FORMAT=tle"><i class="fal fa-file-alt"></i></a> <a title="Table" href="table.php?GROUP=gps-ops&FORMAT=tle"><i class="fal fa-table"></i></a></td>
+	<td align=center width=50%>GLONASS Operational <a title="TLE Data" href="gp.php?GROUP=glo-ops&FORMAT=tle"><i class="fal fa-file-alt"></i></a> <a title="Table" href="table.php?GROUP=glo-ops&FORMAT=tle"><i class="fal fa-table"></i></a></td></tr>
+	  <tr><td align=center>Galileo <a title="TLE Data" href="gp.php?GROUP=galileo&FORMAT=tle"><i class="fal fa-file-alt"></i></a> <a title="Table" href="table.php?GROUP=galileo&FORMAT=tle"><i class="fal fa-table"></i></a></td>
+		    <td align=center>Beidou <a title="TLE Data" href="gp.php?GROUP=beidou&FORMAT=tle"><i class="fal fa-file-alt"></i></a> <a title="Table" href="table.php?GROUP=beidou&FORMAT=tle"><i class="fal fa-table"></i></a></td></tr>
+	  <tr><td colspan=2 align=center>Satellite-Based Augmentation System (WAAS/EGNOS/MSAS) <a title="TLE Data" href="gp.php?GROUP=sbas&FORMAT=tle"><i class="fal fa-file-alt"></i></a> <a title="Table" href="table.php?GROUP=sbas&FORMAT=tle"><i class="fal fa-table"></i></a></td></tr>

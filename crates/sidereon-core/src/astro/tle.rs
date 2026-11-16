@@ -27,14 +27,23 @@ const MAX_LINE_LEN: usize = 69;
 /// Highest ASCII code point permitted in a TLE line.
 const MAX_ASCII: u32 = 127;
 /// Minimum significant length of line 1 accepted by the lenient parser.
-const LINE1_MIN_LEN: usize = 64;
+pub(crate) const LINE1_MIN_LEN: usize = 64;
 /// Minimum significant length of line 2 accepted by the lenient parser.
-const LINE2_MIN_LEN: usize = 68;
+pub(crate) const LINE2_MIN_LEN: usize = 68;
 /// Column index of the checksum digit (zero-based).
 const CHECKSUM_COL: usize = 68;
 /// Two-digit-year pivot: years below this map to 2000+, otherwise 1900+. This is
 /// the long-standing NORAD convention for the TLE epoch year.
 const YEAR_PIVOT: i32 = 57;
+
+/// Expand a TLE two-digit year with NORAD's fixed 57 pivot.
+pub(crate) const fn expand_two_digit_year(year: i32) -> i32 {
+    if year < YEAR_PIVOT {
+        2000 + year
+    } else {
+        1900 + year
+    }
+}
 /// The TLE record body occupies columns 1-68; column 69 is the checksum.
 const BODY_LEN: usize = 68;
 
@@ -406,6 +415,13 @@ impl std::error::Error for TleError {}
 
 fn validate_tle_bridge(elements: &TleElements) -> Result<(), TleError> {
     validate::finite(elements.epoch_day_of_year, "epoch_day_of_year").map_err(map_tle_field)?;
+    validate::finite_in_range_exclusive_upper(
+        elements.epoch_day_of_year,
+        0.0,
+        1000.0,
+        "epoch_day_of_year",
+    )
+    .map_err(map_tle_field)?;
     validate::finite(elements.bstar, "bstar").map_err(map_tle_field)?;
     validate::finite(elements.mean_motion_dot, "mean_motion_dot").map_err(map_tle_field)?;
     validate::finite(elements.mean_motion_double_dot, "mean_motion_double_dot")
@@ -437,6 +453,100 @@ fn map_tle_field(error: validate::FieldError) -> TleError {
 /// have the finding reported instead.
 pub fn parse(line1: &str, line2: &str) -> Result<ParsedTle, TleError> {
     parse_with_policy(line1, line2, TlePolicy::Strict)
+}
+
+/// Identify the source line responsible for an error returned by [`parse`].
+pub(crate) fn error_line(line1: &str, line2: &str, error: &TleError) -> usize {
+    match error {
+        TleError::NonAscii => {
+            if line1.is_ascii() {
+                2
+            } else {
+                1
+            }
+        }
+        TleError::ChecksumMismatch {
+            line_label: "line 2",
+            ..
+        }
+        | TleError::ChecksumNotDigit {
+            line_label: "line 2",
+            ..
+        } => 2,
+        TleError::Format => {
+            let line1 = clean_line(line1);
+            if validate_line(&line1, '1', LINE1_MIN_LEN, &LINE1_POSITIONS).is_ok() {
+                2
+            } else {
+                1
+            }
+        }
+        TleError::Field(_) | TleError::InvalidField { .. } => {
+            let line1 = clean_line(line1);
+            let line2 = clean_line(line2);
+            if validate_line(&line1, '1', LINE1_MIN_LEN, &LINE1_POSITIONS).is_ok()
+                && validate_line(&line2, '2', LINE2_MIN_LEN, &LINE2_POSITIONS).is_ok()
+                && extract_line1_fields(&line1).is_ok()
+            {
+                2
+            } else {
+                1
+            }
+        }
+        _ => 1,
+    }
+}
+
+/// Classify an element-line prefix using the TLE-file reader's framing rule,
+/// independently of field validity or checksum policy.
+pub(crate) fn element_line_label(line: &str) -> Option<u8> {
+    let line = line.trim();
+    if line.starts_with("1 ") {
+        Some(1)
+    } else if line.starts_with("2 ") {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+struct Line1Fields<'a> {
+    catalog_number: &'a str,
+    epoch_year: i32,
+    epoch_day: f64,
+    mean_motion_dot: f64,
+    nddot_text: &'a str,
+    nddot: f64,
+    bstar_text: &'a str,
+    bstar: f64,
+    ephemeris_type: Option<i32>,
+    elset_number: Option<i32>,
+}
+
+fn extract_line1_fields(line1: &str) -> Result<Line1Fields<'_>, TleError> {
+    let catalog_number = slice_inclusive(line1, 2, 6).trim();
+    decode_catalog_number(catalog_number)?;
+    let epoch_year = expand_two_digit_year(parse_epoch_year(slice_inclusive(line1, 18, 19))?);
+    let epoch_day = parse_float(slice_inclusive(line1, 20, 31))?;
+    let mean_motion_dot = parse_float(slice_inclusive(line1, 33, 42))?;
+    let nddot_text = slice_inclusive(line1, 44, 51);
+    let nddot = decode_assumed_decimal_text(nddot_text, &NDDOT_FIELD)?;
+    let bstar_text = slice_inclusive(line1, 53, 60);
+    let bstar = decode_assumed_decimal_text(bstar_text, &BSTAR_FIELD)?;
+    let ephemeris_type = parse_optional_int(slice_inclusive(line1, 62, 62).trim())?;
+    let elset_number = parse_optional_int(slice_inclusive(line1, 64, 67).trim())?;
+    Ok(Line1Fields {
+        catalog_number,
+        epoch_year,
+        epoch_day,
+        mean_motion_dot,
+        nddot_text,
+        nddot,
+        bstar_text,
+        bstar,
+        ephemeris_type,
+        elset_number,
+    })
 }
 
 /// Parse a two-line element set into [`TleElements`] under `policy`.
@@ -671,7 +781,18 @@ fn is_ascii(line: &str) -> bool {
 fn clean_line(line: &str) -> String {
     let trimmed = line.trim_end();
     if trimmed.len() > MAX_LINE_LEN {
-        trimmed[..MAX_LINE_LEN].to_string()
+        let end = trimmed
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= MAX_LINE_LEN)
+            .last()
+            .unwrap_or(0);
+        let end = if trimmed.is_char_boundary(MAX_LINE_LEN) {
+            MAX_LINE_LEN
+        } else {
+            end
+        };
+        trimmed[..end].to_string()
     } else {
         trimmed.to_string()
     }
@@ -738,31 +859,21 @@ const LINE2_POSITIONS: [(usize, char); 10] = [
 ];
 
 fn extract_fields(line1: &str, line2: &str) -> Result<TleElements, TleError> {
-    let catalog_number = slice_inclusive(line1, 2, 6).trim().to_string();
-    decode_catalog_number(&catalog_number)?;
-
-    let two_digit_year = parse_epoch_year(slice_inclusive(line1, 18, 19))?;
-    let nddot_text = slice_inclusive(line1, 44, 51);
-    let bstar_text = slice_inclusive(line1, 53, 60);
-    let epoch_year = if two_digit_year < YEAR_PIVOT {
-        2000 + two_digit_year
-    } else {
-        1900 + two_digit_year
-    };
+    let first = extract_line1_fields(line1)?;
 
     Ok(TleElements {
-        catalog_number,
+        catalog_number: first.catalog_number.to_string(),
         classification: char_at(line1, 7).unwrap_or('U').to_string(),
         international_designator: slice_inclusive(line1, 9, 16).trim_end().to_string(),
-        epoch_year,
-        epoch_day_of_year: parse_float(slice_inclusive(line1, 20, 31))?,
-        mean_motion_dot: parse_float(slice_inclusive(line1, 33, 42))?,
-        mean_motion_double_dot: decode_assumed_decimal_text(nddot_text, &NDDOT_FIELD)?,
-        mean_motion_double_dot_text: Some(nddot_text.to_string()),
-        bstar: decode_assumed_decimal_text(bstar_text, &BSTAR_FIELD)?,
-        bstar_text: Some(bstar_text.to_string()),
-        ephemeris_type: parse_optional_int(slice_inclusive(line1, 62, 62).trim())?,
-        elset_number: parse_optional_int(slice_inclusive(line1, 64, 67).trim())?,
+        epoch_year: first.epoch_year,
+        epoch_day_of_year: first.epoch_day,
+        mean_motion_dot: first.mean_motion_dot,
+        mean_motion_double_dot: first.nddot,
+        mean_motion_double_dot_text: Some(first.nddot_text.to_string()),
+        bstar: first.bstar,
+        bstar_text: Some(first.bstar_text.to_string()),
+        ephemeris_type: first.ephemeris_type,
+        elset_number: first.elset_number,
         inclination_deg: parse_float(slice_inclusive(line2, 8, 15))?,
         raan_deg: parse_float(slice_inclusive(line2, 17, 24))?,
         eccentricity: parse_eccentricity(slice_inclusive(line2, 26, 32))?,
@@ -1509,6 +1620,30 @@ mod tests {
                 reason: "out of range"
             })
         );
+
+        let mut el = parse(ISS_L1, ISS_L2).unwrap().elements;
+        for day in [0.0, 0.5, 366.0, 999.999_999_99] {
+            el.epoch_day_of_year = day;
+            el.to_element_set().expect("writer-representable epoch day");
+        }
+
+        el.epoch_year = 2025;
+        el.epoch_day_of_year = 0.0;
+        let zero = el.to_element_set().unwrap().epoch;
+        assert_eq!(zero.0 + zero.1, 2_460_675.5);
+        el.epoch_day_of_year = 0.5;
+        let half = el.to_element_set().unwrap().epoch;
+        assert_eq!(half.0 + half.1, 2_460_676.0);
+        for day in [-f64::EPSILON, 1000.0, f64::INFINITY] {
+            el.epoch_day_of_year = day;
+            assert!(matches!(
+                el.to_element_set(),
+                Err(TleError::InvalidField {
+                    field: "epoch_day_of_year",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
@@ -2234,5 +2369,12 @@ mod tests {
         assert_eq!(slice_inclusive(&line1, 33, 42), "-.00000000");
         let back = parse(&line1, &line2).unwrap().elements;
         assert_eq!(back.mean_motion_dot.to_bits(), (-0.0_f64).to_bits());
+    }
+    #[test]
+    fn clean_line_never_slices_through_a_multibyte_character() {
+        let line = format!("{}é trailing", "A".repeat(68));
+        assert_eq!(clean_line(&line), "A".repeat(68));
+        let boundary = format!("{}é trailing", "A".repeat(67));
+        assert_eq!(clean_line(&boundary), format!("{}é", "A".repeat(67)));
     }
 }
