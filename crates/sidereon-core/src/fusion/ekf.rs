@@ -78,7 +78,8 @@ impl EkfCorrection {
 pub struct InnovationGate {
     /// Rejection threshold in absolute normalized-innovation sigma.
     pub threshold_sigma: f64,
-    /// Minimum accepted rows required to apply an update.
+    /// Minimum accepted rows required to apply an update. An empty accepted
+    /// set always coasts, including when this value is zero.
     pub min_rows: usize,
 }
 
@@ -95,6 +96,11 @@ impl InnovationGate {
 pub struct EkfUpdateOptions {
     /// Optional normalized-innovation screen applied before correction.
     pub innovation_gate: Option<InnovationGate>,
+    /// Optional joint NIS gate false-alarm probability. The whole measurement
+    /// block is accepted when `v^T S^-1 v <= chi2_isf(p_fa, rows)`. This is
+    /// mutually exclusive with [`Self::innovation_gate`]; the per-row gate
+    /// remains the default behavior.
+    pub joint_innovation_gate_probability: Option<f64>,
 }
 
 /// Diagnostics from an innovation screen.
@@ -114,8 +120,23 @@ pub struct InnovationGateReport {
     pub max_abs_normalized_innovation: Option<f64>,
     /// Largest absolute normalized innovation among rejected rows.
     pub max_rejected_abs_normalized_innovation: Option<f64>,
-    /// Whether too few rows remained to apply the update.
+    /// Whether no rows, or fewer than `min_rows`, remained to apply the update.
     pub coasted: bool,
+}
+
+/// Diagnostics from a joint chi-square innovation gate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JointInnovationGateReport {
+    /// Mahalanobis normalized innovation squared, `v^T S^-1 v`.
+    pub statistic: f64,
+    /// Chi-square degrees of freedom, equal to the tested row count.
+    pub degrees_of_freedom: usize,
+    /// Upper-tail chi-square threshold.
+    pub threshold: f64,
+    /// False-alarm probability used to derive `threshold`.
+    pub false_alarm_probability: f64,
+    /// Whether the complete measurement block passed the gate.
+    pub accepted: bool,
 }
 
 /// Diagnostics from one EKF correction attempt.
@@ -131,6 +152,8 @@ pub struct EkfCorrectionReport {
     pub rejected_rows: usize,
     /// Optional innovation gate diagnostics.
     pub innovation_gate: Option<InnovationGateReport>,
+    /// Optional joint chi-square innovation-gate diagnostics.
+    pub joint_innovation_gate: Option<JointInnovationGateReport>,
     /// Innovation covariance `S`.
     pub innovation_covariance: Vec<Vec<f64>>,
     /// Kalman gain `K`.
@@ -148,6 +171,17 @@ pub fn ekf_correct_closed_loop(
     state.validate()?;
     correction.validate_for_dimension(state.dimension())?;
 
+    validate_gate_selection(options)?;
+    if let Some(probability) = options.joint_innovation_gate_probability {
+        let full_s = innovation_covariance(&state.covariance, correction)?;
+        let (accepted, report) = joint_gate(correction, &full_s, probability)?;
+        if !accepted {
+            return coasted_report(state.dimension(), correction, full_s, report);
+        }
+        let mut applied = apply_correction(state, correction)?;
+        applied.joint_innovation_gate = Some(report);
+        return Ok(applied);
+    }
     if let Some(gate) = options.innovation_gate {
         gate.validate()?;
         let full_s = innovation_covariance(&state.covariance, correction)?;
@@ -160,6 +194,7 @@ pub fn ekf_correct_closed_loop(
                 accepted_rows: report.accepted_rows,
                 rejected_rows: report.rejected_rows,
                 innovation_gate: Some(report),
+                joint_innovation_gate: None,
                 innovation_covariance: full_s,
                 kalman_gain: vec![vec![0.0; correction.row_count()]; state.dimension()],
                 dx: vec![0.0; state.dimension()],
@@ -187,6 +222,7 @@ pub(super) fn ekf_correct_closed_loop_with_predicted_covariance_scale(
     correction: &EkfCorrection,
     options: EkfUpdateOptions,
     predicted_covariance_scale: f64,
+    gate_innovation_covariance: Option<&[Vec<f64>]>,
 ) -> Result<EkfCorrectionReport, FusionError> {
     state.validate()?;
     correction.validate_for_dimension(state.dimension())?;
@@ -199,10 +235,24 @@ pub(super) fn ekf_correct_closed_loop_with_predicted_covariance_scale(
         "scaled_covariance",
     )?;
 
+    validate_gate_selection(options)?;
+    if let Some(probability) = options.joint_innovation_gate_probability {
+        let full_s = innovation_covariance(&predicted_covariance, correction)?;
+        let gate_s = gate_innovation_covariance.unwrap_or(&full_s);
+        let (accepted, report) = joint_gate(correction, gate_s, probability)?;
+        if !accepted {
+            return coasted_report(state.dimension(), correction, full_s, report);
+        }
+        let mut applied =
+            apply_correction_with_predicted_covariance(state, correction, &predicted_covariance)?;
+        applied.joint_innovation_gate = Some(report);
+        return Ok(applied);
+    }
     if let Some(gate) = options.innovation_gate {
         gate.validate()?;
         let full_s = innovation_covariance(&predicted_covariance, correction)?;
-        let (screened, report) = screen_correction(correction, &full_s, gate)?;
+        let gate_s = gate_innovation_covariance.unwrap_or(&full_s);
+        let (screened, report) = screen_correction(correction, gate_s, gate)?;
         let full_nis = normalized_innovation_squared(&full_s, &correction.innovation)?;
         if report.coasted {
             return Ok(EkfCorrectionReport {
@@ -211,6 +261,7 @@ pub(super) fn ekf_correct_closed_loop_with_predicted_covariance_scale(
                 accepted_rows: report.accepted_rows,
                 rejected_rows: report.rejected_rows,
                 innovation_gate: Some(report),
+                joint_innovation_gate: None,
                 innovation_covariance: full_s,
                 kalman_gain: vec![vec![0.0; correction.row_count()]; state.dimension()],
                 dx: vec![0.0; state.dimension()],
@@ -371,6 +422,7 @@ fn apply_correction_with_predicted_covariance(
         accepted_rows: correction.row_count(),
         rejected_rows: 0,
         innovation_gate: None,
+        joint_innovation_gate: None,
         innovation_covariance: s,
         kalman_gain,
         dx,
@@ -464,7 +516,7 @@ pub(super) fn screen_correction(
         }
     }
 
-    let coasted = accepted_indices.len() < gate.min_rows;
+    let coasted = accepted_indices.is_empty() || accepted_indices.len() < gate.min_rows;
     let report = InnovationGateReport {
         threshold_sigma: gate.threshold_sigma,
         min_rows: gate.min_rows,
@@ -498,6 +550,71 @@ pub(super) fn screen_correction(
     }
     let screened = EkfCorrection::new(innovation, design, measurement_covariance)?;
     Ok((screened, report))
+}
+
+pub(super) fn joint_gate(
+    correction: &EkfCorrection,
+    innovation_covariance: &[Vec<f64>],
+    false_alarm_probability: f64,
+) -> Result<(bool, JointInnovationGateReport), FusionError> {
+    if !(false_alarm_probability.is_finite()
+        && false_alarm_probability > 0.0
+        && false_alarm_probability < 1.0)
+    {
+        return Err(invalid_input(
+            "joint_innovation_gate_probability",
+            "must be finite and in (0, 1)",
+        ));
+    }
+    let nis = normalized_innovation_squared(innovation_covariance, &correction.innovation)?;
+    let threshold = crate::quality::chi2_isf(false_alarm_probability, correction.row_count())
+        .map_err(|_| {
+            invalid_input(
+                "joint_innovation_gate_probability",
+                "cannot derive threshold",
+            )
+        })?;
+    let accepted = nis <= threshold;
+    Ok((
+        accepted,
+        JointInnovationGateReport {
+            statistic: nis,
+            degrees_of_freedom: correction.row_count(),
+            threshold,
+            false_alarm_probability,
+            accepted,
+        },
+    ))
+}
+
+fn validate_gate_selection(options: EkfUpdateOptions) -> Result<(), FusionError> {
+    if options.innovation_gate.is_some() && options.joint_innovation_gate_probability.is_some() {
+        Err(invalid_input(
+            "innovation_gate",
+            "per-row and joint gates are mutually exclusive",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn coasted_report(
+    dimension: usize,
+    correction: &EkfCorrection,
+    innovation_covariance: Vec<Vec<f64>>,
+    report: JointInnovationGateReport,
+) -> Result<EkfCorrectionReport, FusionError> {
+    Ok(EkfCorrectionReport {
+        applied: false,
+        normalized_innovation_squared: report.statistic,
+        accepted_rows: 0,
+        rejected_rows: correction.row_count(),
+        innovation_gate: None,
+        joint_innovation_gate: Some(report),
+        innovation_covariance,
+        kalman_gain: vec![vec![0.0; correction.row_count()]; dimension],
+        dx: vec![0.0; dimension],
+    })
 }
 
 #[cfg(test)]
@@ -684,6 +801,7 @@ mod tests {
                     threshold_sigma: 3.0,
                     min_rows: 3,
                 }),
+                ..EkfUpdateOptions::default()
             },
         )
         .expect("ekf correction");
@@ -732,6 +850,7 @@ mod tests {
                     threshold_sigma: 3.0,
                     min_rows: 1,
                 }),
+                ..EkfUpdateOptions::default()
             },
         )
         .expect("ekf correction");
@@ -764,6 +883,7 @@ mod tests {
                     threshold_sigma: 3.0,
                     min_rows: 1,
                 }),
+                ..EkfUpdateOptions::default()
             },
         )
         .expect("ekf correction");

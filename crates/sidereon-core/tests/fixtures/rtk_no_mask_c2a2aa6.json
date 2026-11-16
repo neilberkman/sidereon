@@ -1,0 +1,1296 @@
+{
+  "provenance": {
+    "source_commit": "c2a2aa64f004e2238af5a609a7948f06a995037d",
+    "generator": "fixtures-generators/generate_rtk_no_mask_c2.py",
+    "generator_sha256": "a3c7df2234dbeb8c18e0318643b30e8ea63d224dd4b81a1aee912dbc84e66171",
+    "rinex_projection_sha256": "0a23373ecea22ec71e6aa2f4ce71beb77b5fd969f888cd72811332d431fc1636",
+    "diagnostic_encoding": "shortest round-trip binary64 decimals; exact comparison, including signed zero",
+    "report_residuals": true
+  },
+  "solve_rtk_arc": {
+    "references": {
+      "G": "G01"
+    },
+    "epoch_reported_baseline_bits": [
+      [
+        4622945015847935025,
+        13842939355449176989,
+        4621256165134459133
+      ],
+      [
+        4622945016665642513,
+        13842939354956075157,
+        4621256166391508200
+      ],
+      [
+        4622945016945041342,
+        13842939354845764568,
+        4621256166809124368
+      ],
+      [
+        4622945017082307825,
+        13842939354791811798,
+        4621256167015571948
+      ],
+      [
+        4622945017164764459,
+        13842939354759717640,
+        4621256167139166546
+      ],
+      [
+        4622945017220053465,
+        13842939354737722158,
+        4621256167222064274
+      ]
+    ],
+    "epoch_float_baseline_bits": [
+      [
+        4622928477085871493,
+        13842947607224667005,
+        4621231082296251067
+      ],
+      [
+        4622945016665642513,
+        13842939354956075157,
+        4621256166391508200
+      ],
+      [
+        4622945016945041342,
+        13842939354845764568,
+        4621256166809124368
+      ],
+      [
+        4622945017082307825,
+        13842939354791811798,
+        4621256167015571948
+      ],
+      [
+        4622945017164764459,
+        13842939354759717640,
+        4621256167139166546
+      ],
+      [
+        4622945017220053465,
+        13842939354737722158,
+        4621256167222064274
+      ]
+    ],
+    "epoch_sd_ambiguity_bits": [
+      [
+        [
+          "G01",
+          4603317258612113408
+        ],
+        [
+          "G02",
+          13823899708917381543
+        ],
+        [
+          "G03",
+          4606745284668231406
+        ],
+        [
+          "G04",
+          4596024072336871809
+        ],
+        [
+          "G05",
+          13828403308527604418
+        ],
+        [
+          "G06",
+          4607820858248046890
+        ]
+      ],
+      [
+        [
+          "G01",
+          4603317258612113407
+        ],
+        [
+          "G02",
+          13823899708917387447
+        ],
+        [
+          "G03",
+          4606745284668236804
+        ],
+        [
+          "G04",
+          4596024072336911636
+        ],
+        [
+          "G05",
+          13828403308527614573
+        ],
+        [
+          "G06",
+          4607820858248045118
+        ]
+      ],
+      [
+        [
+          "G01",
+          4603317258612113407
+        ],
+        [
+          "G02",
+          13823899708917264307
+        ],
+        [
+          "G03",
+          4606745284667987661
+        ],
+        [
+          "G04",
+          4596024072336172833
+        ],
+        [
+          "G05",
+          13828403308527758925
+        ],
+        [
+          "G06",
+          4607820858247914399
+        ]
+      ],
+      [
+        [
+          "G01",
+          4603317258612113407
+        ],
+        [
+          "G02",
+          13823899708917221791
+        ],
+        [
+          "G03",
+          4606745284667901262
+        ],
+        [
+          "G04",
+          4596024072335904876
+        ],
+        [
+          "G05",
+          13828403308527801251
+        ],
+        [
+          "G06",
+          4607820858247872183
+        ]
+      ],
+      [
+        [
+          "G01",
+          4603317258612113407
+        ],
+        [
+          "G02",
+          13823899708917204942
+        ],
+        [
+          "G03",
+          4606745284667858917
+        ],
+        [
+          "G04",
+          4596024072335782014
+        ],
+        [
+          "G05",
+          13828403308527824836
+        ],
+        [
+          "G06",
+          4607820858247851203
+        ]
+      ],
+      [
+        [
+          "G01",
+          4603317258612113407
+        ],
+        [
+          "G02",
+          13823899708917191660
+        ],
+        [
+          "G03",
+          4606745284667833901
+        ],
+        [
+          "G04",
+          4596024072335706196
+        ],
+        [
+          "G05",
+          13828403308527838879
+        ],
+        [
+          "G06",
+          4607820858247838064
+        ]
+      ]
+    ],
+    "epoch_used": [
+      [
+        "G01",
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ],
+      [
+        "G01",
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ],
+      [
+        "G01",
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ],
+      [
+        "G01",
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ],
+      [
+        "G01",
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ],
+      [
+        "G01",
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ]
+    ],
+    "epoch_fixed_ids": [
+      [
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ],
+      [
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ],
+      [
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ],
+      [
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ],
+      [
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ],
+      [
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ]
+    ],
+    "epoch_newly_fixed": [
+      [
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ],
+      [],
+      [],
+      [],
+      [],
+      []
+    ],
+    "epoch_fixed_dd_ids": [
+      [
+        "G02",
+        "G03",
+        "G04",
+        "G05",
+        "G06"
+      ],
+      [],
+      [],
+      [],
+      [],
+      []
+    ],
+    "epoch_integer_fixed": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "epoch_integer_ratio_bits": [
+      4675616645482183914,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "epoch_residuals": [
+      "[FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 2.8312206268310547e-7, phase_m: 2.8372405802556955e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 4.7187010447184247e-7, phase_normalized: 4.7287343004261594e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 4.0605664253234863e-7, phase_m: 4.072567509894043e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.767610708872478e-7, phase_normalized: 6.787612516490071e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 3.7997961044311523e-7, phase_m: 3.8240874644657197e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.332993507385254e-7, phase_normalized: 6.373479107442866e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: 3.650784492492676e-7, phase_m: 3.6810396175646076e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.084640820821127e-7, phase_normalized: 6.135066029274346e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 4.1350722312927246e-7, phase_m: 4.153311485843858e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.891787052154541e-7, phase_normalized: 6.922185809739763e-5 }]",
+      "[FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 1.341104507446289e-7, phase_m: 1.3471277360288525e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 2.2351741790771484e-7, phase_normalized: 2.2452128933814208e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 2.3096799850463867e-7, phase_m: 2.3216750744126102e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 3.849466641743978e-7, phase_normalized: 3.86945845735435e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 1.6391277313232422e-7, phase_m: 1.6634080335364843e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 2.731879552205404e-7, phase_normalized: 2.772346722560807e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: 1.6391277313232422e-7, phase_m: 1.669394129599766e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 2.731879552205404e-7, phase_normalized: 2.7823235493329435e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 2.1606683731079102e-7, phase_m: 2.1789115622894428e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 3.6011139551798504e-7, phase_normalized: 3.631519270482405e-5 }]",
+      "[FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 8.940696716308594e-8, phase_m: 9.000245437817966e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.4901161193847656e-7, phase_normalized: 1.5000409063029943e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 1.4901161193847656e-7, phase_m: 1.5023878141562363e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 2.483526865641276e-7, phase_normalized: 2.503979690260394e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 1.043081283569336e-7, phase_m: 1.0675666484161184e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.7384688059488934e-7, phase_normalized: 1.7792777473601973e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: 1.0803341865539551e-7, phase_m: 1.1107608477445297e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.8005569775899252e-7, phase_normalized: 1.851268079574216e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 1.4528632164001465e-7, phase_m: 1.471396657848345e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 2.421438694000244e-7, phase_normalized: 2.452327763080575e-5 }]",
+      "[FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 6.332993507385254e-8, phase_m: 6.392306217684052e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.0554989178975424e-7, phase_normalized: 1.0653843696140086e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 1.1175870895385742e-7, phase_m: 1.1299547075793726e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.862645149230957e-7, phase_normalized: 1.8832578459656208e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 7.82310962677002e-8, phase_m: 8.06870699143758e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.30385160446167e-7, phase_normalized: 1.3447844985729299e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: 7.82310962677002e-8, phase_m: 8.127846151673168e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.30385160446167e-7, phase_normalized: 1.3546410252788613e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 1.0803341865539551e-7, phase_m: 1.0989613663525688e-7, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.8005569775899252e-7, phase_normalized: 1.8316022772542812e-5 }]",
+      "[FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 5.21540641784668e-8, phase_m: 5.274625602957883e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 8.692344029744467e-8, phase_normalized: 8.791042671596472e-6 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 8.940696716308594e-8, phase_m: 9.064843009554124e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.4901161193847656e-7, phase_normalized: 1.5108071682590207e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 6.332993507385254e-8, phase_m: 6.578931888157058e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.0554989178975424e-7, phase_normalized: 1.0964886480261763e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: 6.332993507385254e-8, phase_m: 6.63799188949099e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.0554989178975424e-7, phase_normalized: 1.1063319815818318e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 8.568167686462402e-8, phase_m: 8.754905334029672e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.4280279477437338e-7, phase_normalized: 1.4591508890049454e-5 }]",
+      "[FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 4.0978193283081055e-8, phase_m: 4.156964772406013e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.82969888051351e-8, phase_normalized: 6.928274620676689e-6 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 7.450580596923828e-8, phase_m: 7.575004623561199e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.241763432820638e-7, phase_normalized: 1.2625007705935332e-5 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 5.21540641784668e-8, phase_m: 5.461555208086111e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 8.692344029744467e-8, phase_normalized: 9.102592013476851e-6 }, FloatResidual { epoch_index: 0, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: 5.587935447692871e-8, phase_m: 5.8930897273157257e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 9.313225746154785e-8, phase_normalized: 9.821816212192877e-6 }, FloatResidual { epoch_index: 0, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 7.450580596923828e-8, phase_m: 7.63761001110197e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 1.241763432820638e-7, phase_normalized: 1.2729350018503283e-5 }]"
+    ],
+    "epoch_search": [
+      "Some(IntegerSearchMeta { integer_status: Fixed, integer_method: \"lambda\", integer_ratio: Some(39172.53269886396), integer_best_score: Some(7.022450362803578e-5), integer_second_best_score: Some(2.750871664630722), integer_candidates: 2, ambiguity_search: AmbiguitySearch { order: [\"G02\", \"G03\", \"G04\", \"G05\", \"G06\"], float_cycles: [(\"G02\", -4.9848927125375635), (\"G03\", 2.0215667853021313), (\"G04\", -1.9798348536407204), (\"G05\", -6.98071389999913), (\"G06\", 3.0216809005818988)], covariance_cycles: [5.129511623425896, 3.1527862857376334, 5.3886586248083095, 3.2870063807586263, 6.2574691890187175, 3.1527862857376334, 8.558066548108787, 4.114696641681176, 5.52127010771146, 6.154682156307427, 5.3886586248083095, 4.114696641681176, 8.429977285488361, 6.839604802660977, 5.870252776268744, 3.2870063807586263, 5.52127010771146, 6.839604802660977, 7.243176863438847, 4.139879549054811, 6.2574691890187175, 6.154682156307427, 5.870252776268744, 4.139879549054811, 8.802005516538994], covariance_inverse_cycles: [1162.961065033078, 240.15684406702343, -452.78589123725226, 154.08035323349893, -765.1879484605595, 240.15684406702343, 353.25703894989465, 351.354681487015, -461.37609541147515, -435.0665506784977, -452.78589123725226, 351.354681487015, 828.715890798672, -783.0635200938635, -108.17599801614256, 154.08035323349893, -461.37609541147515, -783.0635200938635, 822.0550530216877, 348.67531651070254, -765.1879484605595, -435.0665506784977, -108.17599801614256, 348.67531651070254, 756.4620330734257] }, ambiguity_offsets_m: [(\"G02\", 0.0), (\"G03\", 0.0), (\"G04\", 0.0), (\"G05\", 0.0), (\"G06\", 0.0)], partial: PartialSearchMeta { enabled: false, fixed: false, fixed_ambiguities: [\"G02\", \"G03\", \"G04\", \"G05\", \"G06\"], free_ambiguities: [], full_set: None, exhaustive_subsets_evaluated: None } })",
+      "None",
+      "None",
+      "None",
+      "None",
+      "None"
+    ],
+    "epoch_geometry": [
+      "GeometryQuality { tier: Nominal, redundancy: 2, rank: 8, condition_number: 7.964996160327374, gdop: 6.661273107030142, raim_checkable: true, covariance_validated: true }",
+      "GeometryQuality { tier: Nominal, redundancy: 2, rank: 8, condition_number: 7.964988182762858, gdop: 6.661264990915079, raim_checkable: true, covariance_validated: true }",
+      "GeometryQuality { tier: Nominal, redundancy: 2, rank: 8, condition_number: 7.9649881503863, gdop: 6.661264958194366, raim_checkable: true, covariance_validated: true }",
+      "GeometryQuality { tier: Nominal, redundancy: 2, rank: 8, condition_number: 7.964988150385754, gdop: 6.66126495821395, raim_checkable: true, covariance_validated: true }",
+      "GeometryQuality { tier: Nominal, redundancy: 2, rank: 8, condition_number: 7.964988150385496, gdop: 6.661264958242816, raim_checkable: true, covariance_validated: true }",
+      "GeometryQuality { tier: Nominal, redundancy: 2, rank: 8, condition_number: 7.964988150385335, gdop: 6.66126495806512, raim_checkable: true, covariance_validated: true }"
+    ],
+    "state_baseline_bits": [
+      4622945017220053465,
+      13842939354737722158,
+      4621256167222064274
+    ],
+    "state_sd_ambiguity_bits": [
+      4603317258612113407,
+      13823899708917191660,
+      4606745284667833901,
+      4596024072335706196,
+      13828403308527838879,
+      4607820858247838064
+    ],
+    "state_information_bits": [
+      4679789852286179991,
+      13854694331636270518,
+      13900046435685634111,
+      13874616915406928020,
+      13903544115155881812,
+      4680855998635929185,
+      13894149545883866064,
+      4679901819887842242,
+      13902632940319024235,
+      13854694331636270262,
+      4682362318053663529,
+      13894370394511255544,
+      13886642097081933248,
+      13868065158469018832,
+      13905386843313202829,
+      4682438599624118426,
+      4680317503913717020,
+      13903680700208248041,
+      13900046435685634111,
+      13894370394511255543,
+      4675079282956372682,
+      13895044779009863902,
+      4677175130578229600,
+      13898250227000806204,
+      13873854183102025864,
+      13901668726291329638,
+      4679085121391923446,
+      13874616915406928048,
+      13886642097081933230,
+      13895044779009863905,
+      4748792161363354512,
+      13960541185661352164,
+      13960541185661352164,
+      13960541185661352164,
+      13960541185661352164,
+      13960541185661352164,
+      13903544115155881812,
+      13868065158469018832,
+      4677175130578229600,
+      13960541185661352164,
+      4737172877076798595,
+      13901240347853091270,
+      13901240347853091270,
+      13901240347853091270,
+      13901240347853091270,
+      4680855998635929185,
+      13905386843313202829,
+      13898250227000806204,
+      13960541185661352164,
+      13901240347853091270,
+      4737172877076798595,
+      13901240347853091270,
+      13901240347853091270,
+      13901240347853091270,
+      13894149545883866064,
+      4682438599624118426,
+      13873854183102025864,
+      13960541185661352164,
+      13901240347853091270,
+      13901240347853091270,
+      4737172877076798595,
+      13901240347853091270,
+      13901240347853091270,
+      4679901819887842242,
+      4680317503913717020,
+      13901668726291329638,
+      13960541185661352164,
+      13901240347853091270,
+      13901240347853091270,
+      13901240347853091270,
+      4737172877076798595,
+      13901240347853091270,
+      13902632940319024235,
+      13903680700208248041,
+      4679085121391923446,
+      13960541185661352164,
+      13901240347853091270,
+      13901240347853091270,
+      13901240347853091270,
+      13901240347853091270,
+      4737172877076798595
+    ],
+    "measurement_covariance_bits": [
+      4551876322491773663,
+      4542987012024304424,
+      4554316291090804895,
+      13534787555124720086,
+      4477225331132806224,
+      13706334524833755134,
+      13704446547425834166,
+      13704873625778716233,
+      13703637863726766851,
+      4542987012024304421,
+      4537549401067680132,
+      4545794726445441135,
+      13525987389468951467,
+      4428915849653207309,
+      4473043384704909005,
+      13703099415468754911,
+      13700317800453157948,
+      4453802561742097943,
+      4554316291090804897,
+      4545794726445441139,
+      4557547194616522402,
+      13538084888133397971,
+      13673501319911863081,
+      13705374604581120158,
+      13707954540152905768,
+      13703136767522428258,
+      13709365053809443216,
+      4268882619915899511,
+      4260750704891309409,
+      4271555107099813383,
+      4475630335815629482,
+      4475630335815629467,
+      4475630335815629469,
+      4475630335815629468,
+      4475630335815629462,
+      4475630335815629465,
+      4477225331132807002,
+      4428915849643845665,
+      13673501319912847055,
+      4475630335815629465,
+      4480938023549890170,
+      4475629566618796479,
+      4475631786067036463,
+      4475629842294902683,
+      4475632786649200082,
+      13706334524833744857,
+      4473043384704914234,
+      13705374604581112985,
+      4475630335815629468,
+      4475629566618796482,
+      4480939320278442569,
+      4475629210497908414,
+      4475631813516913069,
+      4475631729266730071,
+      13704446547425905143,
+      13703099415468784670,
+      13707954540152972670,
+      4475630335815629465,
+      4475631786067036464,
+      4475629210497908408,
+      4480938558860544195,
+      4475632843842413211,
+      4475630682248913140,
+      13704873625778694624,
+      13700317800453144028,
+      13703136767522366425,
+      4475630335815629468,
+      4475629842294902691,
+      4475631813516913079,
+      4475632843842413219,
+      4480938569538067304,
+      4475629219088347163,
+      13703637863726757156,
+      4453802561742173683,
+      13709365053809445752,
+      4475630335815629467,
+      4475632786649200089,
+      4475631729266730070,
+      4475630682248913145,
+      4475629219088347158,
+      4480938674560996471
+    ],
+    "fixed_cycles": {
+      "G02": -5,
+      "G03": 2,
+      "G04": -2,
+      "G05": -7,
+      "G06": 3
+    },
+    "fixed_m_bits": [
+      [
+        "G02",
+        13830117321539109015
+      ],
+      [
+        "G03",
+        4600527672029151353
+      ],
+      [
+        "G04",
+        13823899708883927161
+      ],
+      [
+        "G05",
+        13832049901624762474
+      ],
+      [
+        "G06",
+        4603317258628710491
+      ]
+    ]
+  },
+  "solve_static_rtk_arc": {
+    "references": {
+      "G": "G01"
+    },
+    "ambiguity_ids": [
+      "G02",
+      "G03",
+      "G04",
+      "G05",
+      "G06"
+    ],
+    "float_diagnostics": "FloatBaselineSolution { baseline_m: [11.999999971387604, -7.000000009926036, 8.99999995721889], baseline_covariance_m2: [[2.0989345404002315, 0.5327467197133767, 3.0793602879153528], [0.5327467197130901, 0.23468239698466187, 0.835664222108616], [3.0793602879146933, 0.8356642221086824, 4.830755024842118]], ambiguities_m: [(\"G02\", -0.9514683668880091), (\"G03\", 0.38058734562559904), (\"G04\", -0.38058734269227107), (\"G05\", -1.3320557078808455), (\"G06\", 0.5708810211421145)], ambiguity_covariance_m: [0.03104815431861855, 0.019143083852952183, 0.032643412030229406, 0.019948895782465347, 0.03788919987507372, 0.019143083852832254, 0.05180073689109143, 0.02498902281989962, 0.03346610103464054, 0.03730424080009885, 0.03264341203030902, 0.024989022820203075, 0.051041665221022346, 0.04142959960029073, 0.03559497325260213, 0.01994889578250634, 0.03346610103488511, 0.041429599600232084, 0.04385334160620511, 0.025137750221257096, 0.037889199874997205, 0.037304240800150795, 0.03559497325237404, 0.02513775022108331, 0.053292613670305904], ambiguity_covariance_inverse_m: [192693.79376664115, 39792.16232715511, -75023.17380458914, 25529.94275011984, -126785.81638040284, 39792.16232718591, 58531.99447330902, 58216.78886726668, -76446.51140985056, -72087.223296284, -75023.17380454388, 58216.788867287956, 137311.90365011018, -129747.66993826254, -17923.949233788484, 25529.942750069742, -76446.51140986502, -129747.66993824896, 136208.25907080597, 57772.839436945505, -126785.81638043099, -72087.22329626954, -17923.949233747728, 57772.83943690891, 125339.98805461814], residuals: [FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -3.725290298461914e-9, phase_m: -2.4155522027058396e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -4.0259203378430655e-8 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2262262316653505e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0437103861089173e-7 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: -4.3426418017133983e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -7.237736336188996e-8 }, FloatResidual { epoch_index: 0, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: -3.725290298461914e-9, phase_m: -2.3752542155364154e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -3.958757025894025e-7 }, FloatResidual { epoch_index: 0, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 0.0, phase_m: -8.643761262305816e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -1.4406268770509692e-7 }, FloatResidual { epoch_index: 1, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -3.725290298461914e-9, phase_m: -2.4155522027058396e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -4.0259203378430655e-8 }, FloatResidual { epoch_index: 1, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2262262316653505e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0437103861089173e-7 }, FloatResidual { epoch_index: 1, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: -4.3426418017133983e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -7.237736336188996e-8 }, FloatResidual { epoch_index: 1, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: -3.725290298461914e-9, phase_m: -2.3752542155364154e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -3.958757025894025e-7 }, FloatResidual { epoch_index: 1, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 0.0, phase_m: -8.643761262305816e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -1.4406268770509692e-7 }, FloatResidual { epoch_index: 2, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -3.725290298461914e-9, phase_m: -2.4155522027058396e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -4.0259203378430655e-8 }, FloatResidual { epoch_index: 2, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2262262316653505e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0437103861089173e-7 }, FloatResidual { epoch_index: 2, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: -4.3426418017133983e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -7.237736336188996e-8 }, FloatResidual { epoch_index: 2, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: -3.725290298461914e-9, phase_m: -2.3752542155364154e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -3.958757025894025e-7 }, FloatResidual { epoch_index: 2, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 0.0, phase_m: -8.643761262305816e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -1.4406268770509692e-7 }, FloatResidual { epoch_index: 3, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -3.725290298461914e-9, phase_m: -2.4155522027058396e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -4.0259203378430655e-8 }, FloatResidual { epoch_index: 3, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2262262316653505e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0437103861089173e-7 }, FloatResidual { epoch_index: 3, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: -4.3426418017133983e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -7.237736336188996e-8 }, FloatResidual { epoch_index: 3, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: -3.725290298461914e-9, phase_m: -2.3752542155364154e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -3.958757025894025e-7 }, FloatResidual { epoch_index: 3, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 0.0, phase_m: -8.643761262305816e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -1.4406268770509692e-7 }, FloatResidual { epoch_index: 4, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -3.725290298461914e-9, phase_m: -2.4155522027058396e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -4.0259203378430655e-8 }, FloatResidual { epoch_index: 4, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2262262316653505e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0437103861089173e-7 }, FloatResidual { epoch_index: 4, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: -4.3426418017133983e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -7.237736336188996e-8 }, FloatResidual { epoch_index: 4, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: -3.725290298461914e-9, phase_m: -2.3752542155364154e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -3.958757025894025e-7 }, FloatResidual { epoch_index: 4, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 0.0, phase_m: -8.643761262305816e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -1.4406268770509692e-7 }, FloatResidual { epoch_index: 5, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -3.725290298461914e-9, phase_m: -2.4155522027058396e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -4.0259203378430655e-8 }, FloatResidual { epoch_index: 5, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2262262316653505e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0437103861089173e-7 }, FloatResidual { epoch_index: 5, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: -4.3426418017133983e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -7.237736336188996e-8 }, FloatResidual { epoch_index: 5, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: -3.725290298461914e-9, phase_m: -2.3752542155364154e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -3.958757025894025e-7 }, FloatResidual { epoch_index: 5, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 0.0, phase_m: -8.643761262305816e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -1.4406268770509692e-7 }], iterations: 2, converged: true, status: StateTolerance, code_rms_m: 2.356080457693621e-9, phase_rms_m: 1.2758952739049519e-9, weighted_rms_m: 1.5039133496229206e-7, n_observations: 60, geometry_quality: GeometryQuality { tier: Nominal, redundancy: 52, rank: 8, condition_number: 7.964988150384695, gdop: 2.719450031519806, raim_checkable: true, covariance_validated: true } }",
+    "fixed_diagnostics": "ValidatedFixedBaselineSolution { float_solution: FloatBaselineSolution { baseline_m: [11.999999971387604, -7.000000009926036, 8.99999995721889], baseline_covariance_m2: [[2.0989345404002315, 0.5327467197133767, 3.0793602879153528], [0.5327467197130901, 0.23468239698466187, 0.835664222108616], [3.0793602879146933, 0.8356642221086824, 4.830755024842118]], ambiguities_m: [(\"G02\", -0.9514683668880091), (\"G03\", 0.38058734562559904), (\"G04\", -0.38058734269227107), (\"G05\", -1.3320557078808455), (\"G06\", 0.5708810211421145)], ambiguity_covariance_m: [0.03104815431861855, 0.019143083852952183, 0.032643412030229406, 0.019948895782465347, 0.03788919987507372, 0.019143083852832254, 0.05180073689109143, 0.02498902281989962, 0.03346610103464054, 0.03730424080009885, 0.03264341203030902, 0.024989022820203075, 0.051041665221022346, 0.04142959960029073, 0.03559497325260213, 0.01994889578250634, 0.03346610103488511, 0.041429599600232084, 0.04385334160620511, 0.025137750221257096, 0.037889199874997205, 0.037304240800150795, 0.03559497325237404, 0.02513775022108331, 0.053292613670305904], ambiguity_covariance_inverse_m: [192693.79376664115, 39792.16232715511, -75023.17380458914, 25529.94275011984, -126785.81638040284, 39792.16232718591, 58531.99447330902, 58216.78886726668, -76446.51140985056, -72087.223296284, -75023.17380454388, 58216.788867287956, 137311.90365011018, -129747.66993826254, -17923.949233788484, 25529.942750069742, -76446.51140986502, -129747.66993824896, 136208.25907080597, 57772.839436945505, -126785.81638043099, -72087.22329626954, -17923.949233747728, 57772.83943690891, 125339.98805461814], residuals: [FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -3.725290298461914e-9, phase_m: -2.4155522027058396e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -4.0259203378430655e-8 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2262262316653505e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0437103861089173e-7 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: -4.3426418017133983e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -7.237736336188996e-8 }, FloatResidual { epoch_index: 0, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: -3.725290298461914e-9, phase_m: -2.3752542155364154e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -3.958757025894025e-7 }, FloatResidual { epoch_index: 0, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 0.0, phase_m: -8.643761262305816e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -1.4406268770509692e-7 }, FloatResidual { epoch_index: 1, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -3.725290298461914e-9, phase_m: -2.4155522027058396e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -4.0259203378430655e-8 }, FloatResidual { epoch_index: 1, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2262262316653505e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0437103861089173e-7 }, FloatResidual { epoch_index: 1, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: -4.3426418017133983e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -7.237736336188996e-8 }, FloatResidual { epoch_index: 1, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: -3.725290298461914e-9, phase_m: -2.3752542155364154e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -3.958757025894025e-7 }, FloatResidual { epoch_index: 1, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 0.0, phase_m: -8.643761262305816e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -1.4406268770509692e-7 }, FloatResidual { epoch_index: 2, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -3.725290298461914e-9, phase_m: -2.4155522027058396e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -4.0259203378430655e-8 }, FloatResidual { epoch_index: 2, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2262262316653505e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0437103861089173e-7 }, FloatResidual { epoch_index: 2, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: -4.3426418017133983e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -7.237736336188996e-8 }, FloatResidual { epoch_index: 2, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: -3.725290298461914e-9, phase_m: -2.3752542155364154e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -3.958757025894025e-7 }, FloatResidual { epoch_index: 2, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 0.0, phase_m: -8.643761262305816e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -1.4406268770509692e-7 }, FloatResidual { epoch_index: 3, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -3.725290298461914e-9, phase_m: -2.4155522027058396e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -4.0259203378430655e-8 }, FloatResidual { epoch_index: 3, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2262262316653505e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0437103861089173e-7 }, FloatResidual { epoch_index: 3, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: -4.3426418017133983e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -7.237736336188996e-8 }, FloatResidual { epoch_index: 3, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: -3.725290298461914e-9, phase_m: -2.3752542155364154e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -3.958757025894025e-7 }, FloatResidual { epoch_index: 3, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 0.0, phase_m: -8.643761262305816e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -1.4406268770509692e-7 }, FloatResidual { epoch_index: 4, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -3.725290298461914e-9, phase_m: -2.4155522027058396e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -4.0259203378430655e-8 }, FloatResidual { epoch_index: 4, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2262262316653505e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0437103861089173e-7 }, FloatResidual { epoch_index: 4, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: -4.3426418017133983e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -7.237736336188996e-8 }, FloatResidual { epoch_index: 4, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: -3.725290298461914e-9, phase_m: -2.3752542155364154e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -3.958757025894025e-7 }, FloatResidual { epoch_index: 4, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 0.0, phase_m: -8.643761262305816e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -1.4406268770509692e-7 }, FloatResidual { epoch_index: 5, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -3.725290298461914e-9, phase_m: -2.4155522027058396e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -4.0259203378430655e-8 }, FloatResidual { epoch_index: 5, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2262262316653505e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0437103861089173e-7 }, FloatResidual { epoch_index: 5, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: -4.3426418017133983e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -7.237736336188996e-8 }, FloatResidual { epoch_index: 5, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: -3.725290298461914e-9, phase_m: -2.3752542155364154e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -6.20881716410319e-9, phase_normalized: -3.958757025894025e-7 }, FloatResidual { epoch_index: 5, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 0.0, phase_m: -8.643761262305816e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: -1.4406268770509692e-7 }], iterations: 2, converged: true, status: StateTolerance, code_rms_m: 2.356080457693621e-9, phase_rms_m: 1.2758952739049519e-9, weighted_rms_m: 1.5039133496229206e-7, n_observations: 60, geometry_quality: GeometryQuality { tier: Nominal, redundancy: 52, rank: 8, condition_number: 7.964988150384695, gdop: 2.719450031519806, raim_checkable: true, covariance_validated: true } }, fixed_solution: FixedBaselineSolution { baseline_m: [11.999999984475227, -7.000000007449743, 8.999999974754123], baseline_covariance_m2: [[0.00020987246679769989, 5.326934503790067e-5, 0.000307905238273579], [5.326934503790065e-5, 2.346589310943064e-5, 8.35580664057108e-5], [0.00030790523827357906, 8.355806640571083e-5, 0.0004830271997722206]], free_ambiguities_m: [], fixed_ambiguities_cycles: [(\"G02\", -5), (\"G03\", 2), (\"G04\", -2), (\"G05\", -7), (\"G06\", 3)], fixed_ambiguities_m: [(\"G02\", -0.9514683639918243), (\"G03\", 0.38058734559672974), (\"G04\", -0.38058734559672974), (\"G05\", -1.3320557095885541), (\"G06\", 0.5708810183950946)], residuals: [FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 0.0, phase_m: 5.875504527352859e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 9.792507545588099e-8 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2550955830192834e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0918259716988055e-7 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 3.725290298461914e-9, phase_m: 6.195484569815335e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.20881716410319e-9, phase_normalized: 1.032580761635889e-6 }, FloatResidual { epoch_index: 0, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: 0.0, phase_m: 3.0577447240887068e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 5.096241206814511e-7 }, FloatResidual { epoch_index: 0, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 3.725290298461914e-9, phase_m: 5.607934117080049e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.20881716410319e-9, phase_normalized: 9.346556861800081e-7 }, FloatResidual { epoch_index: 1, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 0.0, phase_m: 5.875504527352859e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 9.792507545588099e-8 }, FloatResidual { epoch_index: 1, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2550955830192834e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0918259716988055e-7 }, FloatResidual { epoch_index: 1, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 3.725290298461914e-9, phase_m: 6.195484569815335e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.20881716410319e-9, phase_normalized: 1.032580761635889e-6 }, FloatResidual { epoch_index: 1, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: 0.0, phase_m: 3.0577447240887068e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 5.096241206814511e-7 }, FloatResidual { epoch_index: 1, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 3.725290298461914e-9, phase_m: 5.607934117080049e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.20881716410319e-9, phase_normalized: 9.346556861800081e-7 }, FloatResidual { epoch_index: 2, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 0.0, phase_m: 5.875504527352859e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 9.792507545588099e-8 }, FloatResidual { epoch_index: 2, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2550955830192834e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0918259716988055e-7 }, FloatResidual { epoch_index: 2, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 3.725290298461914e-9, phase_m: 6.195484569815335e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.20881716410319e-9, phase_normalized: 1.032580761635889e-6 }, FloatResidual { epoch_index: 2, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: 0.0, phase_m: 3.0577447240887068e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 5.096241206814511e-7 }, FloatResidual { epoch_index: 2, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 3.725290298461914e-9, phase_m: 5.607934117080049e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.20881716410319e-9, phase_normalized: 9.346556861800081e-7 }, FloatResidual { epoch_index: 3, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 0.0, phase_m: 5.875504527352859e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 9.792507545588099e-8 }, FloatResidual { epoch_index: 3, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2550955830192834e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0918259716988055e-7 }, FloatResidual { epoch_index: 3, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 3.725290298461914e-9, phase_m: 6.195484569815335e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.20881716410319e-9, phase_normalized: 1.032580761635889e-6 }, FloatResidual { epoch_index: 3, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: 0.0, phase_m: 3.0577447240887068e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 5.096241206814511e-7 }, FloatResidual { epoch_index: 3, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 3.725290298461914e-9, phase_m: 5.607934117080049e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.20881716410319e-9, phase_normalized: 9.346556861800081e-7 }, FloatResidual { epoch_index: 4, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 0.0, phase_m: 5.875504527352859e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 9.792507545588099e-8 }, FloatResidual { epoch_index: 4, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2550955830192834e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0918259716988055e-7 }, FloatResidual { epoch_index: 4, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 3.725290298461914e-9, phase_m: 6.195484569815335e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.20881716410319e-9, phase_normalized: 1.032580761635889e-6 }, FloatResidual { epoch_index: 4, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: 0.0, phase_m: 3.0577447240887068e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 5.096241206814511e-7 }, FloatResidual { epoch_index: 4, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 3.725290298461914e-9, phase_m: 5.607934117080049e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.20881716410319e-9, phase_normalized: 9.346556861800081e-7 }, FloatResidual { epoch_index: 5, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 0.0, phase_m: 5.875504527352859e-10, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 9.792507545588099e-8 }, FloatResidual { epoch_index: 5, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 1.2550955830192834e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 2.0918259716988055e-7 }, FloatResidual { epoch_index: 5, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 3.725290298461914e-9, phase_m: 6.195484569815335e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.20881716410319e-9, phase_normalized: 1.032580761635889e-6 }, FloatResidual { epoch_index: 5, satellite_id: \"G05\", reference_satellite_id: \"G01\", ambiguity_id: \"G05\", code_m: 0.0, phase_m: 3.0577447240887068e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 5.096241206814511e-7 }, FloatResidual { epoch_index: 5, satellite_id: \"G06\", reference_satellite_id: \"G01\", ambiguity_id: \"G06\", code_m: 3.725290298461914e-9, phase_m: 5.607934117080049e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 6.20881716410319e-9, phase_normalized: 9.346556861800081e-7 }], search: IntegerSearchMeta { integer_status: Fixed, integer_method: \"lambda\", integer_ratio: Some(2715015929617.2876), integer_best_score: Some(6.097827078815619e-12), integer_second_best_score: Some(16.555697655036056), integer_candidates: 2, ambiguity_search: AmbiguitySearch { order: [\"G02\", \"G03\", \"G04\", \"G05\", \"G06\"], float_cycles: [(\"G02\", -5.000000015219554), (\"G03\", 2.0000000001517093), (\"G04\", -1.9999999847369667), (\"G05\", -6.9999999910259305), (\"G06\", 3.000000014435687)], covariance_cycles: [0.8574071317173078, 0.5286438752557232, 0.9014608079796709, 0.5508966922240459, 1.0463253259610628, 0.5286438752557232, 1.4304979543341112, 0.6900818052076692, 0.924179692084651, 1.0301714484247617, 0.9014608079796709, 0.6900818052076692, 1.409535888224709, 1.144094872658993, 0.9829693451912739, 0.5508966922240459, 0.924179692084651, 1.144094872658993, 1.2110274722593743, 0.6941889715497475, 1.0463253259610628, 1.0301714484247617, 0.9829693451912739, 0.6941889715497475, 1.4716967250248016], covariance_inverse_cycles: [6977.766365346906, 1440.9411245890867, -2716.715305467155, 924.4821659683973, -4591.127653099956, 1440.9411245890867, 2119.5419652533806, 2108.127840110075, -2768.256754076762, -2610.3995995697283, -2716.715305467155, 2108.127840110075, 4972.294977026068, -4698.3813519818, -649.0563481703405, 924.4821659683973, -2768.256754076762, -4698.3813519818, 4932.330150582471, 2092.0516845579814, -4591.127653099956, -2610.3995995697283, -649.0563481703405, 2092.0516845579814, 4538.771777672654] }, ambiguity_offsets_m: [(\"G01\", 0.0), (\"G02\", 0.0), (\"G03\", 0.0), (\"G04\", 0.0), (\"G05\", 0.0), (\"G06\", 0.0)], partial: PartialSearchMeta { enabled: false, fixed: false, fixed_ambiguities: [\"G02\", \"G03\", \"G04\", \"G05\", \"G06\"], free_ambiguities: [], full_set: None, exhaustive_subsets_evaluated: None } }, iterations: 1, converged: true, status: StateTolerance, code_rms_m: 2.356080457693621e-9, phase_rms_m: 4.027486495844438e-9, weighted_rms_m: 4.746519570772301e-7, n_observations: 60 }, residual_validation: None, ambiguity_ids: [\"G02\", \"G03\", \"G04\", \"G05\", \"G06\"], ambiguity_satellites: {\"G02\": \"G02\", \"G03\": \"G03\", \"G04\": \"G04\", \"G05\": \"G05\", \"G06\": \"G06\"} }",
+    "geometry": "GeometryQuality { tier: Nominal, redundancy: 52, rank: 8, condition_number: 7.964988150384695, gdop: 2.719450031519806, raim_checkable: true, covariance_validated: true }",
+    "float_baseline_bits": [
+      4622945017479706797,
+      13842939354641237803,
+      4621256167611466584
+    ],
+    "float_ambiguity_bits": [
+      [
+        "G02",
+        13830117321565195528
+      ],
+      [
+        "G03",
+        4600527672029671416
+      ],
+      [
+        "G04",
+        13823899708831605085
+      ],
+      [
+        "G05",
+        13832049901617071638
+      ],
+      [
+        "G06",
+        4603317258653453446
+      ]
+    ],
+    "float_covariance_bits": [
+      4584606242606495754,
+      4581174839668064103,
+      4584865232499968599,
+      4581407099143615219,
+      4585621230201834376,
+      4581174839668029536,
+      4587626093975321999,
+      4582859816855467312,
+      4584983794480567248,
+      4585536928714727694,
+      4584865232499980073,
+      4582859816855554777,
+      4587516700218826939,
+      4586131455574097734,
+      4585290597300648247,
+      4581407099143627034,
+      4584983794480602494,
+      4586131455574089282,
+      4586480753609127437,
+      4582902684610304644,
+      4585621230201823349,
+      4585536928714735180,
+      4585290597300615376,
+      4582902684610254553,
+      4587841096077944495
+    ],
+    "fixed_baseline_bits": [
+      4622945017487074474,
+      13842939354638449745,
+      4621256167621338043
+    ],
+    "fixed_cycles": [
+      [
+        "G02",
+        -5
+      ],
+      [
+        "G03",
+        2
+      ],
+      [
+        "G04",
+        -2
+      ],
+      [
+        "G05",
+        -7
+      ],
+      [
+        "G06",
+        3
+      ]
+    ],
+    "fixed_m_bits": [
+      [
+        "G02",
+        13830117321539109015
+      ],
+      [
+        "G03",
+        4600527672029151353
+      ],
+      [
+        "G04",
+        13823899708883927161
+      ],
+      [
+        "G05",
+        13832049901624762474
+      ],
+      [
+        "G06",
+        4603317258628710491
+      ]
+    ]
+  },
+  "fix_wide_lane_rtk_arc": {
+    "references": {
+      "G": "G01"
+    },
+    "wide_lane_cycles": {
+      "G02": 1,
+      "G03": 5,
+      "G04": -2
+    },
+    "diagnostics": "RtkWideLaneArcSolution { geometry_quality: GeometryQuality { tier: Nominal, redundancy: 6, rank: 3, condition_number: 1.0, gdop: 1.0, raim_checkable: true, covariance_validated: true }, references: {\"G\": \"G01\"}, wide_lane_cycles: {\"G02\": 1, \"G03\": 5, \"G04\": -2}, epochs: [RtkDualFrequencyArcEpoch { jd_whole: 2460100.5, jd_fraction: 0.25, epoch_sort_key: Some(\"000\"), gap_time_s: Some(0.0), gap_epoch: None, observations: [RtkDualFrequencySatelliteObservation { satellite_id: \"G01\", base: RtkDualFrequencyObservation { ambiguity_id: \"G01\", p1_m: 20000020.0, p2_m: 20000022.0, phi1_cycles: 2.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G01\", p1_m: 20000050.0, p2_m: 20000052.5, phi1_cycles: 5.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G02\", base: RtkDualFrequencyObservation { ambiguity_id: \"G02\", p1_m: 20000010.0, p2_m: 20000012.0, phi1_cycles: 1.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G02\", p1_m: 20000042.0, p2_m: 20000044.5, phi1_cycles: 7.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G03\", base: RtkDualFrequencyObservation { ambiguity_id: \"G03\", p1_m: 19999980.0, p2_m: 19999982.0, phi1_cycles: -2.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G03\", p1_m: 20000005.0, p2_m: 20000007.5, phi1_cycles: 0.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G04\", base: RtkDualFrequencyObservation { ambiguity_id: \"G04\", p1_m: 20000040.0, p2_m: 20000042.0, phi1_cycles: 4.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G04\", p1_m: 20000073.0, p2_m: 20000075.5, phi1_cycles: 8.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }], satellite_positions_m: {\"G01\": [14350000.0, 3190000.0, 21440000.0], \"G02\": [20000000.0, 3000000.0, 18000000.0], \"G03\": [9000000.0, 9000000.0, 22000000.0], \"G04\": [16000000.0, -4000000.0, 21000000.0], \"G05\": [10000000.0, -2000000.0, 24000000.0], \"G06\": [19000000.0, 8000000.0, 17000000.0]}, base_satellite_positions_m: {}, rover_satellite_positions_m: {}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }, RtkDualFrequencyArcEpoch { jd_whole: 2460100.5, jd_fraction: 0.2500115740740741, epoch_sort_key: Some(\"001\"), gap_time_s: Some(1.0), gap_epoch: None, observations: [RtkDualFrequencySatelliteObservation { satellite_id: \"G01\", base: RtkDualFrequencyObservation { ambiguity_id: \"G01\", p1_m: 20000020.0, p2_m: 20000022.0, phi1_cycles: 2.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G01\", p1_m: 20000050.0, p2_m: 20000052.5, phi1_cycles: 5.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G02\", base: RtkDualFrequencyObservation { ambiguity_id: \"G02\", p1_m: 20000010.0, p2_m: 20000012.0, phi1_cycles: 1.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G02\", p1_m: 20000042.0, p2_m: 20000044.5, phi1_cycles: 7.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G03\", base: RtkDualFrequencyObservation { ambiguity_id: \"G03\", p1_m: 19999980.0, p2_m: 19999982.0, phi1_cycles: -2.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G03\", p1_m: 20000005.0, p2_m: 20000007.5, phi1_cycles: 0.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G04\", base: RtkDualFrequencyObservation { ambiguity_id: \"G04\", p1_m: 20000040.0, p2_m: 20000042.0, phi1_cycles: 4.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G04\", p1_m: 20000073.0, p2_m: 20000075.5, phi1_cycles: 8.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }], satellite_positions_m: {\"G01\": [14350000.0, 3190000.0, 21440000.0], \"G02\": [20000000.0, 3000000.0, 18000000.0], \"G03\": [9000000.0, 9000000.0, 22000000.0], \"G04\": [16000000.0, -4000000.0, 21000000.0], \"G05\": [10000000.0, -2000000.0, 24000000.0], \"G06\": [19000000.0, 8000000.0, 17000000.0]}, base_satellite_positions_m: {}, rover_satellite_positions_m: {}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }, RtkDualFrequencyArcEpoch { jd_whole: 2460100.5, jd_fraction: 0.25002314814814813, epoch_sort_key: Some(\"002\"), gap_time_s: Some(2.0), gap_epoch: None, observations: [RtkDualFrequencySatelliteObservation { satellite_id: \"G01\", base: RtkDualFrequencyObservation { ambiguity_id: \"G01\", p1_m: 20000020.0, p2_m: 20000022.0, phi1_cycles: 2.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G01\", p1_m: 20000050.0, p2_m: 20000052.5, phi1_cycles: 5.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G02\", base: RtkDualFrequencyObservation { ambiguity_id: \"G02\", p1_m: 20000010.0, p2_m: 20000012.0, phi1_cycles: 1.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G02\", p1_m: 20000042.0, p2_m: 20000044.5, phi1_cycles: 7.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G03\", base: RtkDualFrequencyObservation { ambiguity_id: \"G03\", p1_m: 19999980.0, p2_m: 19999982.0, phi1_cycles: -2.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G03\", p1_m: 20000005.0, p2_m: 20000007.5, phi1_cycles: 0.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G04\", base: RtkDualFrequencyObservation { ambiguity_id: \"G04\", p1_m: 20000040.0, p2_m: 20000042.0, phi1_cycles: 4.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G04\", p1_m: 20000073.0, p2_m: 20000075.5, phi1_cycles: 8.0, phi2_cycles: 0.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }], satellite_positions_m: {\"G01\": [14350000.0, 3190000.0, 21440000.0], \"G02\": [20000000.0, 3000000.0, 18000000.0], \"G03\": [9000000.0, 9000000.0, 22000000.0], \"G04\": [16000000.0, -4000000.0, 21000000.0], \"G05\": [10000000.0, -2000000.0, 24000000.0], \"G06\": [19000000.0, 8000000.0, 17000000.0]}, base_satellite_positions_m: {}, rover_satellite_positions_m: {}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }], dropped_sats: [], split_cycle_slip_arcs: [] }"
+  },
+  "prepare_ionosphere_free_rtk_arc": {
+    "references": {
+      "G": "G01"
+    },
+    "epochs": [
+      {
+        "base": [
+          [
+            "G01",
+            "G01",
+            4716133923888391654,
+            4606902040706198308
+          ],
+          [
+            "G02",
+            "G02",
+            4716133921204037093,
+            4602398441078827812
+          ],
+          [
+            "G03",
+            "G03",
+            4716133913150973412,
+            13830274077560974116
+          ],
+          [
+            "G04",
+            "G04",
+            4716133929257100773,
+            4611405640333568804
+          ]
+        ],
+        "rover": [
+          [
+            "G01",
+            "G01",
+            4716133931733991261,
+            4612636682025593590
+          ],
+          [
+            "G02",
+            "G02",
+            4716133929586507613,
+            4614818387315824064
+          ],
+          [
+            "G03",
+            "G03",
+            4716133919654395742,
+            0
+          ],
+          [
+            "G04",
+            "G04",
+            4716133937908006750,
+            4615909239960939300
+          ]
+        ]
+      },
+      {
+        "base": [
+          [
+            "G01",
+            "G01",
+            4716133923888391654,
+            4606902040706198308
+          ],
+          [
+            "G02",
+            "G02",
+            4716133921204037093,
+            4602398441078827812
+          ],
+          [
+            "G03",
+            "G03",
+            4716133913150973412,
+            13830274077560974116
+          ],
+          [
+            "G04",
+            "G04",
+            4716133929257100773,
+            4611405640333568804
+          ]
+        ],
+        "rover": [
+          [
+            "G01",
+            "G01",
+            4716133931733991261,
+            4612636682025593590
+          ],
+          [
+            "G02",
+            "G02",
+            4716133929586507613,
+            4614818387315824064
+          ],
+          [
+            "G03",
+            "G03",
+            4716133919654395742,
+            0
+          ],
+          [
+            "G04",
+            "G04",
+            4716133937908006750,
+            4615909239960939300
+          ]
+        ]
+      },
+      {
+        "base": [
+          [
+            "G01",
+            "G01",
+            4716133923888391654,
+            4606902040706198308
+          ],
+          [
+            "G02",
+            "G02",
+            4716133921204037093,
+            4602398441078827812
+          ],
+          [
+            "G03",
+            "G03",
+            4716133913150973412,
+            13830274077560974116
+          ],
+          [
+            "G04",
+            "G04",
+            4716133929257100773,
+            4611405640333568804
+          ]
+        ],
+        "rover": [
+          [
+            "G01",
+            "G01",
+            4716133931733991261,
+            4612636682025593590
+          ],
+          [
+            "G02",
+            "G02",
+            4716133929586507613,
+            4614818387315824064
+          ],
+          [
+            "G03",
+            "G03",
+            4716133919654395742,
+            0
+          ],
+          [
+            "G04",
+            "G04",
+            4716133937908006750,
+            4615909239960939300
+          ]
+        ]
+      }
+    ],
+    "wavelength_bits": [
+      [
+        "G02",
+        4592371223766316729
+      ],
+      [
+        "G03",
+        4592371223766316729
+      ],
+      [
+        "G04",
+        4592371223766316729
+      ]
+    ],
+    "offset_bits": [
+      [
+        "G02",
+        4600471740303039862
+      ],
+      [
+        "G03",
+        4611178969654064340
+      ],
+      [
+        "G04",
+        13828347376785186166
+      ]
+    ]
+  },
+  "solve_wide_lane_fixed_rtk_arc_static": {
+    "references": {
+      "G": "G01"
+    },
+    "ambiguity_ids": [
+      "G02",
+      "G03",
+      "G04"
+    ],
+    "float_diagnostics": "FloatBaselineSolution { baseline_m: [-10.692591794317263, 7.406217976117218, -2.9241778280799684], baseline_covariance_m2: [[4.943719714808133, 1.2916739151477432, 7.192770246916827], [1.2916739151449572, 0.6595740065492595, 1.6002576260933197], [7.192770246907219, 1.600257626095241, 12.311655988748356]], ambiguities_m: [(\"G02\", -0.5466923360290611), (\"G03\", 4.515564099592053), (\"G04\", -2.5155641182185042)], ambiguity_covariance_m: [0.12001200000026627, 0.060006000000185536, 0.06000600000039511, 0.06000599999994975, 0.12001199999940174, 0.06000599999981875, 0.06000600000010694, 0.06000599999958297, 0.12001200000000428], ambiguity_covariance_inverse_m: [12.498750124999788, -4.166250041707826, -4.1662500416932735, -4.166250041678723, 12.498750125043443, -4.166250041649619, -4.166250041685999, -4.166250041620515, 12.498750124985236], residuals: [FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 1, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 1, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 1, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 2, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 2, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 2, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }], iterations: 2, converged: true, status: StateTolerance, code_rms_m: 0.0, phase_rms_m: 0.0, weighted_rms_m: 0.0, n_observations: 18, geometry_quality: GeometryQuality { tier: Nominal, redundancy: 12, rank: 6, condition_number: 10.159781354531521, gdop: 4.274925228598162, raim_checkable: true, covariance_validated: true } }",
+    "fixed_diagnostics": "ValidatedFixedBaselineSolution { float_solution: FloatBaselineSolution { baseline_m: [-10.692591794317263, 7.406217976117218, -2.9241778280799684], baseline_covariance_m2: [[4.943719714808133, 1.2916739151477432, 7.192770246916827], [1.2916739151449572, 0.6595740065492595, 1.6002576260933197], [7.192770246907219, 1.600257626095241, 12.311655988748356]], ambiguities_m: [(\"G02\", -0.5466923360290611), (\"G03\", 4.515564099592053), (\"G04\", -2.5155641182185042)], ambiguity_covariance_m: [0.12001200000026627, 0.060006000000185536, 0.06000600000039511, 0.06000599999994975, 0.12001199999940174, 0.06000599999981875, 0.06000600000010694, 0.06000599999958297, 0.12001200000000428], ambiguity_covariance_inverse_m: [12.498750124999788, -4.166250041707826, -4.1662500416932735, -4.166250041678723, 12.498750125043443, -4.166250041649619, -4.166250041685999, -4.166250041620515, 12.498750124985236], residuals: [FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 1, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 1, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 1, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 2, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 2, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }, FloatResidual { epoch_index: 2, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: 0.0, phase_m: 0.0, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: 0.0, phase_normalized: 0.0 }], iterations: 2, converged: true, status: StateTolerance, code_rms_m: 0.0, phase_rms_m: 0.0, weighted_rms_m: 0.0, n_observations: 18, geometry_quality: GeometryQuality { tier: Nominal, redundancy: 12, rank: 6, condition_number: 10.159781354531521, gdop: 4.274925228598162, raim_checkable: true, covariance_validated: true } }, fixed_solution: FixedBaselineSolution { baseline_m: [-10.251449330422997, 7.520166177592917, -2.277443395810691], baseline_covariance_m2: [[0.0004943224640055419, 0.00012915445734074983, 0.0007192049917098746], [0.0001291544573407499, 6.595079858413163e-5, 0.00016000973561945702], [0.0007192049917098746, 0.0001600097356194569, 0.0012310423133422073]], free_ambiguities_m: [], fixed_ambiguities_cycles: [(\"G02\", -9), (\"G03\", 24), (\"G04\", -17)], fixed_ambiguities_m: [(\"G02\", -0.5850978921893907), (\"G03\", 4.454293630861168), (\"G04\", -2.5731724505963527)], residuals: [FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -0.03840171545743942, phase_m: 3.840702889945646e-6, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.06400285909573238, phase_normalized: 0.0006401171483242744 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: -0.061264339834451675, phase_m: 6.128896433921227e-6, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.10210723305741946, phase_normalized: 0.001021482738986871 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: -0.057602569460868835, phase_m: 5.762916979623611e-6, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.0960042824347814, phase_normalized: 0.0009604861632706018 }, FloatResidual { epoch_index: 1, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -0.03840171545743942, phase_m: 3.840702889945646e-6, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.06400285909573238, phase_normalized: 0.0006401171483242744 }, FloatResidual { epoch_index: 1, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: -0.061264339834451675, phase_m: 6.128896433921227e-6, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.10210723305741946, phase_normalized: 0.001021482738986871 }, FloatResidual { epoch_index: 1, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: -0.057602569460868835, phase_m: 5.762916979623611e-6, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.0960042824347814, phase_normalized: 0.0009604861632706018 }, FloatResidual { epoch_index: 2, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -0.03840171545743942, phase_m: 3.840702889945646e-6, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.06400285909573238, phase_normalized: 0.0006401171483242744 }, FloatResidual { epoch_index: 2, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: -0.061264339834451675, phase_m: 6.128896433921227e-6, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.10210723305741946, phase_normalized: 0.001021482738986871 }, FloatResidual { epoch_index: 2, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: -0.057602569460868835, phase_m: 5.762916979623611e-6, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.0960042824347814, phase_normalized: 0.0009604861632706018 }], search: IntegerSearchMeta { integer_status: NotFixed, integer_method: \"lambda\", integer_ratio: Some(1.0711845107910163), integer_best_score: Some(0.039382474776966506), integer_second_best_score: Some(0.042185896977704404), integer_candidates: 2, ambiguity_search: AmbiguitySearch { order: [\"G02\", \"G03\", \"G04\"], float_cycles: [(\"G02\", -8.640913107865686), (\"G03\", 24.572870813387993), (\"G04\", -16.461369679214023)], covariance_cycles: [10.491453510496582, 5.245726755242565, 5.245726755258596, 5.245726755242565, 10.491453510421003, 5.245726755210502, 5.245726755258596, 5.245726755210502, 10.49145351047368], covariance_inverse_cycles: [0.14297351634871844, -0.04765783878321131, -0.047657838783169704, -0.04765783878321131, 0.14297351634921782, -0.047657838782545495, -0.047657838783169704, -0.047657838782545495, 0.142973516348552] }, ambiguity_offsets_m: [(\"G02\", 0.3774825110899295), (\"G03\", 1.8874125554496475), (\"G04\", -0.754965022179859)], partial: PartialSearchMeta { enabled: false, fixed: false, fixed_ambiguities: [\"G02\", \"G03\", \"G04\"], free_ambiguities: [], full_set: None, exhaustive_subsets_evaluated: None } }, iterations: 2, converged: true, status: StateTolerance, code_rms_m: 0.05337311150107809, phase_rms_m: 5.339337733608394e-6, weighted_rms_m: 0.06290396247654977, n_observations: 18 }, residual_validation: None, ambiguity_ids: [\"G02\", \"G03\", \"G04\"], ambiguity_satellites: {\"G02\": \"G02\", \"G03\": \"G03\", \"G04\": \"G04\"} }",
+    "geometry": "GeometryQuality { tier: Nominal, redundancy: 12, rank: 6, condition_number: 10.159781354531521, gdop: 4.274925228598162, raim_checkable: true, covariance_validated: true }",
+    "float_baseline_bits": [
+      13845581048962098214,
+      4620024678556754447,
+      13837139118743246222
+    ],
+    "float_ambiguity_bits": [
+      [
+        "G02",
+        13826471423201705795
+      ],
+      [
+        "G03",
+        4616770091626460494
+      ],
+      [
+        "G04",
+        13836219002467510939
+      ]
+    ],
+    "float_covariance_bits": [
+      4593312196638863922,
+      4588808597011500978,
+      4588808597011531181,
+      4588808597011466998,
+      4593312196638801626,
+      4588808597011448119,
+      4588808597011489651,
+      4588808597011414139,
+      4593312196638845044
+    ],
+    "fixed_baseline_bits": [
+      13845332707832596774,
+      4620152972826180821,
+      13835682802269158429
+    ],
+    "fixed_cycles": [
+      [
+        "G02",
+        -9
+      ],
+      [
+        "G03",
+        24
+      ],
+      [
+        "G04",
+        -17
+      ]
+    ],
+    "fixed_m_bits": [
+      [
+        "G02",
+        13826817349698531029
+      ],
+      [
+        "G03",
+        4616701107211424186
+      ],
+      [
+        "G04",
+        13836348724899626096
+      ]
+    ]
+  },
+  "solve_wide_lane_fixed_rtk_arc_sequential": {
+    "references": {
+      "G": "G01"
+    },
+    "epoch_reported_baseline_bits": [
+      [
+        13845570238534969164,
+        4620029248504330747,
+        13837071197979504650
+      ],
+      [
+        13845575630399037463,
+        4620026969877175991,
+        13837105071489759467
+      ],
+      [
+        13845577433610585012,
+        4620026207511918394,
+        13837116401215044899
+      ]
+    ],
+    "epoch_float_baseline_bits": [
+      [
+        13845570238534969164,
+        4620029248504330747,
+        13837071197979504650
+      ],
+      [
+        13845575630399037463,
+        4620026969877175991,
+        13837105071489759467
+      ],
+      [
+        13845577433610585012,
+        4620026207511918394,
+        13837116401215044899
+      ]
+    ],
+    "epoch_sd_ambiguity_bits": [
+      [
+        [
+          "G01",
+          13851882892248496122
+        ],
+        [
+          "G02",
+          13852037361157641879
+        ],
+        [
+          "G03",
+          13850612680012932899
+        ],
+        [
+          "G04",
+          13852591611854352724
+        ]
+      ],
+      [
+        [
+          "G01",
+          13851882892248496122
+        ],
+        [
+          "G02",
+          13852037067621181453
+        ],
+        [
+          "G03",
+          13850612277908046827
+        ],
+        [
+          "G04",
+          13852591287120374674
+        ]
+      ],
+      [
+        [
+          "G01",
+          13851882892248496122
+        ],
+        [
+          "G02",
+          13852036969415490282
+        ],
+        [
+          "G03",
+          13850612143461685484
+        ],
+        [
+          "G04",
+          13852591178479429759
+        ]
+      ]
+    ],
+    "epoch_used": [
+      [
+        "G01",
+        "G02",
+        "G03",
+        "G04"
+      ],
+      [
+        "G01",
+        "G02",
+        "G03",
+        "G04"
+      ],
+      [
+        "G01",
+        "G02",
+        "G03",
+        "G04"
+      ]
+    ],
+    "epoch_fixed_ids": [
+      [],
+      [],
+      []
+    ],
+    "epoch_newly_fixed": [
+      [],
+      [],
+      []
+    ],
+    "epoch_fixed_dd_ids": [
+      [],
+      [],
+      []
+    ],
+    "epoch_integer_fixed": [
+      false,
+      false,
+      false
+    ],
+    "epoch_integer_ratio_bits": [
+      4608339842684119875,
+      4607904129470408245,
+      4607766729002410722
+    ],
+    "epoch_residuals": [
+      "[FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -0.0020914748311042786, phase_m: -4.388642782515717e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.0034857913851737976, phase_normalized: -7.314404637526195e-7 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: -0.002863716334104538, phase_m: -1.0072778167113938e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.004772860556840897, phase_normalized: -1.6787963611856563e-7 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: -0.002313721925020218, phase_m: -1.9826749131368615e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.00385620320836703, phase_normalized: -3.304458188561436e-7 }]",
+      "[FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -0.0010486207902431488, phase_m: -1.3459637848711736e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.0017477013170719147, phase_normalized: -2.2432729747852892e-7 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: -0.001435164362192154, phase_m: -1.2564425944106006e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.00239194060365359, phase_normalized: -2.0940709906843344e-6 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: -0.0011600255966186523, phase_m: 7.499937115795774e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.0019333759943644206, phase_normalized: 1.2499895192992956e-6 }]",
+      "[FloatResidual { epoch_index: 0, satellite_id: \"G02\", reference_satellite_id: \"G01\", ambiguity_id: \"G02\", code_m: -0.0006997250020503998, phase_m: -2.2601303051317245e-9, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.0011662083367506664, phase_normalized: -3.7668838418862077e-7 }, FloatResidual { epoch_index: 0, satellite_id: \"G03\", reference_satellite_id: \"G01\", ambiguity_id: \"G03\", code_m: -0.0009575150907039642, phase_m: -1.2719945985395498e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.001595858484506607, phase_normalized: -2.119990997565916e-6 }, FloatResidual { epoch_index: 0, satellite_id: \"G04\", reference_satellite_id: \"G01\", ambiguity_id: \"G04\", code_m: -0.0007740519940853119, phase_m: 1.0931393124025135e-8, code_sigma_m: 0.6, phase_sigma_m: 0.006, code_normalized: -0.0012900866568088531, phase_normalized: 1.8218988540041892e-6 }]"
+    ],
+    "epoch_search": [
+      "Some(IntegerSearchMeta { integer_status: NotFixed, integer_method: \"lambda\", integer_ratio: Some(1.2569997290763275), integer_best_score: Some(0.012063595160138559), integer_second_best_score: Some(0.015163935847980665), integer_candidates: 2, ambiguity_search: AmbiguitySearch { order: [\"G02\", \"G03\", \"G04\"], float_cycles: [(\"G02\", -8.660468081058603), (\"G03\", 24.54609545222997), (\"G04\", -16.483002655960867)], covariance_cycles: [31.38144877177565, 15.634832348416003, 15.639509877347706, 15.634832348416003, 31.356918140220134, 15.62470040049914, 15.639509877347706, 15.62470040049914, 31.36414081130256], covariance_inverse_cycles: [0.04768029723610823, -0.01586505168084628, -0.015871941247245558, -0.01586505168084628, 0.047700055197310666, -0.01585177933198343, -0.015871941247245558, -0.01585177933198343, 0.04769487210843572] }, ambiguity_offsets_m: [(\"G02\", 0.3774825110899295), (\"G03\", 1.8874125554496475), (\"G04\", -0.754965022179859)], partial: PartialSearchMeta { enabled: false, fixed: false, fixed_ambiguities: [\"G02\", \"G03\", \"G04\"], free_ambiguities: [], full_set: None, exhaustive_subsets_evaluated: None } })",
+      "Some(IntegerSearchMeta { integer_status: NotFixed, integer_method: \"lambda\", integer_ratio: Some(1.160251960677113), integer_best_score: Some(0.02517794670601815), integer_second_best_score: Some(0.029212762031481414), integer_candidates: 2, ambiguity_search: AmbiguitySearch { order: [\"G02\", \"G03\", \"G04\"], float_cycles: [(\"G02\", -8.6507175615678), (\"G03\", 24.559452333086615), (\"G04\", -16.47221583589188)], covariance_cycles: [15.713895024083211, 7.84293799044983, 7.844109696203077, 7.84293799044983, 15.707745454697745, 7.840398559474677, 7.844109696203077, 7.840398559474677, 15.70955620575823], covariance_inverse_cycles: [0.09533813602213138, -0.03175099793618637, -0.031757887503244694, -0.03175099793618637, 0.09535789399034224, -0.031737725583762935, -0.031757887503244694, -0.031737725583762935, 0.09535271089924252] }, ambiguity_offsets_m: [(\"G02\", 0.3774825110899295), (\"G03\", 1.8874125554496475), (\"G04\", -0.754965022179859)], partial: PartialSearchMeta { enabled: false, fixed: false, fixed_ambiguities: [\"G02\", \"G03\", \"G04\"], free_ambiguities: [], full_set: None, exhaustive_subsets_evaluated: None } })",
+      "Some(IntegerSearchMeta { integer_status: NotFixed, integer_method: \"lambda\", integer_ratio: Some(1.1297429280440885), integer_best_score: Some(0.03830104388102378), integer_second_best_score: Some(0.04327033346129293), integer_candidates: 2, ambiguity_search: AmbiguitySearch { order: [\"G02\", \"G03\", \"G04\"], float_cycles: [(\"G02\", -8.64745542335001), (\"G03\", 24.563918292323297), (\"G04\", -16.468607065624106)], covariance_cycles: [10.48109599623777, 5.234316116481157, 5.2348372199617, 5.234316116481157, 10.478360340392378, 5.233186522603951, 5.2348372199617, 5.233186522603951, 10.479165874272457], covariance_inverse_cycles: [0.14299597480629644, -0.04763694419501409, -0.04764383376229217, -0.04763694419501409, 0.1430157327765383, -0.04762367184152036, -0.04764383376229217, -0.04762367184152036, 0.14301054968485447] }, ambiguity_offsets_m: [(\"G02\", 0.3774825110899295), (\"G03\", 1.8874125554496475), (\"G04\", -0.754965022179859)], partial: PartialSearchMeta { enabled: false, fixed: false, fixed_ambiguities: [\"G02\", \"G03\", \"G04\"], free_ambiguities: [], full_set: None, exhaustive_subsets_evaluated: None } })"
+    ],
+    "epoch_geometry": [
+      "GeometryQuality { tier: ZeroRedundancy, redundancy: 0, rank: 6, condition_number: 10.159774901821413, gdop: 7.404382204140929, raim_checkable: false, covariance_validated: false }",
+      "GeometryQuality { tier: ZeroRedundancy, redundancy: 0, rank: 6, condition_number: 10.159781325587094, gdop: 7.404387670235816, raim_checkable: false, covariance_validated: true }",
+      "GeometryQuality { tier: ZeroRedundancy, redundancy: 0, rank: 6, condition_number: 10.159781340022654, gdop: 7.404387682388273, raim_checkable: false, covariance_validated: true }"
+    ],
+    "state_baseline_bits": [
+      13845577433610585012,
+      4620026207511918394,
+      13837116401215044899
+    ],
+    "state_sd_ambiguity_bits": [
+      13851882892248496122,
+      13852036969415490282,
+      13850612143461685484,
+      13852591178479429759
+    ],
+    "state_information_bits": [
+      4671709743493415508,
+      13893826145206311240,
+      13890357319331397223,
+      4649448979069240921,
+      13898880278811740116,
+      4676512617064449340,
+      13888908772822031364,
+      13893826145206311241,
+      4675143113565791858,
+      4662657719824274376,
+      13882103098019099123,
+      13862995496962017472,
+      13900881028754219750,
+      4677937201981446350,
+      13890357319331397222,
+      4662657719824274377,
+      4663573529983698483,
+      13890146953915424067,
+      4672868637181495722,
+      13893494215683642242,
+      4644052281192066656,
+      4649448979069240884,
+      13882103098019099128,
+      13890146953915424069,
+      4733814870691020816,
+      13899331473499313492,
+      13899331473499313492,
+      13899331473499313492,
+      13898880278811740116,
+      13862995496962017472,
+      4672868637181495722,
+      13899331473499313492,
+      4683326347802643566,
+      13899331473499313493,
+      13899331473499313493,
+      4676512617064449340,
+      13900881028754219750,
+      13893494215683642242,
+      13899331473499313492,
+      13899331473499313493,
+      4683326347802643566,
+      13899331473499313493,
+      13888908772822031364,
+      4677937201981446350,
+      4644052281192066656,
+      13899331473499313492,
+      13899331473499313493,
+      13899331473499313493,
+      4683326347802643566
+    ],
+    "measurement_covariance_bits": [
+      4617243401040255194,
+      4608487571000711504,
+      4619770173177464338,
+      4394052715983744090,
+      13824569620148415987,
+      13827700060590335195,
+      13827368220016050071,
+      4608487571000804303,
+      4604111938855768681,
+      4609872227587217904,
+      4384602622958747609,
+      13811347015993353899,
+      13814673557534151879,
+      13821826778296450907,
+      4619770173177416077,
+      4609872227587029822,
+      4623108892496333678,
+      4397422511185319830,
+      13830566053222260374,
+      13830599006002011933,
+      13830162540288505064,
+      4393888487838905882,
+      4384459821708602771,
+      4397282257919056764,
+      4480133935442999950,
+      4480133933511549416,
+      4480133933511953804,
+      4480133933511831498,
+      13824569620148255142,
+      13811347015992747989,
+      13830566053222218264,
+      4480133933468098641,
+      4593303659505003115,
+      4588789786628729489,
+      4588790645687172445,
+      13827700060590293645,
+      13814673557533861085,
+      13830599006002007636,
+      4480133933467378941,
+      4588789786628845857,
+      4593301404589716697,
+      4588787924451110343,
+      13827368220016091709,
+      13821826778296423407,
+      13830162540288618060,
+      4480133933470742514,
+      4588790645687403712,
+      4588787924451290073,
+      4593302068566021676
+    ],
+    "fixed_cycles": {},
+    "fixed_m_bits": []
+  },
+  "rinex_arc_entry_points": [
+    {
+      "name": "gps",
+      "single": "RtkRinexArc { epochs: [RtkArcEpoch { base: [RtkArcObservation { satellite_id: \"G01\", ambiguity_id: \"G01\", code_m: 20000000.0, phase_m: 19.02936727983649, lli: None }], rover: [RtkArcObservation { satellite_id: \"G01\", ambiguity_id: \"G01\", code_m: 20000000.0, phase_m: 19.02936727983649, lli: None }], satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }, RtkArcEpoch { base: [RtkArcObservation { satellite_id: \"G01\", ambiguity_id: \"G01\", code_m: 20000000.0, phase_m: 19.02936727983649, lli: None }], rover: [RtkArcObservation { satellite_id: \"G01\", ambiguity_id: \"G01\", code_m: 20000000.0, phase_m: 19.02936727983649, lli: None }], satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }, RtkArcEpoch { base: [RtkArcObservation { satellite_id: \"G01\", ambiguity_id: \"G01\", code_m: 20000000.0, phase_m: 19.02936727983649, lli: None }], rover: [RtkArcObservation { satellite_id: \"G01\", ambiguity_id: \"G01\", code_m: 20000000.0, phase_m: 19.02936727983649, lli: None }], satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }], wavelengths_m: {\"G01\": 0.19029367279836487}, offsets_m: {\"G01\": 0.0}, skipped_epoch_count: 0, unresolved_carriers: [] }",
+      "dual": "RtkRinexDualFrequencyArc { epochs: [RtkDualFrequencyArcEpoch { jd_whole: 2458849.5, jd_fraction: 0.0, epoch_sort_key: Some(\"2020-01-01T00:00:0.000000000\"), gap_time_s: Some(631108800.0), gap_epoch: Some(ExactEpoch { seconds: 631108800, attoseconds: 0, residue: Residue { digits: 0, places: 0 } }), observations: [RtkDualFrequencySatelliteObservation { satellite_id: \"G01\", base: RtkDualFrequencyObservation { ambiguity_id: \"G01\", p1_m: 20000000.0, p2_m: 20000000.0, phi1_cycles: 100.0, phi2_cycles: 90.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G01\", p1_m: 20000000.0, p2_m: 20000000.0, phi1_cycles: 100.0, phi2_cycles: 90.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }], satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }, RtkDualFrequencyArcEpoch { jd_whole: 2458849.5, jd_fraction: 0.00011574074074074075, epoch_sort_key: Some(\"2020-01-01T00:00:10.000000000\"), gap_time_s: Some(631108810.0), gap_epoch: Some(ExactEpoch { seconds: 631108810, attoseconds: 0, residue: Residue { digits: 0, places: 0 } }), observations: [RtkDualFrequencySatelliteObservation { satellite_id: \"G01\", base: RtkDualFrequencyObservation { ambiguity_id: \"G01\", p1_m: 20000000.0, p2_m: 20000000.0, phi1_cycles: 100.0, phi2_cycles: 90.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G01\", p1_m: 20000000.0, p2_m: 20000000.0, phi1_cycles: 100.0, phi2_cycles: 90.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }], satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }, RtkDualFrequencyArcEpoch { jd_whole: 2458849.5, jd_fraction: 0.0002314814814814815, epoch_sort_key: Some(\"2020-01-01T00:00:20.000000000\"), gap_time_s: Some(631108820.0), gap_epoch: Some(ExactEpoch { seconds: 631108820, attoseconds: 0, residue: Residue { digits: 0, places: 0 } }), observations: [RtkDualFrequencySatelliteObservation { satellite_id: \"G01\", base: RtkDualFrequencyObservation { ambiguity_id: \"G01\", p1_m: 20000000.0, p2_m: 20000000.0, phi1_cycles: 100.0, phi2_cycles: 90.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G01\", p1_m: 20000000.0, p2_m: 20000000.0, phi1_cycles: 100.0, phi2_cycles: 90.0, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: None, lli2: None } }], satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"G01\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }], skipped_epoch_count: 0, unresolved_carriers: [] }"
+    },
+    {
+      "name": "glonass",
+      "single": "RtkRinexArc { epochs: [RtkArcEpoch { base: [RtkArcObservation { satellite_id: \"R01\", ambiguity_id: \"R01\", code_m: 20000000.0, phase_m: 18.75974550432164, lli: None }], rover: [RtkArcObservation { satellite_id: \"R01\", ambiguity_id: \"R01\", code_m: 20000000.0, phase_m: 18.75974550432164, lli: None }], satellite_positions_m: {\"R01\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"R01\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"R01\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }], wavelengths_m: {\"R01\": 0.1875974550432164}, offsets_m: {\"R01\": 0.0}, skipped_epoch_count: 2, unresolved_carriers: [] }",
+      "dual": "RtkRinexDualFrequencyArc { epochs: [RtkDualFrequencyArcEpoch { jd_whole: 2458849.5, jd_fraction: 0.0, epoch_sort_key: Some(\"2020-01-01T00:00:0.000000000\"), gap_time_s: Some(631108800.0), gap_epoch: Some(ExactEpoch { seconds: 631108800, attoseconds: 0, residue: Residue { digits: 0, places: 0 } }), observations: [RtkDualFrequencySatelliteObservation { satellite_id: \"R01\", base: RtkDualFrequencyObservation { ambiguity_id: \"R01\", p1_m: 20000000.0, p2_m: 20000001.0, phi1_cycles: 100.0, phi2_cycles: 90.0, f1_hz: 1598062500.0, f2_hz: 1242937500.0, lli1: None, lli2: None }, rover: RtkDualFrequencyObservation { ambiguity_id: \"R01\", p1_m: 20000000.0, p2_m: 20000001.0, phi1_cycles: 100.0, phi2_cycles: 90.0, f1_hz: 1598062500.0, f2_hz: 1242937500.0, lli1: None, lli2: None } }], satellite_positions_m: {\"R01\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"R01\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"R01\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }], skipped_epoch_count: 2, unresolved_carriers: [] }"
+    },
+    {
+      "name": "rinex_file",
+      "single": "RtkRinexArc { epochs: [RtkArcEpoch { base: [RtkArcObservation { satellite_id: \"G05\", ambiguity_id: \"G05\", code_m: 20746298.836, phase_m: 20746304.041721743, lli: Some(0) }, RtkArcObservation { satellite_id: \"G07\", ambiguity_id: \"G07\", code_m: 21646682.004, phase_m: 21646691.048869174, lli: Some(0) }, RtkArcObservation { satellite_id: \"G08\", ambiguity_id: \"G08\", code_m: 24919936.138, phase_m: 24919937.752697486, lli: Some(0) }, RtkArcObservation { satellite_id: \"G09\", ambiguity_id: \"G09\", code_m: 23949741.662, phase_m: 23949751.70628691, lli: Some(0) }, RtkArcObservation { satellite_id: \"G13\", ambiguity_id: \"G13\", code_m: 21874630.137, phase_m: 21874635.33890568, lli: Some(0) }, RtkArcObservation { satellite_id: \"G15\", ambiguity_id: \"G15\", code_m: 24398135.073, phase_m: 24398136.258035872, lli: Some(0) }, RtkArcObservation { satellite_id: \"G18\", ambiguity_id: \"G18\", code_m: 24735868.666, phase_m: 24735869.289452065, lli: Some(0) }, RtkArcObservation { satellite_id: \"G27\", ambiguity_id: \"G27\", code_m: 25060678.271, phase_m: 25060677.95462826, lli: Some(0) }, RtkArcObservation { satellite_id: \"G28\", ambiguity_id: \"G28\", code_m: 22601016.337, phase_m: 22601017.440383334, lli: Some(0) }, RtkArcObservation { satellite_id: \"G30\", ambiguity_id: \"G30\", code_m: 20373961.173, phase_m: 20373968.21512224, lli: Some(0) }], rover: [RtkArcObservation { satellite_id: \"G05\", ambiguity_id: \"G05\", code_m: 20746298.836, phase_m: 20746304.041721743, lli: Some(0) }, RtkArcObservation { satellite_id: \"G07\", ambiguity_id: \"G07\", code_m: 21646682.004, phase_m: 21646691.048869174, lli: Some(0) }, RtkArcObservation { satellite_id: \"G08\", ambiguity_id: \"G08\", code_m: 24919936.138, phase_m: 24919937.752697486, lli: Some(0) }, RtkArcObservation { satellite_id: \"G09\", ambiguity_id: \"G09\", code_m: 23949741.662, phase_m: 23949751.70628691, lli: Some(0) }, RtkArcObservation { satellite_id: \"G13\", ambiguity_id: \"G13\", code_m: 21874630.137, phase_m: 21874635.33890568, lli: Some(0) }, RtkArcObservation { satellite_id: \"G15\", ambiguity_id: \"G15\", code_m: 24398135.073, phase_m: 24398136.258035872, lli: Some(0) }, RtkArcObservation { satellite_id: \"G18\", ambiguity_id: \"G18\", code_m: 24735868.666, phase_m: 24735869.289452065, lli: Some(0) }, RtkArcObservation { satellite_id: \"G27\", ambiguity_id: \"G27\", code_m: 25060678.271, phase_m: 25060677.95462826, lli: Some(0) }, RtkArcObservation { satellite_id: \"G28\", ambiguity_id: \"G28\", code_m: 22601016.337, phase_m: 22601017.440383334, lli: Some(0) }, RtkArcObservation { satellite_id: \"G30\", ambiguity_id: \"G30\", code_m: 20373961.173, phase_m: 20373968.21512224, lli: Some(0) }], satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }, RtkArcEpoch { base: [RtkArcObservation { satellite_id: \"G05\", ambiguity_id: \"G05\", code_m: 20749124.891, phase_m: 20749130.149573695, lli: Some(0) }, RtkArcObservation { satellite_id: \"G07\", ambiguity_id: \"G07\", code_m: 21657686.855, phase_m: 21657695.913887855, lli: Some(0) }, RtkArcObservation { satellite_id: \"G08\", ambiguity_id: \"G08\", code_m: 24911216.967, phase_m: 24911218.72743609, lli: Some(0) }, RtkArcObservation { satellite_id: \"G09\", ambiguity_id: \"G09\", code_m: 23967955.052, phase_m: 23967965.064611975, lli: Some(0) }, RtkArcObservation { satellite_id: \"G13\", ambiguity_id: \"G13\", code_m: 21860140.76, phase_m: 21860145.83023245, lli: Some(0) }, RtkArcObservation { satellite_id: \"G15\", ambiguity_id: \"G15\", code_m: 24378225.282, phase_m: 24378226.690797795, lli: Some(0) }, RtkArcObservation { satellite_id: \"G18\", ambiguity_id: \"G18\", code_m: 24728522.426, phase_m: 24728523.176903278, lli: Some(0) }, RtkArcObservation { satellite_id: \"G27\", ambiguity_id: \"G27\", code_m: 25060146.007, phase_m: 25060145.6052242, lli: Some(0) }, RtkArcObservation { satellite_id: \"G28\", ambiguity_id: \"G28\", code_m: 22583901.404, phase_m: 22583902.735156715, lli: Some(0) }, RtkArcObservation { satellite_id: \"G30\", ambiguity_id: \"G30\", code_m: 20374784.361, phase_m: 20374791.42897605, lli: Some(0) }], rover: [RtkArcObservation { satellite_id: \"G05\", ambiguity_id: \"G05\", code_m: 20749124.891, phase_m: 20749130.149573695, lli: Some(0) }, RtkArcObservation { satellite_id: \"G07\", ambiguity_id: \"G07\", code_m: 21657686.855, phase_m: 21657695.913887855, lli: Some(0) }, RtkArcObservation { satellite_id: \"G08\", ambiguity_id: \"G08\", code_m: 24911216.967, phase_m: 24911218.72743609, lli: Some(0) }, RtkArcObservation { satellite_id: \"G09\", ambiguity_id: \"G09\", code_m: 23967955.052, phase_m: 23967965.064611975, lli: Some(0) }, RtkArcObservation { satellite_id: \"G13\", ambiguity_id: \"G13\", code_m: 21860140.76, phase_m: 21860145.83023245, lli: Some(0) }, RtkArcObservation { satellite_id: \"G15\", ambiguity_id: \"G15\", code_m: 24378225.282, phase_m: 24378226.690797795, lli: Some(0) }, RtkArcObservation { satellite_id: \"G18\", ambiguity_id: \"G18\", code_m: 24728522.426, phase_m: 24728523.176903278, lli: Some(0) }, RtkArcObservation { satellite_id: \"G27\", ambiguity_id: \"G27\", code_m: 25060146.007, phase_m: 25060145.6052242, lli: Some(0) }, RtkArcObservation { satellite_id: \"G28\", ambiguity_id: \"G28\", code_m: 22583901.404, phase_m: 22583902.735156715, lli: Some(0) }, RtkArcObservation { satellite_id: \"G30\", ambiguity_id: \"G30\", code_m: 20374784.361, phase_m: 20374791.42897605, lli: Some(0) }], satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }, RtkArcEpoch { base: [RtkArcObservation { satellite_id: \"G05\", ambiguity_id: \"G05\", code_m: 20752065.269, phase_m: 20752070.582438976, lli: Some(0) }, RtkArcObservation { satellite_id: \"G07\", ambiguity_id: \"G07\", code_m: 21668747.074, phase_m: 21668756.158171196, lli: Some(0) }, RtkArcObservation { satellite_id: \"G08\", ambiguity_id: \"G08\", code_m: 24902584.009, phase_m: 24902585.554306943, lli: Some(0) }, RtkArcObservation { satellite_id: \"G09\", ambiguity_id: \"G09\", code_m: 23986193.461, phase_m: 23986203.320009716, lli: Some(0) }, RtkArcObservation { satellite_id: \"G13\", ambiguity_id: \"G13\", code_m: 21845692.927, phase_m: 21845698.2082413, lli: Some(0) }, RtkArcObservation { satellite_id: \"G15\", ambiguity_id: \"G15\", code_m: 24358328.154, phase_m: 24358329.57866119, lli: Some(0) }, RtkArcObservation { satellite_id: \"G18\", ambiguity_id: \"G18\", code_m: 24721277.432, phase_m: 24721278.341691848, lli: Some(0) }, RtkArcObservation { satellite_id: \"G27\", ambiguity_id: \"G27\", code_m: 25059724.13, phase_m: 25059723.823484905, lli: Some(0) }, RtkArcObservation { satellite_id: \"G28\", ambiguity_id: \"G28\", code_m: 22566842.578, phase_m: 22566843.691971157, lli: Some(0) }, RtkArcObservation { satellite_id: \"G30\", ambiguity_id: \"G30\", code_m: 20375693.568, phase_m: 20375700.5221741, lli: Some(0) }], rover: [RtkArcObservation { satellite_id: \"G05\", ambiguity_id: \"G05\", code_m: 20752065.269, phase_m: 20752070.582438976, lli: Some(0) }, RtkArcObservation { satellite_id: \"G07\", ambiguity_id: \"G07\", code_m: 21668747.074, phase_m: 21668756.158171196, lli: Some(0) }, RtkArcObservation { satellite_id: \"G08\", ambiguity_id: \"G08\", code_m: 24902584.009, phase_m: 24902585.554306943, lli: Some(0) }, RtkArcObservation { satellite_id: \"G09\", ambiguity_id: \"G09\", code_m: 23986193.461, phase_m: 23986203.320009716, lli: Some(0) }, RtkArcObservation { satellite_id: \"G13\", ambiguity_id: \"G13\", code_m: 21845692.927, phase_m: 21845698.2082413, lli: Some(0) }, RtkArcObservation { satellite_id: \"G15\", ambiguity_id: \"G15\", code_m: 24358328.154, phase_m: 24358329.57866119, lli: Some(0) }, RtkArcObservation { satellite_id: \"G18\", ambiguity_id: \"G18\", code_m: 24721277.432, phase_m: 24721278.341691848, lli: Some(0) }, RtkArcObservation { satellite_id: \"G27\", ambiguity_id: \"G27\", code_m: 25059724.13, phase_m: 25059723.823484905, lli: Some(0) }, RtkArcObservation { satellite_id: \"G28\", ambiguity_id: \"G28\", code_m: 22566842.578, phase_m: 22566843.691971157, lli: Some(0) }, RtkArcObservation { satellite_id: \"G30\", ambiguity_id: \"G30\", code_m: 20375693.568, phase_m: 20375700.5221741, lli: Some(0) }], satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }], wavelengths_m: {\"G05\": 0.19029367279836487, \"G07\": 0.19029367279836487, \"G08\": 0.19029367279836487, \"G09\": 0.19029367279836487, \"G13\": 0.19029367279836487, \"G15\": 0.19029367279836487, \"G18\": 0.19029367279836487, \"G27\": 0.19029367279836487, \"G28\": 0.19029367279836487, \"G30\": 0.19029367279836487}, offsets_m: {\"G05\": 0.0, \"G07\": 0.0, \"G08\": 0.0, \"G09\": 0.0, \"G13\": 0.0, \"G15\": 0.0, \"G18\": 0.0, \"G27\": 0.0, \"G28\": 0.0, \"G30\": 0.0}, skipped_epoch_count: 0, unresolved_carriers: [] }",
+      "dual": "RtkRinexDualFrequencyArc { epochs: [RtkDualFrequencyArcEpoch { jd_whole: 2459025.5, jd_fraction: 0.0, epoch_sort_key: Some(\"2020-06-25T00:00:0.000000000\"), gap_time_s: Some(646315200.0), gap_epoch: Some(ExactEpoch { seconds: 646315200, attoseconds: 0, residue: Residue { digits: 0, places: 0 } }), observations: [RtkDualFrequencySatelliteObservation { satellite_id: \"G05\", base: RtkDualFrequencyObservation { ambiguity_id: \"G05\", p1_m: 20746298.836, p2_m: 20746297.286, phi1_cycles: 109022563.581, phi2_cycles: 84952671.476, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G05\", p1_m: 20746298.836, p2_m: 20746297.286, phi1_cycles: 109022563.581, phi2_cycles: 84952671.476, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G07\", base: RtkDualFrequencyObservation { ambiguity_id: \"G07\", p1_m: 21646682.004, p2_m: 21646680.137, phi1_cycles: 113754129.239, phi2_cycles: 88639597.288, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G07\", p1_m: 21646682.004, p2_m: 21646680.137, phi1_cycles: 113754129.239, phi2_cycles: 88639597.288, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G08\", base: RtkDualFrequencyObservation { ambiguity_id: \"G08\", p1_m: 24919936.138, p2_m: 24919937.6, phi1_cycles: 130955156.765, phi2_cycles: 102042978.226, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G08\", p1_m: 24919936.138, p2_m: 24919937.6, phi1_cycles: 130955156.765, phi2_cycles: 102042978.226, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G09\", base: RtkDualFrequencyObservation { ambiguity_id: \"G09\", p1_m: 23949741.662, p2_m: 23949742.692, phi1_cycles: 125856794.68, phi2_cycles: 98070242.273, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G09\", p1_m: 23949741.662, p2_m: 23949742.692, phi1_cycles: 125856794.68, phi2_cycles: 98070242.273, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G13\", base: RtkDualFrequencyObservation { ambiguity_id: \"G13\", p1_m: 21874630.137, p2_m: 21874627.993, phi1_cycles: 114951984.568, phi2_cycles: 89572975.816, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G13\", p1_m: 21874630.137, p2_m: 21874627.993, phi1_cycles: 114951984.568, phi2_cycles: 89572975.816, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G15\", base: RtkDualFrequencyObservation { ambiguity_id: \"G15\", p1_m: 24398135.073, p2_m: 24398133.525, phi1_cycles: 128213071.403, phi2_cycles: 99906289.27, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G15\", p1_m: 24398135.073, p2_m: 24398133.525, phi1_cycles: 128213071.403, phi2_cycles: 99906289.27, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G18\", base: RtkDualFrequencyObservation { ambiguity_id: \"G18\", p1_m: 24735868.666, p2_m: 24735867.652, phi1_cycles: 129987870.462, phi2_cycles: 101289248.334, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G18\", p1_m: 24735868.666, p2_m: 24735867.652, phi1_cycles: 129987870.462, phi2_cycles: 101289248.334, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G27\", base: RtkDualFrequencyObservation { ambiguity_id: \"G27\", p1_m: 25060678.271, p2_m: 25060677.98, phi1_cycles: 131694751.518, phi2_cycles: 102619290.565, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G27\", p1_m: 25060678.271, p2_m: 25060677.98, phi1_cycles: 131694751.518, phi2_cycles: 102619290.565, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G28\", base: RtkDualFrequencyObservation { ambiguity_id: \"G28\", p1_m: 22601016.337, p2_m: 22601013.967, phi1_cycles: 118769148.275, phi2_cycles: 92547388.799, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G28\", p1_m: 22601016.337, p2_m: 22601013.967, phi1_cycles: 118769148.275, phi2_cycles: 92547388.799, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G30\", base: RtkDualFrequencyObservation { ambiguity_id: \"G30\", p1_m: 20373961.173, p2_m: 20373962.065, phi1_cycles: 107065925.606, phi2_cycles: 83428008.064, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G30\", p1_m: 20373961.173, p2_m: 20373962.065, phi1_cycles: 107065925.606, phi2_cycles: 83428008.064, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }], satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }, RtkDualFrequencyArcEpoch { jd_whole: 2459025.5, jd_fraction: 0.00034722222222222224, epoch_sort_key: Some(\"2020-06-25T00:00:30.000000000\"), gap_time_s: Some(646315230.0), gap_epoch: Some(ExactEpoch { seconds: 646315230, attoseconds: 0, residue: Residue { digits: 0, places: 0 } }), observations: [RtkDualFrequencySatelliteObservation { satellite_id: \"G05\", base: RtkDualFrequencyObservation { ambiguity_id: \"G05\", p1_m: 20749124.891, p2_m: 20749123.408, phi1_cycles: 109037414.878, phi2_cycles: 84964243.915, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G05\", p1_m: 20749124.891, p2_m: 20749123.408, phi1_cycles: 109037414.878, phi2_cycles: 84964243.915, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G07\", base: RtkDualFrequencyObservation { ambiguity_id: \"G07\", p1_m: 21657686.855, p2_m: 21657685.023, phi1_cycles: 113811960.195, phi2_cycles: 88684660.37, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G07\", p1_m: 21657686.855, p2_m: 21657685.023, phi1_cycles: 113811960.195, phi2_cycles: 88684660.37, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G08\", base: RtkDualFrequencyObservation { ambiguity_id: \"G08\", p1_m: 24911216.967, p2_m: 24911218.951, phi1_cycles: 130909337.978, phi2_cycles: 102007275.345, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G08\", p1_m: 24911216.967, p2_m: 24911218.951, phi1_cycles: 130909337.978, phi2_cycles: 102007275.345, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G09\", base: RtkDualFrequencyObservation { ambiguity_id: \"G09\", p1_m: 23967955.052, p2_m: 23967956.036, phi1_cycles: 125952506.524, phi2_cycles: 98144822.905, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G09\", p1_m: 23967955.052, p2_m: 23967956.036, phi1_cycles: 125952506.524, phi2_cycles: 98144822.905, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G13\", base: RtkDualFrequencyObservation { ambiguity_id: \"G13\", p1_m: 21860140.76, p2_m: 21860138.455, phi1_cycles: 114875841.686, phi2_cycles: 89513643.703, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G13\", p1_m: 21860140.76, p2_m: 21860138.455, phi1_cycles: 114875841.686, phi2_cycles: 89513643.703, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G15\", base: RtkDualFrequencyObservation { ambiguity_id: \"G15\", p1_m: 24378225.282, p2_m: 24378224.005, phi1_cycles: 128108445.921, phi2_cycles: 99824762.983, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G15\", p1_m: 24378225.282, p2_m: 24378224.005, phi1_cycles: 128108445.921, phi2_cycles: 99824762.983, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G18\", base: RtkDualFrequencyObservation { ambiguity_id: \"G18\", p1_m: 24728522.426, p2_m: 24728521.634, phi1_cycles: 129949266.38, phi2_cycles: 101259167.243, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G18\", p1_m: 24728522.426, p2_m: 24728521.634, phi1_cycles: 129949266.38, phi2_cycles: 101259167.243, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G27\", base: RtkDualFrequencyObservation { ambiguity_id: \"G27\", p1_m: 25060146.007, p2_m: 25060145.533, phi1_cycles: 131691954.003, phi2_cycles: 102617110.67, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G27\", p1_m: 25060146.007, p2_m: 25060145.533, phi1_cycles: 131691954.003, phi2_cycles: 102617110.67, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G28\", base: RtkDualFrequencyObservation { ambiguity_id: \"G28\", p1_m: 22583901.404, p2_m: 22583899.376, phi1_cycles: 118679209.892, phi2_cycles: 92477306.959, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G28\", p1_m: 22583901.404, p2_m: 22583899.376, phi1_cycles: 118679209.892, phi2_cycles: 92477306.959, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G30\", base: RtkDualFrequencyObservation { ambiguity_id: \"G30\", p1_m: 20374784.361, p2_m: 20374785.185, phi1_cycles: 107070251.624, phi2_cycles: 83431378.99, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G30\", p1_m: 20374784.361, p2_m: 20374785.185, phi1_cycles: 107070251.624, phi2_cycles: 83431378.99, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }], satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }, RtkDualFrequencyArcEpoch { jd_whole: 2459025.5, jd_fraction: 0.0006944444444444445, epoch_sort_key: Some(\"2020-06-25T00:01:0.000000000\"), gap_time_s: Some(646315260.0), gap_epoch: Some(ExactEpoch { seconds: 646315260, attoseconds: 0, residue: Residue { digits: 0, places: 0 } }), observations: [RtkDualFrequencySatelliteObservation { satellite_id: \"G05\", base: RtkDualFrequencyObservation { ambiguity_id: \"G05\", p1_m: 20752065.269, p2_m: 20752063.847, phi1_cycles: 109052866.957, phi2_cycles: 84976284.495, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G05\", p1_m: 20752065.269, p2_m: 20752063.847, phi1_cycles: 109052866.957, phi2_cycles: 84976284.495, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G07\", base: RtkDualFrequencyObservation { ambiguity_id: \"G07\", p1_m: 21668747.074, p2_m: 21668745.283, phi1_cycles: 113870082.171, phi2_cycles: 88729950.21, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G07\", p1_m: 21668747.074, p2_m: 21668745.283, phi1_cycles: 113870082.171, phi2_cycles: 88729950.21, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G08\", base: RtkDualFrequencyObservation { ambiguity_id: \"G08\", p1_m: 24902584.009, p2_m: 24902585.59, phi1_cycles: 130863970.347, phi2_cycles: 101971923.97, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G08\", p1_m: 24902584.009, p2_m: 24902585.59, phi1_cycles: 130863970.347, phi2_cycles: 101971923.97, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G09\", base: RtkDualFrequencyObservation { ambiguity_id: \"G09\", p1_m: 23986193.461, p2_m: 23986194.416, phi1_cycles: 126048349.203, phi2_cycles: 98219505.502, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G09\", p1_m: 23986193.461, p2_m: 23986194.416, phi1_cycles: 126048349.203, phi2_cycles: 98219505.502, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G13\", base: RtkDualFrequencyObservation { ambiguity_id: \"G13\", p1_m: 21845692.927, p2_m: 21845690.846, phi1_cycles: 114799918.92, phi2_cycles: 89454483.121, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G13\", p1_m: 21845692.927, p2_m: 21845690.846, phi1_cycles: 114799918.92, phi2_cycles: 89454483.121, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G15\", base: RtkDualFrequencyObservation { ambiguity_id: \"G15\", p1_m: 24358328.154, p2_m: 24358326.975, phi1_cycles: 128003885.891, phi2_cycles: 99743287.661, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G15\", p1_m: 24358328.154, p2_m: 24358326.975, phi1_cycles: 128003885.891, phi2_cycles: 99743287.661, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G18\", base: RtkDualFrequencyObservation { ambiguity_id: \"G18\", p1_m: 24721277.432, p2_m: 24721276.787, phi1_cycles: 129911194.514, phi2_cycles: 101229500.856, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G18\", p1_m: 24721277.432, p2_m: 24721276.787, phi1_cycles: 129911194.514, phi2_cycles: 101229500.856, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G27\", base: RtkDualFrequencyObservation { ambiguity_id: \"G27\", p1_m: 25059724.13, p2_m: 25059723.493, phi1_cycles: 131689737.525, phi2_cycles: 102615383.546, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G27\", p1_m: 25059724.13, p2_m: 25059723.493, phi1_cycles: 131689737.525, phi2_cycles: 102615383.546, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G28\", base: RtkDualFrequencyObservation { ambiguity_id: \"G28\", p1_m: 22566842.578, p2_m: 22566840.594, phi1_cycles: 118589564.015, phi2_cycles: 92407453.041, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G28\", p1_m: 22566842.578, p2_m: 22566840.594, phi1_cycles: 118589564.015, phi2_cycles: 92407453.041, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }, RtkDualFrequencySatelliteObservation { satellite_id: \"G30\", base: RtkDualFrequencyObservation { ambiguity_id: \"G30\", p1_m: 20375693.568, p2_m: 20375694.32, phi1_cycles: 107075028.941, phi2_cycles: 83435101.581, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) }, rover: RtkDualFrequencyObservation { ambiguity_id: \"G30\", p1_m: 20375693.568, p2_m: 20375694.32, phi1_cycles: 107075028.941, phi2_cycles: 83435101.581, f1_hz: 1575420000.0, f2_hz: 1227600000.0, lli1: Some(0), lli2: Some(0) } }], satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, base_satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, rover_satellite_positions_m: {\"G05\": [20000000.0, 10000000.0, 10000000.0], \"G07\": [20000000.0, 10000000.0, 10000000.0], \"G08\": [20000000.0, 10000000.0, 10000000.0], \"G09\": [20000000.0, 10000000.0, 10000000.0], \"G13\": [20000000.0, 10000000.0, 10000000.0], \"G15\": [20000000.0, 10000000.0, 10000000.0], \"G18\": [20000000.0, 10000000.0, 10000000.0], \"G27\": [20000000.0, 10000000.0, 10000000.0], \"G28\": [20000000.0, 10000000.0, 10000000.0], \"G30\": [20000000.0, 10000000.0, 10000000.0]}, velocity_mps: None, prediction_time_s: None, prediction_epoch: None }], skipped_epoch_count: 0, unresolved_carriers: [] }"
+    }
+  ]
+}

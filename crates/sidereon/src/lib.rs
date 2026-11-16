@@ -1822,6 +1822,7 @@ mod tests {
                 enu_m2: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             },
             posterior_variance_factor: 1.0,
+            posterior_variance_factor_estimated: true,
             position_covariance_scale_factor: 1.0,
             temporal_position_covariance: sidereon_core::dop::PositionCovariance {
                 ecef_m2: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],

@@ -154,13 +154,15 @@
 //! ```
 
 use crate::astro::frames::transforms::itrs_to_geodetic_compute;
-use crate::astro::math::linear::{invert_matrix_last_tie, invert_symmetric_pd};
+use crate::astro::math::linear::invert_matrix_last_tie;
+#[cfg(test)]
+use crate::astro::math::linear::invert_symmetric_pd;
 use crate::estimation::substrate::parameters::{
     undifferenced_design_row, UndifferencedDesignOptions,
 };
 use crate::geometry::{dop, DopError, LineOfSight, Wgs84Geodetic};
 use crate::observables::ObservableEphemerisSource;
-use crate::quality::{chi2_inv, DEFAULT_P_FA};
+use crate::quality::{chi2_inv, chi2_isf, noncentral_chi2_log_cdf, DEFAULT_P_FA};
 use crate::validate;
 
 use super::{
@@ -172,6 +174,7 @@ use super::{
 const DEFAULT_MISSED_DETECTION_PROBABILITY: f64 = 1.0e-3;
 const DEFAULT_MEASUREMENT_SIGMA_M: f64 = 1.0;
 const RESIDUAL_COMPONENTS_PER_ROW: usize = 2;
+const MAX_NONCENTRAL_DOF: usize = 100_000;
 const SNAPSHOT_BASE_STATES: usize = 4;
 const LEVERAGE_TOLERANCE: f64 = 1.0e-12;
 const DEG_TO_RAD: f64 = std::f64::consts::PI / 180.0;
@@ -290,6 +293,8 @@ pub struct ProtectionLevels {
 pub enum RaimFdeStatus {
     /// The first solve passed RAIM without exclusions.
     Clean,
+    /// The solve succeeded, but no RAIM test ran because redundancy was zero.
+    Untested,
     /// At least one satellite was excluded and the final solve passed RAIM.
     Restored,
     /// A fault was detected, but excluding the candidate would exhaust redundancy.
@@ -357,6 +362,20 @@ pub enum RaimError {
     Dop(DopError),
     /// The geometry normal matrix could not be inverted.
     SingularGeometry,
+    /// A protection-level probability evaluation or bias bracket failed
+    /// numerically after the geometry and detection test were valid.
+    NumericalProtectionLevel,
+    /// The detectable-bias search requires a noncentrality above the supported
+    /// maximum of 1e12. This is a domain limit, distinct from numerical failure.
+    UnsupportedNoncentrality,
+    /// The noncentral-CDF protection-level calculation was requested beyond
+    /// the degree-of-freedom range with a validated accuracy bound.
+    UnsupportedDof {
+        /// Requested degrees of freedom.
+        dof: usize,
+        /// Largest supported value.
+        max: usize,
+    },
 }
 
 impl core::fmt::Display for RaimError {
@@ -371,6 +390,18 @@ impl core::fmt::Display for RaimError {
             }
             Self::Dop(error) => write!(f, "RAIM DOP failed: {error}"),
             Self::SingularGeometry => write!(f, "singular RAIM geometry"),
+            Self::NumericalProtectionLevel => {
+                write!(f, "RAIM protection-level probability evaluation failed")
+            }
+            Self::UnsupportedNoncentrality => {
+                write!(f, "RAIM noncentrality exceeds supported maximum 1e12")
+            }
+            Self::UnsupportedDof { dof, max } => {
+                write!(
+                    f,
+                    "RAIM degrees of freedom {dof} exceed supported maximum {max}"
+                )
+            }
         }
     }
 }
@@ -397,7 +428,17 @@ pub fn global_test(
             field: "residuals",
             reason: "too many residual rows",
         })?;
-    let redundancy = n_obs as isize - n_states as isize;
+    let redundancy = isize::try_from(n_obs)
+        .ok()
+        .and_then(|n_obs| {
+            isize::try_from(n_states)
+                .ok()
+                .map(|n_states| n_obs - n_states)
+        })
+        .ok_or(RaimError::InvalidConfig {
+            field: "n_states",
+            reason: "does not fit the reported redundancy",
+        })?;
 
     if redundancy <= 0 {
         return Ok(RaimResult {
@@ -413,16 +454,15 @@ pub fn global_test(
         });
     }
 
-    let threshold =
-        match config.chi_square_threshold {
-            Some(threshold) => threshold,
-            None => chi2_inv(1.0 - config.false_alarm_probability, redundancy as usize).map_err(
-                |_| RaimError::InvalidConfig {
-                    field: "false_alarm_probability",
-                    reason: "cannot derive chi-square threshold",
-                },
-            )?,
-        };
+    let threshold = match config.chi_square_threshold {
+        Some(threshold) => threshold,
+        None => chi2_isf(config.false_alarm_probability, redundancy as usize).map_err(|_| {
+            RaimError::InvalidConfig {
+                field: "false_alarm_probability",
+                reason: "cannot derive chi-square threshold",
+            }
+        })?,
+    };
     validate::finite_positive(threshold, "chi_square_threshold").map_err(|_| {
         RaimError::InvalidConfig {
             field: "chi_square_threshold",
@@ -457,6 +497,7 @@ pub fn global_test_with_geometry(
     geometry: &[RaimGeometryRow],
     config: RaimConfig,
 ) -> Result<RaimResult, RaimError> {
+    validate_geometry(residuals, geometry)?;
     let n_states = snapshot_state_count_for_geometry(geometry)?;
     let mut result = global_test(residuals, n_states, config)?;
     if result.status == RaimStatus::NotEnoughRedundancy {
@@ -479,13 +520,14 @@ pub fn per_satellite_statistics(
     geometry: &[RaimGeometryRow],
     config: RaimConfig,
 ) -> Result<RaimIdentification, RaimError> {
-    per_satellite_statistics_with_ztd(residuals, geometry, None, config)
+    per_satellite_statistics_with_atmosphere(residuals, geometry, None, None, config)
 }
 
-fn per_satellite_statistics_with_ztd(
+fn per_satellite_statistics_with_atmosphere(
     residuals: &[FloatResidual],
     geometry: &[RaimGeometryRow],
     ztd_mappings: Option<&[f64]>,
+    tropo_gradient_mappings: Option<&[[f64; 2]]>,
     config: RaimConfig,
 ) -> Result<RaimIdentification, RaimError> {
     validate_config(config)?;
@@ -493,10 +535,21 @@ fn per_satellite_statistics_with_ztd(
     if let Some(mappings) = ztd_mappings {
         validate_ztd_mappings(residuals.len(), mappings)?;
     }
+    if let Some(mappings) = tropo_gradient_mappings {
+        validate_tropo_gradient_mappings(residuals.len(), mappings)?;
+    }
+    let ambiguity_ids = residuals
+        .iter()
+        .map(|residual| residual.ambiguity_id.clone())
+        .collect::<Vec<_>>();
     let rows = snapshot_design_rows(
         residuals,
         geometry,
         ztd_mappings,
+        tropo_gradient_mappings,
+        1,
+        &[],
+        &ambiguity_ids,
         config.measurement_sigma_m,
     )?;
     let normal = normal_matrix(&rows)?;
@@ -504,7 +557,7 @@ fn per_satellite_statistics_with_ztd(
 
     let mut statistics = Vec::with_capacity(residuals.len());
     let mut most_likely_fault = None;
-    let mut worst = f64::NEG_INFINITY;
+    let mut worst = 0.0;
     for (idx, residual) in residuals.iter().enumerate() {
         let code = standardized_abs(&rows, 2 * idx, &q)?;
         let phase = standardized_abs(&rows, 2 * idx + 1, &q)?;
@@ -534,27 +587,128 @@ fn per_satellite_statistics_with_ztd(
     })
 }
 
-/// Compute geometry-based PPP RAIM protection levels.
+/// Compute Brown (1992) slope-based snapshot-RAIM protection levels with unit
+/// solver weights.
 ///
-/// This uses the DOP horizontal and vertical geometry factors as slope terms and
-/// scales them by `measurement_sigma_m * sqrt(chi2_inv(1 - p_md, 1))`, where
-/// `p_md` is [`RaimConfig::missed_detection_probability`].
+/// Use [`protection_levels_with_weights`] when the residual test used non-unit
+/// weights. At least one degree of redundancy is required.
 pub fn protection_levels(
     geometry: &[RaimGeometryRow],
     receiver: Wgs84Geodetic,
     config: RaimConfig,
 ) -> Result<ProtectionLevels, RaimError> {
+    protection_levels_with_weights(geometry, &vec![1.0; geometry.len()], receiver, config)
+}
+
+/// Compute Brown (1992) slope-based snapshot-RAIM protection levels using the
+/// same inverse-sigma row weights as the residual test.
+///
+/// The detectable bias is the square root of the noncentrality whose
+/// noncentral chi-square CDF at the `p_fa` detection threshold equals `p_md`.
+/// This is the reference's one-sided missed-detection definition; unlike the
+/// former two-sided normal multiplier (3.2905 at `p_md=0.001`), its one-degree
+/// asymptote uses 3.0902 and includes the detection threshold.
+///
+/// One protection-level computation evaluates the noncentral CDF once at zero
+/// noncentrality, once for each upper-bracket doubling, and up to 80 times for
+/// bisection. One degree of freedom uses a folded normal; subnormal x uses
+/// the leading gamma term. Otherwise an evaluation uses at most 10,000
+/// Poisson/gamma terms through noncentrality 100, or 64/128 panels × 16 = up to
+/// 2,048 quadrature nodes above 100 (128 panels above 16,384 perpendicular
+/// degrees of freedom). The noncentrality domain ends at 1e12, limiting
+/// bracket evaluation to 41 calls and total CDF evaluation to 122 calls:
+/// at most 1,220,000 gamma terms or 249,856 quadrature nodes. These are
+/// conservative separate bounds on the mixed sequence. An upper-mixture term
+/// can require a second central-gamma tail evaluation in log form after
+/// underflow, so the gamma-tail evaluation bound is 2,440,000; these kernel
+/// counts do not count their internal series/continued-fraction iterations.
+/// Matrix formation
+/// and per-row slopes are additional. The path is supported through 100,000
+/// residual degrees of freedom; larger requests return
+/// [`RaimError::UnsupportedDof`], and a root outside the noncentrality domain
+/// returns [`RaimError::UnsupportedNoncentrality`].
+/// Invalid CDF threshold or degrees-of-freedom arguments retain their domain
+/// classification (`InvalidConfig`, `InvalidGeometry`, or `UnsupportedDof`);
+/// only a numerical evaluation failure becomes `NumericalProtectionLevel`.
+pub fn protection_levels_with_weights(
+    geometry: &[RaimGeometryRow],
+    weights: &[f64],
+    receiver: Wgs84Geodetic,
+    config: RaimConfig,
+) -> Result<ProtectionLevels, RaimError> {
     validate_config(config)?;
     validate_geometry_only(geometry)?;
+    if weights.len() != geometry.len() {
+        return Err(RaimError::InvalidGeometry {
+            field: "weights",
+            reason: "length must match geometry",
+        });
+    }
+    if geometry.len() <= SNAPSHOT_BASE_STATES {
+        return Err(RaimError::InvalidGeometry {
+            field: "geometry",
+            reason: "protection levels require positive redundancy",
+        });
+    }
+    let max_weight = weights.iter().copied().try_fold(0.0_f64, |max, weight| {
+        validate_weight(weight, "protection_weight").map(|weight| max.max(weight))
+    })?;
+    let design = geometry
+        .iter()
+        .zip(weights)
+        .map(|(row, &weight)| {
+            let weight = validate_weight(weight, "protection_weight")? / max_weight;
+            Ok(vec![
+                -row.line_of_sight.e_x * weight,
+                -row.line_of_sight.e_y * weight,
+                -row.line_of_sight.e_z * weight,
+                weight,
+            ])
+        })
+        .collect::<Result<Vec<_>, RaimError>>()?;
+    let mut normalized_config = config;
+    normalized_config.measurement_sigma_m /= max_weight;
+    slope_protection_levels(&design, receiver, normalized_config)
+}
+
+/// Return the former `K * sigma * DOP` quantity as a fault-free accuracy bound.
+/// It is not a fault-mode RAIM protection level.
+///
+/// `weights` are inverse standard deviations, exactly as in
+/// [`FloatResidual::code_weight`], not inverse variances.
+pub fn fault_free_accuracy_bounds(
+    geometry: &[RaimGeometryRow],
+    weights: &[f64],
+    receiver: Wgs84Geodetic,
+    config: RaimConfig,
+) -> Result<ProtectionLevels, RaimError> {
+    validate_config(config)?;
+    validate_geometry_only(geometry)?;
+    if weights.len() != geometry.len() {
+        return Err(RaimError::InvalidGeometry {
+            field: "weights",
+            reason: "length must match geometry",
+        });
+    }
+    let max_weight = weights.iter().copied().try_fold(0.0_f64, |max, weight| {
+        validate_weight(weight, "accuracy_weight").map(|weight| max.max(weight))
+    })?;
+    let inverse_variance_weights = weights
+        .iter()
+        .map(|weight| {
+            let normalized = weight / max_weight;
+            normalized * normalized
+        })
+        .collect::<Vec<_>>();
     let los = geometry
         .iter()
         .map(|row| row.line_of_sight)
         .collect::<Vec<_>>();
-    let weights = vec![1.0; los.len()];
-    let d = dop(&los, &weights, receiver).map_err(RaimError::Dop)?;
+    let d = dop(&los, &inverse_variance_weights, receiver).map_err(RaimError::Dop)?;
     let k_md = missed_detection_multiplier(config)?;
-    let hpl_m = k_md * config.measurement_sigma_m * d.hdop;
-    let vpl_m = k_md * config.measurement_sigma_m * d.vdop;
+    let effective_sigma = config.measurement_sigma_m / max_weight;
+    let hpl_m = k_md * effective_sigma * d.hdop;
+    let vpl_m = k_md * effective_sigma * d.vdop;
     if hpl_m.is_finite() && hpl_m > 0.0 && vpl_m.is_finite() && vpl_m > 0.0 {
         Ok(ProtectionLevels { hpl_m, vpl_m })
     } else {
@@ -562,23 +716,199 @@ pub fn protection_levels(
     }
 }
 
+fn slope_protection_levels(
+    design: &[Vec<f64>],
+    receiver: Wgs84Geodetic,
+    config: RaimConfig,
+) -> Result<ProtectionLevels, RaimError> {
+    slope_protection_levels_from_design(
+        design,
+        design.len().saturating_sub(4),
+        receiver,
+        config,
+        config.measurement_sigma_m,
+        None,
+    )
+}
+
+fn slope_protection_levels_from_design(
+    design: &[Vec<f64>],
+    dof: usize,
+    receiver: Wgs84Geodetic,
+    config: RaimConfig,
+    output_scale_m: f64,
+    fault_row_indices: Option<&[usize]>,
+) -> Result<ProtectionLevels, RaimError> {
+    if dof == 0 {
+        return Err(RaimError::InvalidGeometry {
+            field: "geometry",
+            reason: "protection levels require positive redundancy",
+        });
+    }
+    let width = design.first().map_or(0, Vec::len);
+    if width < 4 || design.iter().any(|row| row.len() != width) {
+        return Err(RaimError::SingularGeometry);
+    }
+    let mut normal = vec![vec![0.0; width]; width];
+    for h in design {
+        for row in 0..width {
+            for col in 0..width {
+                normal[row][col] += h[row] * h[col];
+            }
+        }
+    }
+    let q = invert_matrix_last_tie(&normal).ok_or(RaimError::SingularGeometry)?;
+    let r = enu_rotation(receiver);
+    let mut max_h = 0.0_f64;
+    let mut max_v = 0.0_f64;
+    for (row_index, h) in design.iter().enumerate() {
+        if fault_row_indices.is_some_and(|indices| !indices.contains(&row_index)) {
+            continue;
+        }
+        let leverage = row_leverage(h, &q)?;
+        let residual_sigma = (1.0 - leverage).max(0.0).sqrt();
+        if residual_sigma <= LEVERAGE_TOLERANCE {
+            return Err(RaimError::SingularGeometry);
+        }
+        let mut sensitivity = [0.0; 3];
+        for state in 0..3 {
+            sensitivity[state] = (0..width).map(|j| q[state][j] * h[j]).sum();
+        }
+        let east = (0..3).map(|j| r[0][j] * sensitivity[j]).sum::<f64>();
+        let north = (0..3).map(|j| r[1][j] * sensitivity[j]).sum::<f64>();
+        let up = (0..3).map(|j| r[2][j] * sensitivity[j]).sum::<f64>();
+        max_h = max_h.max(libm::hypot(east, north) / residual_sigma);
+        max_v = max_v.max(up.abs() / residual_sigma);
+    }
+    let bias = detectable_bias(dof, config)?;
+    Ok(ProtectionLevels {
+        hpl_m: max_h * bias * output_scale_m,
+        vpl_m: max_v * bias * output_scale_m,
+    })
+}
+
+fn detectable_bias(dof: usize, config: RaimConfig) -> Result<f64, RaimError> {
+    if dof > MAX_NONCENTRAL_DOF {
+        return Err(RaimError::UnsupportedDof {
+            dof,
+            max: MAX_NONCENTRAL_DOF,
+        });
+    }
+    let threshold = config.chi_square_threshold.map_or_else(
+        || {
+            chi2_isf(config.false_alarm_probability, dof).map_err(|_| RaimError::InvalidConfig {
+                field: "false_alarm_probability",
+                reason: "cannot derive chi-square threshold",
+            })
+        },
+        Ok,
+    )?;
+    let log_target = libm::log(config.missed_detection_probability);
+    let central_log_cdf =
+        noncentral_chi2_log_cdf(threshold, dof, 0.0).map_err(|error| cdf_error(error, dof))?;
+    if central_log_cdf < log_target {
+        return Err(RaimError::InvalidConfig {
+            field: "missed_detection_probability",
+            reason: "exceeds the fault-free detection-threshold CDF",
+        });
+    }
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    while noncentral_chi2_log_cdf(threshold, dof, hi).map_err(|error| cdf_error(error, dof))?
+        > log_target
+    {
+        if hi == 1.0e12 {
+            return Err(RaimError::UnsupportedNoncentrality);
+        }
+        hi = (hi * 2.0).min(1.0e12);
+    }
+    for _ in 0..80 {
+        let mid = 0.5 * (lo + hi);
+        let log_cdf =
+            noncentral_chi2_log_cdf(threshold, dof, mid).map_err(|error| cdf_error(error, dof))?;
+        if log_cdf > log_target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        if hi - lo <= 4.0 * f64::EPSILON * hi.max(1.0) {
+            break;
+        }
+    }
+    Ok((0.5 * (lo + hi)).sqrt())
+}
+
+fn cdf_error(error: crate::quality::NoncentralCdfError, dof: usize) -> RaimError {
+    match error {
+        crate::quality::NoncentralCdfError::NoncentralityOutOfRange => {
+            RaimError::UnsupportedNoncentrality
+        }
+        crate::quality::NoncentralCdfError::InvalidX => RaimError::InvalidConfig {
+            field: "chi_square_threshold",
+            reason: "CDF argument must be finite and nonnegative",
+        },
+        crate::quality::NoncentralCdfError::InvalidDof if dof > MAX_NONCENTRAL_DOF => {
+            RaimError::UnsupportedDof {
+                dof,
+                max: MAX_NONCENTRAL_DOF,
+            }
+        }
+        crate::quality::NoncentralCdfError::InvalidDof => RaimError::InvalidGeometry {
+            field: "dof",
+            reason: "CDF requires positive degrees of freedom",
+        },
+        crate::quality::NoncentralCdfError::Numerical => RaimError::NumericalProtectionLevel,
+    }
+}
+
+fn enu_rotation(receiver: Wgs84Geodetic) -> [[f64; 3]; 3] {
+    let (sphi, cphi) = (libm::sin(receiver.lat_rad), libm::cos(receiver.lat_rad));
+    let (slam, clam) = (libm::sin(receiver.lon_rad), libm::cos(receiver.lon_rad));
+    [
+        [-slam, clam, 0.0],
+        [-sphi * clam, -sphi * slam, cphi],
+        [cphi * clam, cphi * slam, sphi],
+    ]
+}
+
+#[cfg(test)]
+fn protection_levels_with_atmosphere(
+    geometry: &[RaimGeometryRow],
+    ztd_mappings: Option<&[f64]>,
+    tropo_gradient_mappings: Option<&[[f64; 2]]>,
+    receiver: Wgs84Geodetic,
+    config: RaimConfig,
+) -> Result<ProtectionLevels, RaimError> {
+    if ztd_mappings.is_none() && tropo_gradient_mappings.is_none() {
+        return protection_levels(geometry, receiver, config);
+    }
+
+    validate_config(config)?;
+    validate_geometry_only(geometry)?;
+    if let Some(mappings) = ztd_mappings {
+        validate_ztd_mappings(geometry.len(), mappings)?;
+    }
+    if let Some(mappings) = tropo_gradient_mappings {
+        validate_tropo_gradient_mappings(geometry.len(), mappings)?;
+    }
+
+    let q = protection_position_covariance_with_atmosphere(
+        geometry,
+        ztd_mappings,
+        tropo_gradient_mappings,
+    )?;
+    let enu = rotate_position_covariance_to_enu(&q, receiver);
+    scaled_protection_levels(enu[0][0] + enu[1][1], enu[2][2], config)
+}
+
+#[cfg(test)]
 fn protection_levels_with_ztd(
     geometry: &[RaimGeometryRow],
     ztd_mappings: Option<&[f64]>,
     receiver: Wgs84Geodetic,
     config: RaimConfig,
 ) -> Result<ProtectionLevels, RaimError> {
-    let Some(ztd_mappings) = ztd_mappings else {
-        return protection_levels(geometry, receiver, config);
-    };
-
-    validate_config(config)?;
-    validate_geometry_only(geometry)?;
-    validate_ztd_mappings(geometry.len(), ztd_mappings)?;
-
-    let q = protection_position_covariance_with_ztd(geometry, ztd_mappings)?;
-    let enu = rotate_position_covariance_to_enu(&q, receiver);
-    scaled_protection_levels(enu[0][0] + enu[1][1], enu[2][2], config)
+    protection_levels_with_atmosphere(geometry, ztd_mappings, None, receiver, config)
 }
 
 /// Run PPP snapshot fault detection and exclusion for one float epoch.
@@ -620,7 +950,7 @@ pub fn fde_float_epoch(
                 solution,
                 raim,
                 excluded_sats,
-                status: RaimFdeStatus::CannotExclude,
+                status: RaimFdeStatus::Untested,
             });
         }
 
@@ -795,10 +1125,11 @@ fn raim_for_solution(
     let n_states = snapshot_state_count_for_solution(solution)?;
     let mut result = global_test(&solution.residuals_m, n_states, config)?;
     if result.status != RaimStatus::NotEnoughRedundancy {
-        let identification = per_satellite_statistics_with_ztd(
+        let identification = per_satellite_statistics_with_atmosphere(
             &solution.residuals_m,
             &geometry.rows,
             geometry.ztd_mappings.as_deref(),
+            geometry.tropo_gradient_mappings.as_deref(),
             config,
         )?;
         result.satellite_statistics = identification.statistics;
@@ -806,14 +1137,50 @@ fn raim_for_solution(
     }
     if result.status != RaimStatus::NotEnoughRedundancy {
         let receiver = receiver_geodetic(solution.position_m);
-        let levels = protection_levels_with_ztd(
+        let ionosphere_ids = solution
+            .residual_ionosphere_m
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let ambiguity_ids = solution.ambiguities_m.keys().cloned().collect::<Vec<_>>();
+        let design_rows = snapshot_design_rows(
+            &solution.residuals_m,
             &geometry.rows,
             geometry.ztd_mappings.as_deref(),
+            geometry.tropo_gradient_mappings.as_deref(),
+            solution.epoch_clocks_m.len(),
+            &ionosphere_ids,
+            &ambiguity_ids,
+            config.measurement_sigma_m,
+        )?;
+        let design = design_rows
+            .iter()
+            .map(|row| row.h.clone())
+            .collect::<Vec<_>>();
+        let code_rows = (0..solution.residuals_m.len())
+            .map(|index| 2 * index)
+            .collect::<Vec<_>>();
+        let levels = slope_protection_levels_from_design(
+            &design,
+            result.redundancy as usize,
             receiver,
             config,
-        )?;
-        result.hpl_m = Some(levels.hpl_m);
-        result.vpl_m = Some(levels.vpl_m);
+            1.0,
+            Some(&code_rows),
+        );
+        match levels {
+            Ok(levels) => {
+                result.hpl_m = Some(levels.hpl_m);
+                result.vpl_m = Some(levels.vpl_m);
+            }
+            Err(RaimError::SingularGeometry) => {
+                // The detection result remains valid when a unit-leverage code
+                // row makes fault-slope protection untestable.
+                result.hpl_m = None;
+                result.vpl_m = None;
+            }
+            Err(error) => return Err(error),
+        }
     }
     Ok(result)
 }
@@ -822,6 +1189,7 @@ fn raim_for_solution(
 struct RaimSolutionGeometry {
     rows: Vec<RaimGeometryRow>,
     ztd_mappings: Option<Vec<f64>>,
+    tropo_gradient_mappings: Option<Vec<[f64; 2]>>,
 }
 
 fn geometry_for_solution(
@@ -836,6 +1204,10 @@ fn geometry_for_solution(
         .ztd_residual_m
         .is_some()
         .then(|| Vec::with_capacity(solution.residuals_m.len()));
+    let mut tropo_gradient_mappings = solution
+        .tropo_gradient_north_m
+        .zip(solution.tropo_gradient_east_m)
+        .map(|_| Vec::with_capacity(solution.residuals_m.len()));
     for residual in &solution.residuals_m {
         let obs = epoch
             .observations
@@ -869,12 +1241,21 @@ fn geometry_for_solution(
             )?;
             mappings.push(tropo_model.ztd_mapping);
         }
+        if let Some(mappings) = &mut tropo_gradient_mappings {
+            let tropo_model =
+                super::model::model_troposphere(&pred, solution.position_m, epoch, tropo)?;
+            mappings.push(tropo_model.gradient_mapping);
+        }
         rows.push(RaimGeometryRow {
             satellite_id: residual.satellite_id.clone(),
             line_of_sight: LineOfSight::new(pred.los_unit[0], pred.los_unit[1], pred.los_unit[2]),
         });
     }
-    Ok(RaimSolutionGeometry { rows, ztd_mappings })
+    Ok(RaimSolutionGeometry {
+        rows,
+        ztd_mappings,
+        tropo_gradient_mappings,
+    })
 }
 
 fn exclude_satellite(epoch: &FloatEpoch, satellite_id: &str) -> Option<FloatEpoch> {
@@ -890,7 +1271,17 @@ fn has_positive_redundancy_after_exclusion(
     tropo: super::TroposphereOptions,
 ) -> Result<bool, RaimError> {
     let n_obs = n_sats_after * RESIDUAL_COMPONENTS_PER_ROW;
-    let n_states = snapshot_state_count_from_parts(1, ztd_unknown_count(tropo), n_sats_after)?;
+    let atmospheric_states = ztd_unknown_count(tropo)
+        .checked_add(if tropo.enabled && tropo.estimate_tropo_gradients {
+            2
+        } else {
+            0
+        })
+        .ok_or(RaimError::InvalidGeometry {
+            field: "geometry",
+            reason: "too many atmospheric states",
+        })?;
+    let n_states = snapshot_state_count_from_parts(1, atmospheric_states, n_sats_after)?;
     Ok(n_obs > n_states)
 }
 
@@ -916,7 +1307,9 @@ fn snapshot_state_count_for_geometry(geometry: &[RaimGeometryRow]) -> Result<usi
 fn snapshot_state_count_for_solution(solution: &FloatSolution) -> Result<usize, RaimError> {
     snapshot_state_count_from_parts(
         solution.epoch_clocks_m.len(),
-        usize::from(solution.ztd_residual_m.is_some()),
+        usize::from(solution.ztd_residual_m.is_some())
+            + usize::from(solution.tropo_gradient_north_m.is_some())
+            + usize::from(solution.tropo_gradient_east_m.is_some()),
         solution.ambiguities_m.len(),
     )
 }
@@ -1003,21 +1396,53 @@ fn validate_ztd_mappings(expected_len: usize, mappings: &[f64]) -> Result<(), Ra
     Ok(())
 }
 
-fn protection_position_covariance_with_ztd(
-    geometry: &[RaimGeometryRow],
-    ztd_mappings: &[f64],
-) -> Result<[[f64; 3]; 3], RaimError> {
-    const PROTECTION_STATES_WITH_ZTD: usize = SNAPSHOT_BASE_STATES + 1;
-    let mut normal = vec![vec![0.0_f64; PROTECTION_STATES_WITH_ZTD]; PROTECTION_STATES_WITH_ZTD];
+fn validate_tropo_gradient_mappings(
+    expected_len: usize,
+    mappings: &[[f64; 2]],
+) -> Result<(), RaimError> {
+    if mappings.len() != expected_len {
+        return Err(RaimError::InvalidGeometry {
+            field: "tropo_gradient_mapping",
+            reason: "length must match geometry",
+        });
+    }
+    for mapping in mappings {
+        for &value in mapping {
+            validate::finite(value, "tropo_gradient_mapping").map_err(|_| {
+                RaimError::InvalidGeometry {
+                    field: "tropo_gradient_mapping",
+                    reason: "must be finite",
+                }
+            })?;
+        }
+    }
+    Ok(())
+}
 
-    for (row, &ztd_mapping) in geometry.iter().zip(ztd_mappings) {
-        let h = [
+#[cfg(test)]
+fn protection_position_covariance_with_atmosphere(
+    geometry: &[RaimGeometryRow],
+    ztd_mappings: Option<&[f64]>,
+    tropo_gradient_mappings: Option<&[[f64; 2]]>,
+) -> Result<[[f64; 3]; 3], RaimError> {
+    let atmospheric_states =
+        usize::from(ztd_mappings.is_some()) + 2 * usize::from(tropo_gradient_mappings.is_some());
+    let state_count = SNAPSHOT_BASE_STATES + atmospheric_states;
+    let mut normal = vec![vec![0.0_f64; state_count]; state_count];
+
+    for (idx, row) in geometry.iter().enumerate() {
+        let mut h = vec![
             -row.line_of_sight.e_x,
             -row.line_of_sight.e_y,
             -row.line_of_sight.e_z,
             1.0,
-            ztd_mapping,
         ];
+        if let Some(mappings) = ztd_mappings {
+            h.push(mappings[idx]);
+        }
+        if let Some(mappings) = tropo_gradient_mappings {
+            h.extend_from_slice(&mappings[idx]);
+        }
         for (i, normal_row) in normal.iter_mut().enumerate() {
             let h_i = h[i];
             for (j, normal_ij) in normal_row.iter_mut().enumerate() {
@@ -1034,6 +1459,7 @@ fn protection_position_covariance_with_ztd(
     ])
 }
 
+#[cfg(test)]
 fn rotate_position_covariance_to_enu(q: &[[f64; 3]; 3], receiver: Wgs84Geodetic) -> [[f64; 3]; 3] {
     let sphi = libm::sin(receiver.lat_rad);
     let cphi = libm::cos(receiver.lat_rad);
@@ -1068,6 +1494,7 @@ fn rotate_position_covariance_to_enu(q: &[[f64; 3]; 3], receiver: Wgs84Geodetic)
     enu
 }
 
+#[cfg(test)]
 fn scaled_protection_levels(
     hdop_arg: f64,
     vdop_arg: f64,
@@ -1097,15 +1524,25 @@ struct StandardizationRow {
     residual: f64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn snapshot_design_rows(
     residuals: &[FloatResidual],
     geometry: &[RaimGeometryRow],
     ztd_mappings: Option<&[f64]>,
+    tropo_gradient_mappings: Option<&[[f64; 2]]>,
+    n_clocks: usize,
+    residual_ionosphere_ids: &[String],
+    ambiguity_ids: &[String],
     measurement_sigma_m: f64,
 ) -> Result<Vec<StandardizationRow>, RaimError> {
     let mut rows = Vec::with_capacity(residuals.len() * RESIDUAL_COMPONENTS_PER_ROW);
-    let n_ambiguities = residuals.len();
+    let n_ambiguities = ambiguity_ids.len();
     for (ambiguity_idx, (residual, geometry)) in residuals.iter().zip(geometry).enumerate() {
+        if residual.epoch_index >= n_clocks {
+            return Err(RaimError::InvalidResidual {
+                field: "epoch_index",
+            });
+        }
         let code_residual = validate_residual(residual.code_m, "code_m")?;
         let phase_residual = validate_residual(residual.phase_m, "phase_m")?;
         let code_weight =
@@ -1118,6 +1555,8 @@ fn snapshot_design_rows(
             });
         }
         let ztd_mapping = ztd_mappings.map(|mappings| mappings[ambiguity_idx]);
+        let tropo_gradient_mapping =
+            tropo_gradient_mappings.map(|mappings| mappings[ambiguity_idx]);
         let code = code_residual * code_weight;
         let phase = phase_residual * phase_weight;
         if !code.is_finite() || !phase.is_finite() {
@@ -1125,11 +1564,25 @@ fn snapshot_design_rows(
                 field: "weighted_residual",
             });
         }
+        let active_ionosphere = residual_ionosphere_ids
+            .iter()
+            .position(|id| id == &residual.ambiguity_id);
+        let active_ambiguity = ambiguity_ids
+            .iter()
+            .position(|id| id == &residual.ambiguity_id)
+            .ok_or(RaimError::InvalidResidual {
+                field: "ambiguity_id",
+            })?;
         rows.push(StandardizationRow {
             h: weighted_snapshot_row(
                 geometry.line_of_sight,
                 code_weight,
+                residual.epoch_index,
+                n_clocks,
                 ztd_mapping,
+                tropo_gradient_mapping,
+                residual_ionosphere_ids.len(),
+                active_ionosphere.map(|idx| (idx, 1.0)),
                 n_ambiguities,
                 None,
             ),
@@ -1139,9 +1592,14 @@ fn snapshot_design_rows(
             h: weighted_snapshot_row(
                 geometry.line_of_sight,
                 phase_weight,
+                residual.epoch_index,
+                n_clocks,
                 ztd_mapping,
+                tropo_gradient_mapping,
+                residual_ionosphere_ids.len(),
+                active_ionosphere.map(|idx| (idx, -1.0)),
                 n_ambiguities,
-                Some(ambiguity_idx),
+                Some(active_ambiguity),
             ),
             residual: phase,
         });
@@ -1149,22 +1607,28 @@ fn snapshot_design_rows(
     Ok(rows)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn weighted_snapshot_row(
     line_of_sight: LineOfSight,
     weight: f64,
+    epoch_index: usize,
+    n_clocks: usize,
     ztd_mapping: Option<f64>,
+    tropo_gradient_mapping: Option<[f64; 2]>,
+    residual_ionosphere_columns: usize,
+    active_residual_ionosphere: Option<(usize, f64)>,
     n_ambiguities: usize,
     active_ambiguity: Option<usize>,
 ) -> Vec<f64> {
     let mut row = undifferenced_design_row(
         [-line_of_sight.e_x, -line_of_sight.e_y, -line_of_sight.e_z],
-        0,
-        1,
+        epoch_index,
+        n_clocks,
         UndifferencedDesignOptions {
             ztd_mapping,
-            tropo_gradient_mapping: None,
-            residual_ionosphere_columns: 0,
-            active_residual_ionosphere: None,
+            tropo_gradient_mapping,
+            residual_ionosphere_columns,
+            active_residual_ionosphere,
             ambiguity_columns: n_ambiguities,
             active_ambiguity,
         },
@@ -1260,12 +1724,189 @@ fn row_leverage(row: &[f64], q: &[Vec<f64>]) -> Result<f64, RaimError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::collections::BTreeMap;
 
     use crate::geometry::line_of_sight_from_az_el_deg;
     use crate::observables::{ObservableState, ObservablesError};
     use crate::ppp_corrections::CivilDateTime;
     use crate::{GnssSatelliteId, GnssSystem};
+
+    #[test]
+    fn public_protection_levels_report_unsupported_noncentrality() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/noncentral_log_cdf_mpmath.json"
+        ))
+        .unwrap();
+        let case = fixture["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| {
+                row["dof"] == 1
+                    && row["x"] == "1000000000000000.0"
+                    && row["lambda"] == "1000000000000.0"
+            })
+            .unwrap();
+        // The independent Chernoff certificate makes the CDF round to one
+        // even at the supported noncentrality ceiling: no bias root exists
+        // within that domain for the configured missed-detection probability.
+        assert_eq!(case["tail"], "chernoff_underflow");
+        let config = RaimConfig {
+            chi_square_threshold: Some(case["x"].as_str().unwrap().parse().unwrap()),
+            ..RaimConfig::default()
+        };
+        assert_eq!(
+            protection_levels(&test_geometry(), protection_receiver(), config),
+            Err(RaimError::UnsupportedNoncentrality)
+        );
+        use crate::quality::NoncentralCdfError;
+        assert!(matches!(
+            cdf_error(NoncentralCdfError::InvalidX, 1),
+            RaimError::InvalidConfig {
+                field: "chi_square_threshold",
+                ..
+            }
+        ));
+        assert!(matches!(
+            cdf_error(NoncentralCdfError::InvalidDof, 0),
+            RaimError::InvalidGeometry { field: "dof", .. }
+        ));
+        assert!(matches!(
+            cdf_error(NoncentralCdfError::InvalidDof, MAX_NONCENTRAL_DOF + 1),
+            RaimError::UnsupportedDof { .. }
+        ));
+        assert_eq!(
+            cdf_error(NoncentralCdfError::NoncentralityOutOfRange, 1),
+            RaimError::UnsupportedNoncentrality
+        );
+    }
+
+    #[test]
+    fn detectable_bias_matches_high_precision_noncentral_grid() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/ppp_raim_oracles.json"))
+                .expect("PPP RAIM fixture");
+        for case in fixture["noncentral_bias_grid"]
+            .as_array()
+            .expect("noncentral grid")
+        {
+            let dof = case["dof"].as_u64().unwrap() as usize;
+            let threshold = case["threshold"].as_f64().unwrap();
+            let p_md = case["p_md"].as_f64().unwrap();
+            let config = RaimConfig {
+                missed_detection_probability: p_md,
+                chi_square_threshold: Some(threshold),
+                ..RaimConfig::default()
+            };
+            let result = detectable_bias(dof, config);
+            let Some(expected) = case["pbias"].as_str() else {
+                assert!(
+                    result.is_err(),
+                    "dof={dof} threshold={threshold} p_md={p_md}"
+                );
+                continue;
+            };
+            let expected = expected.parse::<f64>().unwrap();
+            // These degrees of freedom use 1,024 Gauss-Legendre nodes. For these analytic
+            // integrands its 16-point panel remainder is below binary64
+            // rounding; 256 rounded elementary operations along the active
+            // log-sum path give this conservative forward bound.
+            let tolerance = 256.0 * f64::EPSILON * expected.max(1.0);
+            let actual = result.expect("detectable bias");
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "dof={dof} threshold={threshold} p_md={p_md} actual={actual:.17e} expected={expected:.17e} tolerance={tolerance:.3e}"
+            );
+        }
+    }
+
+    #[test]
+    fn detectable_bias_rejects_dof_above_supported_ceiling() {
+        assert_eq!(
+            detectable_bias(MAX_NONCENTRAL_DOF + 1, RaimConfig::default()),
+            Err(RaimError::UnsupportedDof {
+                dof: MAX_NONCENTRAL_DOF + 1,
+                max: MAX_NONCENTRAL_DOF,
+            })
+        );
+    }
+
+    #[test]
+    fn full_solver_design_protection_uses_its_clock_count_weights_and_dof() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/ppp_raim_oracles.json"))
+                .expect("PPP RAIM fixture");
+        let geodetic = fixture["inputs"]["receiver_geodetic_rad"]
+            .as_array()
+            .unwrap();
+        let receiver = Wgs84Geodetic::new(
+            geodetic[0].as_f64().unwrap(),
+            geodetic[1].as_f64().unwrap(),
+            0.0,
+        )
+        .unwrap();
+        let line_of_sight = fixture["line_of_sight_ecef"].as_array().unwrap();
+        for case in fixture["solver_design_cases"].as_array().unwrap() {
+            let clocks = case["clock_indices"].as_array().unwrap();
+            let n_clocks = clocks
+                .iter()
+                .map(|value| value.as_u64().unwrap())
+                .max()
+                .unwrap()
+                + 1;
+            let code_weights = case["code_weights_inverse_sigma"].as_array().unwrap();
+            let phase_weights = case["phase_weights_inverse_sigma"].as_array().unwrap();
+            let satellites = clocks.len();
+            let mut design = Vec::with_capacity(2 * satellites);
+            for index in 0..satellites {
+                let los = line_of_sight[index].as_array().unwrap();
+                let clock = clocks[index].as_u64().unwrap() as usize;
+                let common = [
+                    -los[0].as_f64().unwrap(),
+                    -los[1].as_f64().unwrap(),
+                    -los[2].as_f64().unwrap(),
+                ];
+                let mut code = common.to_vec();
+                code.extend(
+                    (0..n_clocks as usize).map(|column| usize::from(column == clock) as f64),
+                );
+                code.extend(vec![0.0; satellites]);
+                let code_weight = code_weights[index].as_f64().unwrap();
+                code.iter_mut().for_each(|value| *value *= code_weight);
+                design.push(code);
+                let mut phase = common.to_vec();
+                phase.extend(
+                    (0..n_clocks as usize).map(|column| usize::from(column == clock) as f64),
+                );
+                phase.extend((0..satellites).map(|column| usize::from(column == index) as f64));
+                let phase_weight = phase_weights[index].as_f64().unwrap();
+                phase.iter_mut().for_each(|value| *value *= phase_weight);
+                design.push(phase);
+            }
+            let dof = case["dof"].as_u64().unwrap() as usize;
+            let config = RaimConfig {
+                chi_square_threshold: Some(case["threshold"].as_f64().unwrap()),
+                ..RaimConfig::default()
+            };
+            let code_rows = (0..satellites).map(|index| 2 * index).collect::<Vec<_>>();
+            let actual = slope_protection_levels_from_design(
+                &design,
+                dof,
+                receiver,
+                config,
+                1.0,
+                Some(&code_rows),
+            )
+            .unwrap();
+            let condition = case["normal_condition_number_2"].as_f64().unwrap();
+            for (value, field) in [(actual.hpl_m, "hpl_m"), (actual.vpl_m, "vpl_m")] {
+                let expected = case[field].as_f64().unwrap();
+                let tolerance = 32.0 * f64::EPSILON * condition * expected.abs();
+                assert!((value - expected).abs() <= tolerance);
+            }
+        }
+    }
 
     fn residual(satellite_id: &str, code_m: f64, phase_m: f64) -> FloatResidual {
         FloatResidual {
@@ -1491,6 +2132,26 @@ mod tests {
     }
 
     #[test]
+    fn public_float_solve_reports_unestimated_variance_at_zero_redundancy() {
+        let (source, epoch, state) = synthetic_case(4, None);
+        let solution = solve_float_epoch(&source, epoch, state, fde_config())
+            .expect("exactly determined public float solve");
+        assert!(!solution.posterior_variance_factor_estimated);
+        assert_eq!(
+            solution.posterior_variance_factor.to_bits(),
+            1.0f64.to_bits()
+        );
+        assert_eq!(
+            solution.position_covariance,
+            solution.formal_position_covariance
+        );
+        assert_eq!(
+            solution.position_covariance_scale_factor.to_bits(),
+            1.0f64.to_bits()
+        );
+    }
+
+    #[test]
     fn injected_bias_trips_global_test() {
         let mut residuals = clean_residuals();
         residuals[2].code_m = 5.0;
@@ -1622,6 +2283,51 @@ mod tests {
     }
 
     #[test]
+    fn unit_leverage_code_row_preserves_detection_and_omits_protection_levels() {
+        let (mut source, epoch, state) = synthetic_case(6, None);
+        let solve_config = fde_config();
+        let tropo = solve_config.tropo;
+        let solution =
+            solve_float_epoch(&source, epoch.clone(), state, solve_config).expect("float solve");
+        let receiver = solution.position_m;
+        let planar = [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0], [1.0, 0.0]];
+        for (index, direction) in planar.iter().enumerate() {
+            let prn = index as u8 + 1;
+            let id = GnssSatelliteId::new(GnssSystem::Gps, prn).unwrap();
+            source.states.insert(
+                id,
+                [
+                    receiver[0] + 20_000_000.0 * direction[0],
+                    receiver[1] + 20_000_000.0 * direction[1],
+                    receiver[2],
+                ],
+            );
+        }
+        source.states.insert(
+            GnssSatelliteId::new(GnssSystem::Gps, 6).unwrap(),
+            [receiver[0], receiver[1], receiver[2] + 20_000_000.0],
+        );
+        let raim = raim_for_solution(
+            &source,
+            &epoch,
+            &solution,
+            tropo,
+            None,
+            RaimConfig::default(),
+        )
+        .expect("detection result survives unit leverage");
+        assert_ne!(raim.status, RaimStatus::NotEnoughRedundancy);
+        assert_eq!(raim.hpl_m, None);
+        assert_eq!(raim.vpl_m, None);
+        let galileo_statistic = raim
+            .satellite_statistics
+            .iter()
+            .find(|statistic| statistic.satellite_id == "G06")
+            .unwrap();
+        assert!(!galileo_statistic.code_testable);
+    }
+
+    #[test]
     fn nonpositive_redundancy_returns_status() {
         let residuals = vec![residual("G01", 100.0, 0.0), residual("G02", 0.0, 0.0)];
 
@@ -1730,7 +2436,7 @@ mod tests {
     }
 
     #[test]
-    fn ztd_protection_levels_use_estimated_state_projection() {
+    fn solver_protection_levels_use_the_complete_ztd_design() {
         let (source, epoch, state) = synthetic_case(6, None);
         let mut solve_config = fde_config();
         let mut tropo = super::super::TroposphereOptions::disabled();
@@ -1767,8 +2473,11 @@ mod tests {
         assert!(with_ztd.vpl_m.is_finite() && with_ztd.vpl_m > 0.0);
         assert_ne!(with_ztd.hpl_m.to_bits(), without_ztd.hpl_m.to_bits());
         assert_ne!(with_ztd.vpl_m.to_bits(), without_ztd.vpl_m.to_bits());
-        assert_eq!(raim.hpl_m.expect("HPL").to_bits(), with_ztd.hpl_m.to_bits());
-        assert_eq!(raim.vpl_m.expect("VPL").to_bits(), with_ztd.vpl_m.to_bits());
+        // The legacy code-only helper contains the ZTD column but omits the
+        // phase rows and ambiguity states.  Solver RAIM must instead use the
+        // complete design that produced its detection statistic.
+        assert_ne!(raim.hpl_m.expect("HPL").to_bits(), with_ztd.hpl_m.to_bits());
+        assert_ne!(raim.vpl_m.expect("VPL").to_bits(), with_ztd.vpl_m.to_bits());
     }
 
     #[test]

@@ -33,14 +33,14 @@ use super::state::{
 };
 use super::tight::{TightCouplingConfig, TightFusionState};
 use super::timesync::{StationarityDetectorSnapshotSample, TimeSyncHistory};
-use super::ukf::{ukf_correct_closed_loop, UkfUpdateOptions};
+use super::ukf::ukf_correct_closed_loop_with_gate_covariance;
+use super::ukf::UkfUpdateOptions;
 
 const LOOSE_MIN_SATELLITES: usize = 4;
 const POSITION_ROWS: usize = 3;
 const POSITION_VELOCITY_ROWS: usize = 6;
 const ZUPT_ZARU_ROWS: usize = 6;
 const NHC_ROWS: usize = 2;
-const IGG_III_REJECTION_VARIANCE_SCALE: f64 = 1.0e4;
 const DEFAULT_PREDICTION_ADAPTATION_GATE_PROBABILITY: f64 = 0.99;
 
 /// GNSS PVT measurement used by the loose-coupled INS update.
@@ -168,6 +168,8 @@ pub struct LooseCouplingConfig {
     /// Per-fix-status sigma multipliers applied to GNSS covariance.
     pub fix_status_weighting: GnssFixStatusWeighting,
     /// Optional IGG-III variance inflation on standardized innovation rows.
+    /// Innovation gating is evaluated from the raw covariance before this
+    /// inflation is applied.
     pub measurement_reweighting: Option<IggIiiMeasurementReweighting>,
     /// Optional Yang two-segment predicted-covariance inflation.
     pub prediction_adaptation: Option<YangPredictionAdaptiveFactor>,
@@ -417,8 +419,8 @@ impl VelocityMatchingConfig {
 ///
 /// The standardized innovation `v_i / sqrt(S_ii)` selects one of three
 /// variance-domain segments from Remote Sensing 13(10):1943, Eq. 32: unchanged
-/// below `k0`, IGG-III middle-segment inflation up to `k1`, and a fixed
-/// `1e4` variance scale in the rejection segment.
+/// at or below `k0`, the reciprocal of the Yang-Song-Xu tapered weight between
+/// `k0` and `k1`, and zero weight (row removal) at or above `k1`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IggIiiMeasurementReweighting {
     /// Lower standardized-innovation break point. Literature range: `[1.5, 3.0]`.
@@ -465,9 +467,13 @@ impl IggIiiMeasurementReweighting {
 
 /// Yang two-segment predicted-residual adaptive factor for loose GNSS updates.
 ///
-/// `threshold` is the `c` value used with the un-square-rooted statistic
-/// `innovation^T innovation / tr(S)`. The Jiang-Zhang Sensors 2018 guard is
-/// part of this option: if the raw innovation Mahalanobis distance exceeds
+/// `threshold` is the `c` value used with Yang, Song, and Xu's un-square-rooted
+/// statistic `innovation^T innovation / tr(S)`. Position and velocity are
+/// separate observation groups because their units differ; the largest group
+/// factor is applied, which is the multiple-observation-group prescription.
+/// Both each statistic's `S` trace and the Jiang-Zhang Sensors 2018 guard use
+/// the raw innovation covariance before IGG-III inflation. If the raw
+/// innovation Mahalanobis distance exceeds
 /// `chi2_inv(outlier_gate_probability, rows)`, prediction adaptation is
 /// disabled for that epoch and measurement-side reweighting handles the fault.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -850,13 +856,44 @@ impl InertialFilter {
         loose_config: LooseCouplingConfig,
     ) -> Result<FusionUpdate, FusionError> {
         let prepared = prepare_loose_correction(&self.state, correction, loose_config)?;
-        let rows = prepared.correction.row_count();
+        let rows = if prepared.robust_all_rows_rejected {
+            prepared.robust_rejected_rows
+        } else {
+            prepared.correction.row_count() + prepared.robust_rejected_rows
+        };
+        if prepared.robust_all_rows_rejected {
+            let innovation_covariance = prepared
+                .raw_innovation_covariance
+                .clone()
+                .ok_or_else(|| invalid_input("igg_iii_weights", "missing raw covariance"))?;
+            let nis = normalized_innovation_squared(
+                &innovation_covariance,
+                &prepared.correction.innovation,
+            )?;
+            let dimension = self.state.dimension();
+            return Ok(FusionUpdate::from_report(
+                rows,
+                EkfCorrectionReport {
+                    applied: false,
+                    normalized_innovation_squared: nis,
+                    accepted_rows: 0,
+                    rejected_rows: rows,
+                    innovation_gate: None,
+                    joint_innovation_gate: None,
+                    innovation_covariance,
+                    kalman_gain: vec![vec![0.0; rows]; dimension],
+                    dx: vec![0.0; dimension],
+                },
+            ));
+        }
         let filter_kind = self.config.filter_kind;
         let ekf_options = self.config.loose.update_options;
         let ukf_options = self.config.ukf_update_options;
-        let report = match filter_kind {
+        let mut report = match filter_kind {
             FusionFilterKind::Ekf => {
-                if prepared.predicted_covariance_scale == 1.0 {
+                if prepared.predicted_covariance_scale == 1.0
+                    && prepared.raw_innovation_covariance.is_none()
+                {
                     ekf_correct_closed_loop(&mut self.state, &prepared.correction, ekf_options)?
                 } else {
                     ekf_correct_closed_loop_with_predicted_covariance_scale(
@@ -864,13 +901,22 @@ impl InertialFilter {
                         &prepared.correction,
                         ekf_options,
                         prepared.predicted_covariance_scale,
+                        prepared.raw_innovation_covariance.as_deref(),
                     )?
                 }
             }
-            FusionFilterKind::Ukf => {
-                ukf_correct_closed_loop(&mut self.state, &prepared.correction, ukf_options)?
-            }
+            FusionFilterKind::Ukf => ukf_correct_closed_loop_with_gate_covariance(
+                &mut self.state,
+                &prepared.correction,
+                ukf_options,
+                prepared.raw_innovation_covariance.as_deref(),
+            )?,
         };
+        report.rejected_rows += prepared.robust_rejected_rows;
+        if let Some(gate) = &mut report.innovation_gate {
+            gate.input_rows += prepared.robust_rejected_rows;
+            gate.rejected_rows += prepared.robust_rejected_rows;
+        }
         self.tight
             .replace_base_covariance_and_clear_cross(&self.state.covariance)?;
         Ok(FusionUpdate::from_report(rows, report))
@@ -1307,6 +1353,9 @@ pub fn velocity_match_outage_to_state(
 struct PreparedLooseCorrection {
     correction: EkfCorrection,
     predicted_covariance_scale: f64,
+    raw_innovation_covariance: Option<Vec<Vec<f64>>>,
+    robust_rejected_rows: usize,
+    robust_all_rows_rejected: bool,
 }
 
 fn prepare_loose_correction(
@@ -1318,34 +1367,67 @@ fn prepare_loose_correction(
         return Ok(PreparedLooseCorrection {
             correction,
             predicted_covariance_scale: 1.0,
+            raw_innovation_covariance: None,
+            robust_rejected_rows: 0,
+            robust_all_rows_rejected: false,
         });
     }
 
     let raw_innovation_covariance = innovation_covariance(&state.covariance, &correction)?;
-    let correction = if let Some(reweighting) = config.measurement_reweighting {
-        apply_igg_iii_reweighting(&correction, &raw_innovation_covariance, reweighting)?
-    } else {
-        correction
-    };
     let predicted_covariance_scale = if let Some(adaptation) = config.prediction_adaptation {
-        yang_predicted_covariance_scale(state, &correction, &raw_innovation_covariance, adaptation)?
+        yang_predicted_covariance_scale(&correction, &raw_innovation_covariance, adaptation)?
     } else {
         1.0
     };
-
+    let input_rows = correction.row_count();
+    let reweighted = if let Some(reweighting) = config.measurement_reweighting {
+        apply_igg_iii_reweighting(&correction, &raw_innovation_covariance, reweighting)?
+    } else {
+        IggReweightingResult {
+            correction: Some(correction.clone()),
+            retained_rows: (0..input_rows).collect(),
+        }
+    };
+    let robust_all_rows_rejected = reweighted.correction.is_none();
+    if robust_all_rows_rejected {
+        return Ok(PreparedLooseCorrection {
+            correction,
+            predicted_covariance_scale,
+            raw_innovation_covariance: Some(raw_innovation_covariance),
+            robust_rejected_rows: input_rows,
+            robust_all_rows_rejected: true,
+        });
+    }
+    let Some(correction) = reweighted.correction else {
+        return Err(invalid_input(
+            "igg_iii_weights",
+            "missing retained correction",
+        ));
+    };
+    let restricted_raw =
+        restrict_square_matrix(&raw_innovation_covariance, &reweighted.retained_rows);
     Ok(PreparedLooseCorrection {
+        robust_rejected_rows: input_rows - correction.row_count(),
+        robust_all_rows_rejected: false,
         correction,
         predicted_covariance_scale,
+        raw_innovation_covariance: Some(restricted_raw),
     })
+}
+
+struct IggReweightingResult {
+    correction: Option<EkfCorrection>,
+    retained_rows: Vec<usize>,
 }
 
 fn apply_igg_iii_reweighting(
     correction: &EkfCorrection,
     innovation_covariance: &[Vec<f64>],
     reweighting: IggIiiMeasurementReweighting,
-) -> Result<EkfCorrection, FusionError> {
+) -> Result<IggReweightingResult, FusionError> {
     reweighting.validate()?;
     let mut gammas = Vec::with_capacity(correction.row_count());
+    let mut retained = Vec::with_capacity(correction.row_count());
     let mut all_one = true;
     for (row, s_row) in innovation_covariance
         .iter()
@@ -1357,20 +1439,58 @@ fn apply_igg_iii_reweighting(
         let standardized = (correction.innovation[row] / variance.sqrt()).abs();
         let gamma =
             igg_iii_variance_scale(standardized, reweighting.k0_sigma, reweighting.k1_sigma);
+        if gamma.is_infinite() {
+            continue;
+        }
         all_one &= gamma.to_bits() == 1.0_f64.to_bits();
         gammas.push(gamma);
+        retained.push(row);
     }
 
-    if all_one {
-        return Ok(correction.clone());
+    if retained.len() == correction.row_count() && all_one {
+        return Ok(IggReweightingResult {
+            correction: Some(correction.clone()),
+            retained_rows: retained,
+        });
     }
 
-    let covariance = inflate_measurement_covariance(&correction.measurement_covariance, &gammas);
-    EkfCorrection::new(
-        correction.innovation.clone(),
-        correction.design.clone(),
-        covariance,
-    )
+    if retained.is_empty() {
+        return Ok(IggReweightingResult {
+            correction: None,
+            retained_rows: retained,
+        });
+    }
+
+    let innovation = retained
+        .iter()
+        .map(|&row| correction.innovation[row])
+        .collect::<Vec<_>>();
+    let design = retained
+        .iter()
+        .map(|&row| correction.design[row].clone())
+        .collect::<Vec<_>>();
+    let covariance = retained
+        .iter()
+        .map(|&row| {
+            retained
+                .iter()
+                .map(|&col| correction.measurement_covariance[row][col])
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let covariance = inflate_measurement_covariance(&covariance, &gammas);
+    Ok(IggReweightingResult {
+        correction: Some(EkfCorrection::new(innovation, design, covariance)?),
+        retained_rows: retained,
+    })
+}
+
+fn restrict_square_matrix(matrix: &[Vec<f64>], retained: &[usize]) -> Vec<Vec<f64>> {
+    retained
+        .iter()
+        .map(|&row| retained.iter().map(|&col| matrix[row][col]).collect())
+        .collect()
 }
 
 fn igg_iii_variance_scale(abs_standardized: f64, k0_sigma: f64, k1_sigma: f64) -> f64 {
@@ -1381,7 +1501,7 @@ fn igg_iii_variance_scale(abs_standardized: f64, k0_sigma: f64, k1_sigma: f64) -
         let transition = (k1_sigma - k0_sigma) / (k1_sigma - abs_standardized);
         ratio * transition * transition
     } else {
-        IGG_III_REJECTION_VARIANCE_SCALE
+        f64::INFINITY
     }
 }
 
@@ -1397,7 +1517,6 @@ fn inflate_measurement_covariance(covariance: &[Vec<f64>], gammas: &[f64]) -> Ve
 }
 
 fn yang_predicted_covariance_scale(
-    state: &InsFilterState,
     correction: &EkfCorrection,
     raw_innovation_covariance: &[Vec<f64>],
     adaptation: YangPredictionAdaptiveFactor,
@@ -1419,19 +1538,23 @@ fn yang_predicted_covariance_scale(
         return Ok(1.0);
     }
 
-    let innovation_covariance = innovation_covariance(&state.covariance, correction)?;
-    let trace = innovation_covariance
-        .iter()
-        .enumerate()
-        .map(|(idx, row)| row[idx])
-        .sum::<f64>();
-    validate_positive(trace, "innovation_covariance_trace")?;
-    let squared_norm = correction
-        .innovation
-        .iter()
-        .map(|value| value * value)
-        .sum::<f64>();
-    let statistic = squared_norm / trace;
+    let mut statistic = 0.0_f64;
+    // Loose position/velocity corrections contain two three-row observation
+    // groups. A position-only correction is one group.
+    for (start, end) in if correction.row_count() == 6 {
+        vec![(0, 3), (3, 6)]
+    } else {
+        vec![(0, correction.row_count())]
+    } {
+        let trace = (start..end)
+            .map(|idx| raw_innovation_covariance[idx][idx])
+            .sum::<f64>();
+        validate_positive(trace, "innovation_covariance_group_trace")?;
+        let squared_norm = (start..end)
+            .map(|idx| correction.innovation[idx] * correction.innovation[idx])
+            .sum::<f64>();
+        statistic = statistic.max(squared_norm / trace);
+    }
     if statistic <= adaptation.threshold {
         Ok(1.0)
     } else {

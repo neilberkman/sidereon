@@ -1425,6 +1425,20 @@ mod tests {
     use super::*;
     use crate::observables::ObservableState;
 
+    include!("../../fixtures-generators/rtk_no_mask_rinex.rs");
+
+    #[test]
+    fn rinex_arc_entry_points_match_c2a2aa6_bit_for_bit() {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/rtk_no_mask_c2a2aa6.json"
+        ))
+        .expect("historical fixture");
+        assert_eq!(
+            historical_rinex_projection(),
+            expected["rinex_arc_entry_points"]
+        );
+    }
+
     /// Every satellite at one fixed position at every time.
     struct FixedSource;
 

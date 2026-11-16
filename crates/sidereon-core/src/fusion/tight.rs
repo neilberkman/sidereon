@@ -720,6 +720,7 @@ fn apply_tight_correction(
                 accepted_rows: gate_report.accepted_rows,
                 rejected_rows: gate_report.rejected_rows,
                 innovation_gate: Some(gate_report),
+                joint_innovation_gate: None,
                 innovation_covariance: full_s,
                 kalman_gain: vec![vec![0.0; correction.row_count()]; augmented_dimension(base_dim)],
                 dx: vec![0.0; augmented_dimension(base_dim)],
@@ -778,6 +779,7 @@ fn apply_tight_correction_inner(
         accepted_rows: correction.row_count(),
         rejected_rows: 0,
         innovation_gate: None,
+        joint_innovation_gate: None,
         innovation_covariance: s,
         kalman_gain,
         dx,
@@ -816,6 +818,7 @@ fn apply_tight_ukf_correction(
         &correction.innovation,
         &correction.measurement_covariance,
         options,
+        None,
         |dx| {
             tight_sigma_measurement_residual(
                 source,

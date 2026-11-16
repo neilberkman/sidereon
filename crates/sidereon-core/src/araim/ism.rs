@@ -55,6 +55,69 @@ impl SatelliteIsmModel {
             p_sat,
         }
     }
+
+    /// Construct the ADD v3.0 Eq. (3) / Appendix A dual-frequency model at a
+    /// row elevation. The returned effective sigmas combine the supplied SIS
+    /// terms with the v3.0 troposphere, airborne-noise, and multipath variance.
+    ///
+    /// `elevation_rad` must be finite and within the Appendix A table range,
+    /// 5 through 90 degrees inclusive. Galileo values at the five-degree table
+    /// nodes are exact; between nodes this library uses linear interpolation,
+    /// because the ADD specifies no interpolation rule.
+    /// ADD v3.1 changes the airborne-noise coefficients; this constructor is
+    /// intentionally pinned to v3.0 worked examples.
+    pub fn add_v3_0(
+        system: GnssSystem,
+        elevation_rad: f64,
+        sigma_ura_m: f64,
+        sigma_ure_m: f64,
+        b_nom_m: f64,
+        p_sat: f64,
+    ) -> Result<Self, AraimError> {
+        let local_variance_m2 = add_v3_0_local_variance_m2(system, elevation_rad)?;
+        Ok(Self::new_with_effective_sigmas(
+            sigma_ura_m,
+            sigma_ure_m,
+            b_nom_m,
+            p_sat,
+            (sigma_ura_m * sigma_ura_m + local_variance_m2).sqrt(),
+            (sigma_ure_m * sigma_ure_m + local_variance_m2).sqrt(),
+        ))
+    }
+}
+
+fn add_v3_0_local_variance_m2(system: GnssSystem, elevation_rad: f64) -> Result<f64, AraimError> {
+    if !elevation_rad.is_finite()
+        || !(5.0_f64.to_radians()..=90.0_f64.to_radians()).contains(&elevation_rad)
+    {
+        return Err(AraimError::InvalidIsm);
+    }
+    let elevation_deg = elevation_rad.to_degrees();
+    let tropo = 0.12 * 1.001 / (0.002001 + libm::sin(elevation_rad).powi(2)).sqrt();
+    let user_sigma = match system {
+        GnssSystem::Gps => {
+            let noise = 0.15 + 0.43 * libm::exp(-elevation_deg / 6.9);
+            let multipath = 0.13 + 0.53 * libm::exp(-elevation_deg / 10.0);
+            let l1 = 1575.42_f64;
+            let l5 = 1176.45_f64;
+            let gamma = (l1.powi(4) + l5.powi(4)) / (l1.powi(2) - l5.powi(2)).powi(2);
+            (gamma * (noise * noise + multipath * multipath)).sqrt()
+        }
+        GnssSystem::Galileo => galileo_user_sigma_m(elevation_deg),
+        _ => return Err(AraimError::UnsupportedConstellation(system)),
+    };
+    Ok(tropo * tropo + user_sigma * user_sigma)
+}
+
+fn galileo_user_sigma_m(elevation_deg: f64) -> f64 {
+    const TABLE: [f64; 18] = [
+        0.4529, 0.3553, 0.3063, 0.2638, 0.2593, 0.2555, 0.2504, 0.2438, 0.2396, 0.2359, 0.2339,
+        0.2302, 0.2295, 0.2278, 0.2297, 0.2310, 0.2274, 0.2277,
+    ];
+    let position = ((elevation_deg.clamp(5.0, 90.0) - 5.0) / 5.0).min(17.0);
+    let lower = position.floor() as usize;
+    let upper = (lower + 1).min(TABLE.len() - 1);
+    TABLE[lower] + (TABLE[upper] - TABLE[lower]) * (position - lower as f64)
 }
 
 /// Per-satellite ISM override.
@@ -213,6 +276,9 @@ impl Ism {
     }
 
     pub(crate) fn effective_for(&self, row: &AraimRow) -> Result<EffectiveIsm, AraimError> {
+        if !row.elevation_rad.is_finite() || row.elevation_rad <= 0.0 {
+            return Err(AraimError::InvalidIsm);
+        }
         let model = self.model_for(row.id).ok_or(AraimError::InvalidIsm)?;
         let (sigma_int_m, sigma_acc_m) = if let (Some(sigma_int_m), Some(sigma_acc_m)) =
             (model.effective_sigma_int_m, model.effective_sigma_acc_m)

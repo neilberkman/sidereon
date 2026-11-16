@@ -41,6 +41,15 @@
 //! independently reproducible to the bit (it does not depend on a BLAS backend),
 //! unlike a general dense inverse routed through LAPACK. The ENU rotation uses
 //! `sin`/`cos` and the final scalars use `sqrt`; there is no fused multiply-add.
+//! Extreme weights are divided by their largest value before the normal matrix
+//! is formed, then the inverse is rescaled, so the singularity decision is
+//! invariant under a finite uniform weight scale without changing ordinary
+//! weighted DOP arithmetic.
+//! Before inversion, Gaussian elimination of the max-diagonal-normalized normal
+//! matrix rejects a pivot at or below `64 * f64::EPSILON`. The factor is a
+//! conservative rounding envelope for a four-column dot product and four
+//! elimination stages (`4 * 4 * 4` ulps); diagonal normalization makes the
+//! decision invariant under uniform weight scaling.
 //!
 //! # Failure mode
 //!
@@ -386,8 +395,7 @@ pub fn dop_with_convention(
     }
 
     let rows: Vec<[f64; 4]> = los.iter().map(|l| l.design_row()).collect();
-    let a = normal_matrix_4_weighted_column_outer(&rows, weights).map_err(map_linear_error)?;
-    let q = invert_4x4_cofactor(&a).ok_or(DopError::Singular)?;
+    let q = weighted_cofactor_4(&rows, weights)?;
 
     let r = enu_rotation(receiver, convention)?;
     let enu = rotate_pos_block(&q, &r);
@@ -463,8 +471,7 @@ pub fn geometry_cofactor_with_convention(
     }
 
     let rows: Vec<[f64; 4]> = los.iter().map(|l| l.design_row()).collect();
-    let a = normal_matrix_4_weighted_column_outer(&rows, weights).map_err(map_linear_error)?;
-    let q = invert_4x4_cofactor(&a).ok_or(DopError::Singular)?;
+    let q = weighted_cofactor_4(&rows, weights)?;
     validate_cofactor_variances(&q)?;
 
     let r = enu_rotation(receiver, convention)?;
@@ -548,9 +555,7 @@ pub fn geometry_cofactor_from_design_rows(
             .iter()
             .map(|row| [row[0], row[1], row[2], row[3]])
             .collect();
-        let normal = normal_matrix_4_weighted_column_outer(&fixed_rows, weights)
-            .map_err(map_linear_error)?;
-        let fixed = invert_4x4_cofactor(&normal).ok_or(DopError::Singular)?;
+        let fixed = weighted_cofactor_4(&fixed_rows, weights)?;
         fixed.iter().map(|row| row.to_vec()).collect()
     } else {
         let mut normal = vec![vec![0.0_f64; p]; p];
@@ -860,6 +865,66 @@ fn map_linear_error(error: LinearError) -> DopError {
     match error {
         LinearError::InvalidInput { field, reason } => invalid_input(field, reason),
     }
+}
+
+fn weighted_cofactor_4(rows: &[[f64; 4]], weights: &[f64]) -> Result<[[f64; 4]; 4], DopError> {
+    let scale = weights.iter().copied().fold(0.0_f64, f64::max);
+    let normalized;
+    let normalize = !(1.0e-50..=1.0e50).contains(&scale);
+    let effective_weights = if !normalize {
+        weights
+    } else {
+        normalized = weights
+            .iter()
+            .map(|weight| weight / scale)
+            .collect::<Vec<_>>();
+        &normalized
+    };
+    let normal =
+        normal_matrix_4_weighted_column_outer(rows, effective_weights).map_err(map_linear_error)?;
+    if !full_rank_4(&normal) {
+        return Err(DopError::Singular);
+    }
+    let mut q = invert_4x4_cofactor(&normal).ok_or(DopError::Singular)?;
+    if normalize {
+        for row in &mut q {
+            for value in row {
+                *value /= scale;
+            }
+        }
+    }
+    Ok(q)
+}
+
+fn full_rank_4(normal: &[[f64; 4]; 4]) -> bool {
+    let scale = (0..4).map(|i| normal[i][i].abs()).fold(0.0_f64, f64::max);
+    if !scale.is_finite() || scale == 0.0 {
+        return false;
+    }
+    let mut a = *normal;
+    for row in &mut a {
+        for value in row {
+            *value /= scale;
+        }
+    }
+    const PIVOT_TOL: f64 = 64.0 * f64::EPSILON;
+    for column in 0..4 {
+        let pivot_row = (column..4)
+            .max_by(|&left, &right| a[left][column].abs().total_cmp(&a[right][column].abs()))
+            .unwrap_or(column);
+        let pivot = a[pivot_row][column].abs();
+        if !pivot.is_finite() || pivot <= PIVOT_TOL {
+            return false;
+        }
+        a.swap(column, pivot_row);
+        for row in column + 1..4 {
+            let factor = a[row][column] / a[column][column];
+            for next in column + 1..4 {
+                a[row][next] -= factor * a[column][next];
+            }
+        }
+    }
+    true
 }
 
 fn map_validation_error(error: validate::FieldError) -> DopError {

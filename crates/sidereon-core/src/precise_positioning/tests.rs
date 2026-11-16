@@ -398,6 +398,7 @@ fn float_solution_output_validation_rejects_nonfinite_values() {
         position_covariance: unit_position_covariance(),
         formal_position_covariance: unit_position_covariance(),
         posterior_variance_factor: 1.0,
+        posterior_variance_factor_estimated: true,
         position_covariance_scale_factor: 1.0,
         temporal_position_covariance: unit_position_covariance(),
         temporal_position_covariance_scale_factor: 1.0,
@@ -1259,7 +1260,7 @@ fn elevation_cutoff_none_preserves_static_float_fixture_bits() {
     assert_eq!(solution.tropo_gradient_east_m, None);
     assert_eq!(solution.tropo_gradient_covariance_m2, None);
     assert_eq!(solution.formal_tropo_gradient_covariance_m2, None);
-    // Re-frozen when the rows moved to RTKLIB `satposs` placement and `geodist`: the
+    // This value covers rows using RTKLIB `satposs` placement and `geodist`: the
     // elevations are those of the unrotated line of sight, exactly the fixture's designed
     // angles (sin 60 deg, sin 55 deg, ...) where the rotated one had them off by about 5e-6.
     assert_eq!(
@@ -1395,6 +1396,119 @@ fn elevation_cutoff_removes_low_satellites_before_solve() {
     assert_eq!(cutoff.used_sats, ["G01", "G02", "G03", "G04"]);
     assert!(cutoff.converged);
     assert_eq!(cutoff.status, FloatStatus::StateTolerance);
+}
+
+#[test]
+fn elevation_cutoff_keeps_a_satellite_at_the_exact_public_solve_boundary() {
+    let oracle: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/rtklib_integrity_geometry.json"
+    )))
+    .unwrap();
+    let cases = oracle["elevation_mask_cases"].as_array().unwrap();
+    let receiver =
+        std::array::from_fn(|index| cases[0]["receiver_ecef_m"][index].as_f64().unwrap());
+    let ids: Vec<_> = (1..=cases.len())
+        .map(|prn| GnssSatelliteId::new(GnssSystem::Gps, prn as u8).unwrap())
+        .collect();
+    let latitude = 0.7_f64;
+    let longitude = -1.2_f64;
+    let east = [-libm::sin(longitude), libm::cos(longitude), 0.0];
+    let north = [
+        -libm::sin(latitude) * libm::cos(longitude),
+        -libm::sin(latitude) * libm::sin(longitude),
+        libm::cos(latitude),
+    ];
+    let up = [
+        libm::cos(latitude) * libm::cos(longitude),
+        libm::cos(latitude) * libm::sin(longitude),
+        libm::sin(latitude),
+    ];
+    let source = FakeSource {
+        states: ids
+            .iter()
+            .map(|&sat| {
+                if sat.prn == 1 {
+                    return (
+                        sat,
+                        std::array::from_fn(|index| {
+                            cases[0]["satellite_ecef_m"][index].as_f64().unwrap()
+                        }),
+                    );
+                }
+                let az = (sat.prn - 2) as f64 * 55.0 * core::f64::consts::PI / 180.0;
+                let el = (40.0 + (sat.prn % 3) as f64 * 10.0) * core::f64::consts::PI / 180.0;
+                let enu = [
+                    libm::cos(el) * libm::sin(az),
+                    libm::cos(el) * libm::cos(az),
+                    libm::sin(el),
+                ];
+                let los: [f64; 3] = std::array::from_fn(|index| {
+                    east[index] * enu[0] + north[index] * enu[1] + up[index] * enu[2]
+                });
+                (
+                    sat,
+                    std::array::from_fn(|index| receiver[index] + 26_000_000.0 * los[index]),
+                )
+            })
+            .collect(),
+    };
+    let mut epochs = Vec::new();
+    for epoch_index in 0..3 {
+        let t_rx_j2000_s = epoch_index as f64 * 900.0;
+        let observations = ids
+            .iter()
+            .map(|&sat| {
+                let (_, prediction) = super::synthetic_placed_code(
+                    &source,
+                    sat,
+                    receiver,
+                    t_rx_j2000_s,
+                    |geometry| geometry.geometric_range_m,
+                );
+                FloatObservation {
+                    sat,
+                    satellite_id: sat.to_string(),
+                    ambiguity_id: sat.to_string(),
+                    code_m: prediction.geometric_range_m,
+                    phase_m: prediction.geometric_range_m + sat.prn as f64 * 0.1,
+                    freq1_hz: 0.0,
+                    freq2_hz: 0.0,
+                    glonass_channel: None,
+                    signals: None,
+                }
+            })
+            .collect();
+        epochs.push(FloatEpoch {
+            epoch: CivilDateTime {
+                year: 2020,
+                month: 6,
+                day: 24,
+                hour: 12,
+                minute: epoch_index as u8 * 15,
+                second: 0.0,
+            },
+            jd_whole: 2_459_024.5,
+            jd_fraction: 0.5 + t_rx_j2000_s / crate::constants::SECONDS_PER_DAY,
+            t_rx_j2000_s,
+            observations,
+        });
+    }
+    let initial = FloatState {
+        position_m: receiver,
+        clocks_m: vec![0.0; epochs.len()],
+        ambiguities_m: initial_ambiguities(&epochs),
+        ztd_m: 0.0,
+        tropo_gradient_north_m: 0.0,
+        tropo_gradient_east_m: 0.0,
+        residual_ionosphere_m: BTreeMap::new(),
+    };
+    let g01_position = source.states[&ids[0]];
+    let (_, boundary_rad) = crate::estimation::substrate::frames::satazel(receiver, g01_position);
+    let boundary = boundary_rad / crate::constants::DEG_TO_RAD;
+    let solution =
+        solve_float_epochs(&source, &epochs, initial, ppp_cutoff_config(Some(boundary))).unwrap();
+    assert!(solution.used_sats.iter().any(|sat| sat == "G01"));
 }
 
 /// Refuses one satellite's state, as an SSR source does outside the UT1 table under a
@@ -4891,6 +5005,7 @@ fn fixed_resolve_keeps_the_bias_records_of_the_placed_epoch() {
         position_covariance: unit_position_covariance(),
         formal_position_covariance: unit_position_covariance(),
         posterior_variance_factor: 1.0,
+        posterior_variance_factor_estimated: true,
         position_covariance_scale_factor: 1.0,
         temporal_position_covariance: unit_position_covariance(),
         temporal_position_covariance_scale_factor: 1.0,
@@ -6070,6 +6185,7 @@ fn static_fixed_solver_rejects_short_float_solution_clock_vector() {
         position_covariance: unit_position_covariance(),
         formal_position_covariance: unit_position_covariance(),
         posterior_variance_factor: 1.0,
+        posterior_variance_factor_estimated: true,
         position_covariance_scale_factor: 1.0,
         temporal_position_covariance: unit_position_covariance(),
         temporal_position_covariance_scale_factor: 1.0,
@@ -6146,6 +6262,7 @@ fn static_fixed_solver_rejects_nan_tolerance() {
         position_covariance: unit_position_covariance(),
         formal_position_covariance: unit_position_covariance(),
         posterior_variance_factor: 1.0,
+        posterior_variance_factor_estimated: true,
         position_covariance_scale_factor: 1.0,
         temporal_position_covariance: unit_position_covariance(),
         temporal_position_covariance_scale_factor: 1.0,
@@ -6224,6 +6341,7 @@ fn static_fixed_solver_rejects_nan_wavelength() {
         position_covariance: unit_position_covariance(),
         formal_position_covariance: unit_position_covariance(),
         posterior_variance_factor: 1.0,
+        posterior_variance_factor_estimated: true,
         position_covariance_scale_factor: 1.0,
         temporal_position_covariance: unit_position_covariance(),
         temporal_position_covariance_scale_factor: 1.0,
@@ -6299,6 +6417,7 @@ fn static_fixed_solver_rejects_float_solution_options_and_keys_it_cannot_apply()
         position_covariance: unit_position_covariance(),
         formal_position_covariance: unit_position_covariance(),
         posterior_variance_factor: 1.0,
+        posterior_variance_factor_estimated: true,
         position_covariance_scale_factor: 1.0,
         temporal_position_covariance: unit_position_covariance(),
         temporal_position_covariance_scale_factor: 1.0,
@@ -6560,8 +6679,8 @@ fn fixed_design_rows_have_frozen_bits_golden() {
 }
 
 // Generated by running each test once and freezing the observed bits; see the
-// module comment. Regenerate only with a deliberate, reviewed behavior change.
-// Re-frozen when the rows moved to RTKLIB `satposs` placement and `geodist`: the line
+// module comment. Regenerate only when deliberately changing the documented behavior.
+// This value covers rows using RTKLIB `satposs` placement and `geodist`: the line
 // of sight is now the unrotated transmission-epoch vector, so the direction cosines
 // moved by the Earth's rotation over the flight time, about 5e-6.
 const PPP_FLOAT_DESIGN_ROW_GOLDEN: &[u64] = &[

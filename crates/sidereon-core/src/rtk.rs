@@ -267,10 +267,12 @@ pub struct IonosphereFreeBaselineResult {
     /// satellites are skipped.
     pub epochs: Vec<IonosphereFreeBaselineEpoch>,
     /// Narrow-lane wavelengths in meters keyed by double-difference ambiguity
-    /// id.
+    /// id. Includes the reference carrier, so a later reference change has
+    /// its wavelength available too.
     pub wavelengths_m: BTreeMap<String, f64>,
     /// Narrow-lane code-to-phase offsets in meters keyed by double-difference
-    /// ambiguity id and computed from the fixed wide-lane integer.
+    /// ambiguity id and computed from the fixed wide-lane integer. Includes
+    /// a zero entry for the reference; all other offsets are relative to it.
     pub offsets_m: BTreeMap<String, f64>,
 }
 
@@ -976,7 +978,12 @@ pub fn apply_elevation_mask(
     for epoch in epochs {
         let mut kept = Vec::new();
         for (sat, sat_pos) in &epoch.satellite_positions_m {
-            if base_elevation_rad(base_m, *sat_pos)? >= mask_rad {
+            let elevation_rad = base_elevation_rad(base_m, *sat_pos)?;
+            // RTKLIB compares the `satazel` elevation and `elmin` directly in
+            // radians. Platform libm implementations can therefore disagree
+            // at the last bit exactly on the boundary; no empirical envelope
+            // is added here.
+            if crate::geometry::visible_at_elevation_mask_rad(elevation_rad, mask_rad) {
                 kept.push(sat.clone());
             } else {
                 masked.insert(sat.clone());
@@ -1712,6 +1719,18 @@ fn dual_narrow_lane_params(
         else {
             continue;
         };
+        // The reference has no DD integer or offset, but its physical carrier
+        // wavelength is needed if a later epoch promotes another reference.
+        if let Some(observation) = dual_if_satellite(epoch, reference_satellite_id) {
+            let param =
+                dual_narrow_lane_param(observation.base.f1_hz, observation.base.f2_hz, 0.0)?;
+            ensure_consistent_dual_narrow_lane_params(
+                ref_sd.ambiguity_id.as_str(),
+                param,
+                params.get(&ref_sd.ambiguity_id).copied(),
+            )?;
+            params.entry(ref_sd.ambiguity_id.clone()).or_insert(param);
+        }
         for sat in dual_if_epoch_common_sats(epoch)
             .into_iter()
             .filter(|sat| sat != reference_satellite_id)
@@ -4483,10 +4502,20 @@ mod tests {
 
         let result = build_ionosphere_free_baseline_epochs(&epochs, "G01", &wide_lanes).unwrap();
 
+        let reference: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/rtk_hold_transport.json"))
+                .unwrap();
+        assert_eq!(
+            result.wavelengths_m["G01"],
+            reference["narrow_lane_wavelength_m"].as_f64().unwrap()
+        );
+        assert_eq!(result.offsets_m["G01"], 0.0);
+
         assert_eq!(
             result
                 .wavelengths_m
                 .iter()
+                .filter(|(id, _)| id.as_str() != "G01")
                 .map(|(id, value)| (id.as_str(), value.to_bits()))
                 .collect::<Vec<_>>(),
             [("G02", 0x3fbb614bed5136b9), ("G03", 0x3fbb614bed5136b9),]
@@ -4495,6 +4524,7 @@ mod tests {
             result
                 .offsets_m
                 .iter()
+                .filter(|(id, _)| id.as_str() != "G01")
                 .map(|(id, value)| (id.as_str(), value.to_bits()))
                 .collect::<Vec<_>>(),
             [("G02", 0x3ff21e814dfd4618), ("G03", 0xbffe32d781fb74d4),]
@@ -4829,7 +4859,7 @@ mod tests {
         assert_eq!(result.epochs[0].satellite_ids, ["G01", "G02"]);
         assert_eq!(
             result.wavelengths_m.keys().collect::<Vec<_>>(),
-            [&"G02".to_string()]
+            [&"G01".to_string(), &"G02".to_string()]
         );
     }
 

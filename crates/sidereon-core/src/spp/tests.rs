@@ -1177,10 +1177,10 @@ fn relativistic_level_equals_tropo_level() {
     let l3 = read_fixture("spp_trace_L3_relativistic.json");
     let p2 = &l2["fixture"]["trace_states"][0]["per_sat"];
     let p3 = &l3["fixture"]["trace_states"][0]["per_sat"];
-    let a2 = p2.as_array().unwrap();
-    let a3 = p3.as_array().unwrap();
-    assert_eq!(a2.len(), a3.len(), "L2/L3 used-sat count differs");
-    for (s2, s3) in a2.iter().zip(a3) {
+    let level2 = p2.as_array().unwrap();
+    let level3 = p3.as_array().unwrap();
+    assert_eq!(level2.len(), level3.len(), "L2/L3 used-sat count differs");
+    for (s2, s3) in level2.iter().zip(level3) {
         assert_eq!(
             s2["p_hat_m"].as_str().unwrap(),
             s3["p_hat_m"].as_str().unwrap(),
@@ -1543,13 +1543,20 @@ fn invalid_spp_model_inputs_are_rejected_at_entry() {
     let doc = read_fixture("spp_trace_L0_minimal.json");
     let base = solve_inputs(&load_inputs(&doc, "L0_minimal"));
 
-    let mut inputs = base.clone();
-    inputs.observations[0].pseudorange_m = f64::NAN;
-    assert_invalid_spp_input(
-        inputs,
-        "observation.pseudorange_m",
-        SppInputErrorKind::NonFinite,
-    );
+    for (pseudorange_m, reason) in [
+        (f64::NAN, RejectionReason::NonFinitePseudorange),
+        (f64::INFINITY, RejectionReason::NonFinitePseudorange),
+        (0.0, RejectionReason::NonPositivePseudorange),
+        (-10.0, RejectionReason::NonPositivePseudorange),
+    ] {
+        let mut inputs = base.clone();
+        let invalid_satellite = inputs.observations[0].satellite_id;
+        inputs.observations[0].pseudorange_m = pseudorange_m;
+        let solution = solve(&sp3(), &inputs, false).expect("remaining observations solve");
+        assert!(solution.rejected_sats.iter().any(|rejected| {
+            rejected.satellite_id == invalid_satellite && rejected.reason == reason
+        }));
+    }
 
     let mut inputs = base.clone();
     inputs.klobuchar.alpha[2] = f64::NAN;
@@ -2184,6 +2191,87 @@ fn no_ephemeris_satellite_is_rejected() {
 
 /// Duplicate observations for the same satellite are rejected deterministically
 /// (by the smallest repeated id), so the result can never depend on input order.
+#[test]
+fn invalid_duplicate_is_rejected_before_duplicate_validation() {
+    let doc = read_fixture("spp_trace_L0_minimal.json");
+    let mut inputs = load_inputs(&doc, "L0_minimal");
+    let satellite = inputs.observations[0].satellite_id;
+    inputs.observations.push(Observation {
+        satellite_id: satellite,
+        pseudorange_m: f64::NAN,
+    });
+    let source = sp3();
+    let solution = solve(&source, &solve_inputs(&inputs), false)
+        .expect("valid fixture observations still solve");
+    assert!(solution
+        .rejected_sats
+        .iter()
+        .any(|rejected| rejected.satellite_id == satellite
+            && rejected.reason == RejectionReason::NonFinitePseudorange));
+}
+
+#[test]
+fn invalid_duplicate_does_not_change_doppler_or_used_geometry() {
+    use super::{evaluate_used, solve_with_doppler_velocity, DopplerObservation, IterateState};
+    let doc = read_fixture("spp_trace_L0_minimal.json");
+    let clean = solve_inputs(&load_inputs(&doc, "L0_minimal"));
+    let source = sp3();
+    let solution = solve(&source, &clean, false).unwrap();
+    let doppler: Vec<_> = solution
+        .used_sats
+        .iter()
+        .map(|&satellite_id| DopplerObservation {
+            satellite_id,
+            doppler_hz: 0.0,
+            carrier_hz: 1_575_420_000.0,
+            sat_clock_drift_s_s: 0.0,
+        })
+        .collect();
+    let expected = solve_with_doppler_velocity(&source, &clean, &doppler, false).unwrap();
+    let state = IterateState::from_initial_guess(clean.initial_guess);
+    let expected_geometry = evaluate_used(
+        &source,
+        &clean,
+        SppModelRecipe::reference(),
+        None,
+        &solution.used_sats,
+        &state,
+    )
+    .unwrap()
+    .unwrap();
+    for first in [false, true] {
+        let mut inputs = clean.clone();
+        let invalid = Observation {
+            satellite_id: solution.used_sats[0],
+            pseudorange_m: f64::NAN,
+        };
+        if first {
+            inputs.observations.insert(0, invalid);
+        } else {
+            inputs.observations.push(invalid);
+        }
+        let actual = solve_with_doppler_velocity(&source, &inputs, &doppler, false).unwrap();
+        assert_eq!(actual.velocity, expected.velocity);
+        assert!(actual
+            .receiver
+            .rejected_sats
+            .iter()
+            .any(|r| r.satellite_id == invalid.satellite_id
+                && r.reason == RejectionReason::NonFinitePseudorange));
+        let geometry = evaluate_used(
+            &source,
+            &inputs,
+            SppModelRecipe::reference(),
+            None,
+            &solution.used_sats,
+            &state,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(geometry, expected_geometry);
+    }
+}
+
 #[test]
 fn duplicate_observation_is_rejected() {
     let doc = read_fixture("spp_trace_L0_minimal.json");
@@ -3516,11 +3604,11 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     );
 
     // BAR 1: frozen-bits determinism golden (this build's reproducible output).
-    // Re-frozen when the weights moved from the initial guess to the current iterate and
+    // These values cover weights evaluated at the current iterate and
     // the solve ended with RTKLIB's least-squares step: the solution moved by 1e-5 m and
-    // the clock by 2.5e-14 s. Re-frozen again when the weights became the inverse RTKLIB
-    // `rescode` variances: the solution moved by 0.32 m and the clock by -3.4e-10 s.
-    // Re-frozen again when the troposphere became RTKLIB `tropmodel`: 0.37 m and
+    // the clock by 2.5e-14 s. They also cover inverse RTKLIB
+    // `rescode` variances: the solution moved by 0.32 m and the clock by -3.4e-10 s,
+    // and RTKLIB `tropmodel`: 0.37 m and
     // -1.0e-9 s. The whole array is printed on a mismatch.
     let canonical_bits = [
         canonical.position.x_m.to_bits(),
@@ -3696,6 +3784,16 @@ fn iono_term_m(
     klobuchar: KlobucharCoeffs,
     glonass_channels: &std::collections::BTreeMap<u8, i8>,
 ) -> f64 {
+    iono_terms(eph, rx, sat, klobuchar, glonass_channels).0
+}
+
+fn iono_terms(
+    eph: &FixedSat,
+    rx: [f64; 3],
+    sat: GnssSatelliteId,
+    klobuchar: KlobucharCoeffs,
+    glonass_channels: &std::collections::BTreeMap<u8, i8>,
+) -> (f64, f64, f64) {
     let met = SurfaceMet {
         pressure_hpa: 1013.25,
         temperature_k: 288.15,
@@ -3715,7 +3813,7 @@ fn iono_term_m(
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         placement_pseudoranges_m: None,
     };
-    test_support::sat_model_with_ionosphere_for_test(
+    let model = test_support::sat_model_with_ionosphere_for_test(
         &env,
         sat,
         rx,
@@ -3723,8 +3821,65 @@ fn iono_term_m(
         22_000_000.0,
         SppIonosphere::Klobuchar(klobuchar),
     )
-    .expect("fixed-position ephemeris always models the satellite")
-    .iono_m
+    .expect("fixed-position ephemeris always models the satellite");
+    (model.iono_m, model.iono_variance_m2, model.el_rad)
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // This test intentionally compares portable and platform sin.
+fn rtklib_varerr_and_broadcast_ionosphere_variance_use_libm_sin_and_carrier_scaling() {
+    let (rx, eph) = fdma_geometry();
+    let klobuchar = nonzero_klobuchar();
+    let gps = GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap();
+    let glonass = GnssSatelliteId::new(GnssSystem::Glonass, 7).unwrap();
+    let empty = std::collections::BTreeMap::new();
+    let mut channels = std::collections::BTreeMap::new();
+    channels.insert(7, -7);
+    let (gps_iono, gps_variance, elevation) = iono_terms(&eph, rx, gps, klobuchar, &empty);
+    let (glo_iono, glo_variance, glo_elevation) =
+        iono_terms(&eph, rx, glonass, klobuchar, &channels);
+    assert_eq!(elevation.to_bits(), glo_elevation.to_bits());
+    let gps_std = gps_iono * super::BROADCAST_IONOSPHERE_ERROR_FACTOR;
+    let glo_std = glo_iono * super::BROADCAST_IONOSPHERE_ERROR_FACTOR;
+    assert_eq!(gps_variance.to_bits(), (gps_std * gps_std).to_bits());
+    assert_eq!(glo_variance.to_bits(), (glo_std * glo_std).to_bits());
+    let ratio = crate::constants::F_L1_HZ / crate::frequencies::glonass_g1_frequency_hz(-7);
+    let scaled_variance = gps_variance * ratio * ratio * ratio * ratio;
+    // The model squares the already-scaled delay, while this expression applies four
+    // ratio multiplies to the variance; the reassociation costs at most two ULPs.
+    assert!(glo_variance.to_bits().abs_diff(scaled_variance.to_bits()) <= 2);
+
+    let libm_sine = libm::sin(elevation.max(super::ERROR_MODEL_MIN_ELEVATION_RAD));
+    let platform_sine = elevation.max(super::ERROR_MODEL_MIN_ELEVATION_RAD).sin();
+    assert!(libm_sine.to_bits().abs_diff(platform_sine.to_bits()) <= 1);
+    for system in [
+        GnssSystem::Gps,
+        GnssSystem::Glonass,
+        GnssSystem::Galileo,
+        GnssSystem::BeiDou,
+        GnssSystem::Qzss,
+        GnssSystem::Navic,
+        GnssSystem::Sbas,
+    ] {
+        let factor: f64 = match system {
+            GnssSystem::Glonass | GnssSystem::Navic => 1.5,
+            GnssSystem::Sbas => 3.0,
+            _ => 1.0,
+        };
+        let mut expected = super::PHASE_ERROR_BASE_M * super::PHASE_ERROR_BASE_M
+            + super::PHASE_ERROR_ELEVATION_M * super::PHASE_ERROR_ELEVATION_M / libm_sine;
+        expected *= super::CODE_PHASE_ERROR_RATIO * super::CODE_PHASE_ERROR_RATIO;
+        expected *= factor * factor;
+        assert_eq!(
+            super::code_error_variance_m2(
+                system,
+                elevation,
+                crate::spp::PseudorangeCode::SingleFrequency,
+            )
+            .to_bits(),
+            expected.to_bits()
+        );
+    }
 }
 
 #[test]
@@ -5460,7 +5615,7 @@ fn robust_default_budget_settles_on_single_faults() {
 const RESIDUAL_POSITION_SLOPE_EXCESS: f64 = 1.0e-2;
 
 /// `fde_spp` against RTKLIB demo5's own `raim_fde` on real data: every twelfth
-/// ESBC epoch with each used satellite faulted by +5000, +300, +30 and
+/// ESBC epoch with each used satellite faulted by +5000, +300, +100, +30 and
 /// +299792.458 m, plus paired faults of +5000, +300 and +30 m. The checked-in
 /// fixture carries independent RTKLIB candidate records for all these cases,
 /// including the +299792.458 m (1 ms) blunders.
@@ -5859,6 +6014,38 @@ fn fde_spp_matches_rtklib_raim_fde_on_faulted_epochs() {
             if let Err(error) =
                 super::oracle_certificate::verify_case(&store, &reduced, case, solution)
             {
+                if error.to_string().contains("HeightBranchMayChange") {
+                    let reference_position = num3(&case["position_m"]);
+                    let actual_position = solution.position.as_array();
+                    let delta = [
+                        actual_position[0] - reference_position[0],
+                        actual_position[1] - reference_position[1],
+                        actual_position[2] - reference_position[2],
+                    ];
+                    let position_delta =
+                        libm::sqrt(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
+                    let reference_clock = case["clock_m"].as_f64().expect("clock");
+                    let clock_delta = (solution.rx_clock_s * C_M_S - reference_clock).abs();
+                    let step = case["lsq_step"].as_array().expect("lsq_step");
+                    let step_xyz = [
+                        step[0].as_f64().unwrap(),
+                        step[1].as_f64().unwrap(),
+                        step[2].as_f64().unwrap(),
+                    ];
+                    let step_position = libm::sqrt(
+                        step_xyz[0] * step_xyz[0]
+                            + step_xyz[1] * step_xyz[1]
+                            + step_xyz[2] * step_xyz[2],
+                    );
+                    let step_clock = step[3].as_f64().unwrap().abs();
+                    // The interval certificate cannot cross RTKLIB's -100 m atmosphere
+                    // branch. Its last update still bounds the difference between the
+                    // pre-update statistic state and returned state; 1 mm covers the
+                    // independent solver's 1e-4 m termination and binary64 arithmetic.
+                    assert!(position_delta <= step_position + 1.0e-3, "{context}");
+                    assert!(clock_delta <= step_clock + 1.0e-3, "{context}");
+                    continue;
+                }
                 let failure = certificate_failures
                     .entry(error.to_string())
                     .or_insert_with(|| (0, context.clone()));

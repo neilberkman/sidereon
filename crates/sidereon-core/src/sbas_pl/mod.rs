@@ -151,7 +151,9 @@ fn valid_positive_finite(value: f64) -> bool {
 fn map_model_error(error: AraimError) -> SbasPlError {
     match error {
         AraimError::InsufficientGeometry => SbasPlError::InsufficientGeometry,
-        AraimError::InvalidIsm | AraimError::InvalidAllocation => SbasPlError::InvalidErrorModel,
+        AraimError::InvalidIsm
+        | AraimError::InvalidAllocation
+        | AraimError::UnsupportedConstellation(_) => SbasPlError::InvalidErrorModel,
         AraimError::UnmonitorableFaultMass | AraimError::NumericalFailure => {
             SbasPlError::NumericalFailure
         }
@@ -162,7 +164,9 @@ fn map_model_error(error: AraimError) -> SbasPlError {
 fn map_araim_error(error: AraimError) -> SbasPlError {
     match error {
         AraimError::InsufficientGeometry => SbasPlError::InsufficientGeometry,
-        AraimError::InvalidIsm | AraimError::InvalidAllocation => SbasPlError::InvalidErrorModel,
+        AraimError::InvalidIsm
+        | AraimError::InvalidAllocation
+        | AraimError::UnsupportedConstellation(_) => SbasPlError::InvalidErrorModel,
         AraimError::UnmonitorableFaultMass | AraimError::NumericalFailure => {
             SbasPlError::NumericalFailure
         }

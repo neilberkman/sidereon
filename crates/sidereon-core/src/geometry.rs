@@ -40,7 +40,15 @@ const DEG_TO_RAD: f64 = PI / 180.0;
 
 /// Returns whether an elevation is at or above an elevation mask.
 pub fn visible_at_elevation_mask(elevation_deg: f64, mask_deg: f64) -> bool {
-    elevation_deg >= mask_deg
+    visible_at_elevation_mask_rad(elevation_deg * DEG_TO_RAD, mask_deg * DEG_TO_RAD)
+}
+
+/// Returns whether a radian elevation is at or above a radian mask.
+///
+/// This is the direct comparison used by RTKLIB after both quantities have
+/// been formed in radians. No equality envelope is applied.
+pub(crate) fn visible_at_elevation_mask_rad(elevation_rad: f64, mask_rad: f64) -> bool {
+    elevation_rad >= mask_rad
 }
 
 /// Closed-form Sagnac/Earth-rotation transport of a transmit-time ECEF satellite
@@ -284,6 +292,14 @@ pub fn dop_at_epoch(
         let Ok(obs) = prediction else {
             continue;
         };
+        // RTKLIB `dops` rejects the horizon (`el <= 0`) before applying its
+        // configured mask. Form both values once in radians so weighting never
+        // receives a negative elevation.
+        let elevation_rad = obs.elevation_deg * DEG_TO_RAD;
+        let mask_rad = options.visibility.elevation_mask_deg * DEG_TO_RAD;
+        if elevation_rad <= 0.0 || !visible_at_elevation_mask_rad(elevation_rad, mask_rad) {
+            continue;
+        }
         line_of_sight.push(LineOfSight::new(
             obs.los_unit[0],
             obs.los_unit[1],
@@ -529,6 +545,8 @@ mod sampling_tests {
     const RECEIVER_ECEF_M: [f64; 3] = [6_378_137.0, 0.0, 0.0];
     const ANTI_MERIDIAN_RECEIVER_ECEF_M: [f64; 3] = [-6_378_137.0, 0.0, 0.0];
     const RANGE_M: f64 = 20_200_000.0;
+    const ANTI_MERIDIAN_DOPS_FIXTURE: &str =
+        include_str!("../tests/fixtures/rtklib_antimeridian_dops.json");
 
     #[test]
     fn public_sagnac_helpers_match_explicit_formulas() {
@@ -603,7 +621,11 @@ mod sampling_tests {
             sat: GnssSatelliteId,
             _t_j2000_s: f64,
         ) -> Result<ObservableState, ObservablesError> {
-            let los = final_los(sat);
+            let local = final_los(sat);
+            // Longitude pi maps the longitude-zero [up, east, north] axes to
+            // ECEF [-x, -y, z]. All four oracle directions remain above the
+            // ellipsoid-normal horizon at the antimeridian receiver.
+            let los = [-local[0], -local[1], local[2]];
             Ok(ObservableState {
                 position_ecef_m: [
                     self.receiver_ecef_m[0] + RANGE_M * los[0],
@@ -731,8 +753,38 @@ mod sampling_tests {
             0.0,
             &DopOptions::default(),
         )
-        .expect("antimeridian receiver should produce DOP");
-        assert_eq!(epoch.satellites, sats);
+        .expect("above-horizon antimeridian geometry");
+        let fixture: serde_json::Value =
+            serde_json::from_str(ANTI_MERIDIAN_DOPS_FIXTURE).expect("valid RTKLIB fixture");
+        let expected = fixture["dop"].as_array().expect("DOP vector");
+        // The independently generated kappa(N) amplifies backward error in
+        // the azimuth/elevation design, normal formation and inversion. 128
+        // rounding stages cover the frame/design operations, the 4-term dot
+        // products, 4x4 elimination and final square root. The perturbation
+        // bound is gamma_128*kappa/(1-gamma_128*kappa). Retain the existing
+        // tighter 32-ulp regression cap as a separate check.
+        let kappa = fixture["normal_condition_number"].as_f64().unwrap();
+        let gamma = 128.0 * f64::EPSILON / (1.0 - 128.0 * f64::EPSILON);
+        let relative_bound = gamma * kappa / (1.0 - gamma * kappa);
+        for (got, expected) in [
+            epoch.dop.gdop,
+            epoch.dop.pdop,
+            epoch.dop.hdop,
+            epoch.dop.vdop,
+        ]
+        .into_iter()
+        .zip(expected)
+        {
+            let reference = expected.as_f64().expect("finite DOP");
+            assert!((got - reference).abs() <= relative_bound * reference.abs());
+            assert!(
+                got.to_bits()
+                    .abs_diff(expected.as_f64().expect("finite DOP").to_bits())
+                    <= 32,
+                "DOP {got} differs from RTKLIB {}",
+                expected.as_f64().expect("finite DOP")
+            );
+        }
 
         let series = dop_series(
             &source,
@@ -745,6 +797,7 @@ mod sampling_tests {
         )
         .expect("antimeridian receiver DOP series");
         assert_eq!(series.len(), 1);
+        assert_eq!(series[0].geometry.dop, epoch.dop);
     }
 
     #[test]
@@ -957,7 +1010,7 @@ mod tests {
         // Every row is compared at once, so a mismatch prints every row. The epoch,
         // 12:00, is an SP3 node, where the interpolating polynomial passes through the
         // node whichever eleven nodes it is fitted to; the G16 azimuth and the G08 and
-        // G10 elevations were re-frozen one unit in the last place when the pivot at
+        // G10 elevations moved one unit in the last place when the pivot at
         // a node moved to the node before it, as RTKLIB pephpos takes it, which moves
         // only the rounding of Neville's evaluation.
         let got_rows: Vec<(String, u64, u64)> = got
@@ -1127,7 +1180,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["G21", "G16", "G26", "G20", "G27", "G18", "G10", "G08", "G07"]
         );
-        // Re-frozen (up to three units in the last place) when the pivot at an SP3
+        // These values moved by up to three units in the last place when the pivot at an SP3
         // node moved to the node before it, as RTKLIB pephpos takes it: the first
         // sample sits on a node, where only the rounding of the fit moves.
         let dop = &first.geometry.dop;

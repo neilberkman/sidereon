@@ -17,6 +17,7 @@ pub use crate::inertial::*;
 pub use ekf::{
     apply_closed_loop_error, ekf_correct_closed_loop, joseph_covariance_update, EkfCorrection,
     EkfCorrectionReport, EkfUpdateOptions, InnovationGate, InnovationGateReport,
+    JointInnovationGateReport,
 };
 pub use error_state::{
     error_state_process_noise_discrete, error_state_system_matrix_ecef,

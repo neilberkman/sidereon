@@ -47,8 +47,10 @@ static int capture_lsq(const double *weighted_design, const double *residuals,
 #undef lsq
 
 static int captured_lsq_valid;
+static int legacy_fde_format = 1;
 static int captured_lsq_columns;
 static double captured_lsq_design[(MAXOBS + NX) * NX];
+static double captured_lsq_residuals[MAXOBS + NX];
 static double captured_lsq_covariance[NX * NX];
 static int captured_lsq_state_valid;
 static double tracked_receiver_state[NX];
@@ -76,6 +78,7 @@ static int capture_lsq(const double *weighted_design, const double *residuals,
     captured_lsq_state_valid = 1;
     if (measurement_count < parameter_count || measurement_count > MAXOBS + NX) return status;
     for (column = 0; column < measurement_count; column++) {
+        captured_lsq_residuals[column] = residuals[column];
         for (row = 0; row < parameter_count; row++) {
             captured_lsq_design[row + column * parameter_count] =
                 weighted_design[row + column * parameter_count];
@@ -108,6 +111,7 @@ static void print_position(const double *r)
 static void print_captured_lsq(void)
 {
     int row, column;
+    double chi_square = 0.0;
     double receiver_geodetic[3];
     printf(", \"lsq_weighted_design_columns\": [");
     for (column = 0; column < captured_lsq_columns; column++) {
@@ -118,7 +122,20 @@ static void print_captured_lsq(void)
         }
         printf("]");
     }
-    printf("], \"lsq_covariance\": [");
+    for (column = captured_lsq_columns - 1; column >= 0; column--) {
+        chi_square += captured_lsq_residuals[column] * captured_lsq_residuals[column];
+    }
+    printf("]");
+    if (!legacy_fde_format) {
+        printf(", \"pre_update_chi_square\": %.17g, \"chi_square_dof\": %d, "
+               "\"chi_square_threshold\": ", chi_square, captured_lsq_columns - NX);
+        if (captured_lsq_columns > NX && captured_lsq_columns - NX <= 100) {
+            printf("%.17g", chisqr[captured_lsq_columns - NX - 1]);
+        } else {
+            printf("null");
+        }
+    }
+    printf(", \"lsq_covariance\": [");
     for (row = 0; row < NX; row++) {
         printf("%s[", row ? ", " : "");
         for (column = 0; column < NX; column++) {
@@ -171,6 +188,10 @@ static void print_used_states(const obsd_t *obs, int observation_count, gtime_t 
     receiver_state[1] = sol->rr[1];
     receiver_state[2] = sol->rr[2];
     receiver_state[3] = sol->dtr[0] * CLIGHT;
+    receiver_state[4] = sol->dtr[1] * CLIGHT;
+    receiver_state[5] = sol->dtr[2] * CLIGHT;
+    receiver_state[6] = sol->dtr[3] * CLIGHT;
+    receiver_state[7] = sol->dtr[4] * CLIGHT;
     satposs(teph, obs, observation_count, nav, opt->sateph, rs, dts, sat_var, svh);
     reference_count = rescode(1, obs, observation_count, rs, dts, sat_var, svh, nav,
                               receiver_state, opt, ssat, residual, design, fit_var,
@@ -203,17 +224,18 @@ static void print_used_states(const obsd_t *obs, int observation_count, gtime_t 
         int fit_row;
         int frequency_index;
         eph_t *eph;
-        if (!reference_used_by_satellite[satellite_index] || satsys(sat, NULL) != SYS_GPS) {
+        if (!reference_used_by_satellite[satellite_index]) {
             continue;
         }
         for (observation_index = 0;
              observation_index < observation_count && obs[observation_index].sat != sat;
              observation_index++) {
         }
-        if (observation_index == observation_count || !(eph = gps_eph_at(teph, sat, nav))) {
+        if (observation_index == observation_count) {
             fprintf(stderr, "missing used satellite input for %d\n", sat);
             exit(1);
         }
+        eph = satsys(sat, NULL) == SYS_GPS ? gps_eph_at(teph, sat, nav) : NULL;
         for (frequency_index = 0; frequency_index < NFREQ; frequency_index++) {
             if (obs[observation_index].P[frequency_index] != 0.0) {
                 placement_pseudorange = obs[observation_index].P[frequency_index];
@@ -224,12 +246,6 @@ static void print_used_states(const obsd_t *obs, int observation_count, gtime_t 
             fprintf(stderr, "missing used satellite pseudorange for %d\n", sat);
             exit(1);
         }
-        tx = timeadd(obs[observation_index].time, -placement_pseudorange / CLIGHT);
-        clock = eph2clk(tx, eph);
-        tx = timeadd(tx, -clock);
-        tx_j2000_whole_s = (int64_t)tx.time - INT64_C(946728000);
-        memcpy(&tx_fraction_bits, &tx.sec, sizeof(tx_fraction_bits));
-        time2epoch(tx, ep);
         satno2id(sat, id);
         if (!vsat[observation_index]) {
             fprintf(stderr, "reference state absent for used satellite %d\n", sat);
@@ -248,11 +264,19 @@ static void print_used_states(const obsd_t *obs, int observation_count, gtime_t 
         for (frequency_index = 0; frequency_index < NX; frequency_index++) {
             reference_design[frequency_index] = design[frequency_index + fit_row * NX];
         }
-        printf("%s{\"sat\": \"%s\", \"transmit_epoch\": [%d, %d, %d, %d, %d, %.17g], ",
-               first ? "" : ", ", id, (int)ep[0], (int)ep[1], (int)ep[2], (int)ep[3],
-               (int)ep[4], ep[5]);
-        printf("\"transmit_j2000_whole_s\": %" PRId64 ", \"transmit_fraction_bits\": \"%016" PRIx64 "\", ",
-               tx_j2000_whole_s, tx_fraction_bits);
+        printf("%s{\"sat\": \"%s\", ", first ? "" : ", ", id);
+        if (eph) {
+            tx = timeadd(obs[observation_index].time, -placement_pseudorange / CLIGHT);
+            clock = eph2clk(tx, eph);
+            tx = timeadd(tx, -clock);
+            tx_j2000_whole_s = (int64_t)tx.time - INT64_C(946728000);
+            memcpy(&tx_fraction_bits, &tx.sec, sizeof(tx_fraction_bits));
+            time2epoch(tx, ep);
+            printf("\"transmit_epoch\": [%d, %d, %d, %d, %d, %.17g], ",
+                   (int)ep[0], (int)ep[1], (int)ep[2], (int)ep[3], (int)ep[4], ep[5]);
+            printf("\"transmit_j2000_whole_s\": %" PRId64 ", \"transmit_fraction_bits\": \"%016" PRIx64 "\", ",
+                   tx_j2000_whole_s, tx_fraction_bits);
+        }
         first = 0;
         printf("\"position_m\": ");
         print_position(rs + observation_index * 6);
@@ -260,9 +284,16 @@ static void print_used_states(const obsd_t *obs, int observation_count, gtime_t 
         print_position(rs + observation_index * 6 + 3);
         printf(", \"clock_s\": %.17g, \"variance_m2\": %.17g, ",
                dts[observation_index * 2], sat_var[observation_index]);
-        printf("\"residual_m\": %.17g, \"design_row\": [%.17g, %.17g, %.17g, %.17g], ",
-               resp[observation_index], reference_design[0], reference_design[1],
-               reference_design[2], reference_design[3]);
+        if (!legacy_fde_format) {
+            printf("\"az_rad\": %.17g, \"el_rad\": %.17g, ", azel[2 * observation_index],
+                   azel[2 * observation_index + 1]);
+        }
+        printf("\"residual_m\": %.17g, \"design_row\": [", resp[observation_index]);
+        for (frequency_index = 0; frequency_index < (legacy_fde_format ? 4 : NX);
+             frequency_index++) {
+            printf("%s%.17g", frequency_index ? ", " : "", reference_design[frequency_index]);
+        }
+        printf("], ");
         printf("\"reference_variance_m2\": %.17g}", fit_var[fit_row]);
     }
     printf("]");
@@ -295,16 +326,23 @@ static void print_used_states(const obsd_t *obs, int observation_count, gtime_t 
  * ------------------------------------------------------------------------- */
 
 /* +299792.458 m is a 1 ms receiver-clock-sized blunder. */
-#define FDE_BIAS_COUNT 4
-static const double fde_biases_m[FDE_BIAS_COUNT] = {5000.0, 300.0, 30.0, 299792.458};
-#define FDE_PAIR_BIAS_COUNT 3
-static const double fde_pair_biases_m[FDE_PAIR_BIAS_COUNT] = {5000.0, 300.0, 30.0};
+#define FDE_BIAS_COUNT 5
+static const double fde_biases_m[FDE_BIAS_COUNT] = {5000.0, 300.0, 100.0, 30.0, 299792.458};
+#define FDE_PAIR_BIAS_COUNT 4
+static const double fde_pair_biases_m[FDE_PAIR_BIAS_COUNT] = {5000.0, 300.0, 100.0, 30.0};
+#define LEGACY_FDE_BIAS_COUNT 4
+static const double legacy_fde_biases_m[LEGACY_FDE_BIAS_COUNT] = {5000.0, 300.0, 30.0,
+                                                                  299792.458};
+#define LEGACY_FDE_PAIR_BIAS_COUNT 3
+static const double legacy_fde_pair_biases_m[LEGACY_FDE_PAIR_BIAS_COUNT] = {5000.0, 300.0,
+                                                                            30.0};
 
 typedef struct {
     int valid;
     int state_valid;
     int columns;
     double design[(MAXOBS + NX) * NX];
+    double residuals[MAXOBS + NX];
     double covariance[NX * NX];
     double receiver_state[NX];
     double step[NX];
@@ -319,6 +357,7 @@ static void save_capture(lsq_capture_t *capture)
     capture->state_valid = captured_lsq_state_valid;
     capture->columns = captured_lsq_columns;
     memcpy(capture->design, captured_lsq_design, sizeof(capture->design));
+    memcpy(capture->residuals, captured_lsq_residuals, sizeof(capture->residuals));
     memcpy(capture->covariance, captured_lsq_covariance, sizeof(capture->covariance));
     memcpy(capture->receiver_state, captured_lsq_receiver_state,
            sizeof(capture->receiver_state));
@@ -332,6 +371,7 @@ static void restore_capture(const lsq_capture_t *capture)
     captured_lsq_state_valid = capture->state_valid;
     captured_lsq_columns = capture->columns;
     memcpy(captured_lsq_design, capture->design, sizeof(capture->design));
+    memcpy(captured_lsq_residuals, capture->residuals, sizeof(capture->residuals));
     memcpy(captured_lsq_covariance, capture->covariance, sizeof(capture->covariance));
     memcpy(captured_lsq_receiver_state, capture->receiver_state,
            sizeof(capture->receiver_state));
@@ -386,6 +426,7 @@ static void fde_case(const obsd_t *obs, int n, const int *faulted, int fault_cou
     static ssat_t ssat[MAXSAT], ssat_out[MAXSAT];
     sol_t sol_e = {{0}}, best_sol = {{0}}, sol_r = {{0}}, sol_full = {{0}}, sol_p = {{0}};
     static double azel_full[MAXOBS * 2], resp_full[MAXOBS];
+    double full_step[NX]={0};
     static int vsat_full[MAXOBS];
     static ssat_t ssat_p[MAXSAT];
     char msg_full[128] = "", msg_p[128] = "";
@@ -402,6 +443,7 @@ static void fde_case(const obsd_t *obs, int n, const int *faulted, int fault_cou
     for (k = 0; k < 3; k++) sol_full.rr[k] = guess[k];
     full_stat = estpos(obs, n, rs, dts, var, svh, nav, opt, ssat, &sol_full, azel_full,
                        vsat_full, resp_full, msg_full);
+    if (full_stat) memcpy(full_step,captured_lsq_step,sizeof(full_step));
 
     /* The loop of `raim_fde`, replayed. */
     for (i = 0; i < n; i++) {
@@ -510,11 +552,36 @@ static void fde_case(const obsd_t *obs, int n, const int *faulted, int fault_cou
         printf("%s{\"sat\": \"%s\", \"bias_m\": %.17g}", k ? ", " : "", id, bias_m);
     }
     printf("], \"mode\": \"%s\", \"full_estpos_stat\": %d, \"pntpos_stat\": %d, \"stat\": %d, ",
-           fault_count == 2 ? "two_fault"
+           bias_m == -1.0 ? "nan_pseudorange"
+           : bias_m == -2.0 ? "clean_tie"
+           : bias_m == -3.0 ? "gps_minimum"
+           : bias_m == -4.0 ? "gps_minimum_plus_one"
+           : bias_m == -5.0 ? "multi_minimum"
+           : bias_m == -6.0 ? "multi_minimum_plus_one"
+           : bias_m == -7.0 ? "gdop_failure"
+           : bias_m == -8.0 ? "infinite_pseudorange"
+           : bias_m == -9.0 ? "zero_pseudorange"
+           : bias_m == -10.0 ? "negative_pseudorange"
+           : bias_m == -11.0 ? "two_zero_pseudoranges"
+           : fault_count == 2 ? "two_fault"
            : bias_m == 30.0 ? "small_bias"
            : bias_m == 299792.458 ? "one_millisecond_blunder"
                                   : "single_fault",
            full_stat, pntpos_stat, stat);
+    printf("\"invalid_observations\": [");
+    for (i=0,k=0;i<n;i++) if (!isfinite(obs[i].P[0])||obs[i].P[0]<=0.0) {
+        satno2id(obs[i].sat,id);
+        printf("%s{\"sat\":\"%s\"}", k++?",":"",id);
+    }
+    printf("], \"full_position_m\": ");
+    if (full_stat) print_position(sol_full.rr); else printf("null");
+    printf(", \"full_lsq_step\": ");
+    if (full_stat) print_position(full_step); else printf("null");
+    printf(", \"full_used\": [");
+    for (i=0,k=0;i<n;i++) if (full_stat&&vsat_full[i]) {
+        satno2id(obs[i].sat,id); printf("%s\"%s\"",k++?",":"",id);
+    }
+    printf("], ");
     printf("\"candidates\": [");
     for (i = 0; i < n; i++) {
         satno2id(obs[i].sat, id);
@@ -566,6 +633,153 @@ static void fde_case(const obsd_t *obs, int n, const int *faulted, int fault_cou
     printf("}");
 }
 
+static int select_ids(const obsd_t *source, int source_count, const char **ids, int id_count,
+                      obsd_t *selected)
+{
+    char id[8];
+    int i, j, count = 0;
+    for (j = 0; j < id_count; j++) {
+        for (i = 0; i < source_count; i++) {
+            satno2id(source[i].sat, id);
+            if (strcmp(id, ids[j]) != 0) continue;
+            selected[count++] = source[i];
+            break;
+        }
+        if (i == source_count) {
+            fprintf(stderr, "edge-case satellite %s is absent\n", ids[j]);
+            exit(1);
+        }
+    }
+    return count;
+}
+
+static int run_edges(int argc, char **argv)
+{
+    static const char *gps_min[] = {"G09", "G13", "G18", "G28"};
+    static const char *gps_plus[] = {"G09", "G13", "G18", "G28", "G07"};
+    static const char *multi_min[] = {"G09", "G18", "E01", "E09", "C05", "C19"};
+    static const char *multi_plus[] = {"G09", "G18", "E01", "E09", "C05", "C19", "G28"};
+    static const char *gdop[] = {"G07", "G15", "G27", "G30"};
+    static const char *gps_used[] = {"G07", "G09", "G13", "G15", "G18", "G27", "G28"};
+    obs_t obs = {0};
+    nav_t nav = {0};
+    sta_t sta = {{0}};
+    prcopt_t gps_opt = prcopt_default, multi_opt;
+    obsd_t epoch[MAXOBS], gps_epoch[MAXOBS], selected[MAXOBS], invalid_epoch[MAXOBS];
+    int i, n = 0, gps_n = 0, selected_n, first = 1, invalid_index=-1, second_invalid_index=-1;
+
+    legacy_fde_format = 0;
+    if (argc != 5) {
+        fprintf(stderr, "usage: %s edges <label> <obs> <nav>\n", argv[0]);
+        return 2;
+    }
+    if (readrnx(argv[3], 1, "-GL1C", &obs, NULL, &sta) <= 0 ||
+        readrnx(argv[4], 1, "", NULL, &nav, NULL) <= 0) {
+        fprintf(stderr, "cannot read edge-case inputs\n");
+        return 1;
+    }
+    sortobs(&obs);
+    uniqnav(&nav);
+    while (n < obs.n && timediff(obs.data[n].time, obs.data[0].time) == 0.0 && n < MAXOBS) {
+        epoch[n] = obs.data[n];
+        if (satsys(obs.data[n].sat, NULL) == SYS_GPS) gps_epoch[gps_n++] = obs.data[n];
+        n++;
+    }
+    gps_opt.mode = PMODE_SINGLE;
+    gps_opt.navsys = SYS_GPS;
+    gps_opt.nf = 1;
+    gps_opt.elmin = 10.0 * D2R;
+    gps_opt.sateph = EPHOPT_BRDC;
+    gps_opt.ionoopt = IONOOPT_BRDC;
+    gps_opt.tropopt = TROPOPT_SAAS;
+    gps_opt.posopt[4] = 1;
+    multi_opt = gps_opt;
+    multi_opt.navsys = SYS_GPS | SYS_GAL | SYS_CMP;
+    /* G09 and G13 are above the elevation mask in the unchanged control
+     * solve. Check that with estpos itself before applying invalid values. */
+    {
+        double rs[MAXOBS*6],dts[MAXOBS*2],var[MAXOBS],azel[MAXOBS*2],resp[MAXOBS];
+        int svh[MAXOBS],vsat[MAXOBS]; ssat_t ssat[MAXSAT]={{0}};
+        sol_t sol={{0}}; char msg[128]="";
+        memcpy(sol.rr,sta.pos,3*sizeof(double));
+        satposs(gps_epoch[0].time,gps_epoch,gps_n,&nav,gps_opt.sateph,rs,dts,var,svh);
+        if (!estpos(gps_epoch,gps_n,rs,dts,var,svh,&nav,&gps_opt,ssat,&sol,azel,vsat,resp,msg)) return 1;
+        for (i=0;i<gps_n;i++) {
+            if (gps_epoch[i].sat==satno(SYS_GPS,9)&&vsat[i]) invalid_index=i;
+            if (gps_epoch[i].sat==satno(SYS_GPS,13)&&vsat[i]) second_invalid_index=i;
+        }
+        if (invalid_index<0||second_invalid_index<0) return 1;
+    }
+
+    printf("{\"label\": \"%s\", \"guess\": ", argv[2]);
+    print_position(sta.pos);
+    printf(", \"cases\": [\n");
+
+#define EDGE_CASE(ids, opt, marker)                                                        \
+    do {                                                                                   \
+        selected_n = select_ids(epoch, n, ids, (int)(sizeof(ids) / sizeof(ids[0])), selected); \
+        fde_case(selected, selected_n, NULL, 0, marker, sta.pos, &nav, opt, first);         \
+        first = 0;                                                                          \
+    } while (0)
+    EDGE_CASE(gps_min, &gps_opt, -3.0);
+    EDGE_CASE(gps_plus, &gps_opt, -4.0);
+    EDGE_CASE(multi_min, &multi_opt, -5.0);
+    EDGE_CASE(multi_plus, &multi_opt, -6.0);
+    EDGE_CASE(gdop, &gps_opt, -7.0);
+#undef EDGE_CASE
+
+    memcpy(invalid_epoch, gps_epoch, sizeof(obsd_t) * gps_n);
+    invalid_epoch[invalid_index].P[0] = NAN;
+    fde_case(invalid_epoch, gps_n, NULL, 0, -1.0, sta.pos, &nav, &gps_opt, first);
+    first = 0;
+    memcpy(invalid_epoch, gps_epoch, sizeof(obsd_t) * gps_n);
+    invalid_epoch[invalid_index].P[0] = INFINITY;
+    fde_case(invalid_epoch, gps_n, NULL, 0, -8.0, sta.pos, &nav, &gps_opt, first);
+    memcpy(invalid_epoch, gps_epoch, sizeof(obsd_t) * gps_n);
+    invalid_epoch[invalid_index].P[0] = 0.0;
+    fde_case(invalid_epoch, gps_n, NULL, 0, -9.0, sta.pos, &nav, &gps_opt, first);
+    memcpy(invalid_epoch, gps_epoch, sizeof(obsd_t) * gps_n);
+    invalid_epoch[invalid_index].P[0] = -10.0;
+    fde_case(invalid_epoch, gps_n, NULL, 0, -10.0, sta.pos, &nav, &gps_opt, first);
+    memcpy(invalid_epoch, gps_epoch, sizeof(obsd_t) * gps_n);
+    invalid_epoch[invalid_index].P[0] = 0.0;
+    invalid_epoch[second_invalid_index].P[0] = 0.0;
+    fde_case(invalid_epoch, gps_n, NULL, 0, -11.0, sta.pos, &nav, &gps_opt, first);
+    {
+        /* Give the distinct tokens G28 and G30 identical observations and cloned
+         * G28 ephemerides, then add the same fault. Their leave-one-out inputs are
+         * arithmetically identical, so the equal minimum exercises `<=` directly. */
+        nav_t tie_nav = nav;
+        int g28 = satno(SYS_GPS, 28), g30 = satno(SYS_GPS, 30), clones = 0, at;
+        selected_n = select_ids(epoch, n, gps_used,
+                                (int)(sizeof(gps_used) / sizeof(gps_used[0])), selected);
+        selected[selected_n] = selected[6];
+        selected[selected_n].sat = g30;
+        selected[6].P[0] += 30.0;
+        selected[selected_n].P[0] = selected[6].P[0];
+        selected_n++;
+        for (i = 0; i < nav.n; i++) if (nav.eph[i].sat == g28) clones++;
+        tie_nav.eph = (eph_t *)malloc(sizeof(eph_t) * (nav.n + clones));
+        memcpy(tie_nav.eph, nav.eph, sizeof(eph_t) * nav.n);
+        tie_nav.n = nav.n;
+        tie_nav.nmax = nav.n + clones;
+        for (i = 0; i < nav.n; i++) if (tie_nav.eph[i].sat == g30) tie_nav.eph[i].sat = 0;
+        for (i = 0, at = nav.n; i < nav.n; i++) {
+            if (nav.eph[i].sat != g28) continue;
+            tie_nav.eph[at] = nav.eph[i];
+            tie_nav.eph[at++].sat = g30;
+            tie_nav.n++;
+        }
+        memcpy(tie_nav.cbias[g30 - 1], tie_nav.cbias[g28 - 1], sizeof(tie_nav.cbias[0]));
+        fde_case(selected, selected_n, NULL, 0, -2.0, sta.pos, &tie_nav, &gps_opt, first);
+        free(tie_nav.eph);
+    }
+    printf("\n]}\n");
+    freeobs(&obs);
+    freenav(&nav, 0xFF);
+    return 0;
+}
+
 static int run_fde(int argc, char **argv)
 {
     obs_t obs = {0};
@@ -573,6 +787,13 @@ static int run_fde(int argc, char **argv)
     sta_t sta = {{0}};
     prcopt_t opt = prcopt_default;
     int i, k, n, epoch_index, stride, first = 1;
+    int multi = strcmp(argv[1], "multi_fde") == 0;
+    int legacy = strcmp(argv[1], "fde") == 0;
+    const double *single_biases = legacy ? legacy_fde_biases_m : fde_biases_m;
+    const double *pair_biases = legacy ? legacy_fde_pair_biases_m : fde_pair_biases_m;
+    int single_bias_count = legacy ? LEGACY_FDE_BIAS_COUNT : FDE_BIAS_COUNT;
+    int pair_bias_count = legacy ? LEGACY_FDE_PAIR_BIAS_COUNT : FDE_PAIR_BIAS_COUNT;
+    legacy_fde_format = legacy;
 
     if (argc != 8 || (stride = atoi(argv[7])) <= 0) {
         fprintf(stderr, "usage: %s fde <label> <obs> <nav> <iono 0|1> <tropo 0|1> <stride>\n",
@@ -591,7 +812,8 @@ static int run_fde(int argc, char **argv)
     uniqnav(&nav);
 
     opt.mode = PMODE_SINGLE;
-    opt.navsys = SYS_GPS;
+    opt.navsys = multi ? SYS_GPS | SYS_GLO | SYS_GAL | SYS_CMP | SYS_QZS | SYS_IRN | SYS_SBS
+                       : SYS_GPS;
     opt.nf = 1;
     opt.elmin = 10.0 * D2R;
     opt.sateph = EPHOPT_BRDC;
@@ -605,10 +827,10 @@ static int run_fde(int argc, char **argv)
     printf(" \"guess\": ");
     print_position(sta.pos);
     printf(", \"biases_m\": [");
-    for (k = 0; k < FDE_BIAS_COUNT; k++) printf("%s%.17g", k ? ", " : "", fde_biases_m[k]);
+    for (k = 0; k < single_bias_count; k++) printf("%s%.17g", k ? ", " : "", single_biases[k]);
     printf("], \"pair_biases_m\": [");
-    for (k = 0; k < FDE_PAIR_BIAS_COUNT; k++)
-        printf("%s%.17g", k ? ", " : "", fde_pair_biases_m[k]);
+    for (k = 0; k < pair_bias_count; k++)
+        printf("%s%.17g", k ? ", " : "", pair_biases[k]);
     printf("],\n \"cases\": [\n");
 
     for (i = epoch_index = 0; i < obs.n; i += n, epoch_index++) {
@@ -622,7 +844,7 @@ static int run_fde(int argc, char **argv)
         }
         if (epoch_index % stride != 0) continue;
         for (k = 0; k < n; k++) {
-            if (satsys(obs.data[i + k].sat, NULL) != SYS_GPS || m >= MAXOBS) continue;
+            if ((!multi && satsys(obs.data[i + k].sat, NULL) != SYS_GPS) || m >= MAXOBS) continue;
             epoch[m++] = obs.data[i + k];
         }
         if (m < 6) {
@@ -643,11 +865,11 @@ static int run_fde(int argc, char **argv)
                 fprintf(stderr, "used satellite without an L1 pseudorange\n");
                 return 1;
             }
-            for (b = 0; b < FDE_BIAS_COUNT; b++) {
+            for (b = 0; b < single_bias_count; b++) {
                 obsd_t faulted_epoch[MAXOBS];
                 memcpy(faulted_epoch, epoch, sizeof(obsd_t) * m);
-                faulted_epoch[faulted].P[0] += fde_biases_m[b];
-                fde_case(faulted_epoch, m, &faulted, 1, fde_biases_m[b], sta.pos, &nav, &opt,
+                faulted_epoch[faulted].P[0] += single_biases[b];
+                fde_case(faulted_epoch, m, &faulted, 1, single_biases[b], sta.pos, &nav, &opt,
                          first);
                 first = 0;
             }
@@ -657,12 +879,12 @@ static int run_fde(int argc, char **argv)
             }
             pair[0] = faulted;
             pair[1] = next;
-            for (b = 0; b < FDE_PAIR_BIAS_COUNT; b++) {
+            for (b = 0; b < pair_bias_count; b++) {
                 obsd_t faulted_epoch[MAXOBS];
                 memcpy(faulted_epoch, epoch, sizeof(obsd_t) * m);
-                faulted_epoch[pair[0]].P[0] += fde_pair_biases_m[b];
-                faulted_epoch[pair[1]].P[0] += fde_pair_biases_m[b];
-                fde_case(faulted_epoch, m, pair, 2, fde_pair_biases_m[b], sta.pos, &nav, &opt,
+                faulted_epoch[pair[0]].P[0] += pair_biases[b];
+                faulted_epoch[pair[1]].P[0] += pair_biases[b];
+                fde_case(faulted_epoch, m, pair, 2, pair_biases[b], sta.pos, &nav, &opt,
                          first);
                 first = 0;
             }
@@ -684,7 +906,12 @@ int main(int argc, char **argv)
     double guesses[4][3] = {{0}};
     int i, j, k, n, first_case = 1;
 
-    if (argc >= 2 && strcmp(argv[1], "fde") == 0) return run_fde(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "edges") == 0) return run_edges(argc, argv);
+    if (argc >= 2 &&
+        (strcmp(argv[1], "fde") == 0 || strcmp(argv[1], "quality_fde") == 0 ||
+         strcmp(argv[1], "multi_fde") == 0)) {
+        return run_fde(argc, argv);
+    }
     if (argc != 6) {
         fprintf(stderr, "usage: %s <label> <obs> <nav> <iono 0|1> <tropo 0|1>\n", argv[0]);
         return 2;

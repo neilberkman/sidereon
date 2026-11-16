@@ -35,6 +35,7 @@ pub(super) struct PppPositionCovariance {
     pub(super) tropo_gradient_scaled_m2: Option<[[f64; 2]; 2]>,
     pub(super) tropo_gradient_formal_m2: Option<[[f64; 2]; 2]>,
     pub(super) posterior_variance_factor: f64,
+    pub(super) posterior_variance_factor_estimated: bool,
     pub(super) covariance_scale_factor: f64,
 }
 
@@ -152,6 +153,7 @@ pub(super) fn ppp_position_covariance(
     symmetrize_3x3(&mut enu_m2);
     let formal = crate::dop::PositionCovariance { ecef_m2, enu_m2 };
     let posterior_variance_factor = posterior_variance_factor(rows, layout)?;
+    let posterior_variance_factor_estimated = rows.len() > layout.full_dim();
     let covariance_scale_factor = posterior_variance_factor;
     let scaled = scale_position_covariance(formal, covariance_scale_factor);
     let tropo_gradient_scaled_m2 =
@@ -162,6 +164,7 @@ pub(super) fn ppp_position_covariance(
         tropo_gradient_scaled_m2,
         tropo_gradient_formal_m2,
         posterior_variance_factor,
+        posterior_variance_factor_estimated,
         covariance_scale_factor,
     })
 }
@@ -175,7 +178,10 @@ pub(super) fn posterior_variance_factor(
         .checked_sub(layout.full_dim())
         .ok_or(FloatSolveError::SingularGeometry)?;
     if dof == 0 {
-        return Err(FloatSolveError::SingularGeometry);
+        // An exactly determined full-rank solve has a formal covariance but
+        // no residual degrees of freedom from which to estimate a posterior
+        // variance factor. Preserve the formal covariance without rescaling.
+        return Ok(1.0);
     }
     let weighted_ssr = rows.iter().try_fold(0.0_f64, |sum, row| {
         let weighted = row.y * row.weight;
@@ -615,6 +621,31 @@ mod tests {
         let factor = posterior_variance_factor(&rows, layout).expect("posterior variance factor");
         assert_eq!(dof, rows.len() - (3 + n_epochs + 1 + n_ambiguities));
         assert_eq!(factor.to_bits(), (weighted_ssr / dof as f64).to_bits());
+    }
+
+    #[test]
+    fn exactly_determined_posterior_uses_apriori_unit_variance() {
+        // This generic covariance regression also covers the fixed solver's
+        // zero-redundancy branch. A full-rank end-to-end fixed PPP example
+        // cannot have zero redundancy: fixing removes ambiguity unknowns but
+        // retains their phase rows, so a full-rank fixed design necessarily has
+        // more observations than estimated parameters.
+        let layout = PppNormalLayout::new(1, 0, 0, 0, 0);
+        let rows: Vec<Row> = (0..layout.full_dim())
+            .map(|index| Row {
+                h: (0..layout.full_dim())
+                    .map(|column| if index == column { 1.0 } else { 0.0 })
+                    .collect(),
+                y: index as f64,
+                weight: 1.0,
+            })
+            .collect();
+        let exactly_determined = rows.as_slice();
+        assert_eq!(
+            posterior_variance_factor(exactly_determined, layout).unwrap(),
+            1.0
+        );
+        assert_eq!(exactly_determined.len(), layout.full_dim());
     }
 
     fn ppp_schur_rows(n_epochs: usize, n_ambiguities: usize) -> Vec<Row> {

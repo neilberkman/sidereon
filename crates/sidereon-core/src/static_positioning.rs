@@ -1301,11 +1301,10 @@ fn prepare_static(
         });
         let systems = clock_systems(&selection.used, inputs.qzss_clock);
         let weight_by_sat = measurement_weight_map(epoch);
-        let obs_by_id: Vec<(GnssSatelliteId, f64)> = inputs
-            .observations
-            .iter()
-            .map(|m| (m.satellite_id, m.pseudorange_m))
-            .collect();
+        let obs_by_id: Vec<(GnssSatelliteId, f64)> =
+            crate::spp::usable_observations(&inputs.observations)
+                .map(|m| (m.satellite_id, m.pseudorange_m))
+                .collect();
 
         for (row_idx, &satellite_id) in selection.used.iter().enumerate() {
             let multiplier = weight_by_sat.get(&satellite_id).copied().unwrap_or(1.0);
@@ -1635,6 +1634,9 @@ fn measurement_weight_map(epoch: &StaticEpoch) -> BTreeMap<GnssSatelliteId, f64>
                 .measurements
                 .iter()
                 .zip(weights.iter())
+                .filter(|(measurement, _)| {
+                    measurement.pseudorange_m.is_finite() && measurement.pseudorange_m > 0.0
+                })
                 .map(|(measurement, &weight)| (measurement.satellite_id, weight))
                 .collect()
         })
@@ -1642,7 +1644,9 @@ fn measurement_weight_map(epoch: &StaticEpoch) -> BTreeMap<GnssSatelliteId, f64>
 }
 
 fn duplicate_satellite(measurements: &[Observation]) -> Option<GnssSatelliteId> {
-    let mut ids: Vec<GnssSatelliteId> = measurements.iter().map(|m| m.satellite_id).collect();
+    let mut ids: Vec<GnssSatelliteId> = crate::spp::usable_observations(measurements)
+        .map(|m| m.satellite_id)
+        .collect();
     ids.sort_unstable();
     ids.windows(2)
         .find(|pair| pair[0] == pair[1])
