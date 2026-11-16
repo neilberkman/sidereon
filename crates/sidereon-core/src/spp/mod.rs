@@ -299,6 +299,37 @@ pub enum RejectionReason {
     IonosphereCarrierUnresolved,
 }
 
+impl RejectionReason {
+    pub(crate) const fn rank(self) -> u8 {
+        match self {
+            Self::NonFinitePseudorange => 0,
+            Self::NonPositivePseudorange => 1,
+            Self::NoEphemeris => 2,
+            Self::SsrCorrectionExceedsLimit(_) => 3,
+            Self::LowElevation => 4,
+            Self::SbasWithdrawn => 5,
+            Self::SbasIonoUncovered => 6,
+            Self::IonosphereCarrierUnresolved => 7,
+        }
+    }
+}
+
+/// Canonical observation order also fixes the order of repeated invalid rows.
+pub(crate) fn observation_order(observation: &Observation) -> (GnssSatelliteId, u8, u64) {
+    let reason = if !observation.pseudorange_m.is_finite() {
+        RejectionReason::NonFinitePseudorange.rank()
+    } else if observation.pseudorange_m <= 0.0 {
+        RejectionReason::NonPositivePseudorange.rank()
+    } else {
+        u8::MAX
+    };
+    (
+        observation.satellite_id,
+        reason,
+        observation.pseudorange_m.to_bits(),
+    )
+}
+
 /// A rejected satellite paired with its rejection reason.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RejectedSat {
@@ -425,7 +456,8 @@ pub struct ReceiverSolution {
     pub weights: Vec<f64>,
     /// The satellites that contributed to the solve, ascending id order.
     pub used_sats: Vec<GnssSatelliteId>,
-    /// The excluded satellites, each with its reason.
+    /// The excluded satellites, ordered by satellite, rejection reason in enum
+    /// declaration order, and then the rejected pseudorange's raw bits.
     pub rejected_sats: Vec<RejectedSat>,
     /// Geometry observability and covariance-validation diagnostics for the
     /// converged design. Snapshot SPP has no propagated prior, so
@@ -1963,9 +1995,9 @@ fn select_at_with_query_memo(
     receive_epoch: Option<crate::astro::time::ExactEpochQuery>,
     query_memo: Option<&RtklibPlacementQueryMemo>,
 ) -> Selection {
-    // Ascending satellite-id order, never observation order.
+    // Satellite, rejection rank, then raw pseudorange bits; never input order.
     let mut obs: Vec<&Observation> = inputs.observations.iter().collect();
-    obs.sort_by_key(|o| o.satellite_id);
+    obs.sort_by_key(|o| observation_order(o));
 
     let mut used = Vec::new();
     let mut rejected = Vec::new();
