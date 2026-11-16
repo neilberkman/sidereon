@@ -17,8 +17,8 @@ use std::collections::VecDeque;
 
 use super::ekf::{
     ekf_correct_closed_loop, ekf_correct_closed_loop_with_predicted_covariance_scale,
-    innovation_covariance, normalized_innovation_squared, EkfCorrection, EkfCorrectionReport,
-    EkfUpdateOptions,
+    innovation_covariance, normalized_innovation_squared, validate_gate_options, EkfCorrection,
+    EkfCorrectionReport, EkfUpdateOptions,
 };
 use super::error_state::{
     linearize_error_state_ecef_with_imu_to_body, predict_error_state_covariance,
@@ -163,13 +163,18 @@ pub enum GnssFixStatus {
 pub struct LooseCouplingConfig {
     /// Body-frame vector from IMU origin to GNSS antenna phase center, in meters.
     pub lever_arm_body_m: [f64; 3],
-    /// Generic EKF correction options applied to each loose update.
+    /// EKF correction options applied to each loose EKF update. These must
+    /// remain default for a UKF filter; use
+    /// [`InertialFilterConfig::ukf_update_options`] for loose UKF updates.
     pub update_options: EkfUpdateOptions,
     /// Per-fix-status sigma multipliers applied to GNSS covariance.
     pub fix_status_weighting: GnssFixStatusWeighting,
     /// Optional IGG-III variance inflation on standardized innovation rows.
     /// Innovation gating is evaluated from the raw covariance before this
     /// inflation is applied.
+    /// If all rows are removed, the update coasts with both covariances
+    /// unchanged. A joint gate is not tested; per-row diagnostics count
+    /// the removed rows as rejected upstream.
     pub measurement_reweighting: Option<IggIiiMeasurementReweighting>,
     /// Optional Yang two-segment predicted-covariance inflation.
     pub prediction_adaptation: Option<YangPredictionAdaptiveFactor>,
@@ -197,9 +202,10 @@ impl LooseCouplingConfig {
     /// Validate finite lever-arm entries and nested update options.
     pub fn validate(&self) -> Result<(), FusionError> {
         validate_vec3(self.lever_arm_body_m, "lever_arm_body_m").map_err(FusionError::from)?;
-        if let Some(gate) = self.update_options.innovation_gate {
-            gate.validate()?;
-        }
+        validate_gate_options(
+            self.update_options.innovation_gate,
+            self.update_options.joint_innovation_gate_probability,
+        )?;
         self.fix_status_weighting.validate()?;
         if let Some(reweighting) = self.measurement_reweighting {
             reweighting.validate()?;
@@ -540,7 +546,9 @@ pub struct InertialFilterConfig {
     pub loose: LooseCouplingConfig,
     /// Tight raw GNSS update options.
     pub tight: TightCouplingConfig,
-    /// UKF correction options used when [`Self::filter_kind`] is [`FusionFilterKind::Ukf`].
+    /// UKF correction options used by both coupling paths when
+    /// [`Self::filter_kind`] is [`FusionFilterKind::Ukf`]. Non-default options
+    /// are refused for an EKF filter rather than silently ignored.
     pub ukf_update_options: UkfUpdateOptions,
 }
 
@@ -561,7 +569,9 @@ impl InertialFilterConfig {
         Ok(config)
     }
 
-    /// Validate IMU, mechanization, and loose-coupling settings.
+    /// Validate IMU, mechanization, both coupling configurations and UKF
+    /// settings. Non-default correction options for the inactive filter kind
+    /// return `FusionError::InvalidInput` rather than being ignored.
     pub fn validate(&self) -> Result<(), FusionError> {
         self.imu_spec.validate().map_err(FusionError::from)?;
         self.imu_model.bias.validate().map_err(FusionError::from)?;
@@ -582,7 +592,27 @@ impl InertialFilterConfig {
         self.ukf_update_options
             .validate_for_dimension(ERROR_STATE_DIMENSION_15)?;
         self.ukf_update_options
-            .validate_for_dimension(ERROR_STATE_DIMENSION_21)
+            .validate_for_dimension(ERROR_STATE_DIMENSION_21)?;
+        match self.filter_kind {
+            FusionFilterKind::Ekf if self.ukf_update_options != UkfUpdateOptions::default() => {
+                return Err(invalid_input(
+                    "ukf_update_options",
+                    "non-default UKF options require the UKF filter",
+                ));
+            }
+            FusionFilterKind::Ukf => {
+                for (field, options) in [
+                    ("loose.update_options", self.loose.update_options),
+                    ("tight.update_options", self.tight.update_options),
+                ] {
+                    if options != EkfUpdateOptions::default() {
+                        return Err(invalid_input(field, "EKF options require the EKF filter; use ukf_update_options for UKF updates"));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn configures_ukf_prediction_adaptation(&self) -> bool {
@@ -763,6 +793,10 @@ impl InertialFilter {
     /// GNSS epochs must be strictly increasing across the filter's stateful
     /// update surface, matching the standalone time-sync order validator;
     /// duplicate or regressed epochs are rejected rather than fused twice.
+    /// A joint-gate rejection coasts without changing either covariance and
+    /// includes joint-gate diagnostics. If IGG III removes every row, the
+    /// update also coasts, with all input rows reported as rejected and no
+    /// joint-gate report because no remaining innovation block was tested.
     pub fn update_loose(
         &mut self,
         measurement: &GnssFixMeasurement,
@@ -855,6 +889,22 @@ impl InertialFilter {
         correction: EkfCorrection,
         loose_config: LooseCouplingConfig,
     ) -> Result<FusionUpdate, FusionError> {
+        let ekf_options = loose_config.update_options;
+        let ukf_options = self.config.ukf_update_options;
+        let (row_gate, joint_probability) = match self.config.filter_kind {
+            FusionFilterKind::Ekf => (
+                ekf_options.innovation_gate,
+                ekf_options.joint_innovation_gate_probability,
+            ),
+            FusionFilterKind::Ukf => {
+                ukf_options.validate_for_dimension(self.state.dimension())?;
+                (
+                    ukf_options.innovation_gate,
+                    ukf_options.joint_innovation_gate_probability,
+                )
+            }
+        };
+        validate_gate_options(row_gate, joint_probability)?;
         let prepared = prepare_loose_correction(&self.state, correction, loose_config)?;
         let rows = if prepared.robust_all_rows_rejected {
             prepared.robust_rejected_rows
@@ -878,7 +928,16 @@ impl InertialFilter {
                     normalized_innovation_squared: nis,
                     accepted_rows: 0,
                     rejected_rows: rows,
-                    innovation_gate: None,
+                    innovation_gate: row_gate.map(|gate| super::ekf::InnovationGateReport {
+                        threshold_sigma: gate.threshold_sigma,
+                        min_rows: gate.min_rows,
+                        input_rows: rows,
+                        accepted_rows: 0,
+                        rejected_rows: rows,
+                        max_abs_normalized_innovation: None,
+                        max_rejected_abs_normalized_innovation: None,
+                        coasted: true,
+                    }),
                     joint_innovation_gate: None,
                     innovation_covariance,
                     kalman_gain: vec![vec![0.0; rows]; dimension],
@@ -887,8 +946,6 @@ impl InertialFilter {
             ));
         }
         let filter_kind = self.config.filter_kind;
-        let ekf_options = self.config.loose.update_options;
-        let ukf_options = self.config.ukf_update_options;
         let mut report = match filter_kind {
             FusionFilterKind::Ekf => {
                 if prepared.predicted_covariance_scale == 1.0
@@ -917,8 +974,10 @@ impl InertialFilter {
             gate.input_rows += prepared.robust_rejected_rows;
             gate.rejected_rows += prepared.robust_rejected_rows;
         }
-        self.tight
-            .replace_base_covariance_and_clear_cross(&self.state.covariance)?;
+        if report.applied {
+            self.tight
+                .replace_base_covariance_and_clear_cross(&self.state.covariance)?;
+        }
         Ok(FusionUpdate::from_report(rows, report))
     }
 
@@ -1634,6 +1693,344 @@ mod tests {
             super::super::state::ErrorStateLayout::Fifteen,
             diagonal,
         )
+    }
+
+    #[test]
+    fn joint_gate_loose_updates_match_literal_linear_model() {
+        // SciPy 1.18.1 chi2.ppf(0.99,3), false-alarm probability 0.01.
+        let threshold = 11.344_866_730_144_37;
+        for kind in [FusionFilterKind::Ekf, FusionFilterKind::Ukf] {
+            for (innovation, accepted) in [([1.0, 2.0, 3.0], true), ([8.0, 9.0, 10.0], false)] {
+                let mut filter = direct_update_filter(0.0, LooseCouplingConfig::default());
+                filter.config.filter_kind = kind;
+                if kind == FusionFilterKind::Ekf {
+                    filter
+                        .config
+                        .loose
+                        .update_options
+                        .joint_innovation_gate_probability = Some(0.01);
+                } else {
+                    filter
+                        .config
+                        .ukf_update_options
+                        .joint_innovation_gate_probability = Some(0.01);
+                }
+                // Literal position model H=[I,0], P=diag(2,3,4,...),
+                // R=diag(1,4,9), so S=diag(3,7,13).
+                for (index, variance) in [2.0, 3.0, 4.0].into_iter().enumerate() {
+                    filter.state.covariance[index][index] = variance;
+                }
+                filter
+                    .tight
+                    .replace_base_covariance_and_clear_cross(&filter.state.covariance)
+                    .unwrap();
+                // A valid carried position/clock cross-covariance must not be
+                // erased by a loose update that the joint gate rejects.
+                let clock_index = filter.state.dimension();
+                let mut snapshot = filter.tight.snapshot();
+                snapshot.augmented_covariance[0][clock_index] = 0.25;
+                snapshot.augmented_covariance[clock_index][0] = 0.25;
+                filter.tight.restore(&snapshot, clock_index).unwrap();
+                let measurement = GnssFixMeasurement::position(
+                    0.0,
+                    [WGS84_A_M + innovation[0], innovation[1], innovation[2]],
+                    [[1.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 9.0]],
+                    8,
+                )
+                .unwrap();
+                let before_state = filter.state.clone();
+                let before_tight = filter.tight.clone();
+                let row_gate = Some(super::super::ekf::InnovationGate {
+                    threshold_sigma: 3.0,
+                    min_rows: 1,
+                });
+                if kind == FusionFilterKind::Ekf {
+                    filter.config.loose.update_options.innovation_gate = row_gate;
+                } else {
+                    filter.config.ukf_update_options.innovation_gate = row_gate;
+                }
+                assert_eq!(
+                    filter.update_loose(&measurement),
+                    Err(invalid_input(
+                        "innovation_gate",
+                        "per-row and joint gates are mutually exclusive"
+                    ))
+                );
+                assert_eq!(filter.state, before_state);
+                assert_eq!(filter.tight, before_tight);
+                filter.config.loose.update_options.innovation_gate = None;
+                filter.config.ukf_update_options.innovation_gate = None;
+                let report = filter.update_loose(&measurement).unwrap();
+                let gate = report
+                    .ekf
+                    .joint_innovation_gate
+                    .expect("joint loose report");
+                let expected = innovation[0] * innovation[0] / (2.0 + 1.0)
+                    + innovation[1] * innovation[1] / (3.0 + 4.0)
+                    + innovation[2] * innovation[2] / (4.0 + 9.0);
+                let tolerance = 128.0 * f64::EPSILON * expected.max(1.0);
+                assert_close(gate.statistic, expected, tolerance);
+                assert_close(gate.threshold, threshold, 8.0 * f64::EPSILON * threshold);
+                assert_eq!(gate.degrees_of_freedom, 3);
+                assert_eq!(gate.false_alarm_probability, 0.01);
+                assert_eq!(gate.accepted, accepted);
+                assert_eq!(report.applied, accepted);
+                assert_eq!(
+                    (report.accepted_rows, report.rejected_rows),
+                    if accepted { (3, 0) } else { (0, 3) }
+                );
+                if !accepted {
+                    assert_eq!(filter.state, before_state);
+                    assert_eq!(filter.tight, before_tight);
+                } else {
+                    for (index, (p, r)) in
+                        [(2.0, 1.0), (3.0, 4.0), (4.0, 9.0)].into_iter().enumerate()
+                    {
+                        assert_close(
+                            filter.state.covariance[index][index],
+                            p * r / (p + r),
+                            tolerance,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn joint_gate_loose_configuration_rejects_invalid_options() {
+        let mut config = LooseCouplingConfig::default();
+        config.update_options.innovation_gate = Some(super::super::ekf::InnovationGate {
+            threshold_sigma: 3.0,
+            min_rows: 1,
+        });
+        config.update_options.joint_innovation_gate_probability = Some(0.01);
+        assert_eq!(
+            config.validate(),
+            Err(invalid_input(
+                "innovation_gate",
+                "per-row and joint gates are mutually exclusive"
+            ))
+        );
+        config.update_options.innovation_gate = None;
+        for probability in [f64::NAN, -0.01, 0.0, 1.0, f64::INFINITY] {
+            config.update_options.joint_innovation_gate_probability = Some(probability);
+            assert_eq!(
+                config.validate(),
+                Err(invalid_input(
+                    "joint_innovation_gate_probability",
+                    "must be finite and in (0, 1)"
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn joint_gate_inactive_filter_options_are_refused() {
+        let filter = direct_update_filter(0.0, LooseCouplingConfig::default());
+        let mut config = filter.config;
+        config.ukf_update_options.joint_innovation_gate_probability = Some(0.01);
+        assert_eq!(
+            config.validate(),
+            Err(invalid_input(
+                "ukf_update_options",
+                "non-default UKF options require the UKF filter"
+            ))
+        );
+        config.ukf_update_options = UkfUpdateOptions::default();
+        config.ukf_update_options.transform.alpha = 0.25;
+        assert_eq!(
+            config.validate(),
+            Err(invalid_input(
+                "ukf_update_options",
+                "non-default UKF options require the UKF filter"
+            ))
+        );
+        config.ukf_update_options = UkfUpdateOptions::default();
+        config.filter_kind = FusionFilterKind::Ukf;
+        config
+            .loose
+            .update_options
+            .joint_innovation_gate_probability = Some(0.01);
+        assert_eq!(
+            config.validate(),
+            Err(invalid_input(
+                "loose.update_options",
+                "EKF options require the EKF filter; use ukf_update_options for UKF updates"
+            ))
+        );
+        config.loose.update_options = EkfUpdateOptions::default();
+        config
+            .tight
+            .update_options
+            .joint_innovation_gate_probability = Some(0.01);
+        assert_eq!(
+            config.validate(),
+            Err(invalid_input(
+                "tight.update_options",
+                "EKF options require the EKF filter; use ukf_update_options for UKF updates"
+            ))
+        );
+    }
+
+    #[test]
+    fn gates_without_retained_igg_rows_coast() {
+        fn covariance_bits(filter: &InertialFilter) -> (Vec<u64>, Vec<u64>) {
+            (
+                filter
+                    .state
+                    .covariance
+                    .iter()
+                    .flatten()
+                    .map(|x| x.to_bits())
+                    .collect(),
+                filter
+                    .tight
+                    .snapshot()
+                    .augmented_covariance
+                    .iter()
+                    .flatten()
+                    .map(|x| x.to_bits())
+                    .collect(),
+            )
+        }
+        for kind in [FusionFilterKind::Ekf, FusionFilterKind::Ukf] {
+            let loose = LooseCouplingConfig {
+                measurement_reweighting: Some(IggIiiMeasurementReweighting::standard()),
+                ..LooseCouplingConfig::default()
+            };
+            let mut filter = direct_update_filter(0.0, loose);
+            filter.config.filter_kind = kind;
+            if kind == FusionFilterKind::Ekf {
+                filter
+                    .config
+                    .loose
+                    .update_options
+                    .joint_innovation_gate_probability = Some(0.01);
+            } else {
+                filter
+                    .config
+                    .ukf_update_options
+                    .joint_innovation_gate_probability = Some(0.01);
+            }
+            let measurement = direct_position_velocity_measurement(
+                0.0,
+                [WGS84_A_M + 50.0, 50.0, 50.0],
+                [50.0; 3],
+                1.0,
+            );
+            let before_state = filter.state.clone();
+            let before_tight = filter.tight.clone();
+            let before_bits = covariance_bits(&filter);
+            let before_filter = filter.clone();
+            let update = filter.update_loose(&measurement).unwrap().ekf;
+            assert!(!update.applied);
+            assert_eq!(update.accepted_rows, 0);
+            assert_eq!(update.rejected_rows, 6);
+            assert_eq!(update.joint_innovation_gate, None);
+            assert_eq!(filter.state, before_state);
+            assert_eq!(filter.tight, before_tight);
+            assert_eq!(covariance_bits(&filter), before_bits);
+            filter = before_filter;
+            let row_gate = Some(super::super::ekf::InnovationGate {
+                threshold_sigma: 3.0,
+                min_rows: 1,
+            });
+            if kind == FusionFilterKind::Ekf {
+                filter
+                    .config
+                    .loose
+                    .update_options
+                    .joint_innovation_gate_probability = None;
+                filter.config.loose.update_options.innovation_gate = row_gate;
+            } else {
+                filter
+                    .config
+                    .ukf_update_options
+                    .joint_innovation_gate_probability = None;
+                filter.config.ukf_update_options.innovation_gate = row_gate;
+            }
+            let update = filter.update_loose(&measurement).unwrap().ekf;
+            assert!(!update.applied);
+            assert_eq!(update.accepted_rows, 0);
+            assert_eq!(update.rejected_rows, 6);
+            assert_eq!(update.joint_innovation_gate, None);
+            let gate = update.innovation_gate.unwrap();
+            assert_eq!(gate.input_rows, 6);
+            assert_eq!(gate.accepted_rows, 0);
+            assert_eq!(gate.rejected_rows, 6);
+            assert!(gate.coasted);
+            assert_eq!(gate.max_abs_normalized_innovation, None);
+            assert_eq!(filter.state, before_state);
+            assert_eq!(filter.tight, before_tight);
+            assert_eq!(covariance_bits(&filter), before_bits);
+        }
+    }
+
+    #[test]
+    fn joint_gate_uses_raw_retained_loose_rows() {
+        for kind in [FusionFilterKind::Ekf, FusionFilterKind::Ukf] {
+            for (first, accepted) in [(1.0, true), (5.0, false)] {
+                let config = LooseCouplingConfig {
+                    measurement_reweighting: Some(IggIiiMeasurementReweighting {
+                        k0_sigma: 2.0,
+                        k1_sigma: 5.0,
+                    }),
+                    ..LooseCouplingConfig::default()
+                };
+                let mut filter = direct_update_filter(0.0, config);
+                filter.config.filter_kind = kind;
+                if kind == FusionFilterKind::Ekf {
+                    filter
+                        .config
+                        .loose
+                        .update_options
+                        .joint_innovation_gate_probability = Some(0.01);
+                } else {
+                    filter
+                        .config
+                        .ukf_update_options
+                        .joint_innovation_gate_probability = Some(0.01);
+                }
+                filter.state.covariance[0][0] = 2.0;
+                filter.state.covariance[1][1] = 3.0;
+                let mut h = vec![vec![0.0; ERROR_STATE_DIMENSION_15]; 2];
+                h[0][0] = 1.0;
+                h[1][1] = 1.0;
+                let correction =
+                    EkfCorrection::new(vec![first, 50.0], h, covariance_from_diag(&[1.0, 4.0]))
+                        .unwrap();
+                let before = filter.state.clone();
+                let report = filter
+                    .apply_loose_style_correction(correction, filter.config.loose)
+                    .unwrap();
+                let gate = report.ekf.joint_innovation_gate.unwrap();
+                // The second row is removed. The first is inflated for v=5,
+                // but the gate must still use raw S=HPH'+R=2+1=3.
+                assert_close(
+                    gate.statistic,
+                    first * first / 3.0,
+                    64.0 * f64::EPSILON * (first * first / 3.0).max(1.0),
+                );
+                // SciPy 1.18.1 chi2.ppf(0.99,1).
+                assert_close(
+                    gate.threshold,
+                    6.634_896_601_021_215,
+                    8.0 * f64::EPSILON * gate.threshold,
+                );
+                assert_eq!(gate.degrees_of_freedom, 1);
+                assert_eq!(gate.false_alarm_probability, 0.01);
+                assert_eq!(gate.accepted, accepted);
+                assert_eq!(report.applied, accepted);
+                assert_eq!(
+                    (report.accepted_rows, report.rejected_rows),
+                    if accepted { (1, 1) } else { (0, 2) }
+                );
+                if !accepted {
+                    assert_eq!(filter.state, before);
+                }
+            }
+        }
     }
 
     #[test]

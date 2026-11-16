@@ -76,24 +76,20 @@ pub struct UkfUpdateOptions {
     /// Optional normalized-innovation screen applied before correction.
     pub innovation_gate: Option<InnovationGate>,
     /// Optional whole-block NIS gate false-alarm probability. This is mutually
-    /// exclusive with the per-row gate, which remains the default.
+    /// exclusive with the per-row gate, which remains the default. The
+    /// probability must be finite and strictly between zero and one.
     pub joint_innovation_gate_probability: Option<f64>,
 }
 
 impl UkfUpdateOptions {
-    /// Validate transform and gate options for a state dimension.
+    /// Validate the transform, gate exclusivity and probability domain for a
+    /// state dimension.
     pub fn validate_for_dimension(&self, dimension: usize) -> Result<(), FusionError> {
         self.transform.validate_for_dimension(dimension)?;
-        if let Some(gate) = self.innovation_gate {
-            gate.validate()?;
-        }
-        if self.innovation_gate.is_some() && self.joint_innovation_gate_probability.is_some() {
-            return Err(invalid_input(
-                "innovation_gate",
-                "per-row and joint gates are mutually exclusive",
-            ));
-        }
-        Ok(())
+        super::ekf::validate_gate_options(
+            self.innovation_gate,
+            self.joint_innovation_gate_probability,
+        )
     }
 }
 

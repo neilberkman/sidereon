@@ -280,8 +280,11 @@ fn gate_uses_raw_covariance_after_igg_removes_rows() {
             k0_sigma: 2.0,
             k1_sigma: 5.0,
         });
-        config.loose.update_options = gated(3.0, 1);
-        config.ukf_update_options.innovation_gate = gated(3.0, 1).innovation_gate;
+        if filter_kind == FusionFilterKind::Ekf {
+            config.loose.update_options = gated(3.0, 1);
+        } else {
+            config.ukf_update_options.innovation_gate = gated(3.0, 1).innovation_gate;
+        }
         let mut filter = InertialFilter::with_config(state, config).unwrap();
         let before = filter.state().clone();
         let report = filter.update_loose(&measurement).unwrap();
@@ -319,11 +322,14 @@ fn joint_gate_reports_raw_nis_after_igg_removes_rows() {
             k0_sigma: 2.0,
             k1_sigma: 5.0,
         });
-        config
-            .loose
-            .update_options
-            .joint_innovation_gate_probability = Some(0.01);
-        config.ukf_update_options.joint_innovation_gate_probability = Some(0.01);
+        if filter_kind == FusionFilterKind::Ekf {
+            config
+                .loose
+                .update_options
+                .joint_innovation_gate_probability = Some(0.01);
+        } else {
+            config.ukf_update_options.joint_innovation_gate_probability = Some(0.01);
+        }
         let mut filter = InertialFilter::with_config(state, config).unwrap();
         let report = filter.update_loose(&measurement).unwrap();
         assert!(!report.applied);

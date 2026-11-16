@@ -26,9 +26,9 @@ use crate::spp::{
 };
 
 use super::ekf::{
-    apply_closed_loop_navigation_error, apply_closed_loop_scale_error, innovation_covariance,
-    joseph_covariance_update, normalized_innovation_squared, screen_correction, EkfCorrection,
-    EkfCorrectionReport, EkfUpdateOptions,
+    apply_closed_loop_navigation_error, apply_closed_loop_scale_error, coasted_report,
+    innovation_covariance, joint_gate, joseph_covariance_update, normalized_innovation_squared,
+    screen_correction, validate_gate_options, EkfCorrection, EkfCorrectionReport, EkfUpdateOptions,
 };
 use super::loose::{FusionUpdate, InertialFilter};
 use super::state::FusionFilterKind;
@@ -210,7 +210,10 @@ pub struct TightCouplingConfig {
     pub clock_bias_random_walk_m2_s: f64,
     /// Receiver-clock drift random-walk spectral density in `m^2/s^3`.
     pub clock_drift_random_walk_m2_s3: f64,
-    /// Generic EKF correction options applied to each tight update.
+    /// EKF correction options applied to each tight EKF update, including
+    /// per-row or whole-block joint innovation gating. These must remain
+    /// default for a UKF filter; use `InertialFilterConfig::ukf_update_options`
+    /// for tight UKF updates instead.
     pub update_options: EkfUpdateOptions,
 }
 
@@ -250,10 +253,10 @@ impl TightCouplingConfig {
             self.clock_drift_random_walk_m2_s3,
             "clock_drift_random_walk_m2_s3",
         )?;
-        if let Some(gate) = self.update_options.innovation_gate {
-            gate.validate()?;
-        }
-        Ok(())
+        validate_gate_options(
+            self.update_options.innovation_gate,
+            self.update_options.joint_innovation_gate_probability,
+        )
     }
 }
 
@@ -489,6 +492,9 @@ impl InertialFilter {
     ///
     /// GNSS epochs must be strictly increasing across the filter's stateful
     /// update surface. One satellite is a valid update.
+    /// Per-row and joint gates use the selected filter's correction options.
+    /// A joint rejection preserves the navigation and receiver-clock states
+    /// and their full covariance, and returns joint-gate diagnostics.
     ///
     /// A satellite state the source refuses because producing it reads UT1
     /// outside the UT1 table under a strict UT1 policy fails the update with
@@ -707,6 +713,26 @@ fn apply_tight_correction(
     let base_dim = filter.state.dimension();
     filter.tight.validate(base_dim)?;
     correction.validate_for_dimension(augmented_dimension(base_dim))?;
+    validate_gate_options(
+        options.innovation_gate,
+        options.joint_innovation_gate_probability,
+    )?;
+
+    if let Some(probability) = options.joint_innovation_gate_probability {
+        let full_s = innovation_covariance(&filter.tight.augmented_covariance, correction)?;
+        let (accepted, gate_report) = joint_gate(correction, &full_s, probability)?;
+        if !accepted {
+            return coasted_report(
+                augmented_dimension(base_dim),
+                correction,
+                full_s,
+                gate_report,
+            );
+        }
+        let mut report = apply_tight_correction_inner(filter, correction)?;
+        report.joint_innovation_gate = Some(gate_report);
+        return Ok(report);
+    }
 
     if let Some(gate) = options.innovation_gate {
         gate.validate()?;
@@ -1656,6 +1682,141 @@ mod tests {
             clock_bias_random_walk_m2_s: 0.0,
             clock_drift_random_walk_m2_s3: 0.0,
             ..TightCouplingConfig::default()
+        }
+    }
+
+    #[test]
+    fn joint_gate_tight_clock_rows_match_literal_linear_model() {
+        // SciPy 1.18.1: chi2.ppf(0.99, 2), false-alarm probability 0.01.
+        let threshold = 9.210_340_371_976_18;
+        for kind in [FusionFilterKind::Ekf, FusionFilterKind::Ukf] {
+            for (innovation, accepted) in [([1.0, 2.0], true), ([8.0, 9.0], false)] {
+                let nominal =
+                    NavState::new(T0, [WGS84_A_M, 0.0, 0.0], [0.0; 3], mat3_identity()).unwrap();
+                let mut tight = TightCouplingConfig {
+                    light_time: false,
+                    sagnac: false,
+                    initial_clock_bias_variance_m2: 2.0,
+                    initial_clock_drift_variance_m2_s2: 3.0,
+                    ..TightCouplingConfig::default()
+                };
+                if kind == FusionFilterKind::Ekf {
+                    tight.update_options.joint_innovation_gate_probability = Some(0.01);
+                }
+                let mut filter =
+                    filter_with_kind(nominal, &[0.0; ERROR_STATE_DIMENSION_15], tight, kind);
+                if kind == FusionFilterKind::Ukf {
+                    filter
+                        .config
+                        .ukf_update_options
+                        .joint_innovation_gate_probability = Some(0.01);
+                }
+                // All navigation variances are exactly zero. The only random
+                // coordinates are [clock bias, clock drift], with literal
+                // H=I, P=diag(2,3), R=diag(1,4), so S=diag(3,7).
+                let source = LinearSource::new(
+                    T0,
+                    vec![(sat(1), [WGS84_A_M + 32.0, 0.0, 0.0], [0.0; 3], 0.0)],
+                );
+                let mut observation =
+                    TightGnssObservation::pseudorange(sat(1), 32.0 + innovation[0], 1.0).unwrap();
+                observation.range_rate = Some(TightRangeRateObservation {
+                    measured_range_rate_m_s: innovation[1],
+                    sigma_m_s: 2.0,
+                    satellite_clock_drift_m_s: 0.0,
+                });
+                let epoch = TightGnssEpoch::new(T0, vec![observation]).unwrap();
+                let before_state = filter.state.clone();
+                let before_tight = filter.tight.clone();
+                let row_gate = Some(super::super::ekf::InnovationGate {
+                    threshold_sigma: 3.0,
+                    min_rows: 1,
+                });
+                if kind == FusionFilterKind::Ekf {
+                    filter.config.tight.update_options.innovation_gate = row_gate;
+                } else {
+                    filter.config.ukf_update_options.innovation_gate = row_gate;
+                }
+                assert_eq!(
+                    filter.update_tight(&source, &epoch),
+                    Err(invalid_input(
+                        "innovation_gate",
+                        "per-row and joint gates are mutually exclusive"
+                    ))
+                );
+                assert_eq!(filter.state, before_state);
+                assert_eq!(filter.tight, before_tight);
+                filter.config.tight.update_options.innovation_gate = None;
+                filter.config.ukf_update_options.innovation_gate = None;
+                let report = filter.update_tight(&source, &epoch).unwrap();
+                let gate = report
+                    .ekf
+                    .joint_innovation_gate
+                    .expect("joint tight report");
+                let expected = innovation[0] * innovation[0] / (2.0 + 1.0)
+                    + innovation[1] * innovation[1] / (3.0 + 4.0);
+                // Clock sigma points subtract predictions at 32 m. Bound
+                // their cancellation, weighted covariance and SPD solve by
+                // 512 eps times the squared innovation scale.
+                let tolerance = 512.0 * f64::EPSILON * expected.max(1.0);
+                assert_close(gate.statistic, expected, tolerance);
+                assert_close(gate.threshold, threshold, 8.0 * f64::EPSILON * threshold);
+                assert_eq!(gate.degrees_of_freedom, 2);
+                assert_eq!(gate.false_alarm_probability, 0.01);
+                assert_eq!(gate.accepted, accepted);
+                assert_eq!(report.applied, accepted);
+                assert_eq!(
+                    (report.accepted_rows, report.rejected_rows),
+                    if accepted { (2, 0) } else { (0, 2) }
+                );
+                assert_close(report.ekf.innovation_covariance[0][0], 3.0, tolerance);
+                assert_close(report.ekf.innovation_covariance[1][1], 7.0, tolerance);
+                if !accepted {
+                    assert_eq!(filter.state, before_state);
+                    assert_eq!(filter.tight, before_tight);
+                    assert!(report.ekf.dx.iter().all(|&value| value == 0.0));
+                } else {
+                    let clock = filter.tight_clock_state().unwrap();
+                    assert_close(clock.bias_m, 2.0 * innovation[0] / 3.0, tolerance);
+                    assert_close(clock.drift_m_s, 3.0 * innovation[1] / 7.0, tolerance);
+                    assert_close(clock.covariance[0][0], 2.0 / 3.0, tolerance);
+                    assert_close(clock.covariance[1][1], 12.0 / 7.0, tolerance);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn joint_gate_tight_options_validate_probability_and_exclusivity() {
+        let gate = super::super::ekf::InnovationGate {
+            threshold_sigma: 3.0,
+            min_rows: 1,
+        };
+        let mut tight = TightCouplingConfig::default();
+        tight.update_options.innovation_gate = Some(gate);
+        tight.update_options.joint_innovation_gate_probability = Some(0.01);
+        let expected = invalid_input(
+            "innovation_gate",
+            "per-row and joint gates are mutually exclusive",
+        );
+        assert_eq!(tight.validate(), Err(expected.clone()));
+        let mut ukf = UkfUpdateOptions {
+            innovation_gate: Some(gate),
+            joint_innovation_gate_probability: Some(0.01),
+            ..UkfUpdateOptions::default()
+        };
+        assert_eq!(ukf.validate_for_dimension(17), Err(expected));
+        tight.update_options.innovation_gate = None;
+        ukf.innovation_gate = None;
+        for probability in [f64::NAN, f64::INFINITY, -0.01, 0.0, 1.0, 1.01] {
+            tight.update_options.joint_innovation_gate_probability = Some(probability);
+            ukf.joint_innovation_gate_probability = Some(probability);
+            let expected = invalid_input(
+                "joint_innovation_gate_probability",
+                "must be finite and in (0, 1)",
+            );
+            assert_eq!(tight.validate(), Err(expected.clone()));
+            assert_eq!(ukf.validate_for_dimension(17), Err(expected));
         }
     }
 

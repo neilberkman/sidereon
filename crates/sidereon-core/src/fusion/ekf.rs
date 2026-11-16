@@ -99,7 +99,8 @@ pub struct EkfUpdateOptions {
     /// Optional joint NIS gate false-alarm probability. The whole measurement
     /// block is accepted when `v^T S^-1 v <= chi2_isf(p_fa, rows)`. This is
     /// mutually exclusive with [`Self::innovation_gate`]; the per-row gate
-    /// remains the default behavior.
+    /// remains the default behavior. The probability must be finite and
+    /// strictly between zero and one.
     pub joint_innovation_gate_probability: Option<f64>,
 }
 
@@ -125,6 +126,12 @@ pub struct InnovationGateReport {
 }
 
 /// Diagnostics from a joint chi-square innovation gate.
+///
+/// This report exists only when a nonempty innovation block was tested.
+/// If upstream IGG III screening removes every row, the correction coasts
+/// with zero accepted rows, all input rows rejected, and
+/// `EkfCorrectionReport::joint_innovation_gate` set to `None`. No zero-degree
+/// threshold or statistic is invented for that untested block.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JointInnovationGateReport {
     /// Mahalanobis normalized innovation squared, `v^T S^-1 v`.
@@ -152,7 +159,9 @@ pub struct EkfCorrectionReport {
     pub rejected_rows: usize,
     /// Optional innovation gate diagnostics.
     pub innovation_gate: Option<InnovationGateReport>,
-    /// Optional joint chi-square innovation-gate diagnostics.
+    /// Joint chi-square diagnostics, absent when disabled or when upstream
+    /// screening removes every row before the joint test. In the latter case
+    /// `applied` is false and all input rows are counted in `rejected_rows`.
     pub joint_innovation_gate: Option<JointInnovationGateReport>,
     /// Innovation covariance `S`.
     pub innovation_covariance: Vec<Vec<f64>>,
@@ -171,7 +180,10 @@ pub fn ekf_correct_closed_loop(
     state.validate()?;
     correction.validate_for_dimension(state.dimension())?;
 
-    validate_gate_selection(options)?;
+    validate_gate_options(
+        options.innovation_gate,
+        options.joint_innovation_gate_probability,
+    )?;
     if let Some(probability) = options.joint_innovation_gate_probability {
         let full_s = innovation_covariance(&state.covariance, correction)?;
         let (accepted, report) = joint_gate(correction, &full_s, probability)?;
@@ -235,7 +247,10 @@ pub(super) fn ekf_correct_closed_loop_with_predicted_covariance_scale(
         "scaled_covariance",
     )?;
 
-    validate_gate_selection(options)?;
+    validate_gate_options(
+        options.innovation_gate,
+        options.joint_innovation_gate_probability,
+    )?;
     if let Some(probability) = options.joint_innovation_gate_probability {
         let full_s = innovation_covariance(&predicted_covariance, correction)?;
         let gate_s = gate_innovation_covariance.unwrap_or(&full_s);
@@ -557,15 +572,7 @@ pub(super) fn joint_gate(
     innovation_covariance: &[Vec<f64>],
     false_alarm_probability: f64,
 ) -> Result<(bool, JointInnovationGateReport), FusionError> {
-    if !(false_alarm_probability.is_finite()
-        && false_alarm_probability > 0.0
-        && false_alarm_probability < 1.0)
-    {
-        return Err(invalid_input(
-            "joint_innovation_gate_probability",
-            "must be finite and in (0, 1)",
-        ));
-    }
+    validate_gate_options(None, Some(false_alarm_probability))?;
     let nis = normalized_innovation_squared(innovation_covariance, &correction.innovation)?;
     let threshold = crate::quality::chi2_isf(false_alarm_probability, correction.row_count())
         .map_err(|_| {
@@ -587,18 +594,32 @@ pub(super) fn joint_gate(
     ))
 }
 
-fn validate_gate_selection(options: EkfUpdateOptions) -> Result<(), FusionError> {
-    if options.innovation_gate.is_some() && options.joint_innovation_gate_probability.is_some() {
-        Err(invalid_input(
+/// Validate the same gate selection before every filter-specific update.
+pub(super) fn validate_gate_options(
+    innovation_gate: Option<InnovationGate>,
+    joint_probability: Option<f64>,
+) -> Result<(), FusionError> {
+    if innovation_gate.is_some() && joint_probability.is_some() {
+        return Err(invalid_input(
             "innovation_gate",
             "per-row and joint gates are mutually exclusive",
-        ))
-    } else {
-        Ok(())
+        ));
     }
+    if let Some(gate) = innovation_gate {
+        gate.validate()?;
+    }
+    if let Some(probability) = joint_probability {
+        if !(probability.is_finite() && probability > 0.0 && probability < 1.0) {
+            return Err(invalid_input(
+                "joint_innovation_gate_probability",
+                "must be finite and in (0, 1)",
+            ));
+        }
+    }
+    Ok(())
 }
 
-fn coasted_report(
+pub(super) fn coasted_report(
     dimension: usize,
     correction: &EkfCorrection,
     innovation_covariance: Vec<Vec<f64>>,
