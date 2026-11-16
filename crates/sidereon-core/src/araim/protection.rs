@@ -91,16 +91,21 @@ pub(crate) fn separation_sigma(
     fault_free_gain_row: &[f64],
     sigmas_m: &[f64],
 ) -> f64 {
-    gain_row
-        .iter()
-        .zip(fault_free_gain_row)
-        .zip(sigmas_m)
-        .map(|((&sk, &s0), &sigma)| {
+    let (sum, correction) = gain_row.iter().zip(fault_free_gain_row).zip(sigmas_m).fold(
+        (0.0_f64, 0.0_f64),
+        |(sum, correction), ((&sk, &s0), &sigma)| {
             let ds = sk - s0;
-            ds * ds * sigma * sigma
-        })
-        .sum::<f64>()
-        .sqrt()
+            let term = ds * ds * sigma * sigma;
+            let next = sum + term;
+            let next_correction = if sum.abs() >= term.abs() {
+                correction + (sum - next) + term
+            } else {
+                correction + (term - next) + sum
+            };
+            (next, next_correction)
+        },
+    );
+    (sum + correction).sqrt()
 }
 
 pub(crate) fn k_false_alert(

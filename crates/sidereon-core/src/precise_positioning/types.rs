@@ -1655,6 +1655,11 @@ pub struct FloatSolution {
     /// unreduced degrees of freedom. Eliminated receiver clocks still count as
     /// estimated parameters in the denominator.
     pub posterior_variance_factor: f64,
+    /// Whether [`Self::posterior_variance_factor`] was estimated from positive
+    /// residual degrees of freedom. When false, the solve was exactly
+    /// determined and the reported value and covariance scale are the a-priori
+    /// unit variance, not a residual estimate.
+    pub posterior_variance_factor_estimated: bool,
     /// Multiplier applied to [`Self::formal_position_covariance`] to produce
     /// [`Self::position_covariance`]. This equals
     /// [`Self::posterior_variance_factor`].
@@ -2102,6 +2107,11 @@ pub struct FixedSolution {
     /// unreduced degrees of freedom. Eliminated receiver clocks still count as
     /// estimated parameters in the denominator.
     pub posterior_variance_factor: f64,
+    /// Whether [`Self::posterior_variance_factor`] was estimated from positive
+    /// residual degrees of freedom. When false, the solve was exactly
+    /// determined and the reported value and covariance scale are the a-priori
+    /// unit variance, not a residual estimate.
+    pub posterior_variance_factor_estimated: bool,
     /// Multiplier applied to [`Self::formal_position_covariance`] to produce
     /// [`Self::position_covariance`]. This equals
     /// [`Self::posterior_variance_factor`].

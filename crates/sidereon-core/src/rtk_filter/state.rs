@@ -55,12 +55,17 @@ pub struct FilterState {
     /// process-noise sentinel: pre-sized ambiguity columns mean "no ambiguity
     /// columns" no longer identifies the first epoch.
     pub epoch_count: usize,
-    /// Held fixed integer double-difference ambiguities (id -> cycles).
+    /// Held fixed integer double-difference ambiguities (id -> cycles), relative
+    /// to the current system reference. The original arc reference can become
+    /// a held id after a reference change. Integers are transported exactly,
+    /// never reconstructed by rounding their metric values.
     pub fixed_cycles: BTreeMap<String, i64>,
     /// Held fixed double-difference ambiguities (id -> metres). Redundant with
     /// `fixed_cycles` (metres = cycles·λ + offset); both are carried to mirror
     /// the Elixir filter state for 1:1 parity tracing. The metres form is the
-    /// derived one - keep them consistent on every hold.
+    /// derived one - keep both maps' keys and values consistent on every hold,
+    /// using offsets relative to the current reference. Missing integer entries
+    /// are invalid carried state, not a request to infer them from metres.
     pub fixed_m: BTreeMap<String, f64>,
 }
 

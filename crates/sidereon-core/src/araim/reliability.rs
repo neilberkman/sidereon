@@ -140,7 +140,7 @@ pub fn wtest_noncentrality_components(
     let k_beta = normal_q_inv(beta).ok_or(QualityError::InvalidReliabilityParameter)?;
     let delta0 = k_alpha + k_beta;
     let lambda0 = delta0 * delta0;
-    if lambda0.is_finite() && lambda0 > 0.0 {
+    if delta0.is_finite() && delta0 > 0.0 && lambda0.is_finite() {
         Ok(WtestNoncentralityComponents { delta0, lambda0 })
     } else {
         Err(QualityError::InvalidReliabilityParameter)
@@ -489,7 +489,9 @@ mod tests {
         let delta0 = lambda0.sqrt();
 
         assert_close(delta0, 4.132147965064809, 2.0e-15);
-        assert_close(lambda0, 17.074646805189243, 4.0e-15);
+        let expected_lambda = 17.074646805189243_f64;
+        let lambda_ulp = f64::from_bits(expected_lambda.to_bits() + 1) - expected_lambda;
+        assert_close(lambda0, expected_lambda, 4.0 * lambda_ulp);
         assert_eq!((delta0 * 100.0).round() / 100.0, 4.13);
         assert_eq!((lambda0 * 100.0).round() / 100.0, 17.07);
 

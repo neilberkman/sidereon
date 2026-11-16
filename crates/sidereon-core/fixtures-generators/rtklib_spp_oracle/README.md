@@ -22,7 +22,12 @@ Set `RTKLIB_SRC` to the `src` directory in a clean checkout of RTKLIB demo5 comm
 RTKLIB_SRC=/path/to/RTKLIB/src ./generate.sh
 ```
 
-The script verifies the checkout revision and refuses a dirty RTKLIB `src` tree. It hashes the NAV fixture and both OBS fixtures into the JSON provenance block. Compilation and all five RTKLIB runs write to temporary paths; only a successful complete run atomically replaces the checked-in JSON file.
+The supplied RTKLIB source is an exported tree rather than a Git checkout. The
+script records the pinned revision (and checks an optional `RTKLIB_COMMIT`
+override), checks that `RTKLIB_SRC` contains the expected source files, and
+hashes the NAV fixture and both OBS fixtures into the JSON provenance block.
+Compilation and all runs write to temporary paths; only a successful complete
+run atomically replaces the checked-in JSON files.
 
 ## Inputs and coverage
 
@@ -36,10 +41,27 @@ The selection runs use GPS L1 C/A, broadcast ephemerides, a 10-degree elevation 
 
 ## RAIM FDE oracle
 
-`generate.sh` also writes `crates/sidereon-core/tests/fixtures/rtk/rtklib_spp_fde_oracle.json` from `rtklib_spp_oracle fde`. It takes every twelfth epoch of the ESBC fixture with the ionosphere and troposphere corrected and solves it with the unmodified `pntpos` from the approximate position. For each satellite that solve used it then builds faulted copies of the epoch: one each with +5000 m, +300 m, +30 m and +299792.458 m (a 1 ms blunder) added to that satellite's L1 pseudorange, and one each with +5000 m, +300 m and +30 m added to it and to the next used satellite. Each faulted epoch goes to RTKLIB's own `raim_fde` with the `satposs` states `pntpos` would compute.
+`generate.sh` also writes `crates/sidereon-core/tests/fixtures/rtk/rtklib_spp_fde_oracle.json` from `rtklib_spp_oracle fde`. It takes every twelfth epoch of the ESBC fixture with the ionosphere and troposphere corrected and solves it with the unmodified `pntpos` from the approximate position. For each satellite that solve used it then builds faulted copies of the epoch using the fixture's original bias sets: +5000 m, +300 m, +30 m and +299792.458 m (a 1 ms blunder) for one satellite, and +5000 m, +300 m and +30 m for adjacent pairs. The separate `quality_fde` mode adds +100 m without changing this established output. Each faulted epoch goes to RTKLIB's own `raim_fde` with the `satposs` states `pntpos` computes.
+
+The script also writes `rtklib_quality_fde_100m.json`. It runs only the first sampled ESBC epoch and retains all single- and paired-100 m cases. The final least-squares capture includes the standardized residual vector's reverse-order sum of squares, matching RTKLIB `dot`, before the last state update. This is deliberately distinct from residuals reevaluated at the returned state.
+
+`rtklib_multiconstellation_fde_100m.json` repeats that real-epoch run with GPS, Galileo and BeiDou enabled. Its compact form keeps the first fault case's satellite, angle, ephemeris-variance and total-variance fields plus one exact-RMS-tie candidate list. Candidate positions, clocks and least-squares arrays, unused satellite-state fields, and the other fault cases are omitted because no test reads them.
 
 demo5's `pntpos` reaches `raim_fde` only when `estpos` fails, because `valsol`'s chi-square rejection is commented out, so the oracle calls `raim_fde` directly. Its exclusion is the reference, not whether demo5 would have run it. Each case also records whether `estpos` fails on the whole faulted epoch from the approximate position (`full_estpos_stat`). When it does, the helper also runs `pntpos` with RAIM FDE on and requires the same result as `raim_fde`, bit for bit (`pntpos_stat`).
 
 `raim_fde` does not report which satellite it removed or its final least-squares state. The helper replays its loop, calling the unmodified `estpos` in the same order with the same shared solution state, and requires the replay to equal `raim_fde`'s result bit for bit (position, clock and used satellites). It records every candidate's status, used-satellite count, residual RMS, final position and clock, and final least-squares step, and the chosen solution in the same form as a selection case, including the captured least-squares state and the satellite rows at the solution. No RTKLIB message is recorded: `raim_fde` copies its candidate message buffer, which a successful `estpos` leaves unwritten.
 
 The Rust test `fde_spp_matches_rtklib_raim_fde_on_faulted_epochs` requires, for every case, the same admissibility for every candidate, candidate RMS values within the bound the two solutions' state difference and RTKLIB's final step allow, the same exclusion from `fde_spp` whenever core's detection fires or its full-set solve fails, and a solution that passes the selection oracle's endpoint certificate against RTKLIB's.
+
+## Count and failure boundary cases
+
+The `edges` command writes the first ESBC epoch cases consumed from
+`rtklib_spp_edge_cases.json`: four and five GPS observations, six and seven
+GPS/Galileo/BeiDou observations, a four-satellite geometry rejected by
+`valsol`'s GDOP ceiling, a NaN pseudorange, and a symmetric exclusion
+construction. The JSON records the complete compiler feature set and SHA-256
+hashes of the generator and both RINEX inputs. The symmetric construction gives
+G28 and G30 distinct tokens but clones the G28 observation and broadcast
+ephemerides for G30, so any remaining difference between their candidate RMS
+values comes from `raim_fde` retaining its candidate solution as the next
+candidate's initial state.

@@ -5,9 +5,9 @@ use nalgebra::DMatrix;
 use crate::astro::math::portable;
 
 use super::ekf::{
-    apply_closed_loop_navigation_error, apply_closed_loop_scale_error,
+    apply_closed_loop_navigation_error, apply_closed_loop_scale_error, joint_gate,
     normalized_innovation_squared, EkfCorrection, EkfCorrectionReport, InnovationGate,
-    InnovationGateReport,
+    InnovationGateReport, JointInnovationGateReport,
 };
 use super::state::{
     covariance_eigenvalue_tolerance, dmatrix_from_rows, invalid_input, matmul, matrix_sub,
@@ -75,6 +75,9 @@ pub struct UkfUpdateOptions {
     pub transform: UnscentedTransformOptions,
     /// Optional normalized-innovation screen applied before correction.
     pub innovation_gate: Option<InnovationGate>,
+    /// Optional whole-block NIS gate false-alarm probability. This is mutually
+    /// exclusive with the per-row gate, which remains the default.
+    pub joint_innovation_gate_probability: Option<f64>,
 }
 
 impl UkfUpdateOptions {
@@ -83,6 +86,12 @@ impl UkfUpdateOptions {
         self.transform.validate_for_dimension(dimension)?;
         if let Some(gate) = self.innovation_gate {
             gate.validate()?;
+        }
+        if self.innovation_gate.is_some() && self.joint_innovation_gate_probability.is_some() {
+            return Err(invalid_input(
+                "innovation_gate",
+                "per-row and joint gates are mutually exclusive",
+            ));
         }
         Ok(())
     }
@@ -98,6 +107,15 @@ pub fn ukf_correct_closed_loop(
     correction: &EkfCorrection,
     options: UkfUpdateOptions,
 ) -> Result<EkfCorrectionReport, FusionError> {
+    ukf_correct_closed_loop_with_gate_covariance(state, correction, options, None)
+}
+
+pub(super) fn ukf_correct_closed_loop_with_gate_covariance(
+    state: &mut InsFilterState,
+    correction: &EkfCorrection,
+    options: UkfUpdateOptions,
+    gate_innovation_covariance: Option<&[Vec<f64>]>,
+) -> Result<EkfCorrectionReport, FusionError> {
     state.validate()?;
     correction.validate_for_dimension(state.dimension())?;
     options.validate_for_dimension(state.dimension())?;
@@ -107,6 +125,7 @@ pub fn ukf_correct_closed_loop(
         &correction.innovation,
         &correction.measurement_covariance,
         options,
+        gate_innovation_covariance,
         |sigma| super::state::matvec(&correction.design, sigma),
     )?;
     if !report.applied {
@@ -128,6 +147,7 @@ pub(crate) struct InternalUkfReport {
     pub(crate) accepted_rows: usize,
     pub(crate) rejected_rows: usize,
     pub(crate) innovation_gate: Option<InnovationGateReport>,
+    pub(crate) joint_innovation_gate: Option<JointInnovationGateReport>,
     pub(crate) innovation_covariance: Vec<Vec<f64>>,
     pub(crate) kalman_gain: Vec<Vec<f64>>,
     pub(crate) dx: Vec<f64>,
@@ -142,6 +162,7 @@ impl InternalUkfReport {
             accepted_rows: self.accepted_rows,
             rejected_rows: self.rejected_rows,
             innovation_gate: self.innovation_gate,
+            joint_innovation_gate: self.joint_innovation_gate,
             innovation_covariance: self.innovation_covariance,
             kalman_gain: self.kalman_gain,
             dx: self.dx,
@@ -154,6 +175,7 @@ pub(crate) fn ukf_measurement_update<F>(
     innovation: &[f64],
     measurement_covariance: &[Vec<f64>],
     options: UkfUpdateOptions,
+    gate_innovation_covariance: Option<&[Vec<f64>]>,
     measurement_model: F,
 ) -> Result<InternalUkfReport, FusionError>
 where
@@ -179,16 +201,38 @@ where
         None,
     )?;
 
+    if let Some(probability) = options.joint_innovation_gate_probability {
+        let residual = innovation_residual(innovation, &prediction.mean)?;
+        let gate_correction = EkfCorrection::new(
+            residual,
+            vec![vec![0.0; covariance.len()]; innovation.len()],
+            measurement_covariance.to_vec(),
+        )?;
+        let gate_s = gate_innovation_covariance.unwrap_or(&full.innovation_covariance);
+        let (accepted, gate_report) = joint_gate(&gate_correction, gate_s, probability)?;
+        if !accepted {
+            let mut coasted = full;
+            coasted.applied = false;
+            coasted.normalized_innovation_squared = gate_report.statistic;
+            coasted.accepted_rows = 0;
+            coasted.rejected_rows = innovation.len();
+            coasted.joint_innovation_gate = Some(gate_report);
+            coasted.kalman_gain = vec![vec![0.0; innovation.len()]; dimension];
+            coasted.dx = vec![0.0; dimension];
+            coasted.posterior_covariance = covariance.to_vec();
+            return Ok(coasted);
+        }
+        let mut accepted_report = full;
+        accepted_report.joint_innovation_gate = Some(gate_report);
+        return Ok(accepted_report);
+    }
+
     let Some(gate) = options.innovation_gate else {
         return Ok(full);
     };
 
-    let (accepted, gate_report) = screen_rows(
-        innovation,
-        &prediction.mean,
-        &full.innovation_covariance,
-        gate,
-    )?;
+    let gate_s = gate_innovation_covariance.unwrap_or(&full.innovation_covariance);
+    let (accepted, gate_report) = screen_rows(innovation, &prediction.mean, gate_s, gate)?;
     if gate_report.coasted {
         let full_nis = normalized_innovation_squared(
             &full.innovation_covariance,
@@ -200,6 +244,7 @@ where
             accepted_rows: gate_report.accepted_rows,
             rejected_rows: gate_report.rejected_rows,
             innovation_gate: Some(gate_report),
+            joint_innovation_gate: None,
             innovation_covariance: full.innovation_covariance,
             kalman_gain: vec![vec![0.0; innovation.len()]; dimension],
             dx: vec![0.0; dimension],
@@ -410,6 +455,7 @@ fn predicted_update(
         accepted_rows: selected.len(),
         rejected_rows: innovation.len().saturating_sub(selected.len()),
         innovation_gate: None,
+        joint_innovation_gate: None,
         innovation_covariance,
         kalman_gain,
         dx,
@@ -464,7 +510,7 @@ fn screen_rows(
         }
     }
 
-    let coasted = accepted.len() < gate.min_rows;
+    let coasted = accepted.is_empty() || accepted.len() < gate.min_rows;
     let report = InnovationGateReport {
         threshold_sigma: gate.threshold_sigma,
         min_rows: gate.min_rows,
@@ -575,6 +621,7 @@ mod tests {
                     kappa: 0.0,
                 },
                 innovation_gate: None,
+                joint_innovation_gate_probability: None,
             },
         )
         .expect("ukf");

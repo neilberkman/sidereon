@@ -71,6 +71,11 @@ pub fn look_angles_batch_with_validity(
 /// Return true for every successful look angle at or above `min_elevation_deg`.
 ///
 /// Error cells are treated as not visible.
+///
+/// A non-finite threshold retains the legacy behavior and returns `false` for
+/// every cell. New code should use [`try_visible_mask`] to receive a typed
+/// validation error instead.
+#[deprecated(since = "3.0.7", note = "use try_visible_mask for checked input")]
 pub fn visible_mask(
     grid: &[Vec<Result<LookAngle, LookAngleError>>],
     min_elevation_deg: f64,
@@ -84,7 +89,29 @@ pub fn visible_mask(
         .collect()
 }
 
+/// Checked form of [`visible_mask`].
+pub fn try_visible_mask(
+    grid: &[Vec<Result<LookAngle, LookAngleError>>],
+    min_elevation_deg: f64,
+) -> Result<Vec<Vec<bool>>, LookAngleError> {
+    validate_threshold(min_elevation_deg)?;
+    Ok(grid
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| matches!(cell, Ok(look) if look.elevation_deg >= min_elevation_deg))
+                .collect()
+        })
+        .collect())
+}
+
 /// Count visible satellites per station for a look-angle grid.
+///
+/// A non-finite threshold returns zero counts. For a ragged grid, the first
+/// row fixes the output width and later rows are truncated or leave missing
+/// columns unchanged, preserving the legacy behavior. New code should use
+/// [`try_access_counts`] for checked input.
+#[deprecated(since = "3.0.7", note = "use try_access_counts for checked input")]
 pub fn access_counts(
     grid: &[Vec<Result<LookAngle, LookAngleError>>],
     min_elevation_deg: f64,
@@ -92,6 +119,32 @@ pub fn access_counts(
     let Some(first_row) = grid.first() else {
         return Vec::new();
     };
+    let mut counts = vec![0; first_row.len()];
+    for row in grid {
+        for (count, cell) in counts.iter_mut().zip(row) {
+            if matches!(cell, Ok(look) if look.elevation_deg >= min_elevation_deg) {
+                *count += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// Checked form of [`access_counts`].
+pub fn try_access_counts(
+    grid: &[Vec<Result<LookAngle, LookAngleError>>],
+    min_elevation_deg: f64,
+) -> Result<Vec<usize>, LookAngleError> {
+    validate_threshold(min_elevation_deg)?;
+    let Some(first_row) = grid.first() else {
+        return Ok(Vec::new());
+    };
+    if grid.iter().any(|row| row.len() != first_row.len()) {
+        return Err(LookAngleError::InvalidInput {
+            field: "grid",
+            reason: "rows must have equal length",
+        });
+    }
     let mut counts = vec![0; first_row.len()];
 
     for row in grid {
@@ -102,7 +155,18 @@ pub fn access_counts(
         }
     }
 
-    counts
+    Ok(counts)
+}
+
+fn validate_threshold(min_elevation_deg: f64) -> Result<(), LookAngleError> {
+    if min_elevation_deg.is_finite() {
+        Ok(())
+    } else {
+        Err(LookAngleError::InvalidInput {
+            field: "min_elevation_deg",
+            reason: "must be finite",
+        })
+    }
 }
 
 /// Return the maximum successful elevation per station.
@@ -164,7 +228,7 @@ mod tests {
         });
 
         for min_elevation_deg in [0.0, 80.0] {
-            let mask = visible_mask(&grid, min_elevation_deg);
+            let mask = try_visible_mask(&grid, min_elevation_deg).unwrap();
 
             assert_eq!(mask.len(), grid.len());
             for (mask_row, grid_row) in mask.iter().zip(&grid) {
@@ -187,8 +251,8 @@ mod tests {
         });
         let min_elevation_deg = 0.0;
 
-        let mask = visible_mask(&grid, min_elevation_deg);
-        let counts = access_counts(&grid, min_elevation_deg);
+        let mask = try_visible_mask(&grid, min_elevation_deg).unwrap();
+        let counts = try_access_counts(&grid, min_elevation_deg).unwrap();
 
         assert_eq!(counts.len(), grid[0].len());
         for station_idx in 0..counts.len() {

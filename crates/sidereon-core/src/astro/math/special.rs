@@ -138,6 +138,83 @@ fn two_prod(a: f64, b: f64) -> (f64, f64) {
     (product, error)
 }
 
+// Gamma scaling needs more than a rounded logarithm: a*log(x) and log Gamma(a)
+// can each be hundreds of thousands while their difference is near unity.
+fn quad_logarithm(x: f64) -> Quad {
+    let (fraction, power) = libm::frexp(x);
+    let m = fraction * 2.0;
+    let (denominator, denominator_error) = two_sum(m, 1.0);
+    let numerator = m - 1.0;
+    let z = numerator / denominator;
+    let (product, product_error) = two_prod(z, denominator);
+    let correction = ((numerator - product) - product_error - z * denominator_error) / denominator;
+    let z = Quad::from(z).add(Quad::from(correction));
+    let square = z.mul(z);
+    let mut term = z;
+    let mut sum = z;
+    for odd in (3..=201).step_by(2) {
+        term = term.mul(square);
+        let reciprocal = 1.0 / odd as f64;
+        let (product, error) = two_prod(reciprocal, odd as f64);
+        let remainder = ((1.0 - product) - error) / odd as f64;
+        sum = sum.add(term.scale(reciprocal)).add(term.scale(remainder));
+        if term.values[0].abs() < 1.0e-36 {
+            break;
+        }
+    }
+    sum.scale(2.0).add(
+        Quad {
+            values: [
+                f64::from_bits(0x3fe6_2e42_fee0_0000),
+                f64::from_bits(0x3dea_39ef_3579_3c76),
+                f64::from_bits(0x3a8c_c01f_97b5_7a08),
+                f64::from_bits(0xb729_79b3_1ace_93a5),
+            ],
+        }
+        .scale((power - 1) as f64),
+    )
+}
+
+fn gamma_exponent(a: f64, x: f64) -> Quad {
+    let r = 1.0 / a;
+    let r2 = r * r;
+    let stirling = r
+        * (1.0 / 12.0
+            + r2 * (-1.0 / 360.0
+                + r2 * (1.0 / 1260.0
+                    + r2 * (-1.0 / 1680.0 + r2 * (1.0 / 1188.0 - r2 * 691.0 / 360360.0)))));
+    quad_logarithm(x)
+        .scale(a)
+        .add(quad_logarithm(a).scale(0.5 - a))
+        .add(Quad::from(-x))
+        .add(Quad::from(a))
+        .add(Quad::from(-0.918_938_533_204_672_8))
+        .add(Quad::from(-stirling))
+}
+
+/// Logarithm of the gamma normalization divided by a probability. Subtract
+/// before condensing the limbs, so subnormal-tail inversion retains its
+/// significant bits even when both logarithms are close to -745.
+pub(crate) fn gamma_scale_log_ratio(a: f64, x: f64, probability: f64) -> f64 {
+    gamma_exponent(a, x)
+        .add(quad_logarithm(probability).scale(-1.0))
+        .values
+        .iter()
+        .sum()
+}
+
+pub(crate) fn gamma_scale(a: f64, x: f64) -> f64 {
+    let exponent = gamma_exponent(a, x);
+    if exponent.values[0] < libm::log(f64::MIN_POSITIVE) {
+        // The low limbs are not individually bounded by the exponential's
+        // range. Condense before exponentiation when the leading exponential
+        // would underflow, avoiding an otherwise possible 0 * infinity.
+        libm::exp(exponent.values.iter().sum())
+    } else {
+        libm::exp(exponent.values[0]) * libm::exp(exponent.values[1..].iter().sum())
+    }
+}
+
 /// Gauss error function, deterministic across platforms via the `libm` crate.
 #[inline]
 pub fn erf(x: f64) -> f64 {
@@ -171,14 +248,56 @@ pub fn normal_q_inv(p: f64) -> Option<f64> {
     if !(0.0..1.0).contains(&p) || !p.is_finite() {
         return None;
     }
-    Some(core::f64::consts::SQRT_2 * erfc_inv(2.0 * p)?)
+    if p > 0.5 {
+        return normal_q_inv(1.0 - p).map(|value| -value);
+    }
+    let mut value = core::f64::consts::SQRT_2 * erfc_inv(2.0 * p)?;
+    // The final multiplication by sqrt(2) rounds independently of the
+    // inverse-erfc solve.  One Newton correction in the requested normal-tail
+    // variable restores the correctly rounded root at ordinary probabilities.
+    let density = normal_pdf(value);
+    if p >= 1.0e-4 && density > 0.0 {
+        value += (normal_q(value) - p) / density;
+    }
+    Some(if value == 0.0 { 0.0 } else { value })
 }
 
 fn erfc_inv_raw(y: f64) -> Option<f64> {
+    let central = 1.0 - y;
+    if central.abs() <= 0.01 {
+        // Sterbenz makes 1-y exact here. Invert erf directly around zero;
+        // The first omitted term is (4369/22680)*z^9, less than
+        // 7e-20 on this interval (less than 0.04 ulp at its endpoint).
+        let z = 0.886_226_925_452_758 * central;
+        let z2 = z * z;
+        return Some(z * (1.0 + z2 * (1.0 / 3.0 + z2 * (7.0 / 30.0 + z2 * 127.0 / 630.0))));
+    }
+    if central.abs() <= 0.5 {
+        // Sterbenz-exact target and a direct erf residual avoid the absolute
+        // error incurred by subtracting Q(z) from a probability near 0.5.
+        let mut z = 0.886_226_925_452_758 * central;
+        for _ in 0..8 {
+            let next = z
+                - (libm::erf(z) - central)
+                    / (core::f64::consts::FRAC_2_SQRT_PI * libm::exp(-z * z));
+            if next == z {
+                break;
+            }
+            z = next;
+        }
+        return Some(z);
+    }
+    if y > 1.0 {
+        return erfc_inv_raw(2.0 - y).map(|value| -value);
+    }
+    if y < 0.1 {
+        return erfc_inv_from_log(portable_log(y));
+    }
     let p_tail = 0.5 * y;
-    let p_cdf = 1.0 - p_tail;
-    let mut x = inverse_normal_cdf_approx(p_cdf)?;
-    for _ in 0..2 {
+    // Work in the supplied lower tail directly. Forming `1 - p_tail` loses
+    // all useful bits for integrity probabilities below one ulp at unity.
+    let mut x = -inverse_normal_cdf_approx(p_tail)?;
+    for _ in 0..4 {
         let f = normal_q(x) - p_tail;
         let phi = normal_pdf(x);
         if phi == 0.0 || !phi.is_finite() {
@@ -197,6 +316,53 @@ fn erfc_inv_raw(y: f64) -> Option<f64> {
     } else {
         None
     }
+}
+
+fn erfc_inv_from_log(log_y: f64) -> Option<f64> {
+    // erfc(x) ~ exp(-x^2)/(sqrt(pi) x).  Starting from that logarithmic
+    // asymptote avoids halving a subnormal input, and Newton corrections use
+    // the same expansion without ever materializing the underflowed tail.
+    let target = -log_y - 0.5 * portable_log(core::f64::consts::PI);
+    let mut x = libm::sqrt(target - 0.5 * portable_log(target));
+    for _ in 0..8 {
+        let log_erfc = log_erfc_continued_fraction(x)?;
+        let log_derivative_magnitude =
+            portable_log(2.0) - 0.5 * portable_log(core::f64::consts::PI) - x * x - log_erfc;
+        let derivative = -libm::exp(log_derivative_magnitude);
+        x -= (log_erfc - log_y) / derivative;
+    }
+    x.is_finite().then_some(x)
+}
+
+fn log_erfc_continued_fraction(x: f64) -> Option<f64> {
+    let argument = x * x;
+    let mut b = argument + 0.5;
+    let mut c = 1.0e300;
+    let mut d = 1.0 / b;
+    let mut h = d;
+    for index in 1..=256 {
+        let index = index as f64;
+        let coefficient = -index * (index - 0.5);
+        b += 2.0;
+        d = coefficient * d + b;
+        if d.abs() < f64::MIN_POSITIVE {
+            d = f64::MIN_POSITIVE;
+        }
+        c = b + coefficient / c;
+        if c.abs() < f64::MIN_POSITIVE {
+            c = f64::MIN_POSITIVE;
+        }
+        d = 1.0 / d;
+        let delta = d * c;
+        h *= delta;
+        if (delta - 1.0).abs() <= 0.5 * f64::EPSILON {
+            break;
+        }
+    }
+    (h.is_finite() && h > 0.0).then(|| {
+        -argument + 0.5 * portable_log(argument) - 0.5 * portable_log(core::f64::consts::PI)
+            + portable_log(h)
+    })
 }
 
 fn normal_pdf(x: f64) -> f64 {
@@ -269,6 +435,20 @@ fn poly4p1(c: &[f64; 4], x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gamma_scale_large_arguments_match_mpmath() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/chi2_extended_mpmath.json"
+        ))
+        .unwrap();
+        for case in fixture["gamma_scale_large_argument"].as_array().unwrap() {
+            let a = case["a"].as_f64().unwrap();
+            let x: f64 = case["x"].as_str().unwrap().parse().unwrap();
+            let expected: f64 = case["value"].as_str().unwrap().parse().unwrap();
+            assert_eq!(gamma_scale(a, x), expected, "a={a}, x={x}");
+        }
+    }
 
     #[test]
     fn erf_has_frozen_bits() {

@@ -592,6 +592,7 @@ fn finalize_fixed_multi(
         position_covariance: covariance.scaled,
         formal_position_covariance: covariance.formal,
         posterior_variance_factor: covariance.posterior_variance_factor,
+        posterior_variance_factor_estimated: covariance.posterior_variance_factor_estimated,
         position_covariance_scale_factor: covariance.covariance_scale_factor,
         temporal_position_covariance,
         temporal_position_covariance_scale_factor,

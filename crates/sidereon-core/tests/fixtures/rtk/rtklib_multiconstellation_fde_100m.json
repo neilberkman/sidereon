@@ -1,0 +1,483 @@
+{
+  "provenance": {
+    "tool": "RTKLIB demo5",
+    "commit": "75a2e56275485b21a67bd35bc94bbeb8936e1a74",
+    "generator": "fixtures-generators/rtklib_spp_oracle/rtklib_spp_oracle.c",
+    "generator_sha256": "cf4ee0997d0b28e667df45b1eec6a857739888e5a63012ec1f4b3f0486ea6831",
+    "selector": "fixtures-generators/rtklib_spp_oracle/select_quality_cases.py",
+    "selector_sha256": "8e79eac575a5bbb296c4908d71a58e3f17e7b6b613f4131ad0f1291b9c097e59",
+    "cflags": "-std=gnu99 -O2 -ffp-contract=off -fno-fast-math -w -DENAGLO -DENAQZS -DENAGAL -DENACMP -DENAIRN -DNFREQ=4 -DNEXOBS=3 -D_DARWIN_C_SOURCE",
+    "inputs": {
+      "obs": "tests/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx",
+      "obs_sha256": "8ed476c011802032040beaf7a3fb774f06bb180a93f856eb7ae2396366496c45",
+      "nav": "tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx",
+      "nav_sha256": "069f73afc10e9c1a8b87b7fbbb774f3eb9be94fb4da4ac365cfd4356c6ebfd36"
+    }
+  },
+  "guess": [
+    3582105.291,
+    532589.7313,
+    5232754.8054
+  ],
+  "cases": [
+    {
+      "epoch": [
+        2020,
+        6,
+        25,
+        0,
+        0,
+        0.0
+      ],
+      "faults": [
+        {
+          "sat": "G05",
+          "bias_m": 100
+        }
+      ],
+      "mode": "single_fault",
+      "full_estpos_stat": 1,
+      "pntpos_stat": -1,
+      "stat": 1,
+      "excluded": "G05",
+      "position_m": [
+        3582103.8979840404,
+        532589.8076766608,
+        5232755.126152456
+      ],
+      "geodetic_rad_m": [
+        0.9685455889462427,
+        0.14759945491557905,
+        58.966607639566064
+      ],
+      "clock_m": 144178.25085649578,
+      "used": [
+        "G07",
+        "G09",
+        "G13",
+        "G15",
+        "G18",
+        "G27",
+        "G28",
+        "G30",
+        "E01",
+        "E03",
+        "E05",
+        "E09",
+        "E15",
+        "E24",
+        "E31",
+        "C05",
+        "C07",
+        "C10",
+        "C19",
+        "C20",
+        "C23",
+        "C32",
+        "C37"
+      ],
+      "candidates": [],
+      "satellite_states": [
+        {
+          "sat": "G07",
+          "variance_m2": 5.76,
+          "az_rad": 1.2100996419124712,
+          "el_rad": 0.8914429168689864,
+          "reference_variance_m2": 8.6800899895315
+        },
+        {
+          "sat": "G09",
+          "variance_m2": 5.76,
+          "az_rad": 1.8189629341680327,
+          "el_rad": 0.23392939040474733,
+          "reference_variance_m2": 14.517803400491893
+        },
+        {
+          "sat": "G13",
+          "variance_m2": 5.76,
+          "az_rad": 4.821956688614529,
+          "el_rad": 0.78739984804248,
+          "reference_variance_m2": 8.962882821722655
+        },
+        {
+          "sat": "G15",
+          "variance_m2": 5.76,
+          "az_rad": 4.9720410313084455,
+          "el_rad": 0.266093831760108,
+          "reference_variance_m2": 13.693498844873316
+        },
+        {
+          "sat": "G18",
+          "variance_m2": 5.76,
+          "az_rad": 5.694289601944351,
+          "el_rad": 0.2848120421541078,
+          "reference_variance_m2": 13.283051556813659
+        },
+        {
+          "sat": "G27",
+          "variance_m2": 5.76,
+          "az_rad": 0.5236773530467641,
+          "el_rad": 0.17941917958866394,
+          "reference_variance_m2": 16.43028169300669
+        },
+        {
+          "sat": "G28",
+          "variance_m2": 5.76,
+          "az_rad": 2.683593716521706,
+          "el_rad": 0.3695570575773005,
+          "reference_variance_m2": 11.854851389305528
+        },
+        {
+          "sat": "G30",
+          "variance_m2": 5.76,
+          "az_rad": 2.3137894139334723,
+          "el_rad": 1.340164456158501,
+          "reference_variance_m2": 8.15190150440777
+        },
+        {
+          "sat": "E01",
+          "variance_m2": 9.7344,
+          "az_rad": 0.6397089682933568,
+          "el_rad": 0.2818235574594894,
+          "reference_variance_m2": 17.32007173709674
+        },
+        {
+          "sat": "E03",
+          "variance_m2": 9.7344,
+          "az_rad": 5.0907130996469245,
+          "el_rad": 0.348969722135764,
+          "reference_variance_m2": 16.124563122747197
+        },
+        {
+          "sat": "E05",
+          "variance_m2": 9.7344,
+          "az_rad": 4.814256781433151,
+          "el_rad": 1.2660499304298147,
+          "reference_variance_m2": 12.163699781193092
+        },
+        {
+          "sat": "E09",
+          "variance_m2": 9.7344,
+          "az_rad": 2.123675158147159,
+          "el_rad": 0.8825914634331209,
+          "reference_variance_m2": 12.675112460126465
+        },
+        {
+          "sat": "E15",
+          "variance_m2": 9.7344,
+          "az_rad": 5.313271714547635,
+          "el_rad": 0.3172193913092468,
+          "reference_variance_m2": 16.639481854721353
+        },
+        {
+          "sat": "E24",
+          "variance_m2": 9.7344,
+          "az_rad": 2.8661044114832563,
+          "el_rad": 0.692500199409266,
+          "reference_variance_m2": 13.289669992329781
+        },
+        {
+          "sat": "E31",
+          "variance_m2": 9.7344,
+          "az_rad": 1.478186330545726,
+          "el_rad": 0.9241545974962437,
+          "reference_variance_m2": 12.583101923584884
+        },
+        {
+          "sat": "C05",
+          "variance_m2": 5.76,
+          "az_rad": 2.1844670839976237,
+          "el_rad": 0.1989696667297047,
+          "reference_variance_m2": 15.791633580827167
+        },
+        {
+          "sat": "C07",
+          "variance_m2": 5.76,
+          "az_rad": 0.7608261398007496,
+          "el_rad": 0.4153630090874585,
+          "reference_variance_m2": 11.369341177716743
+        },
+        {
+          "sat": "C10",
+          "variance_m2": 5.76,
+          "az_rad": 1.2017538829898424,
+          "el_rad": 0.6731487306846523,
+          "reference_variance_m2": 9.448340005697716
+        },
+        {
+          "sat": "C19",
+          "variance_m2": 5.76,
+          "az_rad": 5.261855690756964,
+          "el_rad": 0.6100481378040301,
+          "reference_variance_m2": 9.77519086798582
+        },
+        {
+          "sat": "C20",
+          "variance_m2": 5.76,
+          "az_rad": 3.833969795194648,
+          "el_rad": 1.2976548243167634,
+          "reference_variance_m2": 8.193662854378644
+        },
+        {
+          "sat": "C23",
+          "variance_m2": 5.76,
+          "az_rad": 1.1012373007054637,
+          "el_rad": 0.7700173134707294,
+          "reference_variance_m2": 9.059025247849732
+        },
+        {
+          "sat": "C32",
+          "variance_m2": 5.76,
+          "az_rad": 2.541832163493761,
+          "el_rad": 0.5358706669329008,
+          "reference_variance_m2": 10.257708406723653
+        },
+        {
+          "sat": "C37",
+          "variance_m2": 5.76,
+          "az_rad": 2.8918627797023095,
+          "el_rad": 1.1287618305718785,
+          "reference_variance_m2": 8.324490056777968
+        }
+      ]
+    },
+    {
+      "epoch": [
+        2020,
+        6,
+        25,
+        0,
+        0,
+        0.0
+      ],
+      "faults": [
+        {
+          "sat": "G05",
+          "bias_m": 100
+        },
+        {
+          "sat": "G07",
+          "bias_m": 100
+        }
+      ],
+      "mode": "two_fault",
+      "candidates": [
+        {
+          "sat": "G02",
+          "status": "solved",
+          "rms_m": 23.494350909065027
+        },
+        {
+          "sat": "G05",
+          "status": "solved",
+          "rms_m": 18.15858764924866
+        },
+        {
+          "sat": "G07",
+          "status": "solved",
+          "rms_m": 18.363691817428165
+        },
+        {
+          "sat": "G08",
+          "status": "solved",
+          "rms_m": 23.494350820928332
+        },
+        {
+          "sat": "G09",
+          "status": "solved",
+          "rms_m": 23.72343357560351
+        },
+        {
+          "sat": "G13",
+          "status": "solved",
+          "rms_m": 23.201917159170883
+        },
+        {
+          "sat": "G15",
+          "status": "solved",
+          "rms_m": 23.9034153638781
+        },
+        {
+          "sat": "G18",
+          "status": "solved",
+          "rms_m": 23.779716310552473
+        },
+        {
+          "sat": "G21",
+          "status": "solved",
+          "rms_m": 23.49435082083362
+        },
+        {
+          "sat": "G27",
+          "status": "solved",
+          "rms_m": 23.693186584905835
+        },
+        {
+          "sat": "G28",
+          "status": "solved",
+          "rms_m": 23.79740565362004
+        },
+        {
+          "sat": "G30",
+          "status": "solved",
+          "rms_m": 22.180544955305464
+        },
+        {
+          "sat": "R01",
+          "status": "solved",
+          "rms_m": 23.49435082082776
+        },
+        {
+          "sat": "R02",
+          "status": "solved",
+          "rms_m": 23.494350820799585
+        },
+        {
+          "sat": "R08",
+          "status": "solved",
+          "rms_m": 23.49435082054535
+        },
+        {
+          "sat": "R09",
+          "status": "solved",
+          "rms_m": 23.494350820851775
+        },
+        {
+          "sat": "R10",
+          "status": "solved",
+          "rms_m": 23.494350820845053
+        },
+        {
+          "sat": "R11",
+          "status": "solved",
+          "rms_m": 23.494350820816262
+        },
+        {
+          "sat": "R12",
+          "status": "solved",
+          "rms_m": 23.49435082054535
+        },
+        {
+          "sat": "R17",
+          "status": "solved",
+          "rms_m": 23.494350820851775
+        },
+        {
+          "sat": "R18",
+          "status": "solved",
+          "rms_m": 23.494350820845053
+        },
+        {
+          "sat": "R19",
+          "status": "solved",
+          "rms_m": 23.494350820816262
+        },
+        {
+          "sat": "E01",
+          "status": "solved",
+          "rms_m": 23.93343178786155
+        },
+        {
+          "sat": "E03",
+          "status": "solved",
+          "rms_m": 23.765789222605566
+        },
+        {
+          "sat": "E05",
+          "status": "solved",
+          "rms_m": 23.792828229130322
+        },
+        {
+          "sat": "E09",
+          "status": "solved",
+          "rms_m": 23.918629922080505
+        },
+        {
+          "sat": "E13",
+          "status": "solved",
+          "rms_m": 23.4943508210494
+        },
+        {
+          "sat": "E15",
+          "status": "solved",
+          "rms_m": 23.77014873457762
+        },
+        {
+          "sat": "E24",
+          "status": "solved",
+          "rms_m": 24.000447121333774
+        },
+        {
+          "sat": "E31",
+          "status": "solved",
+          "rms_m": 23.849917639339758
+        },
+        {
+          "sat": "C05",
+          "status": "solved",
+          "rms_m": 23.604950285530332
+        },
+        {
+          "sat": "C07",
+          "status": "solved",
+          "rms_m": 23.970421625877833
+        },
+        {
+          "sat": "C10",
+          "status": "solved",
+          "rms_m": 23.988237199702752
+        },
+        {
+          "sat": "C12",
+          "status": "solved",
+          "rms_m": 23.49435082046933
+        },
+        {
+          "sat": "C19",
+          "status": "solved",
+          "rms_m": 24.002130847148386
+        },
+        {
+          "sat": "C20",
+          "status": "solved",
+          "rms_m": 23.828498311810517
+        },
+        {
+          "sat": "C23",
+          "status": "solved",
+          "rms_m": 23.956329379184254
+        },
+        {
+          "sat": "C32",
+          "status": "solved",
+          "rms_m": 23.969388968564555
+        },
+        {
+          "sat": "C34",
+          "status": "solved",
+          "rms_m": 23.494350821059147
+        },
+        {
+          "sat": "C37",
+          "status": "solved",
+          "rms_m": 23.899924325998203
+        },
+        {
+          "sat": "123",
+          "status": "solved",
+          "rms_m": 23.49435082109489
+        },
+        {
+          "sat": "125",
+          "status": "solved",
+          "rms_m": 23.494350820795155
+        },
+        {
+          "sat": "136",
+          "status": "solved",
+          "rms_m": 23.494350820871944
+        }
+      ]
+    }
+  ]
+}

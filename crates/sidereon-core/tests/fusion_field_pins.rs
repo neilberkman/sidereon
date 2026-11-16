@@ -639,15 +639,12 @@ fn fix_status_weighting_inflates_float_covariance_by_configured_sigma() {
 
 #[test]
 fn field_mode_defaults_keep_existing_loose_fixture_bits() {
-    // Re-frozen when the GNSS positions and Doppler velocities feeding the loose coupling
-    // moved to RTKLIB `satposs` placement of each pseudorange's transmission epoch (the
-    // velocity rows read the same placed states, with the rate of the first-order Sagnac
-    // term), and the tightly coupled range-rate rows added that Sagnac rate. Re-frozen
-    // again when the SPP fixes feeding it took their selection, elevation mask and
-    // weights at the current iterate and ended with RTKLIB's least-squares step. Re-frozen
-    // again when the SPP fixes took the inverse RTKLIB `rescode` variances as weights,
-    // which moves their positions and the covariances the loose updates read.
-    const EXPECTED_DEFAULT_HASH: u64 = 0x1ba9_0218_456e_910b;
+    // Covers the default field fixture's positions, velocities, and covariance
+    // matrices. The value includes transmit-epoch placement, first-order Sagnac
+    // position/rate terms, current-iterate selection and weights, inverse
+    // pseudorange variances, removal of zero-weight IGG III rows, and separate
+    // position/velocity Yang adaptation groups.
+    const EXPECTED_DEFAULT_HASH: u64 = 0xef4d_2a99_8c2b_f6a8;
     let scenario = field_scenario();
     let simulated = simulate_scenario(&scenario).expect("simulate scenario");
     let source = source_from_scenario(&scenario);

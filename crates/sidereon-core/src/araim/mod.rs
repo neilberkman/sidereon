@@ -222,6 +222,9 @@ impl IntegrityAllocation {
 /// ARAIM input or numerical failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AraimError {
+    /// ADD Appendix A does not define a user-error model for this constellation.
+    #[error("ARAIM Appendix A does not cover constellation {0:?}")]
+    UnsupportedConstellation(GnssSystem),
     /// The full or subset geometry does not have enough independent rows.
     #[error("insufficient ARAIM geometry")]
     InsufficientGeometry,

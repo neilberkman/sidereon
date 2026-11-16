@@ -34,7 +34,7 @@
 
 use crate::astro::frames::transforms::geodetic_from_ecef_proj;
 
-use crate::constants::{AU_KM, KM_TO_M, WGS84_A_KM, WGS84_E2};
+use crate::constants::{AU_KM, KM_TO_M, WGS84_A_KM, WGS84_A_M, WGS84_E2, WGS84_F};
 use crate::estimation::recipe::FrameRecipe;
 use crate::frame::Wgs84Geodetic;
 
@@ -231,7 +231,10 @@ fn receiver_delta(rx_ecef_m: [f64; 3], sat_ecef_m: [f64; 3]) -> [f64; 3] {
 
 /// RTKLIB `satazel`: the azimuth and elevation (radians) of the line of sight
 /// from `rx_ecef_m` to `sat_ecef_m` in the geodetic (ellipsoid-normal) ENU frame
-/// of the receiver, through the geodetic conversion the SPP selection uses. A
+/// of the receiver, through RTKLIB's iterative `ecef2pos` conversion.  RTK and
+/// its mask/reference/variance paths use this recipe to reproduce `satazel`;
+/// SPP satellite selection deliberately retains its Skyfield-compatible
+/// three-iteration astronomical-unit conversion for its separate oracle. A
 /// receiver RTKLIB `ecef2pos` places at or below `-RE_WGS84` in height, which is
 /// only the geocentre, sees every satellite at the zenith (azimuth 0, elevation
 /// `pi / 2`), as `satazel` has it. The RTK elevation mask, reference choice,
@@ -242,7 +245,7 @@ pub(crate) fn satazel(rx_ecef_m: [f64; 3], sat_ecef_m: [f64; 3]) -> (f64, f64) {
     if crate::spp::rtklib_sees_every_satellite_overhead(rx_ecef_m) {
         return (0.0, core::f64::consts::FRAC_PI_2);
     }
-    let geo = skyfield_au_geodetic(rx_ecef_m);
+    let geo = rtklib_ecef2pos(rx_ecef_m);
     let dx = sat_ecef_m[0] - rx_ecef_m[0];
     let dy = sat_ecef_m[1] - rx_ecef_m[1];
     let dz = sat_ecef_m[2] - rx_ecef_m[2];
@@ -277,7 +280,7 @@ pub(crate) fn satazel(rx_ecef_m: [f64; 3], sat_ecef_m: [f64; 3]) -> (f64, f64) {
 /// longitude of the geodetic conversion [`satazel`] uses: the rows of RTKLIB
 /// `xyz2enu` at the `ecef2pos` position.
 pub(crate) fn geodetic_neu_basis(rx_ecef_m: [f64; 3]) -> ([f64; 3], [f64; 3], [f64; 3]) {
-    let geo = skyfield_au_geodetic(rx_ecef_m);
+    let geo = rtklib_ecef2pos(rx_ecef_m);
     let sin_lat = libm::sin(geo.lat_rad);
     let cos_lat = libm::cos(geo.lat_rad);
     let sin_lon = libm::sin(geo.lon_rad);
@@ -287,6 +290,38 @@ pub(crate) fn geodetic_neu_basis(rx_ecef_m: [f64; 3]) -> ([f64; 3], [f64; 3], [f
         [-sin_lon, cos_lon, 0.0],
         [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat],
     )
+}
+
+/// RTKLIB `ecef2pos`, retaining its loop criterion and arithmetic order.
+fn rtklib_ecef2pos(ecef_m: [f64; 3]) -> Wgs84Geodetic {
+    let r2 = ecef_m[0] * ecef_m[0] + ecef_m[1] * ecef_m[1];
+    let e2 = WGS84_F * (2.0 - WGS84_F);
+    let mut z = ecef_m[2];
+    let mut previous = 0.0;
+    let mut v = WGS84_A_M;
+    while (z - previous).abs() >= 1.0e-4 {
+        previous = z;
+        let sin_lat = z / (r2 + z * z).sqrt();
+        v = WGS84_A_M / (1.0 - e2 * sin_lat * sin_lat).sqrt();
+        z = ecef_m[2] + v * e2 * sin_lat;
+    }
+    let latitude = if r2 > 1.0e-12 {
+        libm::atan(z / r2.sqrt())
+    } else if ecef_m[2] > 0.0 {
+        core::f64::consts::FRAC_PI_2
+    } else {
+        -core::f64::consts::FRAC_PI_2
+    };
+    let longitude = if r2 > 1.0e-12 {
+        libm::atan2(ecef_m[1], ecef_m[0])
+    } else {
+        0.0
+    };
+    Wgs84Geodetic {
+        lat_rad: latitude,
+        lon_rad: longitude,
+        height_m: (r2 + z * z).sqrt() - v,
+    }
 }
 
 /// The geodetic ENU topocentric azimuth/elevation of a satellite seen from a

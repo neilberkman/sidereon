@@ -252,13 +252,13 @@ fn fault_modes_are_prior_ordered_and_pinned() {
     };
 
     let modes = enumerate_fault_modes(&geometry, &ism, &allocation).expect("fault modes");
-    assert_eq!(modes.len(), 9);
+    assert_eq!(modes.len(), 16);
     assert_eq!(modes[0].excluded, Vec::<GnssSatelliteId>::new());
-    assert_eq!(modes[1].excluded, vec![sat(GnssSystem::Gps, 1)]);
+    assert_eq!(modes[1].excluded, vec![sat(GnssSystem::Galileo, 1)]);
     assert_eq!(modes[2].excluded, vec![sat(GnssSystem::Gps, 2)]);
-    assert_eq!(modes[3].excluded, vec![sat(GnssSystem::Galileo, 1)]);
-    assert_eq!(modes[4].excluded_constellation, Some(GnssSystem::Gps));
-    assert_eq!(modes[5].excluded_constellation, Some(GnssSystem::Galileo));
+    assert_eq!(modes[3].excluded, vec![sat(GnssSystem::Gps, 1)]);
+    assert_eq!(modes[4].excluded_constellation, Some(GnssSystem::Galileo));
+    assert_eq!(modes[5].excluded_constellation, Some(GnssSystem::Gps));
     assert_eq!(
         modes[6].excluded,
         vec![sat(GnssSystem::Gps, 2), sat(GnssSystem::Galileo, 1)]
@@ -271,9 +271,14 @@ fn fault_modes_are_prior_ordered_and_pinned() {
         modes[8].excluded,
         vec![sat(GnssSystem::Gps, 1), sat(GnssSystem::Gps, 2)]
     );
-    assert_abs_diff(modes[6].prior, 6.0e-4, 0.0);
-    assert_abs_diff(modes[7].prior, 3.0e-4, 0.0);
-    assert_abs_diff(modes[8].prior, 2.0e-4, 0.0);
+    // ADD v3.0 Eq. (2) includes every unselected primary event's `(1 - p)`.
+    assert_abs_diff(modes[6].prior, 0.000_592_219_188, 1.0e-18);
+    assert_abs_diff(modes[7].prior, 0.000_293_118_588, 1.0e-18);
+    assert_abs_diff(modes[8].prior, 0.000_193_418_388, 1.0e-18);
+    assert!(modes[9..]
+        .iter()
+        .all(|mode| mode.excluded_constellation.is_some()));
+    assert_abs_diff(modes[8].prior, 0.000_193_418_388, 1.0e-18);
 }
 
 #[test]
@@ -399,11 +404,13 @@ fn synthetic_lpv_200_modes_are_regression_pinned() {
     )
     .expect("GPS plus Galileo LPV-200 ARAIM");
     assert!(mixed_result.availability);
-    let mut expected_mixed = (1..=6)
-        .map(|prn| sat(GnssSystem::Gps, prn).to_string())
-        .collect::<Vec<_>>();
+    let mut expected_mixed = vec!["Galileo*".to_string()];
+    expected_mixed.extend(
+        (1..=6)
+            .map(|prn| sat(GnssSystem::Gps, prn).to_string())
+            .collect::<Vec<_>>(),
+    );
     expected_mixed.extend((1..=5).map(|prn| sat(GnssSystem::Galileo, prn).to_string()));
-    expected_mixed.push("Galileo*".to_string());
     assert_eq!(monitored_mode_keys(&mixed_result), expected_mixed);
 }
 
@@ -455,14 +462,13 @@ fn max_fault_order_one_counts_pair_and_higher_mass_unmonitored() {
         phmi_hor: 2.0e-4,
         pfa_vert: WG_C_LPV_200_PFA_VERT,
         pfa_hor: WG_C_LPV_200_PFA_HOR,
-        p_threshold_unmonitored: 0.01,
+        p_threshold_unmonitored: 0.009,
         p_emt: WG_C_LPV_200_PEMT,
         max_fault_order: 1,
     };
 
     let result = araim(&geometry, &ism, &allocation).expect("ARAIM with unmonitored tail");
-    let expected_pair_plus =
-        10.0 * p_sat.powi(2) + 10.0 * p_sat.powi(3) + 5.0 * p_sat.powi(4) + p_sat.powi(5);
+    let expected_pair_plus = 1.0 - (1.0 - p_sat).powi(5) - 5.0 * p_sat * (1.0 - p_sat).powi(4);
     assert_abs_diff(result.p_unmonitored, expected_pair_plus, 2.0e-16);
 }
 
@@ -853,6 +859,7 @@ fn receiver_solution(
         rx_clock_drift_s_s: None,
         system_clocks_s: systems.iter().map(|&system| (system, 0.0)).collect(),
         dop: None,
+        rtklib_single_clock_dop: None,
         system_tdops: Vec::new(),
         position_covariance: crate::dop::PositionCovariance {
             ecef_m2: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],

@@ -241,6 +241,17 @@ pub struct Observation {
     pub pseudorange_m: f64,
 }
 
+/// Shared pseudorange boundary for selection, duplicate validation, and
+/// downstream consumers of the selected observations. Invalid rows remain
+/// available to selection solely to produce their typed rejection records.
+pub(crate) fn usable_observations(
+    observations: &[Observation],
+) -> impl Iterator<Item = &Observation> {
+    observations.iter().filter(|observation| {
+        observation.pseudorange_m.is_finite() && observation.pseudorange_m > 0.0
+    })
+}
+
 /// Why a satellite was excluded from the solve.
 ///
 /// SPP selection tests a satellite in the order RTKLIB `rescode` does and
@@ -251,6 +262,14 @@ pub struct Observation {
 /// [`Self::SbasWithdrawn`] is not reported by SPP selection.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RejectionReason {
+    /// The caller supplied a NaN or infinite pseudorange. RTKLIB `prange`
+    /// passes these values into `rescode`'s residual; this library deliberately
+    /// removes and reports them before solving.
+    NonFinitePseudorange,
+    /// The caller supplied a zero or negative pseudorange. RTKLIB `rescode`
+    /// skips exactly zero as unavailable, but passes a negative value into the
+    /// residual. This library deliberately removes and reports both classes.
+    NonPositivePseudorange,
     /// The SP3 product has no usable position or clock for the satellite at the
     /// transmit epoch.
     NoEphemeris,
@@ -366,6 +385,10 @@ pub struct ReceiverSolution {
     /// deterministic diagnostic, not a 0-ULP target). `None` only if the
     /// converged geometry is rank-deficient.
     pub dop: Option<Dop>,
+    /// RTKLIB-compatible single-clock DOP for the same used satellites. This
+    /// equals `dop` for a single-system solve; for a multi-system solve it
+    /// retains RTKLIB `dops`' one shared clock alongside the multi-clock `dop`.
+    pub rtklib_single_clock_dop: Option<Dop>,
     /// Per-constellation time (clock) DOP, one entry per GNSS in the solve, in
     /// the same ascending system order as `system_clocks_s`: the square root of
     /// that system's clock cofactor variance. The first entry's value equals
@@ -1968,6 +1991,20 @@ fn select_at_with_query_memo(
     let receiver_frame_memo = ReceiverFrameMemo::new();
     for ob in obs {
         let sat = ob.satellite_id;
+        if !ob.pseudorange_m.is_finite() {
+            rejected.push(RejectedSat {
+                satellite_id: sat,
+                reason: RejectionReason::NonFinitePseudorange,
+            });
+            continue;
+        }
+        if ob.pseudorange_m <= 0.0 {
+            rejected.push(RejectedSat {
+                satellite_id: sat,
+                reason: RejectionReason::NonPositivePseudorange,
+            });
+            continue;
+        }
         let b = clock_m(clock_system(sat.system, inputs.qzss_clock));
         let ionosphere = ionosphere_for(sat.system, inputs);
         let model = match sat_model_checked_with_memos(
@@ -2418,9 +2455,7 @@ where
     );
     // Each Doppler satellite is read at the transmission epoch its pseudorange places, the
     // state the position solve used, as RTKLIB `estvel` reads the `satposs` states.
-    let pseudoranges_m: BTreeMap<GnssSatelliteId, f64> = inputs
-        .observations
-        .iter()
+    let pseudoranges_m: BTreeMap<GnssSatelliteId, f64> = usable_observations(&inputs.observations)
         .map(|obs| (obs.satellite_id, obs.pseudorange_m))
         .collect();
     let velocity_observations: Vec<_> = velocity_inputs
@@ -3001,9 +3036,7 @@ fn evaluate_used(
     let mut los = Vec::with_capacity(used.len());
     let mut residuals_m = Vec::with_capacity(used.len());
     for &sat in used {
-        let p_meas = inputs
-            .observations
-            .iter()
+        let p_meas = usable_observations(&inputs.observations)
             .find(|o| o.satellite_id == sat)
             .map(|o| o.pseudorange_m)
             .ok_or(SppError::EphemerisLost { satellite: sat })?;
@@ -3196,12 +3229,16 @@ fn solve_tracked(
     placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
     receive_epoch: Option<crate::astro::time::ExactEpochQuery>,
 ) -> Result<ReceiverSolution, SppError> {
+    // Invalid observations are reported by selection, before duplicate
+    // validation. Only usable pseudoranges count toward distinct satellites,
+    // consistently with the FDE entry point.
     // One pseudorange per satellite. Reject duplicates deterministically (by
     // the smallest repeated id) so the result can never depend on observation
     // order and the parameter-count check (`used < n_params`, where
     // `n_params = 3 + n_clocks`) counts distinct satellites.
-    let mut ids: Vec<GnssSatelliteId> =
-        inputs.observations.iter().map(|o| o.satellite_id).collect();
+    let mut ids: Vec<GnssSatelliteId> = usable_observations(&inputs.observations)
+        .map(|o| o.satellite_id)
+        .collect();
     ids.sort_unstable();
     if let Some(w) = ids.windows(2).find(|w| w[0] == w[1]) {
         return Err(SppError::DuplicateObservation { satellite: w[0] });
@@ -3219,9 +3256,7 @@ fn solve_tracked(
             receive_epoch.clone()
         }
     };
-    let obs_by_id: Vec<(GnssSatelliteId, f64)> = inputs
-        .observations
-        .iter()
+    let obs_by_id: Vec<(GnssSatelliteId, f64)> = usable_observations(&inputs.observations)
         .map(|o| (o.satellite_id, o.pseudorange_m))
         .collect();
 
@@ -3606,6 +3641,7 @@ fn solve_tracked(
     } else {
         dop_multi(los, &clock_index, &systems, n_clocks, &unit_weights, geo).ok()
     };
+    let rtklib_single_clock_dop = dop(los, &unit_weights, geo).ok();
     let n_params = xs.len();
     // The geometry diagnostics of the reported design, `sqrt(W) [-e, 1]` at the
     // reported position with the reported weights.
@@ -3660,6 +3696,7 @@ fn solve_tracked(
         rx_clock_drift_s_s: None,
         system_clocks_s,
         dop: dop_result,
+        rtklib_single_clock_dop,
         system_tdops,
         position_covariance,
         residuals_m: final_set.residuals_m,
@@ -3977,7 +4014,6 @@ pub(crate) fn validate_solve_inputs(inputs: &SolveInputs) -> Result<(), SppError
     {
         validate_met(&inputs.met)?;
     }
-    validate_observations(&inputs.observations)?;
     if let Some(robust) = inputs.robust {
         if robust.max_outer == 0 {
             return Err(SppError::InvalidInput {
@@ -4010,14 +4046,6 @@ fn validate_met(met: &SurfaceMet) -> Result<(), SppError> {
     validate::finite_positive(met.pressure_hpa, "met.pressure_hpa").map_err(map_input_error)?;
     validate::finite_positive(met.temperature_k, "met.temperature_k").map_err(map_input_error)?;
     validate::fraction(met.relative_humidity, "met.relative_humidity").map_err(map_input_error)?;
-    Ok(())
-}
-
-fn validate_observations(observations: &[Observation]) -> Result<(), SppError> {
-    for obs in observations {
-        validate::finite_positive(obs.pseudorange_m, "observation.pseudorange_m")
-            .map_err(map_input_error)?;
-    }
     Ok(())
 }
 

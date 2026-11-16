@@ -1,9 +1,8 @@
 use std::cmp::Ordering;
 
+use super::ism::Ism;
 use super::{AraimError, AraimGeometry, IntegrityAllocation};
 use crate::id::{GnssSatelliteId, GnssSystem};
-
-use super::ism::Ism;
 
 /// One ARAIM fault hypothesis.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,13 +35,21 @@ pub(crate) struct FaultEnumeration {
     pub p_unenumerated: f64,
 }
 
-/// Enumerate ARAIM fault modes in the order used by the MHSS solve.
+/// Enumerate ARAIM primary-event combinations in descending probability order.
+///
+/// Mode probabilities follow ADD v3.0 Eq. (2): every selected primary event is
+/// faulty and every unselected primary event is fault-free. Enumeration follows
+/// ADD section 4.6 in descending probability within each fault order and stops
+/// as soon as the remaining probability is below the unmonitored threshold.
+/// Equal-probability modes retain lexicographic combination order over the ISM
+/// event list (satellites in geometry order, then constellations), matching
+/// MAAST/Octave's stable sort.
 pub fn enumerate_fault_modes(
     geometry: &AraimGeometry,
     ism: &Ism,
     allocation: &IntegrityAllocation,
 ) -> Result<Vec<FaultHypothesis>, AraimError> {
-    enumerate_fault_modes_checked(geometry, ism, allocation).map(|enumeration| enumeration.modes)
+    enumerate_fault_modes_checked(geometry, ism, allocation).map(|value| value.modes)
 }
 
 pub(crate) fn enumerate_fault_modes_checked(
@@ -51,198 +58,204 @@ pub(crate) fn enumerate_fault_modes_checked(
     allocation: &IntegrityAllocation,
 ) -> Result<FaultEnumeration, AraimError> {
     ism.validate()?;
-    let mut modes = vec![FaultHypothesis::fault_free()];
-    let mut p_unenumerated = 0.0;
-
-    let mut sat_priors: Vec<(GnssSatelliteId, f64)> = Vec::with_capacity(geometry.rows.len());
+    let mut events = Vec::with_capacity(geometry.rows.len() + ism.constellations.len());
     for row in &geometry.rows {
-        let model = ism.effective_for(row)?;
-        sat_priors.push((row.id, model.p_sat));
+        events.push(PrimaryEvent::Satellite(
+            row.id,
+            ism.effective_for(row)?.p_sat,
+        ));
     }
-    let satellite_order_mass = satellite_order_masses(&sat_priors);
-    let constellation_priors = constellation_priors(geometry, ism)?;
-    let constellation_involving_order_mass =
-        constellation_involving_order_masses(&satellite_order_mass, &constellation_priors);
-
-    if allocation.max_fault_order >= 1 {
-        for &(id, prior) in &sat_priors {
-            if prior > 0.0 {
-                modes.push(FaultHypothesis {
-                    excluded: vec![id],
-                    excluded_constellation: None,
-                    prior,
-                });
-            }
-        }
-
-        for &(system, prior) in &constellation_priors {
-            if prior > 0.0 {
-                modes.push(FaultHypothesis {
-                    excluded: Vec::new(),
-                    excluded_constellation: Some(system),
-                    prior,
-                });
-            }
-        }
-    } else {
-        for &(_, prior) in &sat_priors {
-            p_unenumerated += prior;
-        }
-        for &(_, prior) in &constellation_priors {
-            p_unenumerated += prior;
-        }
+    let mut systems: Vec<_> = geometry.rows.iter().map(|row| row.system).collect();
+    systems.sort_unstable();
+    systems.dedup();
+    for system in systems {
+        events.push(PrimaryEvent::Constellation(
+            system,
+            ism.constellation(system)
+                .ok_or(AraimError::InvalidIsm)?
+                .p_const,
+        ));
     }
 
-    let max_sat_order = sat_priors.len();
-    let max_enumerated_sat_order = allocation.max_fault_order.min(max_sat_order);
-    if max_enumerated_sat_order >= 2 {
-        let mut candidates = Vec::new();
-        for order in 2..=max_enumerated_sat_order {
-            collect_satellite_combinations(
-                &sat_priors,
-                order,
-                0,
-                &mut Vec::with_capacity(order),
-                1.0,
-                &mut candidates,
-            );
-        }
-        candidates.sort_by(compare_candidates);
-
-        let mut remaining: f64 = candidates.iter().map(|candidate| candidate.prior).sum();
-        for candidate in candidates {
-            if remaining < allocation.p_threshold_unmonitored {
-                break;
-            }
-            remaining -= candidate.prior;
-            modes.push(FaultHypothesis {
-                excluded: candidate.ids,
-                excluded_constellation: None,
-                prior: candidate.prior,
-            });
-        }
-        p_unenumerated += remaining;
-        p_unenumerated += satellite_order_mass
-            .iter()
-            .skip(max_enumerated_sat_order + 1)
-            .sum::<f64>();
-    } else {
-        p_unenumerated += satellite_order_mass.iter().skip(2).sum::<f64>();
-    }
-    // WG-C Reference ADD v3.0 Section 4.6 treats constellation faults as
-    // independent primary events, so multi-event tail mass must include any
-    // combination that contains at least one constellation event.
-    p_unenumerated += constellation_involving_order_mass
-        .iter()
-        .skip(2)
-        .sum::<f64>();
-
-    let monitored_fault_mass: f64 = modes.iter().skip(1).map(|mode| mode.prior).sum();
-    let total_fault_mass = monitored_fault_mass + p_unenumerated;
-    if !total_fault_mass.is_finite() || total_fault_mass > 1.0 + 1.0e-12 {
+    let p0: f64 = events.iter().map(|event| 1.0 - event.prior()).product();
+    if !p0.is_finite() || p0 < 0.0 {
         return Err(AraimError::InvalidIsm);
     }
-    modes[0].prior = (1.0 - total_fault_mass).max(0.0);
+    let mut modes = vec![FaultHypothesis {
+        prior: p0,
+        ..FaultHypothesis::fault_free()
+    }];
+    let mut candidates = Vec::new();
+    let max_order = allocation.max_fault_order.min(events.len());
+    for order in 1..=max_order {
+        collect_combinations(
+            geometry,
+            &events,
+            order,
+            0,
+            &mut Vec::with_capacity(order),
+            p0,
+            &mut candidates,
+        );
+    }
+    candidates.sort_by(compare_candidates);
 
-    debug_assert!(p_unenumerated >= 0.0);
-    debug_assert!((monitored_fault_mass + p_unenumerated + modes[0].prior - 1.0).abs() <= 1.0e-10);
+    let order_masses = order_masses(&events);
+    let mut p_unenumerated: f64 = order_masses.iter().skip(1).sum();
+    for candidate in candidates {
+        // ADD section 4.6 and MAAST `determine_subsets_v4` move modes one by
+        // one, in this order, only while the remaining mass exceeds P_THRES.
+        if p_unenumerated <= allocation.p_threshold_unmonitored {
+            break;
+        }
+        p_unenumerated = (p_unenumerated - candidate.hypothesis.prior).max(0.0);
+        modes.push(candidate.hypothesis);
+    }
+    // ADD v3.0 Eq. (16) applies FC to the sum of all same-constellation
+    // satellite-fault modes, not to each mode separately. When the
+    // inequality holds, Eq. (17) transfers that whole monitored probability
+    // mass to the constellation-only representative.
+    let constellation_modes: Vec<_> = modes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, mode)| {
+            mode.excluded_constellation
+                .filter(|_| mode.excluded.is_empty())
+                .map(|system| (index, system, mode.prior))
+        })
+        .collect();
+    let mut remove = vec![false; modes.len()];
+    for (representative, system, constellation_prior) in constellation_modes {
+        let candidates: Vec<_> = (1..modes.len())
+            .filter(|&index| {
+                index != representative
+                    && !modes[index].excluded.is_empty()
+                    // MAAST treats a composite constellation-plus-satellite
+                    // event as belonging to C_j when every affected satellite
+                    // is in j; use that reading where the ADD wording is open.
+                    && modes[index]
+                        .excluded_constellation
+                        .is_none_or(|other| other == system)
+                    && modes[index].excluded.iter().all(|id| id.system == system)
+            })
+            .collect();
+        let consolidated_mass: f64 = candidates.iter().map(|&index| modes[index].prior).sum();
+        if consolidated_mass <= 0.01 * constellation_prior {
+            modes[representative].prior += consolidated_mass;
+            for index in candidates {
+                remove[index] = true;
+            }
+        }
+    }
+    modes = modes
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, mode)| (!remove[index]).then_some(mode))
+        .collect();
     Ok(FaultEnumeration {
         modes,
         p_unenumerated,
     })
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy)]
+enum PrimaryEvent {
+    Satellite(GnssSatelliteId, f64),
+    Constellation(GnssSystem, f64),
+}
+
+impl PrimaryEvent {
+    fn prior(self) -> f64 {
+        match self {
+            Self::Satellite(_, prior) | Self::Constellation(_, prior) => prior,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct Candidate {
-    ids: Vec<GnssSatelliteId>,
-    prior: f64,
+    hypothesis: FaultHypothesis,
+    order: usize,
 }
 
-fn satellite_order_masses(sat_priors: &[(GnssSatelliteId, f64)]) -> Vec<f64> {
-    let mut masses = vec![0.0; sat_priors.len() + 1];
-    masses[0] = 1.0;
-    for (seen, &(_, prior)) in sat_priors.iter().enumerate() {
-        for order in (1..=seen + 1).rev() {
-            masses[order] += masses[order - 1] * prior;
-        }
-    }
-    masses
-}
-
-fn constellation_priors(
+fn collect_combinations(
     geometry: &AraimGeometry,
-    ism: &Ism,
-) -> Result<Vec<(GnssSystem, f64)>, AraimError> {
-    let mut systems: Vec<GnssSystem> = geometry.rows.iter().map(|row| row.system).collect();
-    systems.sort_unstable();
-    systems.dedup();
-    systems
-        .into_iter()
-        .map(|system| {
-            ism.constellation(system)
-                .map(|constellation| (system, constellation.p_const))
-                .ok_or(AraimError::InvalidIsm)
-        })
-        .collect()
-}
-
-fn constellation_involving_order_masses(
-    satellite_order_mass: &[f64],
-    constellation_priors: &[(GnssSystem, f64)],
-) -> Vec<f64> {
-    let constellation_order_mass =
-        order_masses(constellation_priors.iter().map(|&(_, prior)| prior));
-    let mut masses = vec![0.0; satellite_order_mass.len() + constellation_order_mass.len() - 1];
-    for (sat_order, &sat_mass) in satellite_order_mass.iter().enumerate() {
-        for (const_order, &const_mass) in constellation_order_mass.iter().enumerate().skip(1) {
-            masses[sat_order + const_order] += sat_mass * const_mass;
-        }
-    }
-    masses
-}
-
-fn order_masses(priors: impl IntoIterator<Item = f64>) -> Vec<f64> {
-    let mut masses = vec![1.0];
-    for prior in priors {
-        masses.push(0.0);
-        for order in (1..masses.len()).rev() {
-            masses[order] += masses[order - 1] * prior;
-        }
-    }
-    masses
-}
-
-fn collect_satellite_combinations(
-    sat_priors: &[(GnssSatelliteId, f64)],
+    events: &[PrimaryEvent],
     order: usize,
     start: usize,
-    selected: &mut Vec<GnssSatelliteId>,
-    prior: f64,
+    selected: &mut Vec<usize>,
+    p0: f64,
     out: &mut Vec<Candidate>,
 ) {
     if selected.len() == order {
-        if prior > 0.0 {
-            out.push(Candidate {
-                ids: selected.clone(),
-                prior,
-            });
+        let mut excluded = Vec::new();
+        let mut excluded_constellation = None;
+        let mut prior = p0;
+        for &idx in selected.iter() {
+            let event = events[idx];
+            let p = event.prior();
+            if p == 0.0 {
+                return;
+            }
+            prior *= p / (1.0 - p);
+            match event {
+                PrimaryEvent::Satellite(id, _) => excluded.push(id),
+                PrimaryEvent::Constellation(system, _) if excluded_constellation.is_none() => {
+                    excluded_constellation = Some(system);
+                }
+                PrimaryEvent::Constellation(system, _) => excluded.extend(
+                    geometry
+                        .rows
+                        .iter()
+                        .filter(|row| row.system == system)
+                        .map(|row| row.id),
+                ),
+            }
         }
+        excluded.sort_unstable();
+        excluded.dedup();
+        out.push(Candidate {
+            hypothesis: FaultHypothesis {
+                excluded,
+                excluded_constellation,
+                prior,
+            },
+            order,
+        });
         return;
     }
-
-    let remaining_slots = order - selected.len();
-    let max_start = sat_priors.len().saturating_sub(remaining_slots);
-    for idx in start..=max_start {
-        let (id, p_sat) = sat_priors[idx];
-        selected.push(id);
-        collect_satellite_combinations(sat_priors, order, idx + 1, selected, prior * p_sat, out);
+    let remaining = order - selected.len();
+    for idx in start..=events.len().saturating_sub(remaining) {
+        selected.push(idx);
+        collect_combinations(geometry, events, order, idx + 1, selected, p0, out);
         selected.pop();
     }
 }
 
+fn order_masses(events: &[PrimaryEvent]) -> Vec<f64> {
+    let mut masses = vec![0.0; events.len() + 1];
+    masses[0] = 1.0;
+    for (seen, event) in events.iter().enumerate() {
+        let p = event.prior();
+        for order in (0..=seen + 1).rev() {
+            masses[order] = masses[order] * (1.0 - p)
+                + if order > 0 {
+                    masses[order - 1] * p
+                } else {
+                    0.0
+                };
+        }
+    }
+    masses
+}
+
 fn compare_candidates(a: &Candidate, b: &Candidate) -> Ordering {
-    b.prior
-        .partial_cmp(&a.prior)
-        .unwrap_or(Ordering::Equal)
-        .then_with(|| a.ids.cmp(&b.ids))
+    // Rust's stable sort preserves the lexicographic combination-generation
+    // order for equal probabilities, matching MAAST/Octave's stable `sort`.
+    a.order.cmp(&b.order).then_with(|| {
+        b.hypothesis
+            .prior
+            .partial_cmp(&a.hypothesis.prior)
+            .unwrap_or(Ordering::Equal)
+    })
 }

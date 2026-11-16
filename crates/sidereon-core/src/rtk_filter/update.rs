@@ -137,6 +137,8 @@ pub(crate) struct Hold {
     pub sat_sd_id: String,
     pub ref_sd_id: String,
     pub fixed_m: f64,
+    /// Exact lattice coordinate; never recovered by rounding metric values.
+    pub fixed_cycles: i64,
 }
 
 /// Posterior of one epoch's iterated update. Test-only owned form returned by
@@ -1373,6 +1375,7 @@ pub(crate) fn search_and_hold(
                 sat_sd_id: t.sd_ambiguity_id.clone(),
                 ref_sd_id: ref_sd.clone(),
                 fixed_m: cycles as f64 * lambda + offset,
+                fixed_cycles: cycles,
             });
         }
         Ok((updated, Some(search_result.meta)))
@@ -1399,6 +1402,7 @@ fn held_from_state(state: &FilterState) -> Result<Vec<Hold>, UpdateError> {
                 sat_sd_id: sat_sd_id.clone(),
                 ref_sd_id: ref_sd_id.clone(),
                 fixed_m,
+                fixed_cycles: held_integer(state, sat_sd_id)?,
             })
         })
         .collect()
@@ -1420,6 +1424,7 @@ fn held_from_state_into<'a>(
                 sat_sd_id: String::new(),
                 ref_sd_id: String::new(),
                 fixed_m: 0.0,
+                fixed_cycles: 0,
             });
         }
         let hold = &mut pool.holds[pool.len];
@@ -1427,6 +1432,7 @@ fn held_from_state_into<'a>(
         assign_str(&mut hold.sat_sd_id, sat_sd_id);
         assign_str(&mut hold.ref_sd_id, ref_sd_id);
         hold.fixed_m = fixed_m;
+        hold.fixed_cycles = held_integer(state, sat_sd_id)?;
     }
     Ok(&pool.holds[..pool.len])
 }
@@ -1444,25 +1450,25 @@ fn has_search_targets(epoch: &Epoch, held: &[Hold], float_only_systems: &[GnssSy
 
 type FixedMaps = (BTreeMap<String, i64>, BTreeMap<String, f64>);
 
-fn fixed_maps_from_holds(
-    holds: &[Hold],
-    wavelengths: &BTreeMap<String, f64>,
-    offsets: &BTreeMap<String, f64>,
-) -> Result<FixedMaps, UpdateError> {
+fn held_integer(state: &FilterState, id: &str) -> Result<i64, UpdateError> {
+    state
+        .fixed_cycles
+        .get(id)
+        .copied()
+        .ok_or(UpdateError::InvalidInput {
+            field: "state.fixed_cycles",
+            kind: super::RtkInputErrorKind::Missing,
+        })
+}
+
+fn fixed_maps_from_holds(holds: &[Hold]) -> FixedMaps {
     let mut fixed_cycles = BTreeMap::new();
     let mut fixed_m = BTreeMap::new();
     for hold in holds {
-        let lambda = *wavelengths
-            .get(&hold.sat_sd_id)
-            .ok_or_else(|| UpdateError::MissingWavelength(hold.sat_sd_id.clone()))?;
-        let offset = *offsets
-            .get(&hold.sat_sd_id)
-            .ok_or_else(|| UpdateError::MissingOffset(hold.sat_sd_id.clone()))?;
-        let cycles = ((hold.fixed_m - offset) / lambda).round() as i64;
-        fixed_cycles.insert(hold.sat_sd_id.clone(), cycles);
+        fixed_cycles.insert(hold.sat_sd_id.clone(), hold.fixed_cycles);
         fixed_m.insert(hold.sat_sd_id.clone(), hold.fixed_m);
     }
-    Ok((fixed_cycles, fixed_m))
+    (fixed_cycles, fixed_m)
 }
 
 /// Kinematic predict: rank-3 (Woodbury) inflation of the baseline (indices 0..3)
@@ -1583,10 +1589,6 @@ pub fn update_epoch_with_scratch(
 ) -> Result<EpochUpdate, UpdateError> {
     state.validate_for_update().map_err(invalid_state)?;
     validate_update_opts(opts)?;
-    let AmbiguityScale {
-        wavelengths_m: wavelengths,
-        offsets_m: offsets,
-    } = scale;
     let ctx = MeasContext {
         base,
         model,
@@ -1754,7 +1756,7 @@ pub fn update_epoch_with_scratch(
 
     let previous_fixed: std::collections::BTreeSet<String> =
         state.fixed_cycles.keys().cloned().collect();
-    let (fixed_cycles, fixed_m) = fixed_maps_from_holds(&updated_holds, wavelengths, offsets)?;
+    let (fixed_cycles, fixed_m) = fixed_maps_from_holds(&updated_holds);
     let fixed_ids: Vec<String> = fixed_cycles.keys().cloned().collect();
     let newly_fixed: Vec<String> = fixed_ids
         .iter()

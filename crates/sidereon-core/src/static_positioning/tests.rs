@@ -323,6 +323,33 @@ fn single_epoch_static_matches_spp_bits() {
     assert_eq!(static_solution.used_sats[0], spp_solution.used_sats);
 }
 
+#[test]
+fn invalid_duplicate_does_not_change_static_inputs() {
+    let source = make_store(1);
+    let epochs = clean_epochs(&source, 1);
+    let expected = solve_static(&source, &epochs, options()).unwrap();
+    for first in [false, true] {
+        let mut epochs = epochs.clone();
+        let invalid = Observation {
+            satellite_id: epochs[0].measurements[0].satellite_id,
+            pseudorange_m: f64::NAN,
+        };
+        if first {
+            epochs[0].measurements.insert(0, invalid);
+        } else {
+            epochs[0].measurements.push(invalid);
+        }
+        assert!(validated_epoch_inputs(&epochs, options()).is_ok());
+        let actual = solve_static(&source, &epochs, options()).unwrap();
+        assert_eq!(actual.position, expected.position);
+        assert_eq!(actual.used_sats, expected.used_sats);
+        assert!(actual.rejected_sats[0]
+            .iter()
+            .any(|rejection| rejection.satellite_id == invalid.satellite_id
+                && rejection.reason == crate::spp::RejectionReason::NonFinitePseudorange));
+    }
+}
+
 /// An ionosphere-corrected epoch holding a satellite whose carrier cannot be
 /// resolved keeps its other satellites: the satellite is excluded and reported
 /// in `rejected_sats` for its epoch, as SPP excludes it, instead of the static

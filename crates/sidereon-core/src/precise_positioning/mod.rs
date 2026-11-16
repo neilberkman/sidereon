@@ -175,6 +175,7 @@ pub use prep::{
     PreparedFloatObservation, WideLanePrepError, WideLanePrepOptions, WideLanePrepResult,
 };
 pub use raim::{
+    fault_free_accuracy_bounds, protection_levels, protection_levels_with_weights,
     solve_float_epoch_with_raim, ProtectionLevels, RaimConfig, RaimError, RaimFdeError,
     RaimFdeResult, RaimFdeStatus, RaimGeometryRow, RaimIdentification, RaimResult, RaimStatus,
     SatelliteTestStatistic,
@@ -1305,6 +1306,7 @@ fn apply_elevation_cutoff(
     estimate_residual_ionosphere: bool,
     satellite_clock: Option<&SatelliteClockCorrections>,
 ) -> Result<Vec<FloatEpoch>, FloatSolveError> {
+    let cutoff_rad = cutoff_deg * crate::constants::DEG_TO_RAD;
     let mut retained = Vec::with_capacity(epochs.len());
     for (epoch_idx, epoch) in epochs.iter().enumerate() {
         let mut observations = Vec::with_capacity(epoch.observations.len());
@@ -1318,7 +1320,11 @@ fn apply_elevation_cutoff(
             )?;
             validate::finite(pred.elevation_deg, "ppp predicted elevation_deg")
                 .map_err(invalid_input)?;
-            if pred.elevation_deg >= cutoff_deg {
+            let (_, elevation_rad) = crate::estimation::substrate::frames::satazel(
+                state.position_m,
+                pred.sat_pos_ecef_m,
+            );
+            if crate::geometry::visible_at_elevation_mask_rad(elevation_rad, cutoff_rad) {
                 observations.push(obs.clone());
             }
         }

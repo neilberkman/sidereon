@@ -46,12 +46,12 @@ use antenna::{pcv_m, receiver_antenna_correction};
 pub use antenna::{ReceiverAntennaCalibration, ReceiverAntennaCorrections, ReceiverAntennaError};
 pub use arc::{
     fix_wide_lane_rtk_arc, prepare_ionosphere_free_rtk_arc, solve_rtk_arc, solve_static_rtk_arc,
-    solve_wide_lane_fixed_rtk_arc, RtkArcConfig, RtkArcEpoch, RtkArcEpochSolution, RtkArcError,
-    RtkArcObservation, RtkArcPreprocessing, RtkArcSolution, RtkDualCycleSlipConfig,
+    solve_wide_lane_fixed_rtk_arc, ReleasedRtkHold, RtkArcConfig, RtkArcEpoch, RtkArcEpochSolution,
+    RtkArcError, RtkArcObservation, RtkArcPreprocessing, RtkArcSolution, RtkDualCycleSlipConfig,
     RtkDualFrequencyArcEpoch, RtkDualFrequencyObservation, RtkDualFrequencySatelliteObservation,
-    RtkIonosphereFreeArcConfig, RtkIonosphereFreeArcError, RtkIonosphereFreeArcSolution,
-    RtkStaticArcConfig, RtkStaticArcError, RtkStaticArcSolution, RtkWideLaneArcConfig,
-    RtkWideLaneArcError, RtkWideLaneArcSolution, RtkWideLaneFixedArcConfig,
+    RtkHoldReleaseReason, RtkIonosphereFreeArcConfig, RtkIonosphereFreeArcError,
+    RtkIonosphereFreeArcSolution, RtkStaticArcConfig, RtkStaticArcError, RtkStaticArcSolution,
+    RtkWideLaneArcConfig, RtkWideLaneArcError, RtkWideLaneArcSolution, RtkWideLaneFixedArcConfig,
     RtkWideLaneFixedArcError, RtkWideLaneFixedArcIntegerMethod, RtkWideLaneFixedArcMetadata,
     RtkWideLaneFixedArcSolution, RtkWideLaneFixedArcSolveConfig,
     RtkWideLaneFixedSequentialArcSolution, RtkWideLaneFixedStaticArcSolution,

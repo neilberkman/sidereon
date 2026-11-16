@@ -440,7 +440,9 @@ pub fn residual_diagnostics(
         validate_probability(p_fa)?;
     }
 
-    let degrees_of_freedom = residuals_m.len() as isize - n_parameters as isize;
+    let degrees_of_freedom = isize::try_from(residuals_m.len())
+        .unwrap_or(isize::MAX)
+        .saturating_sub(isize::try_from(n_parameters).unwrap_or(isize::MAX));
     let mut weighted_sum_squares = 0.0;
     let mut normalized_residuals = Vec::with_capacity(residuals_m.len());
     let mut worst_index = None;
@@ -464,7 +466,7 @@ pub fn residual_diagnostics(
         None
     };
     let chi_square_threshold = match (p_fa, degrees_of_freedom > 0) {
-        (Some(p_fa), true) => Some(chi2_inv(1.0 - p_fa, degrees_of_freedom as usize)?),
+        (Some(p_fa), true) => Some(chi2_isf(p_fa, degrees_of_freedom as usize)?),
         _ => None,
     };
     let chi_square_consistent =
@@ -542,18 +544,21 @@ fn raim_checked(
     };
     validate_raim_input(used_sats, residuals_m, variances_m2)?;
 
-    let n_used = used_sats.len() as isize;
+    let n_used = isize::try_from(used_sats.len()).unwrap_or(isize::MAX);
     let n_systems = match n_systems {
         Some(n_systems) if n_systems >= 1 => n_systems,
         Some(_) => return Err(QualityError::InvalidSystemCount),
         None => distinct_systems(used_sats),
     };
-    let dof = n_used - (3 + n_systems);
+    let n_state = n_systems
+        .checked_add(3)
+        .ok_or(QualityError::InvalidSystemCount)?;
+    let dof = n_used.saturating_sub(n_state);
 
     let mut test_statistic = 0.0;
     let mut normalized_residuals = BTreeMap::new();
     let mut worst_sat = None::<String>;
-    let mut worst_abs = f64::NEG_INFINITY;
+    let mut worst_abs = 0.0;
 
     for (index, (satellite_id, residual_m)) in used_sats.iter().zip(residuals_m).enumerate() {
         let normalized = match (&options.weights, variances_m2) {
@@ -595,7 +600,7 @@ fn raim_checked(
         });
     }
 
-    let threshold = chi2_inv(1.0 - options.p_fa, dof as usize)?;
+    let threshold = chi2_isf(options.p_fa, dof as usize)?;
     Ok(RaimResult {
         fault_detected: test_statistic > threshold,
         test_statistic,
@@ -622,6 +627,10 @@ fn validate_raim_input(
     variances_m2: Option<&[f64]>,
 ) -> Result<(), QualityError> {
     if used_sats.len() != residuals_m.len() {
+        return Err(QualityError::InvalidResiduals);
+    }
+    let mut unique = BTreeSet::new();
+    if used_sats.iter().any(|satellite| !unique.insert(satellite)) {
         return Err(QualityError::InvalidResiduals);
     }
     validate::finite_slice(residuals_m, "raim residuals")
@@ -946,6 +955,17 @@ where
             );
             let candidate = solve(&subset).ok()?;
             let used_sats = candidate.raim_used_sats();
+            let clock_count = candidate.raim_clock_count().unwrap_or_else(|| {
+                used_sats
+                    .iter()
+                    .filter_map(|sat| sat.chars().next())
+                    .collect::<BTreeSet<_>>()
+                    .len()
+            });
+            let n_state = 3usize.checked_add(clock_count)?;
+            if used_sats.len() <= n_state {
+                return None;
+            }
             Some(LeaveOneOutFit {
                 used: used_sats.len(),
                 rms_m: rtklib_order_rms_m(&used_sats, candidate.raim_residuals_m()),
@@ -1140,25 +1160,76 @@ impl FdeSppOptions {
 /// [`ReceiverSolution`], the excluded satellite tokens in exclusion order, the
 /// exclusion count and the accepted solution's detection test.
 ///
-/// This is the single core driver the language bindings reduce to. It chains the
-/// existing [`solve`], [`validate_receiver_solution`], and [`fde`] primitives and
-/// adds no detection, exclusion, or solve math of its own, so it is bit-for-bit
-/// identical to assembling that loop by hand around the same primitives.
+/// This is the single core driver the language bindings reduce to. It composes
+/// [`solve`], [`validate_receiver_solution`], and [`fde`]. Invalid observations
+/// are removed before FDE, so they do not consume its exclusion budget.
 pub fn fde_spp(
     eph: &dyn EphemerisSource,
     inputs: &SolveInputs,
     with_geodetic: bool,
     options: &FdeSppOptions,
 ) -> Result<FdeResult<ReceiverSolution>, FdeError<ReceiverSolution, FdeSppError>> {
-    let observations = inputs.observations.clone();
-    fde(&observations, &options.fde, |remaining| {
+    let rejected_invalid: Vec<_> = inputs
+        .observations
+        .iter()
+        .filter_map(|observation| {
+            let reason = if !observation.pseudorange_m.is_finite() {
+                crate::spp::RejectionReason::NonFinitePseudorange
+            } else if observation.pseudorange_m <= 0.0 {
+                crate::spp::RejectionReason::NonPositivePseudorange
+            } else {
+                return None;
+            };
+            Some((observation.satellite_id, reason))
+        })
+        .collect();
+    let usable: Vec<_> = inputs
+        .observations
+        .iter()
+        .copied()
+        .filter(|observation| {
+            observation.pseudorange_m.is_finite() && observation.pseudorange_m > 0.0
+        })
+        .collect();
+    let result = fde(&usable, &options.fde, |remaining| {
         let mut next = inputs.clone();
         next.observations = remaining.to_vec();
         let solution = solve(eph, &next, with_geodetic).map_err(FdeSppError::Spp)?;
         validate_receiver_solution(&solution, options.validation)
             .map_err(FdeSppError::Validation)?;
         Ok(solution)
-    })
+    });
+    match result {
+        Ok(mut result) => {
+            append_invalid_spp_rejections(&mut result.solution, &rejected_invalid);
+            Ok(result)
+        }
+        Err(FdeError::FaultUnresolved(mut unresolved)) => {
+            append_invalid_spp_rejections(&mut unresolved.solution, &rejected_invalid);
+            Err(FdeError::FaultUnresolved(unresolved))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn append_invalid_spp_rejections(
+    solution: &mut ReceiverSolution,
+    rejected_invalid: &[(GnssSatelliteId, crate::spp::RejectionReason)],
+) {
+    solution
+        .rejected_sats
+        .extend(
+            rejected_invalid
+                .iter()
+                .copied()
+                .map(|(satellite_id, reason)| crate::spp::RejectedSat {
+                    satellite_id,
+                    reason,
+                }),
+        );
+    solution
+        .rejected_sats
+        .sort_by_key(|rejected| rejected.satellite_id);
 }
 
 /// Run robust-reweighted SPP under the RAIM/FDE exclusion loop.
@@ -1331,8 +1402,9 @@ struct WlsFit {
 ///
 /// # References
 ///
-/// - RTKLIB demo5, `pntpos.c` (`valsol` chi-square residual gate and `raim_fde`
-///   leave-one-out exclusion) and `rtkcmn.c` (`chisqr` table, `alpha = 0.001`).
+/// - RTKLIB demo5, `pntpos.c` (`valsol` computes the chi-square residual value
+///   but its rejection is commented out; `raim_fde` supplies leave-one-out
+///   exclusion) and `rtkcmn.c` (`chisqr` table, `alpha = 0.001`).
 /// - Parkinson & Spilker, *Global Positioning System: Theory and Applications*,
 ///   Vol. II, Ch. 5 (RAIM, integrity monitoring).
 /// - Kaplan & Hegarty, *Understanding GPS/GNSS: Principles and Applications*,
@@ -1539,6 +1611,9 @@ fn validate_range_rows(rows: &[RangeFdeRow]) -> Result<usize, QualityError> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct SolutionValidationOptions {
+    /// Optional RTKLIB single-clock GDOP ceiling. `Some(30.0)` reproduces
+    /// RTKLIB `valsol`; the default is off to preserve existing behavior.
+    pub max_gdop: Option<f64>,
     /// Optional PDOP ceiling.
     pub max_pdop: Option<f64>,
     /// Minimum plausible geocentric radius, meters.
@@ -1554,6 +1629,7 @@ pub struct SolutionValidationOptions {
 impl Default for SolutionValidationOptions {
     fn default() -> Self {
         Self {
+            max_gdop: None,
             max_pdop: None,
             min_plausible_radius_m: 6_344_752.0,
             max_plausible_radius_m: 8_378_137.0,
@@ -1576,6 +1652,8 @@ pub enum SolutionValidationError {
     DegenerateGeometryRankDeficient,
     /// PDOP exceeded the caller's configured ceiling.
     DegenerateGeometryPdop(f64),
+    /// GDOP exceeded the caller's configured ceiling.
+    DegenerateGeometryGdop(f64),
     /// Position geocentric radius was outside the physical receiver band.
     ImplausiblePosition(f64),
     /// Solution residuals were non-finite or produced non-finite RMS.
@@ -1599,6 +1677,10 @@ impl core::fmt::Display for SolutionValidationError {
                     "receiver geometry PDOP {pdop} exceeds the configured limit"
                 )
             }
+            Self::DegenerateGeometryGdop(gdop) => write!(
+                f,
+                "receiver geometry GDOP {gdop} exceeds the configured limit"
+            ),
             Self::ImplausiblePosition(radius_m) => write!(
                 f,
                 "receiver geocentric radius {radius_m} m is outside the plausible range"
@@ -1626,15 +1708,28 @@ pub fn validate_receiver_solution(
         return Err(SolutionValidationError::DegenerateGeometryRankDeficient);
     };
 
+    if let Some(max_gdop) = options.max_gdop {
+        let gdop = solution
+            .rtklib_single_clock_dop
+            .as_ref()
+            .map_or(0.0, |single_clock| single_clock.gdop);
+        if !gdop.is_finite() || gdop <= 0.0 || gdop > max_gdop {
+            return Err(SolutionValidationError::DegenerateGeometryGdop(gdop));
+        }
+    }
+
     if let Some(max_pdop) = options.max_pdop {
-        if dop.pdop > max_pdop {
+        if !dop.pdop.is_finite() || dop.pdop > max_pdop {
             return Err(SolutionValidationError::DegenerateGeometryPdop(dop.pdop));
         }
     }
 
     let p = solution.position.as_array();
     let radius_m = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
-    if radius_m < options.min_plausible_radius_m || radius_m > options.max_plausible_radius_m {
+    if !radius_m.is_finite()
+        || radius_m < options.min_plausible_radius_m
+        || radius_m > options.max_plausible_radius_m
+    {
         return Err(SolutionValidationError::ImplausiblePosition(radius_m));
     }
 
@@ -1644,9 +1739,6 @@ pub fn validate_receiver_solution(
         return Err(SolutionValidationError::InvalidResiduals);
     }
     let rms = residual_rms(&solution.residuals_m);
-    if !rms.is_finite() {
-        return Err(SolutionValidationError::InvalidResiduals);
-    }
     if rms > options.max_converged_residual_rms_m {
         return Err(SolutionValidationError::NoConvergence(rms));
     }
@@ -1657,6 +1749,9 @@ pub fn validate_receiver_solution(
 fn validate_solution_validation_options(
     options: SolutionValidationOptions,
 ) -> Result<(), SolutionValidationError> {
+    if let Some(max_gdop) = options.max_gdop {
+        validate::finite_positive(max_gdop, "max_gdop").map_err(validation_option_error)?;
+    }
     if let Some(max_pdop) = options.max_pdop {
         validate::finite_positive(max_pdop, "max_pdop").map_err(validation_option_error)?;
     }
@@ -1694,45 +1789,280 @@ fn residual_rms(residuals: &[f64]) -> f64 {
     (sum_sq / residuals.len() as f64).sqrt()
 }
 
-/// Chi-square inverse CDF.
+/// Chi-square inverse CDF, evaluated in the lower tail without imposing a
+/// fixed positive floor on very small quantiles. Subnormal probabilities retain
+/// their exponent separately in the small-argument series; other underflowing
+/// tails are inverted logarithmically before probability rounding.
 pub fn chi2_inv(p: f64, k: usize) -> Result<f64, QualityError> {
     validate_probability(p)?;
     if k == 0 {
         return Err(QualityError::InvalidDof);
     }
-    let a = 0.5 * k as f64;
-    let hi0 = (k as f64 + 10.0 * (2.0 * k as f64).sqrt()).max(1.0);
-    let hi = chi2_bracket_hi(p, a, hi0);
-    Ok(chi2_bisect(p, a, 0.0, hi, 0))
+    if k == 1 && p <= 1.0e-3 {
+        // For one degree of freedom, F(x)=erf(sqrt(x/2)). Invert its
+        // odd-power series directly in p so the lower tail never forms 1-p:
+        // x=(pi/2)p^2[1+(pi/6)p^2+(13pi^2/360)p^4+O(p^6)].
+        let p2 = p * p;
+        let correction = 1.0
+            + p2 * (std::f64::consts::PI / 6.0
+                + p2 * (13.0 * std::f64::consts::PI.powi(2) / 360.0));
+        return Ok(std::f64::consts::FRAC_PI_2 * p2 * correction);
+    }
+    if k == 2 {
+        return Ok(-2.0 * libm::log1p(-p));
+    }
+    if p > 0.5 {
+        chi2_inverse_tail(1.0 - p, k, true)
+    } else {
+        chi2_inverse_tail(p, k, false)
+    }
 }
 
-fn chi2_bracket_hi(p: f64, a: f64, hi: f64) -> f64 {
-    if chi2_cdf(hi, a) >= p {
+/// Chi-square inverse survival function. This accepts the upper-tail
+/// probability directly so integrity probabilities smaller than an ulp at one
+/// remain representable, including the smallest positive binary64 probability.
+pub fn chi2_isf(p: f64, k: usize) -> Result<f64, QualityError> {
+    validate_probability(p)?;
+    if k == 0 {
+        return Err(QualityError::InvalidDof);
+    }
+    if p > 0.5 {
+        return chi2_inv(1.0 - p, k);
+    }
+    if k == 1 {
+        let z = std::f64::consts::SQRT_2
+            * crate::integrity::erfc_inv(p).ok_or(QualityError::InvalidProbability)?;
+        return Ok(z * z);
+    }
+    if k == 2 {
+        return Ok(-2.0 * libm::log(p));
+    }
+    chi2_inverse_tail(p, k, true)
+}
+
+fn chi2_inverse_tail(p: f64, k: usize, upper: bool) -> Result<f64, QualityError> {
+    let a = 0.5 * k as f64;
+    if !upper && k <= 30 && p < 1.0e-6 {
+        // P(a,x/2) = (x/2)^a/Gamma(a+1) * (1 + O(x)). This leading
+        // term seeds the full series inversion. Separating the exponent
+        // avoids rounding a subnormal p*Gamma(a+1) before taking the power.
+        let target_root = if p < f64::MIN_POSITIVE {
+            let (fraction, exponent) = libm::frexp(p);
+            positive_power_two_over_n_scaled(fraction * libm::tgamma(a + 1.0), exponent, k)
+        } else {
+            positive_power_two_over_n_scaled(p * libm::tgamma(a + 1.0), 0, k)
+        };
+        // For this seed y remains below 0.0101; the next alternating
+        // exponential-series term is bounded by y^9/9! < 3.1e-24.
+        // Larger shapes/arguments use the general
+        // gamma inversion, whose log-gamma cannot overflow.
+        if target_root <= 0.01 {
+            let mut y = target_root;
+            // The fixed-point derivative on y<=0.0101 is below 0.01.
+            // Sixteen steps reduce the initial O(0.01) relative error
+            // below 1e-34; stop earlier at a rounded fixed point or cycle.
+            let mut previous = f64::NAN;
+            for _ in 0..16 {
+                let mut sum = 1.0;
+                let mut term = 1.0;
+                for index in 1..=8 {
+                    term *= -y / index as f64;
+                    sum += term * a / (a + index as f64);
+                }
+                let next = target_root / libm::pow(sum, 1.0 / a);
+                if next == y || next == previous {
+                    break;
+                }
+                previous = y;
+                y = next;
+            }
+            return Ok(2.0 * y);
+        }
+    }
+    if p < f64::MIN_POSITIVE {
+        return Ok(chi2_inverse_log_tail(p, a, upper));
+    }
+    let hi0 = (k as f64 + 10.0 * (2.0 * k as f64).sqrt()).max(1.0);
+    let hi = chi2_bracket_hi(p, a, hi0, upper);
+    Ok(chi2_bisect(p, a, 0.0, hi, upper))
+}
+
+fn positive_power_two_over_n_scaled(value: f64, scale: i32, n: usize) -> f64 {
+    let (fraction, exponent) = libm::frexp(value);
+    let exponent = exponent + scale;
+    let doubled_exponent = 2 * exponent;
+    let quotient = doubled_exponent.div_euclid(n as i32);
+    let remainder = doubled_exponent.rem_euclid(n as i32);
+    let radicand = fraction * fraction * libm::ldexp(1.0, remainder);
+    let mut root = libm::pow(radicand, 1.0 / n as f64);
+    for _ in 0..4 {
+        root = ((n - 1) as f64 * root + radicand / root.powi((n - 1) as i32)) / n as f64;
+    }
+    libm::ldexp(root, quotient)
+}
+
+/// Invert an underflowing tail without rounding it to a subnormal probability.
+/// The log tail remains normal throughout this search; adjacent binary64
+/// endpoints, rather than a relative probability test, terminate it.
+fn chi2_inverse_log_tail(p: f64, a: f64, upper: bool) -> f64 {
+    let target = if a >= 32.0 { 0.0 } else { libm::log(p) };
+    let tail = |x: f64| {
+        let argument = 0.5 * x;
+        let normalization = if a >= 32.0 {
+            crate::astro::math::special::gamma_scale_log_ratio(a, argument, p)
+        } else {
+            gamma_log_scale(a, argument)
+        };
+        normalization
+            + libm::log(if upper {
+                gamma_continued_fraction(a, argument)
+            } else {
+                gamma_series(a, argument)
+            })
+    };
+    let mut lo = 0.0;
+    let mut hi = (2.0 * a + 10.0 * libm::sqrt(4.0 * a)).max(1.0);
+    while if upper {
+        tail(hi) > target
+    } else {
+        tail(hi) < target
+    } {
+        hi *= 2.0;
+    }
+    loop {
+        let mid = lo + 0.5 * (hi - lo);
+        if mid == lo || mid == hi {
+            return if lo > 0.0 && (tail(lo) - target).abs() < (tail(hi) - target).abs() {
+                lo
+            } else {
+                hi
+            };
+        }
+        if if upper {
+            tail(mid) > target
+        } else {
+            tail(mid) < target
+        } {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+fn chi2_bracket_hi(p: f64, a: f64, hi: f64, upper: bool) -> f64 {
+    let bracketed = if upper {
+        regularized_gamma_q(a, 0.5 * hi) <= p
+    } else {
+        regularized_gamma_p(a, 0.5 * hi) >= p
+    };
+    if bracketed {
         hi
     } else {
-        chi2_bracket_hi(p, a, hi * 2.0)
+        chi2_bracket_hi(p, a, hi * 2.0, upper)
     }
 }
 
-fn chi2_bisect(p: f64, a: f64, lo: f64, hi: f64, iter: usize) -> f64 {
-    if iter >= 120 {
-        return 0.5 * (lo + hi);
+fn chi2_bisect(p: f64, a: f64, mut lo: f64, mut hi: f64, upper: bool) -> f64 {
+    for _ in 0..1075 {
+        let mid = lo + 0.5 * (hi - lo);
+        if mid == lo || mid == hi {
+            break;
+        }
+        let move_lo = if upper {
+            regularized_gamma_q(a, 0.5 * mid) > p
+        } else {
+            regularized_gamma_p(a, 0.5 * mid) < p
+        };
+        if move_lo {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        if hi - lo <= 1.0e-10 * mid.max(f64::MIN_POSITIVE) {
+            break;
+        }
     }
-    let mid = 0.5 * (lo + hi);
-    if chi2_cdf(mid, a) < p {
-        chi2_bisect(p, a, mid, hi, iter + 1)
+    let mut x = lo + 0.5 * (hi - lo);
+    for _ in 0..1075 {
+        let tail = chi2_tail_probability(a, x, upper);
+        let density = chi2_density(a, x);
+        let derivative = if upper { -density } else { density };
+        let candidate = x - (tail - p) / derivative;
+        let next = if candidate.is_finite() && candidate > lo && candidate < hi {
+            candidate
+        } else {
+            lo + 0.5 * (hi - lo)
+        };
+        let next_tail = chi2_tail_probability(a, next, upper);
+        let move_lo = if upper { next_tail > p } else { next_tail < p };
+        if move_lo {
+            lo = next;
+        } else {
+            hi = next;
+        }
+        x = next;
+        if hi == lo || f64::from_bits(lo.to_bits() + 1) >= hi {
+            break;
+        }
+    }
+    x
+}
+
+fn chi2_tail_probability(a: f64, x: f64, upper: bool) -> f64 {
+    if a == 0.5 {
+        let root = libm::sqrt(0.5 * x);
+        if upper {
+            libm::erfc(root)
+        } else {
+            libm::erf(root)
+        }
+    } else if upper {
+        regularized_gamma_q(a, 0.5 * x)
     } else {
-        chi2_bisect(p, a, lo, mid, iter + 1)
+        regularized_gamma_p(a, 0.5 * x)
     }
 }
 
-fn chi2_cdf(x: f64, a: f64) -> f64 {
-    regularized_gamma_p(a, 0.5 * x)
+fn chi2_density(a: f64, x: f64) -> f64 {
+    libm::exp(gamma_log_scale(a, 0.5 * x) - libm::log(x))
+}
+
+/// log(x^a exp(-x) / Gamma(a)), without cancellation near x=a.
+fn gamma_log_scale(a: f64, x: f64) -> f64 {
+    if a < 32.0 {
+        return -x + a * libm::log(x) - log_gamma(a);
+    }
+    let delta = (x - a) / a;
+    let log_minus_delta = if delta.abs() < 0.25 {
+        let mut term = -delta * delta / 2.0;
+        let mut sum = term;
+        for order in 3..=128 {
+            term *= -delta * (order - 1) as f64 / order as f64;
+            sum += term;
+            if term.abs() <= sum.abs() * 0.25 * f64::EPSILON {
+                break;
+            }
+        }
+        sum
+    } else {
+        libm::log(x / a) - delta
+    };
+    let r = 1.0 / a;
+    let r2 = r * r;
+    let stirling = r
+        * (1.0 / 12.0
+            + r2 * (-1.0 / 360.0
+                + r2 * (1.0 / 1260.0
+                    + r2 * (-1.0 / 1680.0 + r2 * (1.0 / 1188.0 - r2 * 691.0 / 360360.0)))));
+    a * log_minus_delta + 0.5 * libm::log(a)
+        - 0.5 * libm::log(2.0 * std::f64::consts::PI)
+        - stirling
 }
 
 const GAMMA_EPS: f64 = 1.0e-15;
 const GAMMA_FPMIN: f64 = 1.0e-300;
-const GAMMA_ITMAX: usize = 1_000;
+const GAMMA_ITMAX: usize = 100_000;
 
 fn regularized_gamma_p(a: f64, x: f64) -> f64 {
     if x <= 0.0 {
@@ -1740,28 +2070,409 @@ fn regularized_gamma_p(a: f64, x: f64) -> f64 {
     }
 
     if x < a + 1.0 {
-        let gln = log_gamma(a);
-        let sum = gamma_series(x, 1.0 / a, 1.0 / a, a, 1);
-        sum * libm::exp(-x + a * libm::log(x) - gln)
+        let sum = gamma_series(a, x);
+        sum * gamma_scale(a, x)
     } else {
-        let gln = log_gamma(a);
-        let q = gamma_continued_fraction(a, x) * libm::exp(-x + a * libm::log(x) - gln);
+        let q = gamma_continued_fraction(a, x) * gamma_scale(a, x);
         1.0 - q
     }
 }
 
-fn gamma_series(x: f64, sum: f64, del: f64, ap: f64, n: usize) -> f64 {
-    if n > GAMMA_ITMAX {
-        return sum;
+/// Natural logarithm of the noncentral chi-square lower tail.
+///
+/// The supported domain is finite x >= 0, 1 <= dof <= 100,000, and finite
+/// noncentrality in [0, 1e12]. Argument limits have distinct typed errors.
+/// One degree of freedom uses the folded-normal identity. For noncentrality at
+/// most 100, a Poisson mixture evaluates the lower or upper central-gamma tail
+/// directly in log space, with at most 10,000 terms and earlier termination only after the
+/// remaining terms are below the returned tail's rounding scale. Larger
+/// noncentrality conditions on the `dof - 1` perpendicular central-normal
+/// components and uses 16 Gauss-Legendre nodes per panel: 64 panels through
+/// 16,384 perpendicular degrees of freedom and 128 above that. That branch also
+/// integrates the smaller tail directly before using `log1p` for a CDF close
+/// to one. In the lower tail with displacement `d > sqrt(x) = r`, the radial
+/// cutoff scales by `sqrt(d/r)`: the conditional radius is stochastically
+/// dominated by a chi radius divided by that factor. This resolves the narrow
+/// conditional mass even when the noncentrality is much larger than x.
+/// Through 100,000 degrees of freedom, the quadrature truncation
+/// contributes at most `1e-11` absolute error in the returned log-CDF.
+pub(crate) fn noncentral_chi2_log_cdf(
+    x: f64,
+    dof: usize,
+    noncentrality: f64,
+) -> Result<f64, NoncentralCdfError> {
+    if !(x.is_finite() && x >= 0.0) {
+        return Err(NoncentralCdfError::InvalidX);
     }
-    let ap = ap + 1.0;
-    let del = del * x / ap;
-    let sum = sum + del;
-    if del.abs() < sum.abs() * GAMMA_EPS {
-        sum
+    if dof == 0 || dof > 100_000 {
+        return Err(NoncentralCdfError::InvalidDof);
+    }
+    if !(noncentrality.is_finite() && (0.0..=1.0e12).contains(&noncentrality)) {
+        return Err(NoncentralCdfError::NoncentralityOutOfRange);
+    }
+    if x > 0.0 && x < f64::MIN_POSITIVE {
+        let a = 0.5 * dof as f64;
+        // Leading gamma term; the next mixture term is bounded by
+        // noncentrality*x/(4*(a+1)) <= 6e-297 over this domain.
+        return Ok(a * (libm::log(x) - std::f64::consts::LN_2)
+            - log_gamma(a + 1.0)
+            - 0.5 * noncentrality);
+    }
+    noncentral_chi2_log_cdf_impl(x, dof, noncentrality).ok_or(NoncentralCdfError::Numerical)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoncentralCdfError {
+    InvalidX,
+    InvalidDof,
+    NoncentralityOutOfRange,
+    Numerical,
+}
+
+#[allow(clippy::excessive_precision)]
+fn noncentral_chi2_log_cdf_impl(x: f64, dof: usize, noncentrality: f64) -> Option<f64> {
+    if !(x.is_finite() && x >= 0.0 && noncentrality.is_finite() && noncentrality >= 0.0) || dof == 0
+    {
+        return None;
+    }
+    if x == 0.0 {
+        return Some(f64::NEG_INFINITY);
+    }
+    let root_x = x.sqrt();
+    let displacement = noncentrality.sqrt();
+    if dof == 1 {
+        return log_folded_normal_interval(root_x, displacement);
+    }
+    if noncentrality == 0.0 {
+        return central_chi2_log_cdf(x, dof);
+    }
+    if noncentrality <= 100.0 {
+        return poisson_mixture_noncentral_log_cdf(x, dof, noncentrality);
+    }
+    let mean = dof as f64 + noncentrality;
+    let integrate_upper = x >= mean;
+    const NODES: [f64; 16] = [
+        -9.89400934991649939e-1,
+        -9.44575023073232600e-1,
+        -8.65631202387831644e-1,
+        -7.55404408355003110e-1,
+        -6.17876244402643771e-1,
+        -4.58016777657227370e-1,
+        -2.81603550779258915e-1,
+        -9.50125098376374405e-2,
+        9.50125098376374405e-2,
+        2.81603550779258915e-1,
+        4.58016777657227370e-1,
+        6.17876244402643771e-1,
+        7.55404408355003110e-1,
+        8.65631202387831644e-1,
+        9.44575023073232600e-1,
+        9.89400934991649939e-1,
+    ];
+    const WEIGHTS: [f64; 16] = [
+        2.71524594117540548e-2,
+        6.22535239386476091e-2,
+        9.51585116824929939e-2,
+        1.24628971255533946e-1,
+        1.49595988816576653e-1,
+        1.69156519395002619e-1,
+        1.82603415044923612e-1,
+        1.89450610455068585e-1,
+        1.89450610455068585e-1,
+        1.82603415044923612e-1,
+        1.69156519395002619e-1,
+        1.49595988816576653e-1,
+        1.24628971255533946e-1,
+        9.51585116824929939e-2,
+        6.22535239386476091e-2,
+        2.71524594117540548e-2,
+    ];
+    let perpendicular_dof = (dof - 1) as f64;
+    // Near the angular endpoint the chi density has width 1/sqrt(nu).
+    // Keep a panel narrower than four such widths: at the largest supported
+    // nu, (pi/2)*sqrt(nu)/128 < 4; through nu=16,384 the 64-panel value is pi.
+    let panels = if perpendicular_dof > 16_384.0 {
+        128
     } else {
-        gamma_series(x, sum, del, ap, n + 1)
+        64
+    };
+    // For d > r, d(log P(|Z+d|<=s))/ds >= d-s. Consequently the
+    // perpendicular integrand divided by the chi density of precision d/r
+    // is decreasing in radius. Its normalized conditional law is therefore
+    // stochastically dominated by that scaled chi law. Forty radial standard
+    // deviations beyond sqrt(nu) bound the omitted relative mass by exp(-800),
+    // while scaling avoids spending all nodes outside a narrow lower-tail peak.
+    let radial_precision = if integrate_upper {
+        1.0
+    } else {
+        (displacement / root_x).max(1.0)
+    };
+    let integration_limit = root_x.min((perpendicular_dof.sqrt() + 40.0) / radial_precision.sqrt());
+    let angle_limit = libm::asin((integration_limit / root_x).min(1.0));
+    let panel_width = angle_limit / panels as f64;
+    let log_density_constant = (1.0 - 0.5 * perpendicular_dof) * core::f64::consts::LN_2
+        - libm::lgamma(0.5 * perpendicular_dof);
+    let mut log_sum = if integrate_upper {
+        let outside = regularized_gamma_q(0.5 * perpendicular_dof, 0.5 * x);
+        if outside > 0.0 {
+            libm::log(outside)
+        } else {
+            f64::NEG_INFINITY
+        }
+    } else {
+        f64::NEG_INFINITY
+    };
+    for panel in 0..panels {
+        let midpoint = (panel as f64 + 0.5) * panel_width;
+        let half_width = 0.5 * panel_width;
+        for (&node, &weight) in NODES.iter().zip(WEIGHTS.iter()) {
+            let angle = midpoint + half_width * node;
+            let radius = root_x * libm::sin(angle);
+            let remaining = root_x * libm::cos(angle);
+            let log_folded = if integrate_upper {
+                log_folded_normal_complement(remaining, displacement)?
+            } else {
+                log_folded_normal_interval(remaining, displacement)?
+            };
+            let log_density = log_density_constant + (perpendicular_dof - 1.0) * libm::log(radius)
+                - 0.5 * radius * radius;
+            let log_jacobian = libm::log(root_x) + libm::log(libm::cos(angle));
+            let log_term =
+                libm::log(weight) + libm::log(half_width) + log_density + log_jacobian + log_folded;
+            log_sum = log_add_exp(log_sum, log_term);
+        }
     }
+    if integrate_upper {
+        if log_sum >= 0.0 {
+            Some(f64::NEG_INFINITY)
+        } else {
+            Some(libm::log1p(-libm::exp(log_sum)))
+        }
+    } else {
+        log_sum.is_finite().then_some(log_sum.min(0.0))
+    }
+}
+
+fn poisson_mixture_noncentral_log_cdf(x: f64, dof: usize, noncentrality: f64) -> Option<f64> {
+    let poisson_mean = 0.5 * noncentrality;
+    let argument = 0.5 * x;
+    let use_upper = x >= dof as f64 + noncentrality;
+    if !use_upper {
+        let mut log_weight = -poisson_mean;
+        let mut log_sum = f64::NEG_INFINITY;
+        for index in 0..10_000 {
+            let a = 0.5 * dof as f64 + index as f64;
+            let log_term = log_weight + central_gamma_log_cdf(a, argument)?;
+            log_sum = log_add_exp(log_sum, log_term);
+            if index as f64 + 1.0 > poisson_mean {
+                let ratio = poisson_mean / (index + 1) as f64;
+                let log_remainder_bound = log_term + libm::log(ratio / (1.0 - ratio));
+                if log_remainder_bound <= log_sum + libm::log(f64::EPSILON) {
+                    break;
+                }
+            }
+            log_weight += libm::log(poisson_mean) - libm::log((index + 1) as f64);
+        }
+        return log_sum.is_finite().then_some(log_sum.min(0.0));
+    }
+    // Markov's inequality with t=1/4 gives an explicit upper-tail bound.
+    // Below half the least subnormal, the returned log-CDF rounds to zero.
+    let log_chernoff_bound = 0.5 * dof as f64 * core::f64::consts::LN_2 + poisson_mean - 0.25 * x;
+    if log_chernoff_bound < -1075.0 * core::f64::consts::LN_2 {
+        return Some(-0.0);
+    }
+    let mut log_weight = -poisson_mean;
+    let mut log_sum = f64::NEG_INFINITY;
+    for index in 0..10_000 {
+        let a = 0.5 * dof as f64 + index as f64;
+        let log_term = log_weight + central_gamma_log_sf(a, argument)?;
+        log_sum = log_add_exp(log_sum, log_term);
+        if index as f64 + 1.0 > poisson_mean {
+            // Q(a+j,x) <= 1. The remaining Poisson mass is bounded by
+            // weight_j*r/(1-r), since subsequent weight ratios decrease.
+            // Bound the returned tail, not merely the accumulated weights.
+            let ratio = poisson_mean / (index + 1) as f64;
+            let log_remainder_bound = log_weight + libm::log(ratio / (1.0 - ratio));
+            if log_remainder_bound <= log_sum + libm::log(f64::EPSILON) {
+                break;
+            }
+        }
+        log_weight += libm::log(poisson_mean) - libm::log((index + 1) as f64);
+    }
+    (log_sum.is_finite() && log_sum < 0.0).then(|| libm::log1p(-libm::exp(log_sum)))
+}
+
+/// Retain the central upper tail before any subnormal conversion. Normal
+/// probabilities reuse the compensated gamma scaling; underflowed values
+/// use the upper continued fraction's logarithm and its log normalization.
+fn central_gamma_log_sf(a: f64, argument: f64) -> Option<f64> {
+    let probability = regularized_gamma_q(a, argument);
+    if (f64::MIN_POSITIVE..=1.0).contains(&probability) {
+        return Some(libm::log(probability));
+    }
+    if probability >= 0.0 && argument >= a + 1.0 {
+        let value = libm::log(gamma_continued_fraction(a, argument)) + gamma_log_scale(a, argument);
+        return (value.is_finite() && value <= 0.0).then_some(value);
+    }
+    None
+}
+
+fn central_gamma_log_cdf(a: f64, argument: f64) -> Option<f64> {
+    if argument < a + 1.0 {
+        let log_probability = libm::log(gamma_series(a, argument)) - argument
+            + a * libm::log(argument)
+            - log_gamma(a);
+        return log_probability
+            .is_finite()
+            .then_some(log_probability.min(0.0));
+    }
+    let upper_tail = gamma_continued_fraction(a, argument)
+        * libm::exp(-argument + a * libm::log(argument) - log_gamma(a));
+    (0.0..1.0)
+        .contains(&upper_tail)
+        .then(|| libm::log1p(-upper_tail))
+}
+
+fn central_chi2_log_cdf(x: f64, dof: usize) -> Option<f64> {
+    let a = 0.5 * dof as f64;
+    let argument = 0.5 * x;
+    central_gamma_log_cdf(a, argument)
+}
+
+fn log_folded_normal_interval(radius: f64, displacement: f64) -> Option<f64> {
+    if radius * displacement.max(1.0) < 0.01 {
+        let radius2 = radius * radius;
+        let displacement2 = displacement * displacement;
+        let correction = 1.0
+            + (displacement2 - 1.0) * radius2 / 6.0
+            + (displacement2 * displacement2 - 6.0 * displacement2 + 3.0) * radius2 * radius2
+                / 120.0
+            + (displacement2 * displacement2 * displacement2
+                - 15.0 * displacement2 * displacement2
+                + 45.0 * displacement2
+                - 15.0)
+                * radius2
+                * radius2
+                * radius2
+                / 5040.0;
+        let result = -0.5 * displacement2 - 0.5 * libm::log(2.0 * core::f64::consts::PI)
+            + libm::log(2.0 * radius)
+            + libm::log(correction);
+        return result.is_finite().then_some(result);
+    }
+    let near_tail = radius - displacement;
+    let far_tail = radius + displacement;
+    if near_tail >= 0.0 {
+        // P(|Z+d| <= r) = 1 - Q(r-d) - Q(r+d). Evaluating both Q tails
+        // directly retains probabilities far below the point where Phi rounds
+        // to one, and log1p preserves their effect on a CDF close to one.
+        let excluded = normal_q(near_tail)? + normal_q(far_tail)?;
+        return (excluded < 1.0).then(|| libm::log1p(-excluded));
+    }
+    // Both interval endpoints are in the lower half of the normal CDF, where
+    // their logarithms can be subtracted without first rounding either to one.
+    let upper = log_normal_cdf(near_tail)?;
+    let lower = log_normal_cdf(-far_tail)?;
+    log_sub_exp(upper, lower)
+}
+
+fn log_folded_normal_complement(radius: f64, displacement: f64) -> Option<f64> {
+    let near_tail = radius - displacement;
+    let far_tail = radius + displacement;
+    if near_tail >= 0.0 {
+        return Some(log_add_exp(
+            log_normal_cdf(-near_tail)?,
+            log_normal_cdf(-far_tail)?,
+        ));
+    }
+    let included = log_folded_normal_interval(radius, displacement)?;
+    if included >= 0.0 {
+        Some(f64::NEG_INFINITY)
+    } else {
+        Some(libm::log1p(-libm::exp(included)))
+    }
+}
+
+fn log_normal_cdf(value: f64) -> Option<f64> {
+    if !value.is_finite() {
+        return None;
+    }
+    if value >= 0.0 {
+        return normal_q(value).map(|tail| libm::log1p(-tail));
+    }
+    if value > -10.0 {
+        let probability = 0.5 * libm::erfc(-value / core::f64::consts::SQRT_2);
+        return (probability > 0.0 && probability.is_finite()).then(|| libm::log(probability));
+    }
+    let magnitude = -value;
+    let mut denominator = magnitude;
+    for numerator in (1..=128).rev() {
+        denominator = magnitude + numerator as f64 / denominator;
+    }
+    let mills_ratio = 1.0 / denominator;
+    let result = -0.5 * value * value - 0.5 * libm::log(2.0 * core::f64::consts::PI)
+        + libm::log(mills_ratio);
+    result.is_finite().then_some(result)
+}
+
+fn normal_q(value: f64) -> Option<f64> {
+    if !(value.is_finite() && value >= 0.0) {
+        return None;
+    }
+    let tail = 0.5 * libm::erfc(value / core::f64::consts::SQRT_2);
+    (tail.is_finite() && (0.0..=0.5).contains(&tail)).then_some(tail)
+}
+
+fn log_add_exp(left: f64, right: f64) -> f64 {
+    if left == f64::NEG_INFINITY {
+        right
+    } else if right == f64::NEG_INFINITY {
+        left
+    } else {
+        let high = left.max(right);
+        high + libm::log1p(libm::exp(left.min(right) - high))
+    }
+}
+
+fn log_sub_exp(high: f64, low: f64) -> Option<f64> {
+    if !(high.is_finite() && low.is_finite()) || low >= high {
+        return None;
+    }
+    Some(high + libm::log1p(-libm::exp(low - high)))
+}
+
+fn regularized_gamma_q(a: f64, x: f64) -> f64 {
+    if x <= 0.0 {
+        return 1.0;
+    }
+    if x < a + 1.0 {
+        1.0 - gamma_series(a, x) * gamma_scale(a, x)
+    } else {
+        gamma_continued_fraction(a, x) * gamma_scale(a, x)
+    }
+}
+
+fn gamma_scale(a: f64, x: f64) -> f64 {
+    if a >= 32.0 {
+        crate::astro::math::special::gamma_scale(a, x)
+    } else {
+        libm::exp(gamma_log_scale(a, x))
+    }
+}
+
+fn gamma_series(a: f64, x: f64) -> f64 {
+    let mut ap = a;
+    let mut del = 1.0 / a;
+    let mut sum = del;
+    for _ in 1..=GAMMA_ITMAX {
+        ap += 1.0;
+        del *= x / ap;
+        sum += del;
+        if del.abs() < sum.abs() * GAMMA_EPS {
+            break;
+        }
+    }
+    sum
 }
 
 fn gamma_continued_fraction(a: f64, x: f64) -> f64 {
@@ -1798,39 +2509,115 @@ fn safe_denominator(x: f64) -> f64 {
     }
 }
 
-const LANCZOS: [f64; 9] = [
-    0.9999999999998099,
-    676.5203681218851,
-    -1259.1392167224028,
-    771.3234287776531,
-    -176.6150291621406,
-    12.507343278686905,
-    -0.13857109526572012,
-    9.984369578019572e-6,
-    1.5056327351493116e-7,
-];
-const SQRT_2PI: f64 = 2.5066282746310002;
-
 fn log_gamma(z: f64) -> f64 {
-    if z < 0.5 {
-        libm::log(std::f64::consts::PI)
-            - libm::log(libm::sin(std::f64::consts::PI * z))
-            - log_gamma(1.0 - z)
-    } else {
-        let z = z - 1.0;
-        let mut x = LANCZOS[0];
-        for (i, coef) in LANCZOS.iter().enumerate().skip(1) {
-            x += coef / (z + i as f64);
+    let twice = 2.0 * z;
+    if twice.is_finite() && twice == twice.round() && z > 0.0 && z <= 64.0 {
+        if z == z.round() {
+            let mut gamma = 1.0;
+            for factor in 2..z as usize {
+                gamma *= factor as f64;
+            }
+            return libm::log(gamma);
         }
-        let t = z + 7.5;
-        libm::log(SQRT_2PI) + (z + 0.5) * libm::log(t) - t + libm::log(x)
+        let mut gamma = std::f64::consts::PI.sqrt();
+        let mut value = 0.5;
+        while value < z {
+            gamma *= value;
+            value += 1.0;
+        }
+        return libm::log(gamma);
     }
+    libm::lgamma(z)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{GnssSatelliteId, GnssSystem};
+
+    #[test]
+    fn noncentral_log_cdf_reports_noncentrality_domain_limit() {
+        assert_eq!(
+            noncentral_chi2_log_cdf(1.0e-6, 100, 1.0e20),
+            Err(NoncentralCdfError::NoncentralityOutOfRange)
+        );
+        assert!(noncentral_chi2_log_cdf(1.0e12, 100, 1.0e12)
+            .unwrap()
+            .is_finite());
+    }
+
+    #[test]
+    fn noncentral_log_cdf_at_minimum_positive_x_matches_mpmath() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/chi2_extended_mpmath.json"))
+                .unwrap();
+        for case in fixture["noncentral_minimum_x"].as_array().unwrap() {
+            let x = case["x"].as_str().unwrap().parse().unwrap();
+            let dof = case["dof"].as_u64().unwrap() as usize;
+            let lambda = case["lambda"].as_f64().unwrap();
+            let expected: f64 = case["log_cdf"].as_str().unwrap().parse().unwrap();
+            let actual = noncentral_chi2_log_cdf(x, dof, lambda).unwrap();
+            assert!(
+                (actual - expected).abs() <= 8.0 * f64::EPSILON * expected.abs(),
+                "dof={dof} lambda={lambda}"
+            );
+        }
+    }
+
+    #[test]
+    fn noncentral_log_cdf_matches_mpmath_at_supported_dof_ceiling() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/integrity_quality_scipy_skyfield.json"
+        ))
+        .unwrap();
+        let case = &fixture["noncentral_supported_dof_ceiling"];
+        let actual = noncentral_chi2_log_cdf(
+            case["x"].as_str().unwrap().parse().unwrap(),
+            case["dof"].as_u64().unwrap() as usize,
+            case["lambda"].as_str().unwrap().parse().unwrap(),
+        )
+        .unwrap();
+        let expected: f64 = case["log_cdf"].as_str().unwrap().parse().unwrap();
+        let tolerance = 1.0e-11;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "{actual} != {expected}"
+        );
+    }
+
+    #[test]
+    fn noncentral_log_cdf_retains_mpmath_tail_cases() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/integrity_quality_scipy_skyfield.json"
+        ))
+        .unwrap();
+        for case in fixture["noncentral_log_cdf_cases"].as_array().unwrap() {
+            let actual = noncentral_chi2_log_cdf(
+                case["x"].as_str().unwrap().parse().unwrap(),
+                case["dof"].as_u64().unwrap() as usize,
+                case["lambda"].as_str().unwrap().parse().unwrap(),
+            )
+            .unwrap_or_else(|_| {
+                panic!(
+                    "no value for dof={} x={} lambda={}",
+                    case["dof"], case["x"], case["lambda"]
+                )
+            });
+            let expected: f64 = case["log_cdf"].as_str().unwrap().parse().unwrap();
+            // These degrees of freedom use at most 1,024 quadrature nodes
+            // or about 600 representable
+            // Poisson terms contribute. Eight rounding allowances per term
+            // cover the multiply, tail evaluation, and pairwise accumulation.
+            let tolerance = 8_192.0 * f64::EPSILON * expected.abs().max(f64::MIN_POSITIVE);
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "dof={} x={} lambda={}: {actual} != {expected}",
+                case["dof"],
+                case["x"],
+                case["lambda"]
+            );
+        }
+    }
 
     use std::path::PathBuf;
 
@@ -2219,6 +3006,7 @@ mod tests {
                 tdop: 0.5,
                 system_tdops: vec![(GnssSystem::Gps, 0.5)],
             }),
+            rtklib_single_clock_dop: None,
             system_tdops: vec![(GnssSystem::Gps, 0.5)],
             position_covariance: crate::dop::PositionCovariance {
                 ecef_m2: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
@@ -2253,6 +3041,95 @@ mod tests {
                 ut1_degraded: None,
             },
         }
+    }
+
+    #[test]
+    fn gdop_gate_uses_rtklib_single_clock_oracle_when_multiclock_exceeds_limit() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/rtklib_integrity_geometry.json"
+        ))
+        .expect("fixture");
+        let case = fixture["dop_cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "multiclock_above_30_single_below")
+            .expect("generated gate case");
+        let receiver = crate::frame::Wgs84Geodetic {
+            lat_rad: 0.0,
+            lon_rad: 0.0,
+            height_m: 0.0,
+        };
+        let los: Vec<_> = case["azel_deg"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|angles| {
+                crate::dop::line_of_sight_from_az_el_deg(
+                    angles[0].as_f64().unwrap(),
+                    angles[1].as_f64().unwrap(),
+                    receiver,
+                )
+                .unwrap()
+            })
+            .collect();
+        let weights = vec![1.0; los.len()];
+        let single = crate::dop::dop(&los, &weights, receiver).unwrap();
+        let mut normal = nalgebra::DMatrix::<f64>::zeros(4, 4);
+        for row in &los {
+            let design = [-row.e_x, -row.e_y, -row.e_z, 1.0];
+            for i in 0..4 {
+                for j in 0..4 {
+                    normal[(i, j)] += design[i] * design[j];
+                }
+            }
+        }
+        let eigen = nalgebra::linalg::SymmetricEigen::new(normal).eigenvalues;
+        let condition = eigen.max() / eigen.min();
+        let expected = case["dop"].as_array().unwrap();
+        for (actual, expected) in [single.gdop, single.pdop, single.hdop, single.vdop]
+            .into_iter()
+            .zip(expected)
+        {
+            let expected = expected.as_f64().unwrap();
+            // Seven normal-matrix accumulations, the 4x4 inverse, trace sums
+            // and square root contribute fewer than 128 rounded operations;
+            // the inverse forward error scales by kappa(N).
+            let tolerance = 128.0 * f64::EPSILON * condition * expected.abs().max(1.0);
+            assert!((actual - expected).abs() <= tolerance);
+        }
+        let systems = [
+            GnssSystem::Gps,
+            GnssSystem::Gps,
+            GnssSystem::Gps,
+            GnssSystem::Galileo,
+            GnssSystem::Galileo,
+            GnssSystem::Galileo,
+            GnssSystem::Galileo,
+        ];
+        let clock_index: Vec<_> = systems
+            .iter()
+            .map(|system| usize::from(*system == GnssSystem::Galileo))
+            .collect();
+        let multi = crate::dop::dop_multi(
+            &los,
+            &clock_index,
+            &[GnssSystem::Gps, GnssSystem::Galileo],
+            2,
+            &weights,
+            receiver,
+        )
+        .unwrap();
+        assert!(multi.gdop > 30.0);
+        assert!(single.gdop < 30.0);
+        let mut solution = valid_receiver_solution();
+        solution.dop = Some(multi);
+        solution.rtklib_single_clock_dop = Some(single);
+        let options = SolutionValidationOptions {
+            max_gdop: Some(30.0),
+            ..SolutionValidationOptions::default()
+        };
+        validate_receiver_solution(&solution, options).expect("single-clock GDOP accepts");
     }
 
     #[test]
@@ -3408,6 +4285,317 @@ mod tests {
             assert!(
                 (got - expected).abs() < tol,
                 "dof {dof}: got {got}, demo5 chisqr {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn noncentral_log_cdf_retains_folded_normal_upper_tails() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/noncentral_log_cdf_mpmath.json"
+        ))
+        .expect("mpmath fixture");
+        let mut previous = 0.0;
+        for noncentrality in [0.0, 0.01, 0.1, 1.0] {
+            let case = fixture["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|case| {
+                    case["dof"].as_u64() == Some(1)
+                        && case["x"].as_str().unwrap().parse::<f64>().unwrap() == 100.0
+                        && case["lambda"].as_str().unwrap().parse::<f64>().unwrap() == noncentrality
+                })
+                .expect("folded-normal reference");
+            let expected: f64 = case["log_cdf"].as_str().unwrap().parse().unwrap();
+            let actual = noncentral_chi2_log_cdf(100.0, 1, noncentrality).unwrap();
+            let scale = expected.abs().max(f64::MIN_POSITIVE);
+            assert!((actual - expected).abs() <= 2.0e-14 * scale);
+            assert!(actual <= previous, "lambda={noncentrality}");
+            previous = actual;
+        }
+    }
+
+    #[test]
+    fn noncentral_log_cdf_is_monotone_in_x_and_noncentrality() {
+        for dof in [1, 2, 3, 4, 8, 20, 100, 1_000, 100_000] {
+            for noncentrality in [
+                0.0,
+                1.0e-12,
+                0.01,
+                1.0,
+                99.999_999,
+                100.0,
+                100.000_001,
+                150.0,
+            ] {
+                let mut previous = f64::NEG_INFINITY;
+                for index in 0..=360 {
+                    let exponent = -40.0 + index as f64 * 52.0 / 360.0;
+                    let x = libm::pow(10.0, exponent);
+                    let value = noncentral_chi2_log_cdf(x, dof, noncentrality).unwrap();
+                    assert!(value >= previous, "dof={dof} lambda={noncentrality} x={x}");
+                    previous = value;
+                }
+            }
+            for x in [1.0e-40, 1.0e-6, 0.01, 1.0, 100.0, 1.0e6, 1.0e12] {
+                let mut previous = 0.0;
+                for index in 0..=400 {
+                    let noncentrality = if index <= 200 {
+                        99.0 + index as f64 / 200.0
+                    } else {
+                        100.0 + (index - 200) as f64 / 200.0
+                    };
+                    let value = noncentral_chi2_log_cdf(x, dof, noncentrality).unwrap();
+                    assert!(value <= previous, "dof={dof} lambda={noncentrality} x={x}");
+                    previous = value;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn noncentral_log_cdf_matches_mpmath_grid() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/integrity_quality_scipy_skyfield.json"
+        ))
+        .expect("fixture");
+        for case in fixture["noncentral_log_cdf_grid"].as_array().expect("grid") {
+            let parse = |value: &serde_json::Value| {
+                value
+                    .as_f64()
+                    .unwrap_or_else(|| value.as_str().unwrap().parse().unwrap())
+            };
+            let dof = case["dof"].as_u64().unwrap() as usize;
+            let x = parse(&case["x"]);
+            let noncentrality = parse(&case["lambda"]);
+            let expected = parse(&case["log_cdf"]);
+            let actual = noncentral_chi2_log_cdf(x, dof, noncentrality)
+                .unwrap_or_else(|_| panic!("dof={dof} x={x} lambda={noncentrality}"));
+            // Retain the relative regression ceiling in addition to the full
+            // grid's independently derived, per-cell arithmetic and ideal-rule
+            // discretization bounds below.
+            let tolerance = 2.0e-10 * expected.abs().max(f64::MIN_POSITIVE);
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "dof={dof} x={x} lambda={noncentrality}: actual={actual:.17e} expected={expected:.17e} tolerance={tolerance:.3e}"
+            );
+        }
+    }
+
+    #[test]
+    fn noncentral_log_cdf_dense_mean_monotonicity() {
+        for dof in [1, 2, 3, 4, 8, 20, 100, 1_000, 100_000] {
+            for noncentrality in [
+                0.0,
+                1.0e-12,
+                1.0,
+                99.999_999,
+                100.0,
+                100.000_001,
+                150.0,
+                1_000.0,
+                1.0e6,
+                1.0e12,
+            ] {
+                let mean = dof as f64 + noncentrality;
+                let sigma = libm::sqrt(2.0 * dof as f64 + 4.0 * noncentrality);
+                let mut previous = f64::NEG_INFINITY;
+                // 1/64 standard-deviation spacing resolves the transition
+                // through the mean, unlike a logarithmic x grid.
+                for index in -64..=64 {
+                    let x = mean + index as f64 * sigma / 64.0;
+                    if x <= 0.0 {
+                        continue;
+                    }
+                    let actual = noncentral_chi2_log_cdf(x, dof, noncentrality).unwrap();
+                    assert!(
+                        actual > previous,
+                        "dof={dof} lambda={noncentrality} x={x}: {actual} <= {previous}"
+                    );
+                    previous = actual;
+                }
+            }
+            for center in [100.0, 1_000.0, 1.0e6, 1.0e12] {
+                let sigma = libm::sqrt(2.0 * dof as f64 + 4.0 * center);
+                for standardized in [-8.0, -2.0, 0.0, 2.0, 8.0] {
+                    let x = dof as f64 + center + standardized * sigma;
+                    if x <= 0.0 {
+                        continue;
+                    }
+                    let mut previous = 0.0;
+                    for index in -32..=32 {
+                        let noncentrality = center + index as f64 * center.min(1.0) / 32.0;
+                        if noncentrality > 1.0e12 {
+                            continue;
+                        }
+                        let actual = noncentral_chi2_log_cdf(x, dof, noncentrality).unwrap();
+                        assert!(
+                            actual < previous,
+                            "dof={dof} lambda={noncentrality} x={x}: {actual} >= {previous}"
+                        );
+                        previous = actual;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn noncentral_log_cdf_far_lower_tail_resolves_conditional_radius() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/noncentral_log_cdf_mpmath.json"
+        ))
+        .expect("mpmath fixture");
+        let mut compared = 0;
+        for case in fixture["cases"].as_array().unwrap() {
+            let dof = case["dof"].as_u64().unwrap() as usize;
+            let x: f64 = case["x"].as_str().unwrap().parse().unwrap();
+            let noncentrality: f64 = case["lambda"].as_str().unwrap().parse().unwrap();
+            if dof == 1 || noncentrality != 1.0e12 || !(1.0..=1000.0).contains(&x) {
+                continue;
+            }
+            let expected: f64 = case["log_cdf"].as_str().unwrap().parse().unwrap();
+            let actual = noncentral_chi2_log_cdf(x, dof, noncentrality).unwrap();
+            // In this far tail the squared normal displacement dominates the
+            // logarithm. Sixty-four rounded kernel/root/log-sum operations
+            // bound its forward error by gamma_64 times that log magnitude.
+            let gamma = 64.0 * f64::EPSILON / (1.0 - 64.0 * f64::EPSILON);
+            assert!(
+                (actual - expected).abs() <= gamma * expected.abs(),
+                "dof={dof} x={x}: {actual} != {expected}"
+            );
+            compared += 1;
+        }
+        assert!(compared > 0);
+    }
+
+    #[test]
+    fn noncentral_log_cdf_full_mpmath_domain_grid() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/noncentral_log_cdf_mpmath.json"
+        ))
+        .expect("mpmath fixture");
+        let cases = fixture["cases"].as_array().unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut subnormal_upper_tail = false;
+        for case in cases {
+            let parse = |name: &str| case[name].as_str().unwrap().parse::<f64>().unwrap();
+            let dof = case["dof"].as_u64().unwrap() as usize;
+            let x = parse("x");
+            let noncentrality = parse("lambda");
+            let expected = parse("log_cdf");
+            seen.insert((dof, x.to_bits(), noncentrality.to_bits()));
+            subnormal_upper_tail |= expected != 0.0 && expected.abs() < f64::MIN_POSITIVE;
+            let actual = noncentral_chi2_log_cdf(x, dof, noncentrality)
+                .unwrap_or_else(|err| panic!("dof={dof} x={x} lambda={noncentrality}: {err:?}"));
+            if case["tail"] == "chernoff_underflow" {
+                // The generated MGF Chernoff bound is below half a binary64
+                // subnormal, independently certifying a rounded zero log-CDF.
+                assert_eq!(actual, 0.0, "dof={dof} x={x} lambda={noncentrality}");
+                continue;
+            }
+            let discretization = parse("quadrature_log_tail_error_bound");
+            assert!(discretization <= 1.0e-11, "quadrature log-tail error {discretization}: dof={dof} x={x} lambda={noncentrality}");
+            // Bound arithmetic separately from discretization. The latter is
+            // the independently generated ideal-rule error, not an observed
+            // engine offset. For the Poisson branch, mu<=50 and a<=50,000.
+            // If the t=1/4 Chernoff cutoff has not fired, z is bounded by
+            // 2*a*ln(2)+2*mu+2150*ln(2). Integrating the gamma density over
+            // [z,z+1] and applying Stirling's bound gives a first weighted
+            // upper-tail term >exp(-5000). The Poisson remainder after 2,048
+            // terms is <exp(-5500), below eps*exp(-5000). Lower-tail terms
+            // decrease faster. Thus 16 rounding allowances per active term
+            // fit gamma_32768 without depending on the 10,000-term safety cap.
+            // The quadrature path allows eight log-sum operations per node;
+            // the folded-normal path allows 128 rounds for its contracted
+            // continued fraction and elementary functions.
+            // Absolute log-kernel sensitivity includes the gamma normalization
+            // nu*log(nu), the normal log-tail, and the two rounded square roots:
+            // |delta(r-d)| <= eps*(r+d), multiplied by the Mills ratio bound
+            // 1+|r-d|. Positive summation/log-sum-exp does not amplify the
+            // largest absolute log-kernel perturbation.
+            let root_x = libm::sqrt(x);
+            let root_lambda = libm::sqrt(noncentrality);
+            let log_tail = parse("log_small_tail_or_bound");
+            let nu = dof as f64;
+            let condition = 1.0
+                + log_tail.abs()
+                + nu * (1.0 + libm::log1p(nu))
+                + (root_x + root_lambda) * (1.0 + (root_x - root_lambda).abs());
+            let operations = if dof == 1 {
+                128.0
+            } else if noncentrality > 100.0 {
+                if dof > 16_385 {
+                    16384.0
+                } else {
+                    8192.0
+                }
+            } else {
+                32768.0
+            };
+            let gamma = operations * f64::EPSILON / (1.0 - operations * f64::EPSILON);
+            let tail_log_bound = discretization + gamma * condition;
+            let log_cdf_bound = if case["tail"] == "upper" {
+                // Mean-value theorem for log(1-exp(log Q)), with its largest
+                // derivative over the bounded interval, Q/(1-Q).
+                let largest_q = libm::exp(log_tail + tail_log_bound);
+                tail_log_bound * largest_q / (1.0 - largest_q)
+            } else {
+                tail_log_bound
+            };
+            let tolerance = log_cdf_bound + 2.0 * f64::EPSILON * expected.abs() + f64::from_bits(8);
+            assert!((actual-expected).abs() <= tolerance,
+                "dof={dof} x={x} lambda={noncentrality}: {actual:.17e} != {expected:.17e}; bound={tolerance:.3e}");
+        }
+        assert_eq!(
+            cases.len() as u64,
+            fixture["provenance"]["case_count"].as_u64().unwrap(),
+            "complete Cartesian and mean/switch grid"
+        );
+        assert!(
+            subnormal_upper_tail,
+            "nonzero subnormal upper tails exercised"
+        );
+        for dof in [1, 2, 3, 4, 8, 20, 100, 1000, 100000] {
+            for x in [
+                1.0e-40_f64,
+                1.0e-30,
+                1.0e-20,
+                1.0e-10,
+                1.0e-6,
+                0.01,
+                1.0,
+                100.0,
+                1000.0,
+                1.0e6,
+                1.0e9,
+                1.0e12,
+            ] {
+                for lambda in [
+                    0.0_f64,
+                    1.0e-12,
+                    0.01,
+                    1.0,
+                    f64::from_bits(100.0_f64.to_bits() - 1),
+                    100.0,
+                    f64::from_bits(100.0_f64.to_bits() + 1),
+                    150.0,
+                    1000.0,
+                    1.0e6,
+                    1.0e12,
+                ] {
+                    assert!(
+                        seen.contains(&(dof, x.to_bits(), lambda.to_bits())),
+                        "missing axis point: dof={dof} x={x} lambda={lambda}"
+                    );
+                }
+            }
+        }
+        for dof in [16385, 16386] {
+            assert!(
+                seen.contains(&(dof, (dof as f64 + 150.0).to_bits(), 150.0_f64.to_bits())),
+                "panel-count boundary exercised"
             );
         }
     }

@@ -437,10 +437,15 @@ fn run_loose_outlier_budget_ensemble(robust: bool) -> EnsembleResult {
         let update = filter.update_loose(&measurement).expect("loose update");
         assert!(update.applied);
         assert_eq!(update.rows, 6);
-        assert_eq!(update.accepted_rows, update.rows);
-        assert_eq!(update.rejected_rows, 0);
+        if robust && run % LOOSE_OUTLIER_BUDGET_STRIDE == 0 {
+            assert_eq!(update.accepted_rows, 5);
+            assert_eq!(update.rejected_rows, 1);
+        } else {
+            assert_eq!(update.accepted_rows, update.rows);
+            assert_eq!(update.rejected_rows, 0);
+        }
         nis_sum += update.nis;
-        nis_dof += update.rows;
+        nis_dof += update.accepted_rows;
         nees_sum += nees_position_velocity(&filter, &truth);
     }
 
