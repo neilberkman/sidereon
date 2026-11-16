@@ -412,5 +412,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "celestrak_gp_response"
+path = "fuzz_targets/celestrak_gp_response.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

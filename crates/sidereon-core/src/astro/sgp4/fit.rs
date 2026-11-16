@@ -149,6 +149,25 @@ pub struct FitConfig {
     pub f_scale: f64,
     /// Catalog and object metadata copied into the generated TLE and OMM.
     pub metadata: TleMetadata,
+    /// Mandatory CCSDS header to attach to the fitted OMM.
+    ///
+    /// Leave this absent when only the fitted elements or TLE are needed. A
+    /// fitted OMM intended for serialization should supply the actual message
+    /// creation date and originator here. When present, `metadata.object_name`
+    /// and `metadata.international_designator` must also be non-empty so the
+    /// resulting strict CCSDS message has `OBJECT_NAME` and `OBJECT_ID`.
+    /// Header and object text must be writable in both KVN and XML, without
+    /// surrounding whitespace or line breaks; validation precedes the solve.
+    pub omm_header: Option<FitOmmHeader>,
+}
+
+/// Mandatory CCSDS header values supplied by the producer of a fitted OMM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FitOmmHeader {
+    /// Actual message `CREATION_DATE` in CCSDS date-time form.
+    pub creation_date: String,
+    /// Organization or system that produced the fitted message.
+    pub originator: String,
 }
 
 impl Default for FitConfig {
@@ -169,6 +188,7 @@ impl Default for FitConfig {
             loss: Loss::Linear,
             f_scale: 1.0,
             metadata: TleMetadata::default(),
+            omm_header: None,
         }
     }
 }
@@ -297,10 +317,33 @@ pub enum TleFitError {
     /// The final fitted TLE elements could not be encoded as TLE text.
     #[error("fitted TLE failed encoding: {0}")]
     TleEncode(tle::TleError),
+    /// Caller-supplied fitted-OMM header metadata was invalid.
+    #[error("fitted OMM header is invalid: {0}")]
+    OmmHeader(crate::astro::omm::OmmError),
 }
 
 /// Fit SGP4 mean elements and optional B* to a TEME ephemeris arc.
 pub fn fit_tle(samples: &[FitSample], config: &FitConfig) -> Result<TleFit, TleFitError> {
+    if let Some(header) = &config.omm_header {
+        crate::astro::omm::validate_ccsds_header_fields(
+            "2.0",
+            &header.creation_date,
+            &header.originator,
+        )
+        .map_err(TleFitError::OmmHeader)?;
+        crate::astro::omm::validate_required_text("OBJECT_NAME", &config.metadata.object_name)
+            .map_err(TleFitError::OmmHeader)?;
+        crate::astro::omm::validate_required_text(
+            "OBJECT_ID",
+            &config.metadata.international_designator,
+        )
+        .map_err(TleFitError::OmmHeader)?;
+        if object_id_from_designator(&config.metadata.international_designator).is_none() {
+            return Err(TleFitError::OmmHeader(
+                crate::astro::omm::OmmError::MissingField("OBJECT_ID"),
+            ));
+        }
+    }
     let resolved = validate_and_resolve(samples, config)?;
     let (x0, seed_refine_passes) = initial_guess(samples, config, &resolved)?;
     let seed_elements = chart_to_elements(
@@ -728,7 +771,7 @@ fn build_fit(
     let tle_rms_position_km =
         compute_tle_rms(problem, &tle_satellite).map_err(TleFitError::FinalElements)?;
     let bstar_observable = bstar_observable(&result, problem.fit_bstar);
-    let omm = omm_from_fit(&elements, &config.metadata)?;
+    let omm = omm_from_fit(&elements, &config.metadata, config.omm_header.as_ref())?;
 
     Ok(TleFit {
         elements,
@@ -1005,11 +1048,15 @@ fn tle_elements_from_fit(
     })
 }
 
-fn omm_from_fit(elements: &ElementSet, metadata: &TleMetadata) -> Result<Omm, TleFitError> {
-    Ok(Omm {
+fn omm_from_fit(
+    elements: &ElementSet,
+    metadata: &TleMetadata,
+    header: Option<&FitOmmHeader>,
+) -> Result<Omm, TleFitError> {
+    let omm = Omm {
         ccsds_omm_vers: Some("2.0".to_string()),
-        creation_date: None,
-        originator: None,
+        creation_date: header.map(|value| value.creation_date.clone()),
+        originator: header.map(|value| value.originator.clone()),
         object_name: Some(metadata.object_name.clone()),
         object_id: object_id_from_designator(&metadata.international_designator),
         center_name: Some("EARTH".to_string()),
@@ -1044,7 +1091,13 @@ fn omm_from_fit(elements: &ElementSet, metadata: &TleMetadata) -> Result<Omm, Tl
         comments: crate::astro::omm::OmmComments::default(),
         exact_sgp4_epoch: Some(elements.epoch),
         quantize_tle_derived_fields: false,
-    })
+    };
+    match header {
+        Some(header) => omm
+            .with_ccsds_header("2.0", &header.creation_date, &header.originator)
+            .map_err(TleFitError::OmmHeader),
+        None => Ok(omm),
+    }
 }
 
 fn object_id_from_designator(designator: &str) -> Option<String> {
@@ -1258,6 +1311,13 @@ mod tests {
     const SSO_L1: &str = "1 28057U 03049A   06177.78615833  .00000060  00000-0  35970-4 0  1839";
     const SSO_L2: &str = "2 28057  98.4283 247.6961 0000884  88.1964 271.9322 14.35478080140550";
 
+    fn test_omm_header() -> FitOmmHeader {
+        FitOmmHeader {
+            creation_date: "2026-06-17T05:00:00".to_string(),
+            originator: "SIDEREON TEST".to_string(),
+        }
+    }
+
     fn arc_from_tle(line1: &str, line2: &str, offsets_min: &[f64]) -> Vec<FitSample> {
         let satellite = Satellite::from_tle(line1, line2).expect("valid TLE");
         let epoch = satellite.epoch_jd();
@@ -1307,7 +1367,7 @@ mod tests {
                     .rev_number
                     .expect("fixture states a revolution number"),
             ),
-            object_name: String::new(),
+            object_name: "TEST OBJECT".to_string(),
         }
     }
 
@@ -1318,7 +1378,7 @@ mod tests {
             international_designator: String::new(),
             element_set_number: 999,
             rev_at_epoch: 0,
-            object_name: String::new(),
+            object_name: "TEST OBJECT".to_string(),
         }
     }
 
@@ -1464,6 +1524,9 @@ mod tests {
             ..FitConfig::default()
         };
         let fit = fit_tle(samples, &config).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(fit.omm.ccsds_omm_vers.as_deref(), Some("2.0"));
+        assert_eq!(fit.omm.creation_date, None);
+        assert_eq!(fit.omm.originator, None);
         assert!(
             fit.stats.rms_position_km <= max_rms_km,
             "{name} rms {}",
@@ -1587,6 +1650,82 @@ mod tests {
     }
 
     #[test]
+    fn invalid_omm_header_is_rejected_before_the_fit_inputs() {
+        let config = FitConfig {
+            omm_header: Some(FitOmmHeader {
+                creation_date: "yesterday".to_string(),
+                originator: "TEST".to_string(),
+            }),
+            ..FitConfig::default()
+        };
+        assert!(matches!(
+            fit_tle(&[], &config),
+            Err(TleFitError::OmmHeader(
+                crate::astro::omm::OmmError::InvalidField {
+                    field: "CREATION_DATE",
+                    kind: crate::astro::omm::OmmInputErrorKind::InvalidCivilDate,
+                }
+            ))
+        ));
+
+        for invalid in 0..8 {
+            let mut config = FitConfig {
+                metadata: metadata_from_tle(ISS_L1, ISS_L2),
+                omm_header: Some(test_omm_header()),
+                ..FitConfig::default()
+            };
+            let field = match invalid {
+                0 => {
+                    config.metadata.object_name.push(' ');
+                    "OBJECT_NAME"
+                }
+                1 => {
+                    config.metadata.international_designator.push(' ');
+                    "OBJECT_ID"
+                }
+                2 => {
+                    config.omm_header.as_mut().unwrap().originator.push(' ');
+                    "ORIGINATOR"
+                }
+                3 => {
+                    config.omm_header.as_mut().unwrap().creation_date.push(' ');
+                    "CREATION_DATE"
+                }
+                4 => {
+                    config.metadata.object_name.push_str("\nNAME");
+                    "OBJECT_NAME"
+                }
+                5 => {
+                    config.metadata.international_designator.push_str("\nID");
+                    "OBJECT_ID"
+                }
+                6 => {
+                    config
+                        .omm_header
+                        .as_mut()
+                        .unwrap()
+                        .originator
+                        .push_str("\nSYSTEM");
+                    "ORIGINATOR"
+                }
+                _ => {
+                    config
+                        .omm_header
+                        .as_mut()
+                        .unwrap()
+                        .creation_date
+                        .push_str("\nDATE");
+                    "CREATION_DATE"
+                }
+            };
+            assert!(matches!(
+                fit_tle(&[], &config),
+                Err(TleFitError::OmmHeader(crate::astro::omm::OmmError::UnwritableText { field: actual, .. })) if actual == field
+            ));
+        }
+    }
+
+    #[test]
     fn round_trip_recovers_iss_elements() {
         let offsets: Vec<f64> = (-36..=36).map(|i| i as f64 * 10.0).collect();
         let samples = arc_from_tle(ISS_L1, ISS_L2, &offsets);
@@ -1598,6 +1737,7 @@ mod tests {
         let config = FitConfig {
             epoch: FitEpoch::Jd(truth.epoch),
             metadata: metadata_from_tle(ISS_L1, ISS_L2),
+            omm_header: Some(test_omm_header()),
             max_nfev: Some(80),
             ..FitConfig::default()
         };
@@ -1694,7 +1834,8 @@ mod tests {
         // Midnight-anchored split (what calendar/TLE producers emit): the
         // femtosecond epoch text carries the full split JD, so a text round
         // trip rebuilds it bit-identically and propagation matches exactly.
-        let omm = omm_from_fit(&truth, &metadata).expect("fitted OMM");
+        let header = test_omm_header();
+        let omm = omm_from_fit(&truth, &metadata, Some(&header)).expect("fitted OMM");
         let mut reparsed =
             parse_kvn(&encode_kvn(&omm).expect("fitted OMM encodes")).expect("fitted OMM reparses");
         assert_eq!(reparsed.epoch, omm.epoch);
@@ -1728,7 +1869,8 @@ mod tests {
         assert_eq!(shifted.0 + shifted.1, whole + fraction);
         let mut shifted_elements = truth.clone();
         shifted_elements.epoch = shifted;
-        let omm2 = omm_from_fit(&shifted_elements, &metadata).expect("shifted fitted OMM");
+        let omm2 =
+            omm_from_fit(&shifted_elements, &metadata, Some(&header)).expect("shifted fitted OMM");
         let in_memory = omm2.to_element_set().expect("in-memory bridge").epoch;
         assert_eq!(in_memory.0.to_bits(), shifted.0.to_bits());
         assert_eq!(in_memory.1.to_bits(), shifted.1.to_bits());

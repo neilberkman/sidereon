@@ -29,10 +29,28 @@ pub(crate) enum KvnLine<'a> {
     Other(&'a str),
 }
 
+/// One physical source line with its exact byte range, including its
+/// terminator when present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PhysicalLine<'a> {
+    pub(crate) number: usize,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) text: &'a str,
+}
+
 /// Split a KVN message into physical lines. A line ends at a single carriage
 /// return, a single line feed, a CR LF pair, or an LF CR pair (502.0-B-3 7.3.7,
 /// 508.0-B-1 6.2.2.4). A final line without a terminator is kept.
 pub(crate) fn kvn_lines(text: &str) -> Vec<&str> {
+    physical_lines(text)
+        .into_iter()
+        .map(|line| line.text)
+        .collect()
+}
+
+/// Split text using the CCSDS physical-line definition and retain byte ranges.
+pub(crate) fn physical_lines(text: &str) -> Vec<PhysicalLine<'_>> {
     let bytes = text.as_bytes();
     let mut lines = Vec::new();
     let mut start = 0usize;
@@ -42,21 +60,41 @@ pub(crate) fn kvn_lines(text: &str) -> Vec<&str> {
         if byte == b'\n' || byte == b'\r' {
             // Both terminators are ASCII, so every slice point is a character
             // boundary.
-            lines.push(&text[start..index]);
+            let content_end = index;
             let pair = matches!(
                 (byte, bytes.get(index + 1)),
                 (b'\r', Some(b'\n')) | (b'\n', Some(b'\r'))
             );
             index += if pair { 2 } else { 1 };
+            lines.push(PhysicalLine {
+                number: lines.len() + 1,
+                start,
+                end: index,
+                text: &text[start..content_end],
+            });
             start = index;
         } else {
             index += 1;
         }
     }
     if start < bytes.len() {
-        lines.push(&text[start..]);
+        lines.push(PhysicalLine {
+            number: lines.len() + 1,
+            start,
+            end: text.len(),
+            text: &text[start..],
+        });
     }
     lines
+}
+
+/// One-based source line containing `byte_offset`.
+pub(crate) fn source_line_number(text: &str, byte_offset: usize) -> usize {
+    let lines = physical_lines(text);
+    lines
+        .iter()
+        .find(|line| byte_offset < line.end)
+        .map_or(lines.len().max(1), |line| line.number)
 }
 
 /// Classify one physical line.

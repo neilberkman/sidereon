@@ -4,6 +4,28 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Add sans-I/O CelesTrak GP and NAVCEN constellation source metadata, validated URL builders, and `parse_celestrak_gp_response`. `CelestrakGpSourceEntry::{protocol,host,root_url}` and `NavcenSourceEntry::{protocol,host,root_url}` describe the sources. `CelestrakGpQuery::{Group,CatalogNumber,InternationalDesignator,Name,Special}`, `CelestrakGpSpecial::{Gpz,GpzPlus,Decaying}`, and `CelestrakGpFormat::{Tle,ThreeLine,TwoLine,Xml,Kvn,Json,JsonPretty,Csv}` describe every documented request. `CelestrakGpResponse::{records,rejected}` holds accepted and rejected source positions. `CelestrakGpRecord::{record_index,line_number,raw,object_name,payload}` and `CelestrakGpPayload::{Tle,Omm}` preserve each native record; `CelestrakTleRecord::{elements,line1,line2,checksum_warnings}` preserves parsed fields, source lines, and checksum findings. `CelestrakGpRejectedRecord::{record_index,line_number,reason,raw}`, `CelestrakGpRejectionReason::{Tle,Omm,Structural}`, and `CelestrakGpStructuralError::{UnexpectedContent,IncompleteRecord,InvalidTleStructure,InvalidElementSet}` retain every rejection. `CelestrakGpRecord::{to_element_set,to_omm}` performs explicit conversion, with failures represented by `CelestrakGpRecordError::{Tle,Omm}`.
+- Add `celestrak_gp_source_entry`, `celestrak_gp_url`, `celestrak_constellation_url`, `navcen_source_entry`, and `navcen_constellation_url`; add the exact wire-value helpers `CelestrakGpSpecial::as_str` and `CelestrakGpFormat::as_str`.
+- Add `Omm::from_tle`, deriving exact 10^-8-day epochs, the fixed launch-year pivot, and only the fields a TLE states; add the public `celestrak_group` constellation-to-source mapping.
+- Add `OmmRecordSpan::{index,byte_start,byte_end,line}` and parser-owned source spans for multi-record OMM input.
+- Add explicit `encode_kvn_lenient` and `encode_xml_lenient` OMM writers and `Omm::with_ccsds_header` for records sourced from TLE or GP table formats.
+- Add `FitOmmHeader::{creation_date,originator}` and `FitConfig::omm_header` so callers producing a fitted OMM can supply its actual CCSDS creation date and originator.
+
+### Changed
+
+- **Breaking.** Default OMM KVN and XML writers require the CCSDS 502.0-B-3 mandatory header (`CCSDS_OMM_VERS`, `CREATION_DATE`, `ORIGINATOR`), metadata (`OBJECT_NAME`, `OBJECT_ID`, `CENTER_NAME`, `REF_FRAME`, `TIME_SYSTEM`, `MEAN_ELEMENT_THEORY`), and mean-element fields (`EPOCH`, one of `SEMI_MAJOR_AXIS`/`MEAN_MOTION`, `ECCENTRICITY`, `INCLINATION`, `RA_OF_ASC_NODE`, `ARG_OF_PERICENTER`, `MEAN_ANOMALY`). They additionally require `MEAN_MOTION` for SGP/SGP4 records (including `SGP/SGP4` and `SDP4`), `BSTAR` for SGP4/SDP4, `MEAN_MOTION_DOT` and `MEAN_MOTION_DDOT` for SGP/PPT3, and `BTERM` and `AGOM` for SGP4-XP. Explicit lenient writers preserve the former partial-message behavior; GP JSON writing remains header-optional.
+- **Breaking.** `OmmArray` includes the public `spans` field. `OmmError` adds `MalformedDocument { format, message, byte_offset }` and `MissingOneOf`.
+- **Breaking.** OMM readers return `MissingOneOf` instead of `MissingField("SEMI_MAJOR_AXIS or MEAN_MOTION")` when neither orbital-size keyword is present.
+- **Breaking.** `TleFitError` adds `OmmHeader`. `DataCatalogError` adds `InvalidCelestrakGpSelector { selector, value }`, `EmptyCelestrakGpResponse`, `CelestrakGpDataNotFound`, `CelestrakGpNotModified { query, last_successful_download }`, `CelestrakGpHtmlResponse`, and `InvalidCelestrakGpResponse { reason, line, column }`.
+- **Breaking.** Malformed whole XML, JSON, and CSV documents now return `OmmError::MalformedDocument` with the parser's byte position instead of flattening the failure into `OmmError::Field`.
+- Strict OMM writers accept the historical parsed `CCSDS_OMM_VERS = 1.0` as well as 2.0 and 3.0; an empty mandatory text keyword is `MissingField`, while surrounding whitespace or unwritable text is rejected as unwritable.
+- **Breaking.** `TleElements::to_element_set` and `Satellite::from_tle` refuse negative, non-finite, and `>= 1000` epoch days; finite days in `[0, 1000)` still roll across year boundaries, including day 0. This narrows the former permissive epoch-day domain.
+- Fitted OMMs retain the previous default `CCSDS_OMM_VERS = 2.0`; serializable fitted records take caller-supplied creation date and originator through `FitConfig::omm_header`.
+- SBAS constellation records now use CelesTrak's dedicated `sbas` group instead of the combined `gnss` group.
+- `allowed_hosts()` includes NAVCEN's `www.navcen.uscg.gov` host.
+
 ## [3.0.6] - 2026-10-30
 
 ### Added

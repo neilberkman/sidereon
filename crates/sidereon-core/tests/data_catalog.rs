@@ -13,10 +13,1779 @@ use sidereon_core::data::{
     space_weather_source_entry, station_obs, station_obs_filename, station_obs_protocol,
     station_obs_url, supported_samples, terrain_tile_index, ultra_issue_candidates,
     ultra_sp3_locations, validate_exact_product_set, AnalysisCenter, ArchiveCompression,
-    ArchiveProtocol, DataCatalogError, DistributionSource, ExactProductSetError, ProductCampaign,
-    ProductDate, ProductDateTime, ProductFormat, ProductPublisher, ProductRequest, ProductType,
-    PublishedProduct, SolutionClass, Sp3ContentStartConvention, SpaceWeatherProduct, UltraIssue,
+    ArchiveProtocol, CelestrakGpFormat, CelestrakGpQuery, CelestrakGpSpecial, DataCatalogError,
+    DistributionSource, ExactProductSetError, ProductCampaign, ProductDate, ProductDateTime,
+    ProductFormat, ProductPublisher, ProductRequest, ProductType, PublishedProduct, SolutionClass,
+    Sp3ContentStartConvention, SpaceWeatherProduct, UltraIssue,
 };
+
+fn assert_gp_byte_accounting(body: &[u8], response: &sidereon_core::data::CelestrakGpResponse) {
+    use sidereon_core::astro::omm;
+    let source = std::str::from_utf8(&body[ignored_gp_prefix(body)..]).unwrap();
+    let trimmed = source.trim();
+    let container = if trimmed.starts_with('<') {
+        Some((
+            omm::parse_xml_all(trimmed).unwrap(),
+            source.len() - source.trim_start().len(),
+        ))
+    } else if trimmed.starts_with(['[', '{']) {
+        Some((omm::parse_json_array(source).unwrap(), 0))
+    } else if trimmed
+        .lines()
+        .next()
+        .is_some_and(|header| header.contains(',') && !header.contains('='))
+    {
+        Some((
+            omm::parse_csv_array(trimmed).unwrap(),
+            source.len() - source.trim_start().len(),
+        ))
+    } else {
+        None
+    };
+    let mut segments = response
+        .records
+        .iter()
+        .map(|record| {
+            (
+                record.record_index,
+                record.line_number,
+                record.raw.as_bytes(),
+                matches!(
+                    record.payload,
+                    sidereon_core::data::CelestrakGpPayload::Tle(_)
+                ) || container.is_none(),
+            )
+        })
+        .chain(response.rejected.iter().map(|record| {
+            (
+                record.record_index,
+                record.line_number,
+                record.raw.as_bytes(),
+                rejection_uses_start(&record.reason, container.is_none()),
+            )
+        }))
+        .collect::<Vec<_>>();
+    segments.sort_by_key(|segment| segment.0);
+    for (position, segment) in segments.iter().enumerate() {
+        assert_eq!(segment.0, position + 1);
+        if let Some((array, offset)) = &container {
+            let expected =
+                source_line(source.as_bytes(), offset + array.spans[position].byte_start);
+            assert_eq!(segment.1, Some(expected));
+        }
+        if let Some(reported) = segment.1 {
+            let offset = segments[..position]
+                .iter()
+                .map(|part| part.2.len())
+                .sum::<usize>();
+            let first = source_line(&body[ignored_gp_prefix(body)..], offset);
+            let last = source_line(
+                &body[ignored_gp_prefix(body)..],
+                offset + segment.2.len().saturating_sub(1),
+            );
+            assert!(
+                (first..=last).contains(&reported),
+                "line {reported} outside {first}..={last}"
+            );
+            if segment.3 {
+                let raw = std::str::from_utf8(segment.2).unwrap();
+                let significant = raw
+                    .find(|character: char| !character.is_whitespace())
+                    .unwrap();
+                assert_eq!(
+                    reported,
+                    source_line(&body[ignored_gp_prefix(body)..], offset + significant)
+                );
+            }
+        }
+    }
+    let accounted = &body[ignored_gp_prefix(body)..];
+    assert_eq!(
+        segments
+            .iter()
+            .flat_map(|segment| segment.2.iter().copied())
+            .collect::<Vec<_>>(),
+        accounted
+    );
+}
+
+fn rejection_uses_start(
+    reason: &sidereon_core::data::CelestrakGpRejectionReason,
+    non_container: bool,
+) -> bool {
+    use sidereon_core::astro::omm::OmmError;
+    use sidereon_core::data::{CelestrakGpRejectionReason as R, CelestrakGpStructuralError as S};
+    matches!(
+        reason,
+        R::Structural(S::IncompleteRecord | S::InvalidTleStructure | S::UnexpectedContent)
+    ) || (non_container
+        && match reason {
+            R::Tle(_) => false,
+            R::Structural(_) => true,
+            R::Omm(error) => !matches!(
+                error,
+                OmmError::MalformedLine { .. }
+                    | OmmError::InvalidField { .. }
+                    | OmmError::DuplicateField { .. }
+                    | OmmError::UnitMismatch { .. }
+                    | OmmError::Epoch(_)
+            ),
+        })
+}
+
+#[test]
+fn celestrak_start_line_invariant_rejects_a_line_inside_the_record() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let body = include_bytes!("fixtures/omm/25544.tle");
+    let mut response = parse_celestrak_gp_response(body, CelestrakGpFormat::Tle).unwrap();
+    response.records[0].line_number = Some(source_line(
+        body,
+        body.iter().position(|byte| *byte == b'\n').unwrap() + 1,
+    ));
+    assert!(std::panic::catch_unwind(|| assert_gp_byte_accounting(body, &response)).is_err());
+
+    for (body, format) in [
+        (
+            include_bytes!("fixtures/omm/24876.xml").as_slice(),
+            CelestrakGpFormat::Xml,
+        ),
+        (
+            include_bytes!("fixtures/omm/24876.json").as_slice(),
+            CelestrakGpFormat::Json,
+        ),
+    ] {
+        let mut response = parse_celestrak_gp_response(body, format).unwrap();
+        response.records[0].line_number = response.records[0].line_number.map(|line| line + 1);
+        assert!(std::panic::catch_unwind(|| assert_gp_byte_accounting(body, &response)).is_err());
+    }
+    let body = b"\n\nOBJECT_NAME = X\n";
+    let mut response = parse_celestrak_gp_response(body, CelestrakGpFormat::Kvn).unwrap();
+    assert_gp_byte_accounting(body, &response);
+    response.rejected[0].line_number = Some(source_line(body, 0));
+    assert!(std::panic::catch_unwind(|| assert_gp_byte_accounting(body, &response)).is_err());
+}
+
+fn ignored_gp_prefix(body: &[u8]) -> usize {
+    usize::from(body.starts_with(&[0xef, 0xbb, 0xbf])) * 3
+}
+
+fn source_line(body: &[u8], offset: usize) -> usize {
+    let mut line = 1;
+    let mut index = 0;
+    while index < offset.min(body.len()) {
+        if matches!(body[index], b'\r' | b'\n') {
+            let first = body[index];
+            index += 1;
+            if index < body.len() && matches!((first, body[index]), (b'\r', b'\n') | (b'\n', b'\r'))
+            {
+                index += 1;
+            }
+            line += 1;
+        } else {
+            index += 1;
+        }
+    }
+    line
+}
+
+#[test]
+fn celestrak_tle_errors_follow_physical_element_lines() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let lines = include_str!("fixtures/omm/25544.tle")
+        .lines()
+        .collect::<Vec<_>>();
+    let mut bad = lines[2].as_bytes().to_vec();
+    bad[68] = if bad[68] == b'9' { b'0' } else { bad[68] + 1 };
+    let bad = String::from_utf8(bad).unwrap();
+    for (format, body) in [
+        (CelestrakGpFormat::TwoLine, format!("{}\n\n{bad}", lines[1])),
+        (
+            CelestrakGpFormat::Tle,
+            format!("{}\r\r\n{}\r\r\n{bad}", lines[0], lines[1]),
+        ),
+    ] {
+        let expected = source_line(body.as_bytes(), body.find(&bad).unwrap());
+        let response = parse_celestrak_gp_response(body.as_bytes(), format).unwrap();
+        assert!(response.records.is_empty());
+        assert_eq!(response.rejected.len(), 1);
+        assert_eq!(response.rejected[0].line_number, Some(expected));
+        assert_eq!(response.rejected[0].raw, body);
+    }
+}
+
+#[test]
+fn celestrak_blank_pairs_and_checksum_recovery_have_exact_outcomes() {
+    use sidereon_core::data::{
+        parse_celestrak_gp_response, CelestrakGpRejectionReason as R,
+        CelestrakGpStructuralError as S,
+    };
+    let lines = include_str!("fixtures/omm/25544.tle")
+        .lines()
+        .collect::<Vec<_>>();
+    let expected_name =
+        sidereon_core::astro::omm::parse_json_array(include_str!("fixtures/omm/25544.json"))
+            .unwrap()
+            .omms
+            .remove(0)
+            .object_name;
+    for format in [CelestrakGpFormat::TwoLine, CelestrakGpFormat::ThreeLine] {
+        let name = if format == CelestrakGpFormat::ThreeLine {
+            format!("0 {}\n\n", lines[0])
+        } else {
+            String::new()
+        };
+        let body = format!("{name}{}\n \n\t\n{}", lines[1], lines[2]);
+        let response = parse_celestrak_gp_response(body.as_bytes(), format).unwrap();
+        assert_eq!(response.records.len(), 1);
+        assert!(response.rejected.is_empty());
+        let record = &response.records[0];
+        assert_eq!(record.record_index, 1);
+        assert_eq!(record.line_number, Some(source_line(body.as_bytes(), 0)));
+        assert_eq!(record.raw, body);
+        assert_eq!(
+            record.object_name,
+            if format == CelestrakGpFormat::ThreeLine {
+                expected_name.clone()
+            } else {
+                None
+            }
+        );
+        assert_gp_byte_accounting(body.as_bytes(), &response);
+    }
+    let mut bad = lines[2].as_bytes().to_vec();
+    bad[68] = b'X';
+    let bad = String::from_utf8(bad).unwrap();
+    for format in [
+        CelestrakGpFormat::TwoLine,
+        CelestrakGpFormat::Tle,
+        CelestrakGpFormat::ThreeLine,
+    ] {
+        let name = match format {
+            CelestrakGpFormat::TwoLine => String::new(),
+            CelestrakGpFormat::ThreeLine => format!("0 {}\n", lines[0]),
+            _ => format!("{}\n", lines[0]),
+        };
+        let rejected = format!("STRAY\n{name}{}\n{bad}\n\n", lines[1]);
+        let good = format!("{name}{}\n{}", lines[1], lines[2]);
+        let body = format!("{rejected}{good}");
+        let response = parse_celestrak_gp_response(body.as_bytes(), format).unwrap();
+        assert_eq!(response.records.len(), 1);
+        assert_eq!(response.rejected.len(), 1);
+        assert_eq!(response.rejected[0].record_index, 1);
+        assert_eq!(
+            response.rejected[0].line_number,
+            Some(source_line(body.as_bytes(), 0))
+        );
+        assert_eq!(response.rejected[0].raw, rejected);
+        assert_eq!(
+            response.rejected[0].reason,
+            R::Structural(S::InvalidTleStructure)
+        );
+        assert_eq!(response.records[0].record_index, 2);
+        assert_eq!(
+            response.records[0].line_number,
+            Some(source_line(body.as_bytes(), rejected.len()))
+        );
+        assert_eq!(response.records[0].raw, good);
+        assert_eq!(
+            response.records[0].object_name,
+            if format == CelestrakGpFormat::TwoLine {
+                None
+            } else {
+                expected_name.clone()
+            }
+        );
+        assert_gp_byte_accounting(body.as_bytes(), &response);
+    }
+}
+
+#[test]
+fn celestrak_kvn_whitespace_classification_matches_the_reader() {
+    use sidereon_core::astro::omm::parse_kvn;
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let body = format!(
+        "\x0bCOMMENT header\n\u{a0}{}",
+        include_str!("fixtures/omm/24876.kvn")
+    );
+    let expected = parse_kvn(&body).unwrap();
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+    assert!(response.rejected.is_empty());
+    assert_eq!(response.records.len(), 1);
+    assert_eq!(response.records[0].to_omm().unwrap(), expected);
+    assert_eq!(
+        response.records[0].line_number,
+        Some(source_line(body.as_bytes(), body.find("COMMENT").unwrap()))
+    );
+    assert_gp_byte_accounting(body.as_bytes(), &response);
+}
+
+#[test]
+fn celestrak_corrupted_element_prefixes_never_become_names() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let a = include_str!("fixtures/omm/25544.tle")
+        .lines()
+        .collect::<Vec<_>>();
+    let b = include_str!("fixtures/omm/24876.tle")
+        .lines()
+        .collect::<Vec<_>>();
+    for checksum in [
+        b'X',
+        if a[1].as_bytes()[68] == b'9' {
+            b'0'
+        } else {
+            a[1].as_bytes()[68] + 1
+        },
+    ] {
+        let mut corrupt = a[1].as_bytes().to_vec();
+        corrupt[68] = checksum;
+        let corrupt = String::from_utf8(corrupt).unwrap();
+        let body = format!("NAME_A\n{corrupt}\n{}\n{}", b[1], b[2]);
+        let response =
+            parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+        assert_eq!(response.records.len(), 1);
+        assert_eq!(response.records[0].object_name, None);
+        assert_eq!(response.records[0].record_index, 2);
+        assert_eq!(
+            response.records[0].line_number,
+            Some(source_line(body.as_bytes(), body.find(b[1]).unwrap()))
+        );
+        assert_eq!(response.records[0].raw, format!("{}\n{}", b[1], b[2]));
+        assert_eq!(response.rejected.len(), 1);
+        assert_eq!(response.rejected[0].raw, format!("NAME_A\n{corrupt}\n"));
+        for record in &response.records {
+            assert!(!record
+                .object_name
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("1 "));
+            assert!(!record
+                .object_name
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("2 "));
+        }
+        assert_eq!(
+            response.rejected[0].line_number,
+            Some(source_line(body.as_bytes(), 0))
+        );
+    }
+}
+
+#[test]
+fn celestrak_tle_responses_match_the_file_reader() {
+    use sidereon_core::astro::sgp4::{parse_tle_file, MinutesSinceEpoch, Satellite};
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let fixtures = [
+        include_str!("fixtures/omm/25544.tle"),
+        include_str!("fixtures/omm/24876.tle"),
+        include_str!("fixtures/omm/28884.tle"),
+        include_str!("fixtures/celestrak/stations.tle"),
+    ];
+    let mut accepted_files = 0;
+    for fixture in fixtures {
+        for ending in ["\n", "\r", "\r\n", "\n\r", "\r\r\n"] {
+            for blanks in ["", "\n", " \n\t\n"] {
+                for format in [
+                    CelestrakGpFormat::Tle,
+                    CelestrakGpFormat::ThreeLine,
+                    CelestrakGpFormat::TwoLine,
+                ] {
+                    let lines = fixture.lines().collect::<Vec<_>>();
+                    let mut source = Vec::new();
+                    for record in lines.as_chunks::<3>().0 {
+                        if format != CelestrakGpFormat::TwoLine {
+                            source.push(if format == CelestrakGpFormat::ThreeLine {
+                                format!("0 {}", record[0])
+                            } else {
+                                record[0].to_string()
+                            });
+                        }
+                        source.push(format!(" {} ", record[1]));
+                        source.push(format!(" {} ", record[2]));
+                    }
+                    let body = source.join(&format!("\n{blanks}")).replace('\n', ending);
+                    let file = parse_tle_file(&body);
+                    let response = parse_celestrak_gp_response(body.as_bytes(), format).unwrap();
+                    // Their line-number definitions intentionally differ for
+                    // bare CRs; only satellites and names are compared here.
+                    if file.rejected.is_empty() {
+                        accepted_files += 1;
+                        assert_eq!(response.records.len(), file.satellites.len());
+                        assert!(response.rejected.is_empty());
+                        for (record, expected) in response.records.iter().zip(&file.satellites) {
+                            assert_eq!(record.object_name.as_deref().unwrap_or(""), expected.name);
+                            let satellite =
+                                Satellite::from_elements(&record.to_element_set().unwrap())
+                                    .unwrap();
+                            for minutes in [0.0, 90.0] {
+                                assert_eq!(
+                                    satellite.propagate(MinutesSinceEpoch(minutes)).unwrap(),
+                                    expected
+                                        .satellite
+                                        .propagate(MinutesSinceEpoch(minutes))
+                                        .unwrap()
+                                );
+                            }
+                        }
+                    }
+                    assert_gp_byte_accounting(body.as_bytes(), &response);
+                }
+            }
+        }
+    }
+    assert!(accepted_files > 0);
+}
+
+#[test]
+fn celestrak_kvn_starts_skip_ignored_blank_lines() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let valid = include_str!("fixtures/omm/24876.kvn");
+    for suffix in [
+        valid.to_string(),
+        valid.replace("EPOCH          = 2026-06-16T04:54:23.504544", ""),
+    ] {
+        for prefix in [String::new(), format!("{valid}\n\n")] {
+            let expected_index = if prefix.is_empty() { 1 } else { 2 };
+            let body = format!("{prefix}\n\n{suffix}");
+            let expected = source_line(body.as_bytes(), body.rfind("CCSDS_OMM_VERS").unwrap());
+            let response =
+                parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+            let actual = response
+                .records
+                .iter()
+                .map(|record| (record.record_index, record.line_number))
+                .chain(
+                    response
+                        .rejected
+                        .iter()
+                        .map(|record| (record.record_index, record.line_number)),
+                )
+                .find(|(index, _)| *index == expected_index)
+                .map(|(_, line)| line)
+                .unwrap();
+            assert_eq!(actual, Some(expected));
+            assert_gp_byte_accounting(body.as_bytes(), &response);
+        }
+    }
+}
+
+#[test]
+fn celestrak_non_gp_structures_share_an_excerpt_error() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    for (format, body) in [
+        (CelestrakGpFormat::Tle, "1 error"),
+        (CelestrakGpFormat::ThreeLine, "Service Unavailable"),
+        (CelestrakGpFormat::TwoLine, "1 error"),
+        (CelestrakGpFormat::Kvn, "error = x"),
+        (
+            CelestrakGpFormat::Json,
+            "{\"error\":\"Service Unavailable\"}",
+        ),
+        (CelestrakGpFormat::JsonPretty, "[1,2]"),
+        (CelestrakGpFormat::Csv, "Service Unavailable"),
+        (CelestrakGpFormat::Xml, "<error>Service Unavailable</error>"),
+    ] {
+        assert!(
+            matches!(parse_celestrak_gp_response(body.as_bytes(), format),
+            Err(DataCatalogError::InvalidCelestrakGpResponse { reason, .. }) if reason.contains(&format!("{body:?}"))),
+            "{format:?}: {body}"
+        );
+    }
+}
+
+#[test]
+fn celestrak_json_eof_and_control_positions_are_always_located() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    for body in [
+        "[{\"OBJECT_NAME\":\"X\"}\n",
+        "[{\"OBJECT_NAME\":\"é",
+        "[{\"OBJECT_NAME\":\"é\n",
+        "[{\"OBJECT_NAME\":\"a\nb\"}]",
+        "[{\"OBJECT_NAME\":\"a\tb\"}]",
+    ] {
+        match parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Json) {
+            Err(DataCatalogError::InvalidCelestrakGpResponse { line, column, .. }) => {
+                assert!(line.is_some(), "{body:?}");
+                assert!(column.is_some(), "{body:?}");
+                let offset = if body.contains("\"}") && body.ends_with('\n') {
+                    body.len()
+                } else if let Some(control) = body.find(['\n', '\t']) {
+                    control
+                } else {
+                    body.char_indices().last().unwrap().0
+                };
+                let expected_line = source_line(body.as_bytes(), offset);
+                let start = body[..offset].rfind('\n').map_or(0, |at| at + 1);
+                let expected_column = body[start..offset].chars().count() + 1;
+                assert_eq!(
+                    (line, column),
+                    (Some(expected_line), Some(expected_column)),
+                    "{body:?}"
+                );
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn celestrak_gp_urls_cover_every_selector_and_format() {
+    use CelestrakGpFormat as F;
+    use CelestrakGpQuery as Q;
+    let root = "https://celestrak.org/NORAD/elements/gp.php";
+    let selectors = [
+        (Q::Group("gps-ops"), "GROUP=gps-ops"),
+        (Q::CatalogNumber(123_456), "CATNR=123456"),
+        (Q::InternationalDesignator("2020-025"), "INTDES=2020-025"),
+        (Q::Name("COSMOS 2251 DEB"), "NAME=COSMOS%202251%20DEB"),
+        (Q::Special(CelestrakGpSpecial::Gpz), "SPECIAL=GPZ"),
+        (Q::Special(CelestrakGpSpecial::GpzPlus), "SPECIAL=GPZ-PLUS"),
+        (Q::Special(CelestrakGpSpecial::Decaying), "SPECIAL=DECAYING"),
+    ];
+    for (query, expected) in selectors {
+        assert_eq!(
+            sidereon_core::data::celestrak_gp_url(query, F::Csv),
+            Ok(format!("{root}?{expected}&FORMAT=CSV"))
+        );
+    }
+
+    let formats = [
+        (F::Tle, "TLE"),
+        (F::ThreeLine, "3LE"),
+        (F::TwoLine, "2LE"),
+        (F::Xml, "XML"),
+        (F::Kvn, "KVN"),
+        (F::Json, "JSON"),
+        (F::JsonPretty, "JSON-PRETTY"),
+        (F::Csv, "CSV"),
+    ];
+    for (format, expected) in formats {
+        assert_eq!(
+            sidereon_core::data::celestrak_gp_url(Q::CatalogNumber(25544), format),
+            Ok(format!("{root}?CATNR=25544&FORMAT={expected}"))
+        );
+    }
+}
+
+#[test]
+fn celestrak_gp_urls_reject_invalid_selectors() {
+    use CelestrakGpQuery as Q;
+    for query in [Q::Group(""), Q::Group("gps&ops"), Q::CatalogNumber(0)] {
+        assert!(matches!(
+            sidereon_core::data::celestrak_gp_url(query, CelestrakGpFormat::Json),
+            Err(DataCatalogError::InvalidCelestrakGpSelector { .. })
+        ));
+    }
+    for value in ["20-025", "2020-25", "2020/025", "202A-025"] {
+        assert!(sidereon_core::data::celestrak_gp_url(
+            Q::InternationalDesignator(value),
+            CelestrakGpFormat::Json
+        )
+        .is_err());
+    }
+    for name in ["", " ", "\t"] {
+        assert!(
+            sidereon_core::data::celestrak_gp_url(Q::Name(name), CelestrakGpFormat::Json).is_err()
+        );
+    }
+}
+
+#[test]
+fn constellation_sources_are_cataloged_and_allowlisted() {
+    use sidereon_core::data::{
+        celestrak_constellation_url, celestrak_gp_source_entry, navcen_constellation_url,
+        navcen_source_entry,
+    };
+    use sidereon_core::GnssSystem;
+
+    assert_eq!(celestrak_gp_source_entry().host, "celestrak.org");
+    assert_eq!(navcen_source_entry().host, "www.navcen.uscg.gov");
+    assert_eq!(
+        navcen_constellation_url(),
+        "https://www.navcen.uscg.gov/gps-constellation"
+    );
+    assert!(allowed_hosts().contains(&"www.navcen.uscg.gov"));
+    assert_eq!(
+        celestrak_constellation_url(GnssSystem::Gps, CelestrakGpFormat::Json),
+        Ok("https://celestrak.org/NORAD/elements/gp.php?GROUP=gps-ops&FORMAT=JSON".to_string())
+    );
+    assert_eq!(
+        celestrak_constellation_url(GnssSystem::Qzss, CelestrakGpFormat::Json),
+        Ok("https://celestrak.org/NORAD/elements/gp.php?GROUP=gnss&FORMAT=JSON".to_string())
+    );
+    let listing = include_str!("fixtures/celestrak/current_data_groups.tsv");
+    for (system, label) in [
+        (GnssSystem::Gps, "GPS Operational"),
+        (GnssSystem::Glonass, "GLONASS Operational"),
+        (GnssSystem::Galileo, "Galileo"),
+        (GnssSystem::BeiDou, "Beidou"),
+        (GnssSystem::Qzss, "GNSS"),
+        (GnssSystem::Navic, "GNSS"),
+        (GnssSystem::Sbas, "Satellite-Based Augmentation System"),
+    ] {
+        let tail = listing.split_once(label).expect("archived listing label").1;
+        let group = tail
+            .split_once("gp.php?GROUP=")
+            .expect("archived group link")
+            .1
+            .split_once('&')
+            .expect("archived group query")
+            .0;
+        assert_eq!(sidereon_core::constellation::celestrak_group(system), group);
+    }
+}
+
+#[test]
+fn celestrak_gp_response_classification_is_typed() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let format = CelestrakGpFormat::Json;
+    assert_eq!(
+        parse_celestrak_gp_response(b" \r\n", format),
+        Err(DataCatalogError::EmptyCelestrakGpResponse)
+    );
+    assert_eq!(
+        parse_celestrak_gp_response(b"No GP data found", format),
+        Err(DataCatalogError::CelestrakGpDataNotFound)
+    );
+    assert_eq!(
+        parse_celestrak_gp_response("\u{feff}No GP data found".as_bytes(), format),
+        Err(DataCatalogError::CelestrakGpDataNotFound)
+    );
+    assert_eq!(
+        parse_celestrak_gp_response(b"<!DOCTYPE html><title>503</title>", format),
+        Err(DataCatalogError::CelestrakGpHtmlResponse)
+    );
+    assert!(matches!(
+        parse_celestrak_gp_response(b"not json", format),
+        Err(DataCatalogError::InvalidCelestrakGpResponse { reason, .. })
+            if reason.contains("line 1 column 2")
+    ));
+
+    let tle = include_bytes!("fixtures/omm/25544.tle");
+    assert_eq!(
+        parse_celestrak_gp_response(tle, CelestrakGpFormat::Tle)
+            .expect("valid TLE response")
+            .records
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn celestrak_generated_responses_preserve_every_non_bom_byte() {
+    use sidereon_core::astro::omm::{
+        encode_csv, encode_json, encode_kvn_lenient, encode_xml_lenient, parse_json_array,
+    };
+    use sidereon_core::data::parse_celestrak_gp_response;
+
+    let omm = parse_json_array(include_str!("fixtures/omm/24876.json"))
+        .unwrap()
+        .omms
+        .remove(0)
+        .with_ccsds_header("2.0", "2026-06-17T05:00:00", "CELESTRAK")
+        .unwrap();
+    let mut invalid = omm.clone();
+    invalid.mean_motion = Some(0.0);
+    let tle = include_str!("fixtures/omm/24876.tle").trim_end();
+    let tle_lines = tle.lines().collect::<Vec<_>>();
+    let two_line = format!("{}\n{}", tle_lines[1], tle_lines[2]);
+    let three_line = format!("0 {}\n{}\n{}", tle_lines[0], tle_lines[1], tle_lines[2]);
+    let xml = |record: &sidereon_core::astro::omm::Omm| {
+        let encoded = encode_xml_lenient(record).unwrap();
+        encoded[encoded.find("<omm ").unwrap()..encoded.find("</omm>").unwrap() + 6].to_string()
+    };
+    let json = format!(
+        "[{},\n\n{},\n{}]",
+        encode_json(&omm).unwrap(),
+        encode_json(&invalid).unwrap(),
+        encode_json(&omm).unwrap()
+    );
+    let bases = [
+        (
+            CelestrakGpFormat::Tle,
+            format!("{tle}\n\nSTRAY é\n{tle}\n{tle}").into_bytes(),
+        ),
+        (
+            CelestrakGpFormat::ThreeLine,
+            format!("{three_line}\n\nSTRAY é\n{three_line}\n{three_line}").into_bytes(),
+        ),
+        (
+            CelestrakGpFormat::TwoLine,
+            format!("{two_line}\n\nSTRAY é\n{two_line}\n{two_line}").into_bytes(),
+        ),
+        (
+            CelestrakGpFormat::Xml,
+            format!(
+                "<ndm>{}\n\n{}\n{}</ndm>",
+                xml(&omm),
+                xml(&invalid),
+                xml(&omm)
+            )
+            .into_bytes(),
+        ),
+        (
+            CelestrakGpFormat::Kvn,
+            format!(
+                "{}\n\n{}\n{}",
+                encode_kvn_lenient(&omm).unwrap(),
+                encode_kvn_lenient(&invalid).unwrap(),
+                encode_kvn_lenient(&omm).unwrap()
+            )
+            .into_bytes(),
+        ),
+        (CelestrakGpFormat::Json, json.clone().into_bytes()),
+        (CelestrakGpFormat::JsonPretty, json.into_bytes()),
+        (
+            CelestrakGpFormat::Csv,
+            encode_csv(&[omm.clone(), invalid, omm])
+                .unwrap()
+                .into_bytes(),
+        ),
+    ];
+    let endings: [&[u8]; 5] = [b"\n", b"\r", b"\r\n", b"\n\r", b"\r\r\n"];
+    let mut state = 0x6a09_e667_f3bc_c909_u64;
+    let mut counts = [(0usize, 0usize); 8];
+    for _ in 0..20_000 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        let format_index = (state as usize) % bases.len();
+        let (format, base) = &bases[format_index];
+        let ending = endings[((state >> 8) as usize) % endings.len()];
+        let mut body = base
+            .split(|byte| *byte == b'\n')
+            .collect::<Vec<_>>()
+            .join(ending);
+        match (state >> 16) % 8 {
+            0 => {
+                body.splice(0..0, [0xef, 0xbb, 0xbf]);
+            }
+            1 => {
+                body.splice(0..0, ending.iter().copied());
+            }
+            2 => body.extend_from_slice(ending),
+            3 if !body.is_empty() => {
+                let at = ((state >> 24) as usize) % body.len();
+                body[at] = b'X';
+            }
+            4 => body.extend_from_slice("é".as_bytes()),
+            5 => body.extend_from_slice(b"\0"),
+            _ => {}
+        };
+        if let Ok(response) = parse_celestrak_gp_response(&body, *format) {
+            assert_gp_byte_accounting(&body, &response);
+            counts[format_index].0 += response.records.len();
+            counts[format_index].1 += response.rejected.len();
+            if matches!(
+                format,
+                CelestrakGpFormat::Tle | CelestrakGpFormat::ThreeLine | CelestrakGpFormat::TwoLine
+            ) {
+                for record in &response.records {
+                    let name = record.object_name.as_deref().unwrap_or("");
+                    assert!(!name.starts_with("1 ") && !name.starts_with("2 "));
+                }
+                let text = std::str::from_utf8(&body)
+                    .unwrap()
+                    .trim_start_matches('\u{feff}');
+                let file = sidereon_core::astro::sgp4::parse_tle_file(text);
+                // Compare where both readers see the same logical lines. A bare
+                // CR inside a std::lines name belongs to that name only in the
+                // file reader; physical line numbers also need not agree.
+                let same_lines = text.lines().all(|line| !line.trim().contains('\r'));
+                if *format == CelestrakGpFormat::Tle && file.rejected.is_empty() && same_lines {
+                    assert_eq!(response.records.len(), file.satellites.len());
+                    for (record, satellite) in response.records.iter().zip(file.satellites) {
+                        assert_eq!(record.object_name.as_deref().unwrap_or(""), satellite.name);
+                    }
+                }
+            }
+        }
+    }
+    for (index, (accepted, rejected)) in counts.into_iter().enumerate() {
+        assert!(
+            accepted > 0 && rejected > 0,
+            "{:?}: {accepted} accepted, {rejected} rejected",
+            bases[index].0
+        );
+    }
+}
+
+#[test]
+fn celestrak_repeat_download_body_preserves_backoff_details() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let archived = include_str!("fixtures/celestrak/repeat_download.txt").replace('\n', "\r\n");
+    assert_eq!(
+        parse_celestrak_gp_response(archived.as_bytes(), CelestrakGpFormat::Tle),
+        Err(DataCatalogError::CelestrakGpNotModified {
+            query: Some("GROUP=active".to_string()),
+            last_successful_download: Some("2026-03-26 08:10:22 UTC".to_string()),
+        })
+    );
+    let body = b"GP data has not updated since your last successful\r\ndownload of NAME=Look at This at 2026-03-26 08:10:22 UTC.\r\nData is updated once every 2 hours.\r\n";
+    assert_eq!(
+        parse_celestrak_gp_response(body, CelestrakGpFormat::Tle),
+        Err(DataCatalogError::CelestrakGpNotModified {
+            query: Some("NAME=Look at This".to_string()),
+            last_successful_download: Some("2026-03-26 08:10:22 UTC".to_string()),
+        })
+    );
+    let wrapped = b"GP data has not updated since your last successful download\r\nof NAME=  Look  at  This   at 2026-03-26 08:10:22 UTC.\r\nData is updated once every 2 hours.\r\n";
+    assert_eq!(
+        parse_celestrak_gp_response(wrapped, CelestrakGpFormat::Json),
+        Err(DataCatalogError::CelestrakGpNotModified {
+            query: Some("NAME=  Look  at  This".to_string()),
+            last_successful_download: Some("2026-03-26 08:10:22 UTC".to_string()),
+        })
+    );
+}
+
+#[test]
+fn celestrak_tle_whitespace_and_partial_failures_keep_source_locations() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let tle = include_str!("fixtures/omm/25544.tle");
+    let lines: Vec<_> = tle.lines().collect();
+    let body = format!(
+        "\n\n{}\n{}\n{}\n\n{}\n{}\n{}\n",
+        lines[0], lines[1], lines[2], lines[0], lines[1], lines[2]
+    );
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+    assert_eq!(response.records.len(), 2);
+    assert!(response.rejected.is_empty());
+    assert_eq!(response.records[0].record_index, 1);
+    assert_eq!(response.records[0].line_number, Some(3));
+    assert!(response.records[0].raw.starts_with("\n\n"));
+    assert_eq!(response.records[1].record_index, 2);
+    assert!(response.records[1].raw.starts_with('\n'));
+    assert_gp_byte_accounting(body.as_bytes(), &response);
+
+    let padded = format!("\n\n{tle}\n\n");
+    let response = parse_celestrak_gp_response(padded.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert!(response.rejected.is_empty());
+}
+
+#[test]
+fn celestrak_kvn_rejects_leading_content_without_discarding_the_message() {
+    use sidereon_core::astro::omm::{encode_kvn, parse_json_array};
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let mut source = parse_json_array(include_str!("fixtures/omm/24876.json"))
+        .unwrap()
+        .omms
+        .remove(0);
+    let conventions =
+        sidereon_core::astro::omm::parse_xml(include_str!("fixtures/omm/24876.xml")).unwrap();
+    source.center_name = conventions.center_name;
+    source.ref_frame = conventions.ref_frame;
+    source.time_system = conventions.time_system;
+    source.mean_element_theory = conventions.mean_element_theory;
+    let source = source
+        .with_ccsds_header("2.0", "2026-06-16T05:00:00", "CELESTRAK")
+        .unwrap();
+    let body = format!("BAD PREFIX\n{}", encode_kvn(&source).unwrap());
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert_eq!(response.rejected[0].line_number, Some(1));
+    assert_eq!(response.rejected[0].raw, "BAD PREFIX\n");
+
+    // The KVN reader assigns a leading COMMENT to the message that follows it.
+    let body = format!("COMMENT before version\n{}", encode_kvn(&source).unwrap());
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert!(response.rejected.is_empty());
+    assert_eq!(response.records[0].raw, body);
+
+    let indented = encode_kvn(&source)
+        .unwrap()
+        .replacen("CCSDS_OMM_VERS", "  CCSDS_OMM_VERS", 1);
+    let response =
+        parse_celestrak_gp_response(indented.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert!(response.rejected.is_empty());
+
+    let message = encode_kvn(&source).unwrap();
+    let body = format!("{message}COMMENT for next message\n{message}");
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+    assert_eq!(response.records.len(), 2);
+    assert!(response.rejected.is_empty());
+    assert!(response.records[1]
+        .raw
+        .starts_with("COMMENT for next message\n"));
+
+    let body = format!("{message}COMMENT for next message\n\n{message}");
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+    assert_eq!(response.records.len(), 2);
+    assert!(response.rejected.is_empty());
+    assert!(response.records[1]
+        .raw
+        .starts_with("COMMENT for next message\n\n"));
+
+    let body = format!("{message}COMMENTARY = not-a-comment\n{message}");
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert_eq!(response.rejected.len(), 1);
+    assert!(matches!(
+        response.rejected[0].reason,
+        sidereon_core::data::CelestrakGpRejectionReason::Omm(_)
+    ));
+}
+
+#[test]
+fn celestrak_three_line_names_that_resemble_element_lines_are_names() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let tle = include_str!("fixtures/omm/25544.tle");
+    let mut lines = tle.lines();
+    let _original_name = lines.next().expect("name");
+    let line1 = lines.next().expect("line 1");
+    let line2 = lines.next().expect("line 2");
+
+    for name in ["1 TEST SAT", "2 FAST"] {
+        let body = format!("0 {name}\n{line1}\n{line2}");
+        let records = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::ThreeLine)
+            .expect("structured 3LE response");
+        assert_eq!(records.records[0].object_name.as_deref(), Some(name));
+    }
+}
+
+#[test]
+fn celestrak_three_line_recovery_never_promotes_an_element_line_to_a_name() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let first: Vec<_> = include_str!("fixtures/omm/25544.tle").lines().collect();
+    let second: Vec<_> = include_str!("fixtures/omm/24876.tle").lines().collect();
+    let body = format!(
+        "NAME\n{}\n{}\n{}\n{}\nGOOD\n{}\n{}",
+        first[1], second[2], second[1], second[2], first[1], first[2]
+    );
+    let parsed = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+    assert_eq!(parsed.records.len(), 2);
+    assert_eq!(parsed.records[0].object_name, None);
+    assert_eq!(parsed.records[1].object_name.as_deref(), Some("GOOD"));
+    assert_eq!(parsed.rejected.len(), 1);
+    assert_eq!(parsed.rejected[0].line_number, Some(1));
+    assert_eq!(
+        parsed.rejected[0].raw,
+        format!("NAME\n{}\n{}\n", first[1], second[2])
+    );
+
+    let unprefixed = format!("NAME\n{}\n{}", first[1], first[2]);
+    let parsed =
+        parse_celestrak_gp_response(unprefixed.as_bytes(), CelestrakGpFormat::ThreeLine).unwrap();
+    assert!(parsed.records.is_empty());
+    assert_eq!(parsed.rejected.len(), 1);
+    assert_eq!(parsed.rejected[0].raw, unprefixed);
+}
+
+#[test]
+fn celestrak_tle_framing_rules_have_complete_outcomes() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let first: Vec<_> = include_str!("fixtures/omm/25544.tle").lines().collect();
+    let second: Vec<_> = include_str!("fixtures/omm/24876.tle").lines().collect();
+    let record = format!("{}\n{}\n{}", first[0], first[1], first[2]);
+
+    let body = format!(
+        "{}\n\n{}\n{}\n{record}\n{record}",
+        first[0], first[1], first[2]
+    );
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+    assert_eq!(
+        response
+            .records
+            .iter()
+            .map(|record| (
+                record.record_index,
+                record.line_number,
+                record.object_name.as_deref()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, Some(1), Some(first[0].trim())),
+            (2, Some(5), Some(first[0].trim())),
+            (3, Some(8), Some(first[0].trim()))
+        ]
+    );
+    assert!(response.rejected.is_empty());
+    assert!(response.records[0].raw.contains("\n\n"));
+    assert_gp_byte_accounting(body.as_bytes(), &response);
+
+    for orphan in [
+        second[2].to_string(),
+        format!("{} trailing", second[2]),
+        second[2][..68].to_string(),
+    ] {
+        let body = format!("{record}\n{orphan}\n{}\n{}", second[1], second[2]);
+        let response =
+            parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+        assert_eq!(response.records.len(), 2);
+        assert_eq!(response.records[0].record_index, 1);
+        assert_eq!(
+            response.records[0].object_name.as_deref(),
+            Some(first[0].trim())
+        );
+        assert_eq!(response.rejected.len(), 1);
+        assert_eq!(response.rejected[0].record_index, 2);
+        assert_eq!(response.rejected[0].line_number, Some(4));
+        assert_eq!(response.rejected[0].raw, format!("{orphan}\n"));
+        assert_eq!(response.records[1].record_index, 3);
+        assert_eq!(response.records[1].object_name, None);
+        assert_eq!(
+            response.records[1].raw,
+            format!("{}\n{}", second[1], second[2])
+        );
+        assert_gp_byte_accounting(body.as_bytes(), &response);
+    }
+
+    let prefixed = format!("0 {}\n{}\n{}", first[0], first[1], first[2]);
+    let body = format!("{}\n{}\n{}\n{prefixed}", first[0], first[1], first[2]);
+    let response =
+        parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::ThreeLine).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert_eq!(response.records[0].record_index, 2);
+    assert_eq!(
+        response.records[0].object_name.as_deref(),
+        Some(first[0].trim())
+    );
+    assert_eq!(response.rejected.len(), 1);
+    assert_eq!(response.rejected[0].record_index, 1);
+    assert_eq!(response.rejected[0].line_number, Some(1));
+    assert_eq!(
+        response.rejected[0].raw,
+        format!("{}\n{}\n{}\n", first[0], first[1], first[2])
+    );
+    assert_gp_byte_accounting(body.as_bytes(), &response);
+
+    let pair = format!("{}\n{}", first[1], first[2]);
+    let body = format!("{pair}\n\n{pair}");
+    let response =
+        parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::TwoLine).unwrap();
+    assert_eq!(response.records.len(), 2);
+    assert_eq!(response.records[0].record_index, 1);
+    assert_eq!(response.records[1].record_index, 2);
+    assert!(response.rejected.is_empty());
+    assert!(response.records[1].raw.starts_with('\n'));
+    assert_gp_byte_accounting(body.as_bytes(), &response);
+}
+
+#[test]
+fn celestrak_tle_structure_reports_stray_and_incomplete_lines() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let tle = include_str!("fixtures/omm/25544.tle");
+    let lines: Vec<&str> = tle.lines().collect();
+    let two_line_with_stray = format!(
+        "{}\n{}\nSTRAY\n{}\n{}",
+        lines[1], lines[2], lines[1], lines[2]
+    );
+    let response =
+        parse_celestrak_gp_response(two_line_with_stray.as_bytes(), CelestrakGpFormat::TwoLine)
+            .unwrap();
+    assert_eq!(response.rejected[0].line_number, Some(3));
+
+    assert_eq!(
+        response.rejected[0].reason,
+        sidereon_core::data::CelestrakGpRejectionReason::Structural(
+            sidereon_core::data::CelestrakGpStructuralError::UnexpectedContent
+        )
+    );
+
+    let incomplete = format!("{}\n{}\n{}\nNEXT SAT", lines[0], lines[1], lines[2]);
+    let response =
+        parse_celestrak_gp_response(incomplete.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+    assert_eq!(response.rejected[0].line_number, Some(4));
+    assert_eq!(response.rejected[0].raw, "NEXT SAT");
+    assert_eq!(
+        response.rejected[0].reason,
+        sidereon_core::data::CelestrakGpRejectionReason::Structural(
+            sidereon_core::data::CelestrakGpStructuralError::IncompleteRecord
+        )
+    );
+}
+
+#[test]
+fn celestrak_tle_framing_resynchronizes_after_one_rejected_run() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let lines: Vec<_> = include_str!("fixtures/omm/25544.tle").lines().collect();
+    let pair = format!("{}\n{}", lines[1], lines[2]);
+    let body = format!("{pair}\nSTRAY\n{pair}\n{pair}\n{pair}");
+    let response =
+        parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::TwoLine).unwrap();
+    assert_eq!(response.records.len(), 4);
+    assert_eq!(response.rejected.len(), 1);
+    assert_eq!(response.rejected[0].record_index, 2);
+    assert_eq!(response.rejected[0].line_number, Some(3));
+    assert_eq!(response.rejected[0].raw, "STRAY\n");
+
+    let record = format!("{}\n{}\n{}", lines[0], lines[1], lines[2]);
+    let body = format!("{}\n\n{}\n{}", lines[0], record, record);
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+    assert_eq!(response.records.len(), 2);
+    assert_eq!(response.rejected.len(), 1);
+    assert_eq!(response.rejected[0].record_index, 1);
+    assert_eq!(response.rejected[0].line_number, Some(1));
+}
+
+#[test]
+fn celestrak_tle_reader_attributes_line_two_format_and_field_errors() {
+    use sidereon_core::data::{parse_celestrak_gp_response, CelestrakGpRejectionReason};
+    let lines: Vec<_> = include_str!("fixtures/omm/25544.tle").lines().collect();
+    let mut malformed_format = lines[2].to_string();
+    malformed_format.replace_range(11..12, "X");
+    let mut malformed_field = lines[2].to_string();
+    malformed_field.replace_range(52..63, "ABCDEFGHIJK");
+    for line2 in [malformed_format, malformed_field] {
+        let body = format!("{}\n{}\n{line2}", lines[0], lines[1]);
+        let response =
+            parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+        assert_eq!(response.rejected[0].line_number, Some(3));
+        assert!(matches!(
+            response.rejected[0].reason,
+            CelestrakGpRejectionReason::Tle(_)
+        ));
+    }
+}
+
+#[test]
+fn celestrak_three_line_blank_names_are_absent() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let lines: Vec<_> = include_str!("fixtures/omm/25544.tle").lines().collect();
+    for name_line in ["0", "0 "] {
+        let body = format!("{name_line}\n{}\n{}", lines[1], lines[2]);
+        let response =
+            parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::ThreeLine).unwrap();
+        assert_eq!(response.records[0].object_name, None);
+    }
+}
+
+#[test]
+fn celestrak_omm_rejections_use_parser_owned_exact_spans() {
+    use sidereon_core::astro::omm::{encode_csv, parse_json_array};
+    use sidereon_core::data::{parse_celestrak_gp_response, CelestrakGpRejectionReason};
+
+    let json = include_str!("fixtures/omm/24876.json");
+    let object = json
+        .trim()
+        .strip_prefix('[')
+        .unwrap()
+        .strip_suffix(']')
+        .unwrap();
+    let body = format!("[\r\n{object},\r\nnull,\r\n{object}\r\n]");
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Json).unwrap();
+    assert_eq!(response.records.len(), 2);
+    assert_eq!(response.rejected[0].record_index, 2);
+    assert_eq!(response.rejected[0].line_number, Some(3));
+    assert_eq!(response.rejected[0].raw, "null,\r\n");
+    assert!(matches!(
+        response.rejected[0].reason,
+        CelestrakGpRejectionReason::Omm(_)
+    ));
+
+    let record = parse_json_array(json).unwrap().omms.remove(0);
+    let csv = encode_csv(&[record.clone(), record]).unwrap();
+    let split = csv.find('\n').unwrap() + 1;
+    let body = format!("{}   \r\n{}", &csv[..split], &csv[split..]);
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Csv).unwrap();
+    assert_eq!(response.records.len(), 2);
+    assert_eq!(response.rejected[0].record_index, 1);
+    assert_eq!(response.rejected[0].line_number, Some(2));
+    assert_eq!(
+        response.rejected[0].raw,
+        format!("{}   \r\n", &csv[..split])
+    );
+}
+
+#[test]
+fn celestrak_all_formats_return_canonical_omm_records_with_names() {
+    use sidereon_core::astro::omm::{
+        encode_csv, encode_json, encode_kvn, encode_xml, parse_json_array, Omm,
+    };
+    use sidereon_core::data::parse_celestrak_gp_response;
+
+    let json = include_str!("fixtures/omm/24876.json");
+    let mut source = parse_json_array(json)
+        .expect("source JSON")
+        .omms
+        .remove(0)
+        .with_ccsds_header("2.0", "2026-06-16T05:00:00", "CELESTRAK")
+        .expect("CCSDS header");
+    let conventions =
+        sidereon_core::astro::omm::parse_xml(include_str!("fixtures/omm/24876.xml")).unwrap();
+    source.center_name = conventions.center_name;
+    source.ref_frame = conventions.ref_frame;
+    source.time_system = conventions.time_system;
+    source.mean_element_theory = conventions.mean_element_theory;
+    let tle = include_str!("fixtures/omm/24876.tle");
+    let tle_lines: Vec<&str> = tle.lines().collect();
+    let tle_body = format!("{}\n{}\n{}", tle_lines[0], tle_lines[1], tle_lines[2]);
+    let three_line_body = format!("0 {}\n{}\n{}", tle_lines[0], tle_lines[1], tle_lines[2]);
+    let two_line_body = format!("{}\n{}", tle_lines[1], tle_lines[2]);
+    let kvn = encode_kvn(&source).expect("KVN");
+    let xml = encode_xml(&source).expect("XML");
+    let compact_json = encode_json(&source).expect("JSON");
+    let pretty_json = compact_json.replace("},{", "},\n{");
+    let csv = encode_csv(std::slice::from_ref(&source)).expect("CSV");
+    let bodies: [(CelestrakGpFormat, &[u8]); 8] = [
+        (CelestrakGpFormat::Tle, tle_body.as_bytes()),
+        (CelestrakGpFormat::ThreeLine, three_line_body.as_bytes()),
+        (CelestrakGpFormat::TwoLine, two_line_body.as_bytes()),
+        (CelestrakGpFormat::Xml, xml.as_bytes()),
+        (CelestrakGpFormat::Kvn, kvn.as_bytes()),
+        (CelestrakGpFormat::Json, compact_json.as_bytes()),
+        (CelestrakGpFormat::JsonPretty, pretty_json.as_bytes()),
+        (CelestrakGpFormat::Csv, csv.as_bytes()),
+    ];
+
+    let records: Vec<Omm> = bodies
+        .into_iter()
+        .map(|(format, body)| {
+            let mut parsed = parse_celestrak_gp_response(body, format).expect("GP response");
+            assert_gp_byte_accounting(body, &parsed);
+            assert_eq!(parsed.records.len(), 1);
+            let terminated = format!("{}\n", String::from_utf8_lossy(body));
+            let terminated_response = parse_celestrak_gp_response(terminated.as_bytes(), format)
+                .expect("terminated response");
+            assert_eq!(terminated_response.records.len(), 1, "{format:?}");
+            assert_gp_byte_accounting(terminated.as_bytes(), &terminated_response);
+            let crlf = String::from_utf8_lossy(body).replace('\n', "\r\n");
+            let crlf_response =
+                parse_celestrak_gp_response(crlf.as_bytes(), format).expect("CRLF response");
+            assert_eq!(crlf_response.records.len(), 1, "{format:?}");
+            assert_gp_byte_accounting(crlf.as_bytes(), &crlf_response);
+            let surrounded_body = format!("\r\n\r\n{}\r\n\r\n", String::from_utf8_lossy(body));
+            let surrounded = parse_celestrak_gp_response(surrounded_body.as_bytes(), format)
+                .expect("surrounding blank lines");
+            assert_eq!(surrounded.records.len(), 1, "{format:?}");
+            assert!(surrounded.rejected.is_empty(), "{format:?}");
+            assert_gp_byte_accounting(surrounded_body.as_bytes(), &surrounded);
+            parsed.records.remove(0).to_omm().expect("record OMM")
+        })
+        .collect();
+    for record in &records[..2] {
+        assert_eq!(record.object_name, source.object_name);
+    }
+    assert_eq!(records[2].object_name, None);
+    for record in &records[3..] {
+        assert_eq!(record, &source);
+        assert_eq!(record.object_name, source.object_name);
+        assert_eq!(record.object_id, source.object_id);
+        assert_eq!(record.originator, source.originator);
+        assert_eq!(record.classification, source.classification);
+    }
+    // A TLE cannot supply the CCSDS version, creation date, originator,
+    // message id, reference-frame epoch, spacecraft parameters, covariance,
+    // user-defined parameters, or CCSDS comments. All fields it does state
+    // agree with the same object's OMM record.
+    for record in &records {
+        assert_eq!(record.epoch, source.epoch);
+        assert_eq!(record.object_id, source.object_id);
+        assert_eq!(record.center_name, source.center_name);
+        assert_eq!(record.ref_frame, source.ref_frame);
+        assert_eq!(record.time_system, source.time_system);
+        assert_eq!(record.mean_element_theory, source.mean_element_theory);
+        assert_eq!(record.mean_motion, source.mean_motion);
+        assert_eq!(record.norad_cat_id, source.norad_cat_id);
+        assert_eq!(record.ephemeris_type, source.ephemeris_type);
+        assert_eq!(record.classification_type, source.classification_type);
+        assert_eq!(record.element_set_no, source.element_set_no);
+        assert_eq!(record.rev_at_epoch, source.rev_at_epoch);
+        assert_eq!(record.bstar, source.bstar);
+        assert_eq!(record.mean_motion_dot, source.mean_motion_dot);
+        assert_eq!(record.mean_motion_ddot, source.mean_motion_ddot);
+        assert_eq!(record.eccentricity, source.eccentricity);
+        assert_eq!(record.inclination_deg, source.inclination_deg);
+        assert_eq!(record.ra_of_asc_node_deg, source.ra_of_asc_node_deg);
+        assert_eq!(record.arg_of_pericenter_deg, source.arg_of_pericenter_deg);
+        assert_eq!(record.mean_anomaly_deg, source.mean_anomaly_deg);
+        record.to_element_set().expect("canonical OMM bridges");
+    }
+}
+
+#[test]
+fn celestrak_tle_payload_preserves_the_direct_initialization_path() {
+    use sidereon_core::astro::sgp4::{MinutesSinceEpoch, Satellite};
+    use sidereon_core::data::{parse_celestrak_gp_response, CelestrakGpPayload, CelestrakGpRecord};
+
+    for fixture in [
+        include_str!("fixtures/omm/25544.tle"),
+        include_str!("fixtures/omm/24876.tle"),
+        include_str!("fixtures/omm/28884.tle"),
+    ] {
+        let parsed =
+            parse_celestrak_gp_response(fixture.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+        let record = &parsed.records[0];
+        let CelestrakGpPayload::Tle(tle) = &record.payload else {
+            panic!("TLE response lost its native payload")
+        };
+        let direct = Satellite::from_tle(&tle.line1, &tle.line2).unwrap();
+        let retained = Satellite::from_elements(&record.to_element_set().unwrap()).unwrap();
+        let direct_elements = sidereon_core::astro::tle::parse(tle.line1.trim(), tle.line2.trim())
+            .unwrap()
+            .elements
+            .to_element_set()
+            .unwrap();
+        assert_eq!(record.to_element_set().unwrap(), direct_elements);
+        assert_eq!(tle.line1, fixture.lines().nth(1).unwrap());
+        assert_eq!(tle.line2, fixture.lines().nth(2).unwrap());
+        assert!(tle.checksum_warnings.is_empty());
+        assert_eq!(record.raw, fixture);
+        for minutes in [0.0, 90.0, 1440.0] {
+            assert_eq!(
+                retained.propagate(MinutesSinceEpoch(minutes)).unwrap(),
+                direct.propagate(MinutesSinceEpoch(minutes)).unwrap()
+            );
+        }
+    }
+
+    let fixture = include_str!("fixtures/omm/25544.tle");
+    let parsed = parse_celestrak_gp_response(fixture.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+    let mut ordinary = parsed.records[0].to_omm().unwrap();
+    ordinary.inclination_deg = 10.0;
+    assert_eq!(ordinary.to_element_set().unwrap().inclination_deg, 10.0);
+
+    fn assert_public_shape(record: CelestrakGpRecord) -> CelestrakGpRecord {
+        CelestrakGpRecord { ..record }
+    }
+    let _ = assert_public_shape(parsed.records[0].clone());
+
+    let lines: Vec<_> = fixture.lines().collect();
+    let mut line1 = lines[1].as_bytes()[..68].to_vec();
+    line1[53..61].copy_from_slice(b" 01000-8");
+    line1[44..52].copy_from_slice(b" 01000-8");
+    let mut line1 = String::from_utf8(line1).unwrap();
+    line1.push(char::from(
+        b'0' + sidereon_core::astro::tle::line_checksum(&line1),
+    ));
+    let body = format!("LEADING ZERO\n{line1}\n{}", lines[2]);
+    let parsed = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+    let elements = parsed.records[0].to_element_set().unwrap();
+    assert_eq!(elements.bstar.to_bits(), 1.0e-10_f64.to_bits());
+    assert_eq!(elements.bstar.to_bits(), 0x3ddb_7cdf_d9d7_bdbb);
+    assert_eq!(
+        elements.mean_motion_double_dot.unwrap().to_bits(),
+        1.0e-10_f64.to_bits()
+    );
+}
+
+#[test]
+fn celestrak_stations_fixture_retains_all_records() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+
+    let body = include_bytes!("fixtures/celestrak/stations.tle");
+    let response = parse_celestrak_gp_response(body, CelestrakGpFormat::Tle).unwrap();
+    assert_eq!(response.records.len(), 31);
+    assert!(response.rejected.is_empty());
+    assert_eq!(response.records[0].record_index, 1);
+    assert_eq!(response.records[30].record_index, 31);
+    let source = std::str::from_utf8(body)
+        .unwrap()
+        .lines()
+        .collect::<Vec<_>>();
+    for (index, record) in response.records.iter().enumerate() {
+        let expected_name = source[index * 3].trim();
+        let expected =
+            sidereon_core::astro::tle::parse(source[index * 3 + 1], source[index * 3 + 2]).unwrap();
+        assert_eq!(record.object_name.as_deref(), Some(expected_name));
+        let sidereon_core::data::CelestrakGpPayload::Tle(actual) = &record.payload else {
+            panic!("station record is not a TLE payload")
+        };
+        assert_eq!(
+            actual.elements.catalog_number,
+            expected.elements.catalog_number
+        );
+    }
+}
+
+#[test]
+fn celestrak_response_line_splitting_keeps_final_utf8_and_never_panics() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+
+    for format in [
+        CelestrakGpFormat::Tle,
+        CelestrakGpFormat::ThreeLine,
+        CelestrakGpFormat::TwoLine,
+        CelestrakGpFormat::Xml,
+        CelestrakGpFormat::Kvn,
+        CelestrakGpFormat::Json,
+        CelestrakGpFormat::JsonPretty,
+        CelestrakGpFormat::Csv,
+    ] {
+        for body in [
+            b"".as_slice(),
+            b"\0",
+            b"\r",
+            b"\n\r",
+            b"\xff\xfe",
+            "ISS\né".as_bytes(),
+            "é".as_bytes(),
+            "A\rB\nC\n\rD\r\nE\0F".as_bytes(),
+        ] {
+            assert!(std::panic::catch_unwind(|| parse_celestrak_gp_response(body, format)).is_ok());
+        }
+    }
+}
+
+#[test]
+fn celestrak_tle_unterminated_utf8_name_and_checksum_are_preserved() {
+    use sidereon_core::data::{parse_celestrak_gp_response, CelestrakGpRejectionReason};
+    let lines: Vec<_> = include_str!("fixtures/omm/25544.tle").lines().collect();
+    let body = format!("ÉTOILE\n{}\n{}", lines[1], lines[2]);
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert_eq!(response.records[0].object_name.as_deref(), Some("ÉTOILE"));
+    assert_eq!(response.records[0].raw, body);
+
+    let mut bad = lines[2].as_bytes().to_vec();
+    bad[68] = if bad[68] == b'9' { b'0' } else { bad[68] + 1 };
+    let bad = String::from_utf8(bad).unwrap();
+    let body = format!("{}\n{}\n{bad}", lines[0], lines[1]);
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+    assert!(response.records.is_empty());
+    assert_eq!(response.rejected.len(), 1);
+    assert_eq!(response.rejected[0].line_number, Some(3));
+    assert_eq!(response.rejected[0].raw, body);
+    assert!(matches!(
+        response.rejected[0].reason,
+        CelestrakGpRejectionReason::Tle(sidereon_core::astro::tle::TleError::ChecksumMismatch {
+            line_label: "line 2",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn celestrak_kvn_without_version_uses_the_kvn_reader() {
+    use sidereon_core::astro::omm::{encode_kvn_lenient, parse_json_array};
+    use sidereon_core::data::parse_celestrak_gp_response;
+
+    let record = parse_json_array(include_str!("fixtures/omm/24876.json"))
+        .unwrap()
+        .omms
+        .remove(0);
+    let body = encode_kvn_lenient(&record).unwrap();
+    let parsed = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+    assert_eq!(parsed.records.len(), 1);
+    assert_eq!(parsed.records[0].to_omm().unwrap(), record);
+    assert!(parsed.rejected.is_empty());
+
+    let unterminated = body.trim_end_matches(['\r', '\n']);
+    let parsed =
+        parse_celestrak_gp_response(unterminated.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+    assert_eq!(parsed.records.len(), 1);
+    assert!(parsed.rejected.is_empty());
+}
+
+#[test]
+fn celestrak_kvn_splitter_handles_mixed_headers_and_exact_keywords() {
+    use sidereon_core::astro::omm::{encode_kvn, parse_xml};
+    use sidereon_core::data::parse_celestrak_gp_response;
+
+    let source = parse_xml(include_str!("fixtures/omm/24876.xml"))
+        .unwrap()
+        .with_ccsds_header("2.0", "2026-06-16T05:00:00", "CELESTRAK")
+        .unwrap();
+    let versioned = encode_kvn(&source).unwrap();
+    let headerless = versioned.lines().skip(1).collect::<Vec<_>>().join("\n") + "\n";
+    let body = format!("{headerless}{versioned}");
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+    assert_eq!(response.records.len(), 2);
+    assert!(response.rejected.is_empty());
+    assert_eq!(response.records[0].record_index, 1);
+    assert_eq!(response.records[0].line_number, Some(1));
+    assert_eq!(response.records[0].raw, headerless);
+    assert_eq!(response.records[1].record_index, 2);
+    assert_eq!(response.records[1].raw, versioned);
+    assert_gp_byte_accounting(body.as_bytes(), &response);
+
+    let body = format!("CCSDS_OMM_VERSION = 9\n{versioned}");
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert_eq!(response.records[0].record_index, 2);
+    assert_eq!(response.rejected.len(), 1);
+    assert_eq!(response.rejected[0].record_index, 1);
+    assert_eq!(response.rejected[0].line_number, Some(1));
+    assert_eq!(response.rejected[0].raw, "CCSDS_OMM_VERSION = 9\n");
+    assert_gp_byte_accounting(body.as_bytes(), &response);
+}
+
+#[test]
+fn celestrak_line_endings_follow_the_ccsds_reader_rule() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+
+    let tle = include_str!("fixtures/omm/25544.tle").trim_end();
+    let tle_body = tle.replace('\n', "\r\r\n");
+    let response =
+        parse_celestrak_gp_response(tle_body.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert!(response.rejected.is_empty());
+    assert_gp_byte_accounting(tle_body.as_bytes(), &response);
+
+    let kvn = include_str!("fixtures/omm/24876.kvn").trim_end();
+    let kvn_body = kvn.replace('\n', "\r\r\n");
+    let response =
+        parse_celestrak_gp_response(kvn_body.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert!(response.rejected.is_empty());
+    assert_gp_byte_accounting(kvn_body.as_bytes(), &response);
+}
+
+#[test]
+fn celestrak_non_omm_documents_are_response_errors() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+
+    for (body, format) in [
+        ("Service Unavailable", CelestrakGpFormat::Csv),
+        ("<other/>", CelestrakGpFormat::Xml),
+    ] {
+        assert!(matches!(
+            parse_celestrak_gp_response(body.as_bytes(), format),
+            Err(DataCatalogError::InvalidCelestrakGpResponse { .. })
+        ));
+    }
+    for (body, format) in [
+        ("<ndm/>", CelestrakGpFormat::Xml),
+        ("[]", CelestrakGpFormat::Json),
+        ("[ ]", CelestrakGpFormat::JsonPretty),
+        ("OBJECT_NAME,EPOCH,MEAN_MOTION\n", CelestrakGpFormat::Csv),
+    ] {
+        assert!(
+            matches!(
+                parse_celestrak_gp_response(body.as_bytes(), format),
+                Err(DataCatalogError::CelestrakGpDataNotFound)
+            ),
+            "{format:?}: {body}"
+        );
+    }
+}
+
+#[test]
+fn celestrak_short_line_one_remains_a_recognizable_attempt() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let lines = include_str!("fixtures/omm/25544.tle")
+        .lines()
+        .collect::<Vec<_>>();
+    let mut bad = lines[2].as_bytes().to_vec();
+    bad[68] = b'X';
+    for length in 66..=68 {
+        let body = format!(
+            "{}\n{}\n{}",
+            lines[0],
+            &lines[1][..length],
+            String::from_utf8(bad.clone()).unwrap()
+        );
+        let response =
+            parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Tle).unwrap();
+        assert!(response.records.is_empty());
+        assert_eq!(response.rejected.len(), 1);
+        assert_eq!(response.rejected[0].raw, body);
+    }
+}
+
+#[test]
+fn celestrak_invalid_response_excerpt_is_escaped_and_bounded() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+    let body = format!("Service\nUnavailable\0{}", "x".repeat(1000));
+    let excerpt = body.chars().take(160).collect::<String>();
+    match parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Tle) {
+        Err(DataCatalogError::InvalidCelestrakGpResponse { reason, .. }) => {
+            assert!(reason.ends_with(&format!("{excerpt:?}")));
+            assert!(!reason.contains(['\n', '\0']));
+            assert!(reason.len() < 300);
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn celestrak_omm_document_edges_use_parser_structure() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+
+    let xml = include_str!("fixtures/omm/24876.xml");
+    let with_comment = xml.replacen("<omm ", "<!-- <omm is comment text -->\n<omm ", 1);
+    let response =
+        parse_celestrak_gp_response(with_comment.as_bytes(), CelestrakGpFormat::Xml).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert!(response.rejected.is_empty());
+    assert_gp_byte_accounting(with_comment.as_bytes(), &response);
+
+    let namespaced = xml
+        .replacen("<omm ", "<ndm:omm xmlns:ndm=\"urn:ccsds:ndm\" ", 1)
+        .replacen("</omm>", "</ndm:omm>", 1);
+    let response =
+        parse_celestrak_gp_response(namespaced.as_bytes(), CelestrakGpFormat::Xml).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert!(response.rejected.is_empty());
+    assert_gp_byte_accounting(namespaced.as_bytes(), &response);
+
+    let start = xml.find("<omm ").unwrap();
+    let end = xml.find("</omm>").unwrap() + "</omm>".len();
+    let message = &xml[start..end];
+    let broken = message.replace("<EPOCH>2026-06-16T04:54:23.504544</EPOCH>", "");
+    let combined = format!("<ndm>{message}{broken}{message}</ndm>");
+    let response =
+        parse_celestrak_gp_response(combined.as_bytes(), CelestrakGpFormat::Xml).unwrap();
+    assert_eq!(
+        response
+            .records
+            .iter()
+            .map(|record| record.record_index)
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+    assert_eq!(response.rejected.len(), 1);
+    assert_eq!(response.rejected[0].record_index, 2);
+    assert_gp_byte_accounting(combined.as_bytes(), &response);
+
+    let xml_blank = xml.replacen("</header>", "</header>\n\n", 1);
+    let response =
+        parse_celestrak_gp_response(xml_blank.as_bytes(), CelestrakGpFormat::Xml).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert!(response.rejected.is_empty());
+
+    let json = include_str!("fixtures/omm/24876.json");
+    let json_blank = json.replacen(',', ",\n\n", 1);
+    let response =
+        parse_celestrak_gp_response(json_blank.as_bytes(), CelestrakGpFormat::Json).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert!(response.rejected.is_empty());
+
+    let csv = "OBJECT_NAME,EPOCH,MEAN_MOTION,ECCENTRICITY,INCLINATION,RA_OF_ASC_NODE,ARG_OF_PERICENTER,MEAN_ANOMALY,BSTAR\nISS \"ZARYA\",2026-01-01T00:00:00,1,0,0,0,0,0,0";
+    let response = parse_celestrak_gp_response(csv.as_bytes(), CelestrakGpFormat::Csv).unwrap();
+    assert_eq!(response.records.len(), 1);
+    assert!(response.rejected.is_empty());
+    assert_eq!(response.records[0].record_index, 1);
+    assert_eq!(response.records[0].raw, csv);
+    assert_eq!(
+        response.records[0].object_name.as_deref(),
+        Some("ISS \"ZARYA\"")
+    );
+}
+
+#[test]
+fn celestrak_invalid_element_set_rejection_keeps_the_sgp4_error() {
+    use sidereon_core::data::{
+        parse_celestrak_gp_response, CelestrakGpRejectionReason, CelestrakGpStructuralError,
+    };
+    let body = include_str!("fixtures/omm/24876.json")
+        .replace("\"MEAN_MOTION\":2.00563771", "\"MEAN_MOTION\":0.0");
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Json).unwrap();
+    assert!(response.records.is_empty());
+    assert_eq!(response.rejected.len(), 1);
+    assert_eq!(
+        response.rejected[0].reason,
+        CelestrakGpRejectionReason::Structural(CelestrakGpStructuralError::InvalidElementSet(
+            sidereon_core::astro::sgp4::Error::InvalidInput {
+                field: "mean_motion",
+                kind: sidereon_core::astro::sgp4::Sgp4InputErrorKind::NotPositive,
+            }
+        ))
+    );
+}
+
+#[test]
+fn celestrak_repository_fixtures_parse_through_the_response_boundary() {
+    use sidereon_core::astro::omm::{parse_json_array, parse_kvn, parse_xml};
+    use sidereon_core::data::parse_celestrak_gp_response;
+
+    for (body, format, expected) in [
+        (
+            include_bytes!("fixtures/omm/24876.kvn").as_slice(),
+            CelestrakGpFormat::Kvn,
+            parse_kvn(include_str!("fixtures/omm/24876.kvn")).unwrap(),
+        ),
+        (
+            include_bytes!("fixtures/omm/24876.xml").as_slice(),
+            CelestrakGpFormat::Xml,
+            parse_xml(include_str!("fixtures/omm/24876.xml")).unwrap(),
+        ),
+        (
+            include_bytes!("fixtures/omm/24876.json").as_slice(),
+            CelestrakGpFormat::Json,
+            parse_json_array(include_str!("fixtures/omm/24876.json"))
+                .unwrap()
+                .omms
+                .remove(0),
+        ),
+    ] {
+        let response = parse_celestrak_gp_response(body, format).unwrap();
+        assert_eq!(response.records.len(), 1, "{format:?}");
+        assert!(response.rejected.is_empty(), "{format:?}");
+        assert_eq!(
+            response.records[0].to_omm().unwrap(),
+            expected,
+            "{format:?}"
+        );
+    }
+}
+
+#[test]
+fn celestrak_whole_document_errors_use_absolute_positions() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+
+    match parse_celestrak_gp_response(b"\n\n\nnot json", CelestrakGpFormat::Json) {
+        Err(DataCatalogError::InvalidCelestrakGpResponse { line, column, .. }) => {
+            assert_eq!(line, Some(4));
+            assert_eq!(column, Some(2));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    match parse_celestrak_gp_response(b"\r\r<ndm>&</ndm>", CelestrakGpFormat::Xml) {
+        Err(DataCatalogError::InvalidCelestrakGpResponse { line, column, .. }) => {
+            assert_eq!(line, Some(3));
+            assert_eq!(column, Some(6));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+    match parse_celestrak_gp_response(b"42", CelestrakGpFormat::Json) {
+        Err(DataCatalogError::InvalidCelestrakGpResponse { line, column, .. }) => {
+            assert_eq!((line, column), (None, None));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    for body in ["\n\n  <ndm><omm>", "<!DOCTYPE ndm><ndm/>"] {
+        match parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Xml) {
+            Err(DataCatalogError::InvalidCelestrakGpResponse { line, column, .. }) => {
+                assert_eq!((line, column), (None, None), "{body:?}");
+            }
+            other => panic!("unexpected result for {body:?}: {other:?}"),
+        }
+    }
+    match parse_celestrak_gp_response(b"<ndm>\r<x/>\n&</ndm>", CelestrakGpFormat::Xml) {
+        Err(DataCatalogError::InvalidCelestrakGpResponse { line, column, .. }) => {
+            assert_eq!((line, column), (Some(3), Some(1)));
+        }
+        other => panic!("unexpected XML result: {other:?}"),
+    }
+    for (body, expected_column) in [
+        ("[{\"OBJECT_NAME\":\"é\"x}]", 20),
+        ("[{\"OBJECT_NAME\":\"ééééé\"x}]", 24),
+    ] {
+        match parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Json) {
+            Err(DataCatalogError::InvalidCelestrakGpResponse { line, column, .. }) => {
+                assert_eq!((line, column), (Some(1), Some(expected_column)), "{body}");
+            }
+            other => panic!("unexpected JSON result: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn celestrak_kvn_field_errors_use_absolute_lines() {
+    use sidereon_core::data::parse_celestrak_gp_response;
+
+    let body = format!(
+        "\r\r{}",
+        include_str!("fixtures/omm/24876.kvn").replace(
+            "EPOCH          = 2026-06-16T04:54:23.504544",
+            "EPOCH          = invalid"
+        )
+    );
+    let epoch_offset = body.find("EPOCH          = invalid").unwrap();
+    let expected = source_line(body.as_bytes(), epoch_offset);
+    let response = parse_celestrak_gp_response(body.as_bytes(), CelestrakGpFormat::Kvn).unwrap();
+    assert_eq!(response.records.len(), 0);
+    assert_eq!(response.rejected.len(), 1);
+    assert_eq!(response.rejected[0].record_index, 1);
+    assert_eq!(response.rejected[0].line_number, Some(expected));
+    assert_eq!(response.rejected[0].raw, body);
+}
 
 fn date(year: i32, month: u8, day: u8) -> ProductDate {
     ProductDate::new(year, month, day).expect("valid test date")

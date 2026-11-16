@@ -51,20 +51,19 @@ const FIXTURES: &[Fixture] = &[
 
 type FrozenOmmCase = (&'static str, &'static str, fn(&Omm) -> String);
 
-/// `encode_kvn` refuses text that would not read back unchanged; the committed
-/// fixtures hold none, so their encoding is expected to succeed.
+/// CelesTrak's committed KVN fixtures omit mandatory header fields, so this
+/// fixture-identity gate deliberately exercises the explicit lenient writer.
 fn encode_kvn_fixture(record: &Omm) -> String {
-    omm::encode_kvn(record).expect("fixture OMM encodes as KVN")
+    omm::encode_kvn_lenient(record).expect("fixture OMM encodes as KVN")
 }
 
-/// `encode_xml` refuses text the XML reader would not return unchanged; the
-/// committed fixtures hold none.
+/// CelesTrak's committed XML fixtures omit mandatory header fields.
 fn encode_xml_fixture(record: &Omm) -> String {
-    omm::encode_xml(record).expect("fixture OMM encodes as XML")
+    omm::encode_xml_lenient(record).expect("fixture OMM encodes as XML")
 }
 
-/// `encode_json` refuses what the JSON reader would not return unchanged, such
-/// as a non-finite number; the committed fixtures hold none.
+/// GP JSON is CelesTrak's header-optional table representation rather than a
+/// CCSDS KVN/XML message, so the ordinary JSON writer preserves its fields.
 fn encode_json_fixture(record: &Omm) -> String {
     omm::encode_json(record).expect("fixture OMM encodes as JSON")
 }
@@ -101,16 +100,15 @@ fn tle_lines(body: &str) -> (String, String) {
 /// JSON omits `CENTER_NAME`/`REF_FRAME`/`TIME_SYSTEM`). Cross-encoding identity
 /// is asserted on this canonical content, which must match exactly.
 fn canonical(omm: &Omm) -> Omm {
-    Omm {
-        ccsds_omm_vers: None,
-        creation_date: None,
-        originator: None,
-        center_name: None,
-        ref_frame: None,
-        time_system: None,
-        mean_element_theory: None,
-        ..omm.clone()
-    }
+    let mut canonical = omm.clone();
+    canonical.ccsds_omm_vers = None;
+    canonical.creation_date = None;
+    canonical.originator = None;
+    canonical.center_name = None;
+    canonical.ref_frame = None;
+    canonical.time_system = None;
+    canonical.mean_element_theory = None;
+    canonical
 }
 
 /// Propagation offsets (minutes since epoch), including 0 and a deep-space-sized

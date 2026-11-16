@@ -67,16 +67,19 @@ use core::fmt::{self, Write as _};
 /// The CelesTrak GP group each system's identity base is fetched from.
 ///
 /// These mirror the live CelesTrak group names (`gps-ops`, `galileo`, `glo-ops`,
-/// `beidou`); QZSS has no dedicated group and is carried in the combined `gnss`
-/// group, so its records are filtered out of that feed by the caller.
-const fn celestrak_group(system: GnssSystem) -> &'static str {
+/// `beidou`, and `sbas`). QZSS and NavIC have no dedicated groups and are
+/// carried in the combined `gnss` group, so their records are filtered out of
+/// that feed by the caller.
+#[must_use]
+pub const fn celestrak_group(system: GnssSystem) -> &'static str {
     match system {
         GnssSystem::Gps => "gps-ops",
         GnssSystem::Galileo => "galileo",
         GnssSystem::Glonass => "glo-ops",
         GnssSystem::BeiDou => "beidou",
         GnssSystem::Qzss => "gnss",
-        GnssSystem::Navic | GnssSystem::Sbas => "gnss",
+        GnssSystem::Navic => "gnss",
+        GnssSystem::Sbas => "sbas",
     }
 }
 

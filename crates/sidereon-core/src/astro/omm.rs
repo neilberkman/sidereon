@@ -103,7 +103,7 @@ use crate::astro::sgp4::{
 use crate::astro::tle;
 use crate::astro::xml;
 use crate::validate;
-use roxmltree::{Document, Node};
+use roxmltree::{Document, Error as XmlError, Node};
 use std::fmt::{self, Write as _};
 
 /// Header keywords, CCSDS 502.0-B-3 table 4-1 (`COMMENT` is handled apart).
@@ -472,8 +472,19 @@ pub struct OmmUserDefined {
 /// Failure modes of the OMM readers, writers and SGP4 bridge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OmmError {
+    /// A whole XML, JSON, or CSV document was malformed.
+    MalformedDocument {
+        /// Document encoding being parsed.
+        format: &'static str,
+        /// Parser-provided diagnostic text.
+        message: String,
+        /// Parser-provided location converted to a byte offset in its input.
+        byte_offset: Option<usize>,
+    },
     /// A required field was absent from the message.
     MissingField(&'static str),
+    /// None of a required alternative set of keywords was present.
+    MissingOneOf(&'static [&'static str]),
     /// A decoded scalar field failed boundary validation.
     InvalidField {
         /// Static field label returned by the shared validator.
@@ -637,7 +648,13 @@ impl From<&validate::FieldError> for OmmInputErrorKind {
 impl fmt::Display for OmmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            OmmError::MalformedDocument {
+                format, message, ..
+            } => write!(f, "malformed {format}: {message}"),
             OmmError::MissingField(name) => write!(f, "OMM missing required field {name}"),
+            OmmError::MissingOneOf(names) => {
+                write!(f, "OMM requires one of {}", names.join(", "))
+            }
             OmmError::InvalidField { field, kind } => {
                 write!(f, "invalid OMM field {field}: {kind}")
             }
@@ -766,15 +783,27 @@ pub fn parse_kvn(text: &str) -> Result<Omm, OmmError> {
 ///
 /// Text that would not read back unchanged is refused with
 /// [`OmmError::UnwritableText`]: a line break, whitespace the reader trims, an
-/// XML-illegal character, an empty `CCSDS_OMM_VERS` (which reads back as
-/// absent), a `USER_DEFINED_*` parameter containing `=` or given more than
+/// XML-illegal character, a `USER_DEFINED_*` parameter containing `=` or given more than
 /// once, or user-defined comments with no user-defined parameter to precede.
-/// `CCSDS_OMM_VERS` is written only when the message holds one. A non-finite number, and an
+/// Every mandatory CCSDS 502.0-B-3 table 4-1 through 4-3 header, metadata, and
+/// mean-element keyword must be present; [`OmmError::MissingField`] names a
+/// missing keyword (including empty mandatory text), while
+/// [`OmmError::MissingOneOf`] names missing alternatives. Use [`encode_kvn_lenient`] only for an intentional
+/// non-conformant fragment. A non-finite number, and an
 /// [`OmmEpoch`] that names no instant the reader accepts under the message's
 /// `TIME_SYSTEM`, are refused with [`OmmError::InvalidField`]. Comments of an
 /// empty spacecraft or TLE-parameter block are written before a blank `MASS`
 /// or `EPHEMERIS_TYPE`, which reads back as the same empty block.
 pub fn encode_kvn(omm: &Omm) -> Result<String, OmmError> {
+    require_ccsds_header(omm, true)?;
+    encode_kvn_lenient(omm)
+}
+
+/// Encode KVN while permitting absent mandatory CCSDS fields.
+///
+/// Prefer [`encode_kvn`]. This explicitly preserves the historical writer
+/// behavior for callers assembling a fragment before supplying its header.
+pub fn encode_kvn_lenient(omm: &Omm) -> Result<String, OmmError> {
     check_user_defined_names(omm)?;
     let epoch = epoch_text(omm)?;
     let mut out = KvnWriter::default();
@@ -1112,19 +1141,104 @@ pub fn parse_xml(text: &str) -> Result<Omm, OmmError> {
 /// records.
 pub fn parse_xml_all(text: &str) -> Result<OmmArray, OmmError> {
     let doc = parse_xml_document(text)?;
+    Ok(parse_xml_all_document(text, &doc))
+}
+
+pub(crate) fn parse_xml_all_omm_document(text: &str) -> Result<Option<OmmArray>, OmmError> {
+    let doc = parse_xml_document(text)?;
+    if !matches!(doc.root_element().tag_name().name(), "omm" | "ndm") {
+        return Ok(None);
+    }
+    Ok(Some(parse_xml_all_document(text, &doc)))
+}
+
+fn parse_xml_all_document(text: &str, doc: &Document<'_>) -> OmmArray {
     let mut omms = Vec::new();
     let mut skipped = Vec::new();
-    for (index, message) in ndm::message_elements(&doc, "omm").into_iter().enumerate() {
+    let mut spans = Vec::new();
+    for (index, message) in ndm::message_elements(doc, "omm").into_iter().enumerate() {
+        let range = message.range();
+        spans.push(OmmRecordSpan::new(text, index, range.start, range.end));
         match omm_from_xml(message) {
             Ok(omm) => omms.push(omm),
             Err(reason) => skipped.push(OmmSkippedRecord { index, reason }),
         }
     }
-    Ok(OmmArray { omms, skipped })
+    OmmArray {
+        omms,
+        skipped,
+        spans,
+    }
 }
 
 fn parse_xml_document(text: &str) -> Result<Document<'_>, OmmError> {
-    Document::parse(text).map_err(|e| OmmError::Field(format!("malformed XML: {e}")))
+    Document::parse(text).map_err(|error| OmmError::MalformedDocument {
+        format: "XML",
+        message: error.to_string(),
+        byte_offset: xml_error_offset(text, &error),
+    })
+}
+
+fn xml_error_offset(text: &str, error: &XmlError) -> Option<usize> {
+    if matches!(
+        error,
+        XmlError::NoRootNode
+            | XmlError::UnclosedRootNode
+            | XmlError::DtdDetected
+            | XmlError::NodesLimitReached
+            | XmlError::AttributesLimitReached
+            | XmlError::NamespacesLimitReached
+            | XmlError::UnexpectedEndOfStream
+    ) {
+        return None;
+    }
+    let position = error.pos();
+    parser_line_char_column_offset(text, position.row as usize, position.col as usize)
+}
+
+fn parser_line_char_column_offset(text: &str, line: usize, column: usize) -> Option<usize> {
+    if line == 0 || column == 0 {
+        return None;
+    }
+    let line_start = if line == 1 {
+        0
+    } else {
+        text.match_indices('\n').nth(line - 2)?.0 + 1
+    };
+    let line_text = &text[line_start..];
+    let relative = if column == 1 {
+        0
+    } else {
+        line_text.char_indices().nth(column - 1)?.0
+    };
+    Some(line_start + relative)
+}
+
+fn parser_line_byte_column_offset(text: &str, error: &serde_json::Error) -> Option<usize> {
+    let line = error.line();
+    let column = error.column();
+    if line == 0 {
+        return None;
+    }
+    let line_start = if line == 1 {
+        0
+    } else {
+        text.match_indices('\n').nth(line - 2)?.0 + 1
+    };
+    // A syntax error at column zero identifies the preceding line feed (an
+    // illegal control character in a string); EOF instead identifies its end.
+    // Columns count bytes and can land inside a UTF-8 scalar at EOF.
+    let mut offset = if column == 0 && !error.is_eof() {
+        line_start.saturating_sub(1)
+    } else {
+        line_start
+            .checked_add(column.saturating_sub(1))?
+            .min(text.len())
+    };
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    Some(offset)
 }
 
 /// Read one `<omm>` element.
@@ -1276,14 +1390,27 @@ fn read_xml_user_defined(node: Node, fields: &mut OmmFields) -> Result<(), OmmEr
 /// Text the reader would not return unchanged is refused with
 /// [`OmmError::UnwritableText`]: a keyword value or `CCSDS_OMM_VERS` with
 /// surrounding whitespace (the reader trims element text and the `version`
-/// attribute), an empty `CCSDS_OMM_VERS` (which reads back as `2.0`), a
+/// attribute), a
 /// comment with trailing whitespace, a `USER_DEFINED_*` parameter given more
 /// than once, and any character XML 1.0 cannot carry. A line break inside a
 /// value or comment is written and reads back unchanged, a carriage return as
 /// a character reference. A non-finite number, and an [`OmmEpoch`] that names
 /// no instant the reader accepts under the message's `TIME_SYSTEM`, are
 /// refused with [`OmmError::InvalidField`].
+/// Every mandatory CCSDS 502.0-B-3 table 4-1 through 4-3 header, metadata, and
+/// mean-element value must be present. [`encode_xml_lenient`] retains the historical
+/// fragment writer explicitly. Missing or empty mandatory text returns
+/// [`OmmError::MissingField`]; absent alternatives return [`OmmError::MissingOneOf`].
 pub fn encode_xml(omm: &Omm) -> Result<String, OmmError> {
+    require_ccsds_header(omm, false)?;
+    encode_xml_lenient(omm)
+}
+
+/// Encode XML while permitting absent mandatory CCSDS fields.
+///
+/// Prefer [`encode_xml`]. This explicitly preserves the historical writer
+/// behavior for callers assembling a fragment before supplying its header.
+pub fn encode_xml_lenient(omm: &Omm) -> Result<String, OmmError> {
     check_user_defined_names(omm)?;
     let epoch = epoch_text(omm)?;
     let mut out = XmlWriter::default();
@@ -1515,7 +1642,11 @@ fn check_xml_comment(comment: &str) -> Result<(), OmmError> {
 /// `COMMENT` member, which Space-Track writes, is read as a header comment.
 pub fn parse_json(text: &str) -> Result<Omm, OmmError> {
     let value: JsonNode =
-        serde_json::from_str(text).map_err(|e| OmmError::Field(format!("malformed JSON: {e}")))?;
+        serde_json::from_str(text).map_err(|error| OmmError::MalformedDocument {
+            format: "JSON",
+            message: error.to_string(),
+            byte_offset: parser_line_byte_column_offset(text, &error),
+        })?;
     let object = match &value {
         JsonNode::Array(items) => match items.as_slice() {
             [] => return Err(OmmError::Field("empty JSON array".to_string())),
@@ -1710,6 +1841,32 @@ pub struct OmmArray {
     /// from one whose every record was malformed, without aborting the whole
     /// parse on one bad record. No fabricated OMM is emitted in their place.
     pub skipped: Vec<OmmSkippedRecord>,
+    /// Exact source ranges for all records, in source order.
+    pub spans: Vec<OmmRecordSpan>,
+}
+
+/// The exact location of one record in a multi-record OMM input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OmmRecordSpan {
+    /// Zero-based record position in the parsed input.
+    pub index: usize,
+    /// Byte offset at which the record begins.
+    pub byte_start: usize,
+    /// Byte offset immediately after the record.
+    pub byte_end: usize,
+    /// One-based absolute line on which the record begins.
+    pub line: usize,
+}
+
+impl OmmRecordSpan {
+    fn new(text: &str, index: usize, byte_start: usize, byte_end: usize) -> Self {
+        Self {
+            index,
+            byte_start,
+            byte_end,
+            line: source_line_number(text, byte_start),
+        }
+    }
 }
 
 /// One XML message, GP JSON array element or GP CSV data row that was not
@@ -1735,8 +1892,43 @@ pub struct OmmSkippedRecord {
 /// error rather than aborting the whole array. A malformed top-level document
 /// (not valid JSON, or neither an object nor an array) is still an error.
 pub fn parse_json_array(text: &str) -> Result<OmmArray, OmmError> {
+    parse_json_array_with_structure(text).map(|(array, _)| array)
+}
+
+pub(crate) fn is_omm_keyword(key: &str) -> bool {
+    OmmBlock::of_keyword(key).is_some()
+}
+
+pub(crate) fn is_mandatory_omm_keyword(key: &str) -> bool {
+    matches!(
+        key,
+        "CCSDS_OMM_VERS"
+            | "CREATION_DATE"
+            | "ORIGINATOR"
+            | "OBJECT_NAME"
+            | "OBJECT_ID"
+            | "CENTER_NAME"
+            | "REF_FRAME"
+            | "TIME_SYSTEM"
+            | "MEAN_ELEMENT_THEORY"
+            | "EPOCH"
+            | "SEMI_MAJOR_AXIS"
+            | "MEAN_MOTION"
+            | "ECCENTRICITY"
+            | "INCLINATION"
+            | "RA_OF_ASC_NODE"
+            | "ARG_OF_PERICENTER"
+            | "MEAN_ANOMALY"
+    )
+}
+
+pub(crate) fn parse_json_array_with_structure(text: &str) -> Result<(OmmArray, bool), OmmError> {
     let value: JsonNode =
-        serde_json::from_str(text).map_err(|e| OmmError::Field(format!("malformed JSON: {e}")))?;
+        serde_json::from_str(text).map_err(|error| OmmError::MalformedDocument {
+            format: "JSON",
+            message: error.to_string(),
+            byte_offset: parser_line_byte_column_offset(text, &error),
+        })?;
     let items: &[JsonNode] = match &value {
         JsonNode::Array(items) => items.as_slice(),
         JsonNode::Object(_) => std::slice::from_ref(&value),
@@ -1748,14 +1940,95 @@ pub fn parse_json_array(text: &str) -> Result<OmmArray, OmmError> {
     };
 
     let mut omms = Vec::with_capacity(items.len());
+    let recognizable = items.iter().any(|item| {
+        matches!(item,
+        JsonNode::Object(members) if members.iter().any(|(key, _)| is_omm_keyword(key)))
+    });
     let mut skipped = Vec::new();
+    let spans = json_value_spans(text, items.len())?;
     for (index, object) in items.iter().enumerate() {
         match omm_from_json_value(object) {
             Ok(omm) => omms.push(omm),
             Err(reason) => skipped.push(OmmSkippedRecord { index, reason }),
         }
     }
-    Ok(OmmArray { omms, skipped })
+    Ok((
+        OmmArray {
+            omms,
+            skipped,
+            spans,
+        },
+        recognizable,
+    ))
+}
+
+fn json_value_spans(text: &str, expected: usize) -> Result<Vec<OmmRecordSpan>, OmmError> {
+    let bytes = text.as_bytes();
+    let first = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(0);
+    if bytes.get(first) != Some(&b'[') {
+        let end = bytes
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .map_or(first, |i| i + 1);
+        return Ok((expected == 1)
+            .then(|| OmmRecordSpan::new(text, 0, first, end))
+            .into_iter()
+            .collect());
+    }
+    let mut spans = Vec::with_capacity(expected);
+    let mut i = first + 1;
+    while i < bytes.len() {
+        while bytes.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b']') {
+            break;
+        }
+        let start = i;
+        let mut string = false;
+        let mut escape = false;
+        let mut depth = 0usize;
+        while i < bytes.len() {
+            let byte = bytes[i];
+            if string {
+                if escape {
+                    escape = false;
+                } else if byte == b'\\' {
+                    escape = true;
+                } else if byte == b'"' {
+                    string = false;
+                }
+            } else if byte == b'"' {
+                string = true;
+            } else if matches!(byte, b'{' | b'[') {
+                depth += 1;
+            } else if matches!(byte, b'}' | b']') && depth > 0 {
+                depth -= 1;
+            } else if depth == 0 && matches!(byte, b',' | b']') {
+                break;
+            }
+            i += 1;
+        }
+        let mut end = i;
+        while end > start && bytes[end - 1].is_ascii_whitespace() {
+            end -= 1;
+        }
+        spans.push(OmmRecordSpan::new(text, spans.len(), start, end));
+        if bytes.get(i) == Some(&b',') {
+            i += 1;
+        }
+    }
+    if spans.len() != expected {
+        return Err(OmmError::MalformedDocument {
+            format: "JSON",
+            message: "record locations do not match parsed values".to_string(),
+            byte_offset: None,
+        });
+    }
+    Ok(spans)
 }
 
 /// Encode an [`Omm`] as a CCSDS/CelesTrak OMM JSON object.
@@ -2077,19 +2350,27 @@ pub fn parse_csv_array(text: &str) -> Result<OmmArray, OmmError> {
     let Some((header, rows)) = records.split_first() else {
         return Err(OmmError::Field("missing GP CSV header".to_string()));
     };
-    let header: Vec<String> = header.iter().map(|key| key.trim().to_string()).collect();
+    let header: Vec<String> = header
+        .fields
+        .iter()
+        .map(|key| key.trim().to_string())
+        .collect();
     if header.is_empty() || header.iter().all(String::is_empty) {
         return Err(OmmError::Field("missing GP CSV header".to_string()));
     }
-
     let mut omms = Vec::with_capacity(rows.len());
     let mut skipped = Vec::new();
+    let spans = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| OmmRecordSpan::new(text, index, row.start, row.end))
+        .collect();
     for (index, row) in rows.iter().enumerate() {
-        if row.len() != header.len() {
+        if row.fields.len() != header.len() {
             skipped.push(OmmSkippedRecord {
                 index,
                 reason: OmmError::CsvColumnCount {
-                    found: row.len(),
+                    found: row.fields.len(),
                     expected: header.len(),
                 },
             });
@@ -2097,7 +2378,7 @@ pub fn parse_csv_array(text: &str) -> Result<OmmArray, OmmError> {
         }
         let pairs = header
             .iter()
-            .zip(row.iter())
+            .zip(row.fields.iter())
             .map(|(key, value)| (key.clone(), value.trim().to_string()))
             .filter(|(_, value)| !value.is_empty())
             .collect();
@@ -2107,7 +2388,11 @@ pub fn parse_csv_array(text: &str) -> Result<OmmArray, OmmError> {
         }
     }
 
-    Ok(OmmArray { omms, skipped })
+    Ok(OmmArray {
+        omms,
+        skipped,
+        spans,
+    })
 }
 
 /// Encode [`Omm`] records as GP CSV.
@@ -2463,18 +2748,25 @@ fn write_csv_records(omms: &[Omm], parameters: &[String]) -> String {
     out
 }
 
-fn parse_csv_records(text: &str) -> Result<Vec<Vec<String>>, OmmError> {
+struct CsvRecord {
+    fields: Vec<String>,
+    start: usize,
+    end: usize,
+}
+
+fn parse_csv_records(text: &str) -> Result<Vec<CsvRecord>, OmmError> {
     let mut records = Vec::new();
     let mut record = Vec::new();
     let mut field = String::new();
-    let mut chars = text.chars().peekable();
+    let mut chars = text.char_indices().peekable();
     let mut in_quotes = false;
     let mut quoted_field = false;
+    let mut record_start = 0usize;
 
-    while let Some(ch) = chars.next() {
+    while let Some((offset, ch)) = chars.next() {
         if in_quotes {
             match ch {
-                '"' if chars.peek() == Some(&'"') => {
+                '"' if chars.peek().is_some_and(|(_, next)| *next == '"') => {
                     field.push('"');
                     chars.next();
                 }
@@ -2495,13 +2787,20 @@ fn parse_csv_records(text: &str) -> Result<Vec<Vec<String>>, OmmError> {
             }
             '\n' => {
                 record.push(std::mem::take(&mut field));
-                push_csv_record(&mut records, &mut record);
+                let end = if text.as_bytes().get(offset.wrapping_sub(1)) == Some(&b'\r') {
+                    offset - 1
+                } else {
+                    offset
+                };
+                push_csv_record(&mut records, &mut record, record_start, end);
+                record_start = offset + 1;
                 quoted_field = false;
             }
-            '\r' if chars.peek() == Some(&'\n') => {}
+            '\r' if chars.peek().is_some_and(|(_, next)| *next == '\n') => {}
             '\r' => {
                 record.push(std::mem::take(&mut field));
-                push_csv_record(&mut records, &mut record);
+                push_csv_record(&mut records, &mut record, record_start, offset);
+                record_start = offset + 1;
                 quoted_field = false;
             }
             _ => field.push(ch),
@@ -2509,24 +2808,35 @@ fn parse_csv_records(text: &str) -> Result<Vec<Vec<String>>, OmmError> {
     }
 
     if in_quotes {
-        return Err(OmmError::Field(
-            "malformed GP CSV: unclosed quoted field".to_string(),
-        ));
+        return Err(OmmError::MalformedDocument {
+            format: "GP CSV",
+            message: "unclosed quoted field".to_string(),
+            byte_offset: Some(text.len()),
+        });
     }
     if !field.is_empty() || !record.is_empty() || quoted_field {
         record.push(field);
-        push_csv_record(&mut records, &mut record);
+        push_csv_record(&mut records, &mut record, record_start, text.len());
     }
 
     Ok(records)
 }
 
-fn push_csv_record(records: &mut Vec<Vec<String>>, record: &mut Vec<String>) {
+fn push_csv_record(
+    records: &mut Vec<CsvRecord>,
+    record: &mut Vec<String>,
+    start: usize,
+    end: usize,
+) {
     if record.len() == 1 && record[0].is_empty() {
         record.clear();
         return;
     }
-    records.push(std::mem::take(record));
+    records.push(CsvRecord {
+        fields: std::mem::take(record),
+        start,
+        end,
+    });
 }
 
 fn write_csv_record<I, S>(out: &mut String, fields: I)
@@ -2898,6 +3208,88 @@ impl OmmFields {
 }
 
 impl Omm {
+    /// Supply the mandatory CCSDS header fields required by the strict writers.
+    ///
+    /// CCSDS 502.0-B-3 uses format-set version `3.0`; historical parsed OMM
+    /// messages using `1.0` or `2.0` are also accepted. The creation date must
+    /// be a valid CCSDS UTC epoch. All three values must be writable in both
+    /// KVN and XML, without surrounding whitespace or line breaks.
+    pub fn with_ccsds_header(
+        mut self,
+        version: &str,
+        creation_date: &str,
+        originator: &str,
+    ) -> Result<Self, OmmError> {
+        validate_ccsds_header_fields(version, creation_date, originator)?;
+        self.ccsds_omm_vers = Some(version.to_string());
+        self.creation_date = Some(creation_date.to_string());
+        self.originator = Some(originator.to_string());
+        Ok(self)
+    }
+
+    /// Convert parsed TLE fields into the canonical OMM representation.
+    ///
+    /// Only information present in a TLE is populated. `object_name` comes
+    /// from a three-line set's name line; pass `None` for a two-line set.
+    /// The Earth center, TEME frame, UTC time system, and SGP4 theory that
+    /// define a TLE are populated. CCSDS-only header, spacecraft, covariance,
+    /// comment, and user-defined fields remain absent. The epoch is derived
+    /// from the TLE's exact 10^-8-day units using integer microseconds. The
+    /// result is an ordinary OMM: later initialization uses the OMM bridge,
+    /// whose decimal normalization can differ by one floating-point bit from
+    /// initializing directly from the parsed TLE. Preserve and initialize the
+    /// [`tle::TleElements`] directly when TLE-exact propagation is required.
+    pub fn from_tle(
+        elements: &tle::TleElements,
+        object_name: Option<String>,
+    ) -> Result<Self, tle::TleError> {
+        elements.to_element_set()?;
+        let epoch = OmmEpoch::from_tle_epoch(elements.epoch_year, elements.epoch_day_of_year)?;
+        Ok(Self {
+            ccsds_omm_vers: None,
+            classification: None,
+            creation_date: None,
+            originator: None,
+            message_id: None,
+            object_name: object_name.and_then(|name| {
+                let trimmed = name.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }),
+            object_id: tle_object_id(&elements.international_designator),
+            center_name: Some("EARTH".to_string()),
+            ref_frame: Some("TEME".to_string()),
+            ref_frame_epoch: None,
+            time_system: Some("UTC".to_string()),
+            mean_element_theory: Some("SGP4".to_string()),
+            epoch,
+            mean_motion: Some(elements.mean_motion),
+            semi_major_axis_km: None,
+            eccentricity: elements.eccentricity,
+            inclination_deg: elements.inclination_deg,
+            ra_of_asc_node_deg: elements.raan_deg,
+            arg_of_pericenter_deg: elements.arg_perigee_deg,
+            mean_anomaly_deg: elements.mean_anomaly_deg,
+            gm_km3_s2: None,
+            spacecraft: None,
+            ephemeris_type: elements.ephemeris_type,
+            classification_type: (!elements.classification.trim().is_empty())
+                .then(|| elements.classification.clone()),
+            norad_cat_id: Some(tle::decode_catalog_number(&elements.catalog_number)?),
+            element_set_no: elements.elset_number,
+            rev_at_epoch: elements.rev_number.map(i64::from),
+            bstar: Some(elements.bstar),
+            bterm_m2_kg: None,
+            mean_motion_dot: Some(elements.mean_motion_dot),
+            mean_motion_ddot: Some(elements.mean_motion_double_dot),
+            agom_m2_kg: None,
+            covariance: None,
+            user_defined: Vec::new(),
+            comments: OmmComments::default(),
+            exact_sgp4_epoch: None,
+            quantize_tle_derived_fields: true,
+        })
+    }
+
     /// Build an [`Omm`] from decoded fields. This is the single place the CCSDS
     /// keyword names map onto the canonical container for every encoding.
     ///
@@ -3020,6 +3412,146 @@ impl Omm {
     }
 }
 
+pub(crate) fn validate_ccsds_header_fields(
+    version: &str,
+    creation_date: &str,
+    originator: &str,
+) -> Result<(), OmmError> {
+    validate_required_text("CCSDS_OMM_VERS", version)?;
+    validate_required_text("CREATION_DATE", creation_date)?;
+    validate_required_text("ORIGINATOR", originator)?;
+    validate_ccsds_header_values(version, creation_date)
+}
+
+fn validate_ccsds_header_values(version: &str, creation_date: &str) -> Result<(), OmmError> {
+    if !matches!(version, "1.0" | "2.0" | "3.0") {
+        return Err(OmmError::InvalidField {
+            field: "CCSDS_OMM_VERS",
+            kind: OmmInputErrorKind::OutOfRange,
+        });
+    }
+    OmmEpoch::parse(creation_date, validate::CivilSecondPolicy::UtcLike).map_err(|_| {
+        OmmError::InvalidField {
+            field: "CREATION_DATE",
+            kind: OmmInputErrorKind::InvalidCivilDate,
+        }
+    })?;
+    Ok(())
+}
+
+pub(crate) fn validate_required_text(field: &'static str, value: &str) -> Result<(), OmmError> {
+    if value.is_empty() {
+        return Err(OmmError::MissingField(field));
+    }
+    check_kvn_text(field, value)?;
+    check_xml_text(field, value)
+}
+
+fn require_ccsds_header(omm: &Omm, kvn: bool) -> Result<(), OmmError> {
+    for (field, value) in [
+        ("CCSDS_OMM_VERS", omm.ccsds_omm_vers.as_deref()),
+        ("CREATION_DATE", omm.creation_date.as_deref()),
+        ("ORIGINATOR", omm.originator.as_deref()),
+        ("OBJECT_NAME", omm.object_name.as_deref()),
+        ("OBJECT_ID", omm.object_id.as_deref()),
+        ("CENTER_NAME", omm.center_name.as_deref()),
+        ("REF_FRAME", omm.ref_frame.as_deref()),
+        ("TIME_SYSTEM", omm.time_system.as_deref()),
+        ("MEAN_ELEMENT_THEORY", omm.mean_element_theory.as_deref()),
+    ] {
+        let value = value.ok_or(OmmError::MissingField(field))?;
+        if value.is_empty() {
+            return Err(OmmError::MissingField(field));
+        }
+        if kvn {
+            check_kvn_text(field, value)?;
+        }
+        check_xml_text(field, value)?;
+    }
+    validate_ccsds_header_values(
+        omm.ccsds_omm_vers.as_deref().unwrap_or_default(),
+        omm.creation_date.as_deref().unwrap_or_default(),
+    )?;
+    if omm.mean_motion.is_none() && omm.semi_major_axis_km.is_none() {
+        return Err(OmmError::MissingOneOf(&["MEAN_MOTION", "SEMI_MAJOR_AXIS"]));
+    }
+    for (field, value) in [
+        ("ECCENTRICITY", omm.eccentricity),
+        ("INCLINATION", omm.inclination_deg),
+        ("RA_OF_ASC_NODE", omm.ra_of_asc_node_deg),
+        ("ARG_OF_PERICENTER", omm.arg_of_pericenter_deg),
+        ("MEAN_ANOMALY", omm.mean_anomaly_deg),
+    ] {
+        if !value.is_finite() {
+            return Err(OmmError::InvalidField {
+                field,
+                kind: OmmInputErrorKind::NonFinite,
+            });
+        }
+    }
+    let theory = omm.mean_element_theory.as_deref().unwrap_or_default();
+    let theory = theory.to_ascii_uppercase();
+    let sgp4 = SGP4_THEORY_LABELS
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(&theory));
+    // CCSDS 502.0-B-3 section 4.2.4.6, page 4-8: "The MEAN_MOTION
+    // keyword must be used instead of SEMI_MAJOR_AXIS."
+    if (theory == "SGP" || sgp4) && omm.mean_motion.is_none() {
+        return Err(OmmError::MissingField("MEAN_MOTION"));
+    }
+    for (field, value) in [
+        ("MEAN_MOTION", omm.mean_motion),
+        ("SEMI_MAJOR_AXIS", omm.semi_major_axis_km),
+        ("BSTAR", omm.bstar),
+        ("BTERM", omm.bterm_m2_kg),
+        ("MEAN_MOTION_DOT", omm.mean_motion_dot),
+        ("MEAN_MOTION_DDOT", omm.mean_motion_ddot),
+        ("AGOM", omm.agom_m2_kg),
+    ] {
+        if value.is_some_and(|value| !value.is_finite()) {
+            return Err(OmmError::InvalidField {
+                field,
+                kind: OmmInputErrorKind::NonFinite,
+            });
+        }
+    }
+    match theory.as_str() {
+        _ if sgp4 && omm.bstar.is_none() => {
+            return Err(OmmError::MissingField("BSTAR"));
+        }
+        "SGP" | "PPT3" if omm.mean_motion_dot.is_none() => {
+            return Err(OmmError::MissingField("MEAN_MOTION_DOT"));
+        }
+        "SGP" | "PPT3" if omm.mean_motion_ddot.is_none() => {
+            return Err(OmmError::MissingField("MEAN_MOTION_DDOT"));
+        }
+        "SGP4-XP" if omm.bterm_m2_kg.is_none() => {
+            return Err(OmmError::MissingField("BTERM"));
+        }
+        "SGP4-XP" if omm.agom_m2_kg.is_none() => {
+            return Err(OmmError::MissingField("AGOM"));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn tle_object_id(designator: &str) -> Option<String> {
+    let designator = designator.trim_end();
+    if designator.is_empty() {
+        return None;
+    }
+    if designator.len() < 5 || !designator.as_bytes()[..5].iter().all(u8::is_ascii_digit) {
+        return Some(designator.to_string());
+    }
+    let launch_year = designator[..2].parse::<i32>().ok()?;
+    Some(format!(
+        "{:04}-{}",
+        tle::expand_two_digit_year(launch_year),
+        &designator[2..]
+    ))
+}
+
 /// Whether any of `keys` occurs, with any value including a blank one. A
 /// blank optional keyword still opens its block.
 fn keyword_occurs(map: &FieldMap, keys: &[&str]) -> bool {
@@ -3092,7 +3624,7 @@ fn parse_mean_elements(map: &FieldMap, epoch: OmmEpoch) -> Result<OmmMeanElement
     let mean_motion = opt_num(get("MEAN_MOTION"), "MEAN_MOTION")?;
     let semi_major_axis_km = opt_num(get("SEMI_MAJOR_AXIS"), "SEMI_MAJOR_AXIS")?;
     if mean_motion.is_none() && semi_major_axis_km.is_none() {
-        return Err(OmmError::MissingField("SEMI_MAJOR_AXIS or MEAN_MOTION"));
+        return Err(OmmError::MissingOneOf(&["SEMI_MAJOR_AXIS", "MEAN_MOTION"]));
     }
     Ok(OmmMeanElements {
         epoch,
@@ -3222,13 +3754,11 @@ impl Omm {
     /// refused with [`OmmError::InvalidField`] for `epoch`.
     pub fn to_element_set(&self) -> Result<ElementSet, OmmError> {
         let inputs = validate_omm_bridge(self)?;
-        // An epoch of whole microseconds is initialised as
-        // `sgp4.omm.initialize` initialises the same instant, which takes B*
-        // and the second derivative as stated.
-        let omm_epoch_days = match self.exact_sgp4_epoch {
-            Some(_) => None,
-            None => self.epoch.python_sgp4_epoch_days(),
-        };
+        let omm_epoch_days = self
+            .exact_sgp4_epoch
+            .is_none()
+            .then(|| self.epoch.python_sgp4_epoch_days())
+            .flatten();
         // `validate_omm_bridge` has refused a non-finite value, so a
         // quantizer refuses only a magnitude its TLE field cannot hold. That
         // value has no TLE to match and SGP4 propagates it as it is.
@@ -3410,6 +3940,60 @@ fn map_omm_bridge_to_sgp4(error: OmmError) -> Sgp4Error {
 // ── Epoch ────────────────────────────────────────────────────────────
 
 impl OmmEpoch {
+    fn from_tle_epoch(year: i32, day_of_year: f64) -> Result<Self, tle::TleError> {
+        const UNITS_PER_DAY: u64 = 100_000_000;
+        const MICROS_PER_UNIT: u64 = 864;
+        let units = (day_of_year * UNITS_PER_DAY as f64).round() as i64;
+        let mut day_index = units.div_euclid(UNITS_PER_DAY as i64) - 1;
+        let day_units = units.rem_euclid(UNITS_PER_DAY as i64) as u64;
+        let mut civil_year = year;
+        if day_index < 0 {
+            civil_year -= 1;
+            day_index += if crate::astro::time::civil::is_leap_year(i64::from(civil_year)) {
+                366
+            } else {
+                365
+            };
+        }
+        for _ in 0..3 {
+            let year_days = if crate::astro::time::civil::is_leap_year(i64::from(civil_year)) {
+                366
+            } else {
+                365
+            };
+            if day_index >= year_days {
+                day_index -= year_days;
+                civil_year += 1;
+            }
+        }
+        let mut month = 1_u32;
+        for candidate in 1..=12_u32 {
+            let month_days = crate::astro::time::civil::days_in_month(
+                i64::from(civil_year),
+                i64::from(candidate),
+            );
+            if day_index < month_days {
+                month = candidate;
+                break;
+            }
+            day_index -= month_days;
+        }
+        let micros = day_units * MICROS_PER_UNIT;
+        let hour = micros / 3_600_000_000;
+        let minute = (micros % 3_600_000_000) / 60_000_000;
+        let second = (micros % 60_000_000) / 1_000_000;
+        Ok(Self {
+            year: civil_year,
+            month,
+            day: day_index as u32 + 1,
+            hour: hour as u32,
+            minute: minute as u32,
+            second: second as u32,
+            microsecond: (micros % 1_000_000) as u32,
+            femtosecond: 0,
+        })
+    }
+
     /// Parse a CCSDS `EPOCH` value (`YYYY-MM-DDThh:mm:ss[.f...][Z]`, UTC) by
     /// delegating to the shared NDM epoch parser.
     fn parse(text: &str, second_policy: validate::CivilSecondPolicy) -> Result<OmmEpoch, OmmError> {
@@ -3549,6 +4133,10 @@ fn is_zero_u32(value: &u32) -> bool {
 
 fn default_quantize_tle_derived_fields() -> bool {
     true
+}
+
+pub(crate) fn source_line_number(text: &str, byte_offset: usize) -> usize {
+    ndm::source_line_number(text, byte_offset)
 }
 
 // ── Numeric helpers ──────────────────────────────────────────────────
@@ -3879,7 +4467,7 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
             }
         );
         assert!(
-            encode_kvn(&omm)
+            encode_kvn_lenient(&omm)
                 .unwrap()
                 .contains("EPOCH = 2026-06-17T04:32:52.999999500000000"),
             "sub-microsecond epoch must encode with high fractional precision"
@@ -3929,7 +4517,7 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
             }
         );
         assert!(
-            encode_kvn(&ordinary)
+            encode_kvn_lenient(&ordinary)
                 .unwrap()
                 .contains("EPOCH = 2026-12-31T23:59:58.123456"),
             "ordinary epoch must encode unchanged"
@@ -3954,7 +4542,7 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
             }
         );
         assert!(
-            encode_kvn(&carried)
+            encode_kvn_lenient(&carried)
                 .unwrap()
                 .contains("EPOCH = 2026-12-31T23:59:59.999999500000000"),
             "sub-microsecond year-end epoch must encode unchanged"
@@ -3964,7 +4552,7 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
     #[test]
     fn kvn_round_trips_through_struct() {
         let omm = parse_kvn(ISS_KVN).unwrap();
-        let reparsed = parse_kvn(&encode_kvn(&omm).unwrap()).unwrap();
+        let reparsed = parse_kvn(&encode_kvn_lenient(&omm).unwrap()).unwrap();
         assert_eq!(omm, reparsed);
     }
 
@@ -3980,7 +4568,7 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
                 _ => None,
             })
             .expect("fixture EPOCH");
-        let encoded = encode_kvn(&parse_kvn(ISS_KVN).unwrap()).unwrap();
+        let encoded = encode_kvn_lenient(&parse_kvn(ISS_KVN).unwrap()).unwrap();
         assert!(
             encoded.contains(&format!("EPOCH = {source_epoch}\n")),
             "catalog epoch {source_epoch} must re-encode byte-faithfully"
@@ -3993,7 +4581,7 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
         // IR-level parse(encode(ir)) == ir must include the femtosecond field.
         let omm = parse_kvn(&kvn_with_field("EPOCH", "2026-06-17T04:32:52.9999995")).unwrap();
         assert_eq!(omm.epoch.femtosecond, 500_000_000);
-        let reparsed = parse_kvn(&encode_kvn(&omm).unwrap()).unwrap();
+        let reparsed = parse_kvn(&encode_kvn_lenient(&omm).unwrap()).unwrap();
         assert_eq!(omm, reparsed);
         assert_eq!(reparsed.epoch.femtosecond, 500_000_000);
     }
@@ -4008,7 +4596,7 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
     #[test]
     fn xml_round_trips_through_struct() {
         let omm = parse_xml(ISS_XML).unwrap();
-        let reparsed = parse_xml(&encode_xml(&omm).unwrap()).unwrap();
+        let reparsed = parse_xml(&encode_xml_lenient(&omm).unwrap()).unwrap();
         assert_eq!(omm, reparsed);
     }
 
@@ -4025,15 +4613,18 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
 
         let omm = parse_kvn(&kvn_with_field("MEAN_ELEMENT_THEORY", "SGP\tSGP4"))
             .expect("XML-legal text control must remain valid");
-        let reparsed =
-            parse_xml(&encode_xml(&omm).unwrap()).expect("encoded OMM must remain valid XML");
+        let reparsed = parse_xml(&encode_xml_lenient(&omm).unwrap())
+            .expect("encoded OMM must remain valid XML");
         assert_eq!(omm, reparsed);
     }
 
     #[test]
     fn xml_round_trip_preserves_carriage_returns_in_text_values() {
         for value in ["SGP\rSGP4", "SGP\r\nSGP4"] {
-            let mut omm = parse_kvn(ISS_KVN).expect("base OMM must parse");
+            let mut omm = parse_kvn(ISS_KVN)
+                .unwrap()
+                .with_ccsds_header("2.0", "2026-06-17T05:00:00", "TEST")
+                .unwrap();
             omm.mean_element_theory = Some(value.to_string());
             let encoded = encode_xml(&omm).unwrap();
             assert!(encoded.contains("&#xD;"));
@@ -4042,6 +4633,12 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
             assert_eq!(omm.mean_element_theory, reparsed.mean_element_theory);
             assert_eq!(omm, reparsed);
         }
+        let mut omm = parse_kvn(ISS_KVN)
+            .unwrap()
+            .with_ccsds_header("2.0", "2026-06-17T05:00:00", "TEST")
+            .unwrap();
+        omm.object_name = Some("ISS\nZARYA".to_string());
+        assert_eq!(parse_xml(&encode_xml(&omm).unwrap()).unwrap(), omm);
     }
 
     #[test]
@@ -4225,10 +4822,200 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
         tle::parse(line1, line2).unwrap().elements
     }
 
+    #[test]
+    fn tle_object_id_uses_the_fixed_57_pivot_independent_of_epoch() {
+        let cases = [
+            ("98067A", 1998, 2056),
+            ("24001A", 2024, 1957),
+            ("56001A", 2056, 1957),
+            ("57001A", 1957, 2056),
+        ];
+        for (designator, expected_year, epoch_year) in cases {
+            let mut elements = iss_tle_elements();
+            elements.international_designator = designator.to_string();
+            elements.epoch_year = epoch_year;
+            let omm = Omm::from_tle(&elements, None).expect("TLE converts");
+            assert_eq!(
+                omm.object_id,
+                Some(format!("{expected_year:04}-{}", &designator[2..]))
+            );
+        }
+    }
+
+    #[test]
+    fn tle_object_id_preserves_piece_code_and_discards_fixed_column_padding() {
+        let mut elements = iss_tle_elements();
+        elements.international_designator = "98067ABC   ".to_string();
+        let omm = Omm::from_tle(&elements, None).expect("TLE converts");
+        assert_eq!(omm.object_id.as_deref(), Some("1998-067ABC"));
+    }
+
+    #[test]
+    fn tle_conversion_states_its_earth_teme_utc_sgp4_conventions() {
+        let omm =
+            Omm::from_tle(&iss_tle_elements(), Some("ISS".to_string())).expect("TLE converts");
+        assert_eq!(omm.center_name.as_deref(), Some("EARTH"));
+        assert_eq!(omm.ref_frame.as_deref(), Some("TEME"));
+        assert_eq!(omm.time_system.as_deref(), Some("UTC"));
+        assert_eq!(omm.mean_element_theory.as_deref(), Some("SGP4"));
+        assert_eq!(omm.ccsds_omm_vers, None);
+        assert_eq!(omm.creation_date, None);
+        assert_eq!(omm.originator, None);
+        assert_eq!(omm.message_id, None);
+        assert_eq!(omm.covariance, None);
+        assert!(omm.user_defined.is_empty());
+
+        assert_eq!(
+            encode_kvn(&omm),
+            Err(OmmError::MissingField("CCSDS_OMM_VERS"))
+        );
+        assert_eq!(
+            encode_xml(&omm),
+            Err(OmmError::MissingField("CCSDS_OMM_VERS"))
+        );
+        encode_kvn_lenient(&omm).expect("explicit lenient KVN");
+        encode_xml_lenient(&omm).expect("explicit lenient XML");
+        encode_json(&omm).expect("GP JSON");
+        let headed = omm
+            .with_ccsds_header("2.0", "2026-06-17T05:00:00", "CELESTRAK")
+            .expect("header");
+        encode_kvn(&headed).expect("headed KVN");
+        encode_xml(&headed).expect("headed XML");
+        encode_json(&headed).expect("headed JSON");
+        let mut missing_creation = headed.clone();
+        missing_creation.creation_date = None;
+        assert_eq!(
+            encode_kvn(&missing_creation),
+            Err(OmmError::MissingField("CREATION_DATE"))
+        );
+        let mut missing_originator = headed;
+        missing_originator.originator = None;
+        assert_eq!(
+            encode_xml(&missing_originator),
+            Err(OmmError::MissingField("ORIGINATOR"))
+        );
+    }
+
+    #[test]
+    fn ccsds_header_builder_validates_version_and_creation_epoch() {
+        let omm = Omm::from_tle(&iss_tle_elements(), Some("ISS".to_string())).unwrap();
+        assert!(matches!(
+            omm.clone()
+                .with_ccsds_header("banana", "2026-06-17T05:00:00", "X"),
+            Err(OmmError::InvalidField {
+                field: "CCSDS_OMM_VERS",
+                ..
+            })
+        ));
+        assert!(matches!(
+            omm.with_ccsds_header("3.0", "yesterday", "X"),
+            Err(OmmError::InvalidField {
+                field: "CREATION_DATE",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn tle_epoch_decimal_units_convert_to_exact_microseconds() {
+        let mut elements = iss_tle_elements();
+        elements.epoch_year = 2026;
+        elements.epoch_day_of_year = 167.20443871;
+        let first = Omm::from_tle(&elements, None).unwrap();
+        assert_eq!(
+            (
+                first.epoch.year,
+                first.epoch.month,
+                first.epoch.day,
+                first.epoch.hour,
+                first.epoch.minute,
+                first.epoch.second,
+                first.epoch.microsecond
+            ),
+            (2026, 6, 16, 4, 54, 23, 504_544)
+        );
+
+        elements.epoch_day_of_year = 168.04375000;
+        let second = Omm::from_tle(&elements, None).unwrap();
+        assert_eq!(
+            (
+                second.epoch.year,
+                second.epoch.month,
+                second.epoch.day,
+                second.epoch.hour,
+                second.epoch.minute,
+                second.epoch.second,
+                second.epoch.microsecond
+            ),
+            (2026, 6, 17, 1, 3, 0, 0)
+        );
+
+        let before = first.to_element_set().unwrap();
+        let reparsed = parse_json(&encode_json(&first).unwrap()).unwrap();
+        let after = reparsed.to_element_set().unwrap();
+        assert!(before.omm_epoch_days.is_some());
+        assert!(after.omm_epoch_days.is_some());
+        assert_eq!(before.catalog_number, after.catalog_number);
+        assert_eq!(
+            before.mean_motion_rev_per_day,
+            after.mean_motion_rev_per_day
+        );
+    }
+
+    #[test]
+    fn tle_epoch_days_roll_across_year_boundaries() {
+        let mut elements = iss_tle_elements();
+        for row in include_str!("../../tests/fixtures/omm/tle_epoch_cases.tsv")
+            .lines()
+            .filter(|row| !row.starts_with('#'))
+        {
+            let values: Vec<_> = row.split('\t').collect();
+            let year = values[0].parse().unwrap();
+            let day = values[1].parse().unwrap();
+            let expected = (
+                values[2].parse().unwrap(),
+                values[3].parse().unwrap(),
+                values[4].parse().unwrap(),
+                values[5].parse().unwrap(),
+                values[6].parse().unwrap(),
+                values[7].parse().unwrap(),
+            );
+            elements.epoch_year = year;
+            elements.epoch_day_of_year = day;
+            let epoch = Omm::from_tle(&elements, None).unwrap().epoch;
+            assert_eq!(
+                (
+                    epoch.year,
+                    epoch.month,
+                    epoch.day,
+                    epoch.hour,
+                    epoch.minute,
+                    epoch.second
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn tle_conversion_treats_blank_fields_as_absent_and_validates_epoch_range() {
+        let mut elements = iss_tle_elements();
+        elements.classification = " ".to_string();
+        let omm = Omm::from_tle(&elements, Some("  ".to_string())).unwrap();
+        assert_eq!(omm.classification_type, None);
+        assert_eq!(omm.object_name, None);
+
+        elements.epoch_day_of_year = 1.0e17;
+        assert!(Omm::from_tle(&elements, None).is_err());
+    }
+
     /// The ISS OMM given its catalog TLE's epoch as the exact SGP4 epoch, so it
     /// is bridged as that TLE is.
     fn tle_bridged_iss() -> Omm {
-        let mut omm = parse_kvn(ISS_KVN).unwrap();
+        let mut omm = parse_kvn(ISS_KVN)
+            .unwrap()
+            .with_ccsds_header("2.0", "2026-06-17T05:00:00", "TEST")
+            .unwrap();
         omm.exact_sgp4_epoch = Some(iss_tle_elements().to_element_set().unwrap().epoch);
         omm
     }
@@ -4773,6 +5560,227 @@ USER_DEFINED_C3 = 29.376 [km**2/s**2]
     }
 
     #[test]
+    fn strict_writers_require_each_sgp4_keyword_and_validate_public_header_fields() {
+        let base = parse_xml(STANDARD_XML).unwrap();
+        for missing in 0..9 {
+            let mut omm = base.clone();
+            match missing {
+                0 => omm.ccsds_omm_vers = None,
+                1 => omm.creation_date = None,
+                2 => omm.originator = None,
+                3 => omm.object_name = None,
+                4 => omm.object_id = None,
+                5 => omm.center_name = None,
+                6 => omm.ref_frame = None,
+                7 => omm.time_system = None,
+                _ => omm.mean_element_theory = None,
+            }
+            let field = [
+                "CCSDS_OMM_VERS",
+                "CREATION_DATE",
+                "ORIGINATOR",
+                "OBJECT_NAME",
+                "OBJECT_ID",
+                "CENTER_NAME",
+                "REF_FRAME",
+                "TIME_SYSTEM",
+                "MEAN_ELEMENT_THEORY",
+            ][missing];
+            assert_eq!(encode_kvn(&omm), Err(OmmError::MissingField(field)));
+            assert_eq!(encode_xml(&omm), Err(OmmError::MissingField(field)));
+        }
+        for mutate in 0..3 {
+            let mut omm = base.clone();
+            match mutate {
+                0 => omm.norad_cat_id = None,
+                1 => omm.element_set_no = None,
+                _ => omm.rev_at_epoch = None,
+            }
+            assert!(encode_kvn(&omm).is_ok());
+            assert!(encode_xml(&omm).is_ok());
+        }
+
+        let mut no_motion = base.clone();
+        no_motion.mean_motion = None;
+        assert_eq!(
+            encode_kvn(&no_motion),
+            Err(OmmError::MissingOneOf(&["MEAN_MOTION", "SEMI_MAJOR_AXIS"]))
+        );
+        no_motion.semi_major_axis_km = Some(42_164.0);
+        assert_eq!(
+            encode_kvn(&no_motion),
+            Err(OmmError::MissingField("MEAN_MOTION"))
+        );
+        for theory in ["SGP", "SGP4", "SGP/SGP4", "SDP4"] {
+            no_motion.mean_element_theory = Some(theory.to_string());
+            assert_eq!(
+                encode_kvn(&no_motion),
+                Err(OmmError::MissingField("MEAN_MOTION")),
+                "{theory}"
+            );
+            assert_eq!(
+                encode_xml(&no_motion),
+                Err(OmmError::MissingField("MEAN_MOTION")),
+                "{theory}"
+            );
+        }
+        let mut no_bstar = base.clone();
+        no_bstar.bstar = None;
+        assert_eq!(encode_xml(&no_bstar), Err(OmmError::MissingField("BSTAR")));
+        let mut optional_derivatives = base.clone();
+        optional_derivatives.mean_motion_dot = None;
+        optional_derivatives.mean_motion_ddot = None;
+        assert!(encode_kvn(&optional_derivatives).is_ok());
+
+        for theory in ["SGP", "PPT3"] {
+            for derivative in 0..2 {
+                let mut omm = base.clone();
+                omm.mean_element_theory = Some(theory.to_string());
+                if derivative == 0 {
+                    omm.mean_motion_dot = None;
+                } else {
+                    omm.mean_motion_ddot = None;
+                }
+                let field = if derivative == 0 {
+                    "MEAN_MOTION_DOT"
+                } else {
+                    "MEAN_MOTION_DDOT"
+                };
+                assert_eq!(encode_kvn(&omm), Err(OmmError::MissingField(field)));
+            }
+        }
+        for field in ["BTERM", "AGOM"] {
+            let mut omm = base.clone();
+            omm.mean_element_theory = Some("SGP4-XP".to_string());
+            omm.bterm_m2_kg = (field != "BTERM").then_some(0.0);
+            omm.agom_m2_kg = (field != "AGOM").then_some(0.0);
+            assert_eq!(encode_xml(&omm), Err(OmmError::MissingField(field)));
+        }
+        let mut sdp4 = base.clone();
+        sdp4.mean_element_theory = Some("SDP4".to_string());
+        sdp4.bstar = None;
+        assert_eq!(encode_kvn(&sdp4), Err(OmmError::MissingField("BSTAR")));
+
+        for theory in ["SGP", "SGP4-XP"] {
+            let mut omm = base.clone();
+            omm.mean_element_theory = Some(theory.to_string());
+            omm.bstar = None;
+            omm.mean_motion_dot = Some(0.0);
+            omm.mean_motion_ddot = Some(0.0);
+            omm.bterm_m2_kg = Some(0.0);
+            omm.agom_m2_kg = Some(0.0);
+            assert!(encode_kvn(&omm).is_ok(), "{theory}");
+            assert!(encode_xml(&omm).is_ok(), "{theory}");
+        }
+
+        for numeric in 0..12 {
+            let mut omm = base.clone();
+            let field = match numeric {
+                0 => {
+                    omm.eccentricity = f64::NAN;
+                    "ECCENTRICITY"
+                }
+                1 => {
+                    omm.inclination_deg = f64::INFINITY;
+                    "INCLINATION"
+                }
+                2 => {
+                    omm.ra_of_asc_node_deg = f64::NAN;
+                    "RA_OF_ASC_NODE"
+                }
+                3 => {
+                    omm.arg_of_pericenter_deg = f64::NAN;
+                    "ARG_OF_PERICENTER"
+                }
+                4 => {
+                    omm.mean_anomaly_deg = f64::NAN;
+                    "MEAN_ANOMALY"
+                }
+                5 => {
+                    omm.mean_motion = Some(f64::NAN);
+                    "MEAN_MOTION"
+                }
+                6 => {
+                    omm.bstar = Some(f64::INFINITY);
+                    "BSTAR"
+                }
+                7 => {
+                    omm.semi_major_axis_km = Some(f64::NAN);
+                    "SEMI_MAJOR_AXIS"
+                }
+                8 => {
+                    omm.bterm_m2_kg = Some(f64::NAN);
+                    "BTERM"
+                }
+                9 => {
+                    omm.mean_motion_dot = Some(f64::NAN);
+                    "MEAN_MOTION_DOT"
+                }
+                10 => {
+                    omm.mean_motion_ddot = Some(f64::NAN);
+                    "MEAN_MOTION_DDOT"
+                }
+                _ => {
+                    omm.agom_m2_kg = Some(f64::NAN);
+                    "AGOM"
+                }
+            };
+            assert_eq!(
+                encode_kvn(&omm),
+                Err(OmmError::InvalidField {
+                    field,
+                    kind: OmmInputErrorKind::NonFinite
+                })
+            );
+            assert_eq!(
+                encode_xml(&omm),
+                Err(OmmError::InvalidField {
+                    field,
+                    kind: OmmInputErrorKind::NonFinite
+                })
+            );
+        }
+
+        let mut version_one = base.clone();
+        version_one.ccsds_omm_vers = Some("1.0".to_string());
+        assert!(encode_kvn(&version_one).is_ok());
+
+        let mut invalid_version = base.clone();
+        invalid_version.ccsds_omm_vers = Some("banana".to_string());
+        assert!(matches!(
+            encode_kvn(&invalid_version),
+            Err(OmmError::InvalidField {
+                field: "CCSDS_OMM_VERS",
+                ..
+            })
+        ));
+        let mut invalid_date = base;
+        invalid_date.creation_date = Some("yesterday".to_string());
+        assert!(matches!(
+            encode_xml(&invalid_date),
+            Err(OmmError::InvalidField {
+                field: "CREATION_DATE",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn header_builder_rejects_every_text_the_strict_writers_refuse() {
+        let base = parse_xml(STANDARD_XML).unwrap();
+        for (date, originator, field) in [
+            ("2026-06-17T05:00:00 ", "TEST", "CREATION_DATE"),
+            ("2026-06-17T05:00:00", "TEST\nSYSTEM", "ORIGINATOR"),
+            ("2026-06-17T05:00:00\n", "TEST", "CREATION_DATE"),
+        ] {
+            assert!(
+                matches!(base.clone().with_ccsds_header("3.0", date, originator),
+                Err(OmmError::UnwritableText { field: actual, .. }) if actual == field)
+            );
+        }
+    }
+
+    #[test]
     fn retains_optional_items_and_block_comments_through_kvn_and_xml() {
         let omm = parse_kvn(RETAINED_KVN).expect("retention message parses");
         assert_eq!(omm.comments.header, vec!["header comment"]);
@@ -4862,7 +5870,7 @@ USER_DEFINED_C3 = 29.376 [km**2/s**2]
     fn trailing_comments_belong_to_the_last_block() {
         let omm = parse_kvn(&format!("{ISS_KVN}COMMENT trailing\n")).unwrap();
         assert_eq!(omm.comments.tle_parameters, vec!["trailing"]);
-        assert_eq!(parse_kvn(&encode_kvn(&omm).unwrap()).unwrap(), omm);
+        assert_eq!(parse_kvn(&encode_kvn_lenient(&omm).unwrap()).unwrap(), omm);
     }
 
     #[test]
@@ -4879,8 +5887,8 @@ USER_DEFINED_C3 = 29.376 [km**2/s**2]
                 ..OmmSpacecraft::default()
             })
         );
-        assert_eq!(parse_kvn(&encode_kvn(&omm).unwrap()).unwrap(), omm);
-        assert_eq!(parse_xml(&encode_xml(&omm).unwrap()).unwrap(), omm);
+        assert_eq!(parse_kvn(&encode_kvn_lenient(&omm).unwrap()).unwrap(), omm);
+        assert_eq!(parse_xml(&encode_xml_lenient(&omm).unwrap()).unwrap(), omm);
         // GP JSON drops the comment only when asked to, and still states the
         // empty block as "MASS": null.
         assert_eq!(
@@ -4891,8 +5899,12 @@ USER_DEFINED_C3 = 29.376 [km**2/s**2]
                 issue: TextIssue::CommentNotCarried,
             })
         );
+        let headed = omm
+            .clone()
+            .with_ccsds_header("2.0", "2026-06-17T05:00:00", "CELESTRAK")
+            .unwrap();
         assert_eq!(
-            parse_json(&encode_json_discarding_comments(&omm).unwrap())
+            parse_json(&encode_json_discarding_comments(&headed).unwrap())
                 .unwrap()
                 .spacecraft,
             Some(OmmSpacecraft::default())
@@ -5078,16 +6090,16 @@ USER_DEFINED_C3 = 29.376 [km**2/s**2]
         // mandatory for every theory (table 4-3).
         let broken = first.replace("<EPOCH>2026-06-17T04:32:52.099296</EPOCH>", "");
         let doc = format!("<ndm>{first}{broken}</ndm>");
+        let parsed = parse_xml_all(&doc).unwrap();
+        assert_eq!(parsed.omms, vec![parse_xml(ISS_XML).unwrap()]);
         assert_eq!(
-            parse_xml_all(&doc),
-            Ok(OmmArray {
-                omms: vec![parse_xml(ISS_XML).unwrap()],
-                skipped: vec![OmmSkippedRecord {
-                    index: 1,
-                    reason: OmmError::MissingField("EPOCH"),
-                }],
-            })
+            parsed.skipped,
+            vec![OmmSkippedRecord {
+                index: 1,
+                reason: OmmError::MissingField("EPOCH"),
+            }]
         );
+        assert_eq!(parsed.spans.len(), 2);
 
         let misplaced = ISS_XML.replace("<EPOCH>", "<MASS>1</MASS><EPOCH>");
         assert_eq!(
@@ -5150,7 +6162,10 @@ USER_DEFINED_C3 = 29.376 [km**2/s**2]
 
     #[test]
     fn bridge_validates_a_mutated_epoch_calendar() {
-        let base = parse_kvn(ISS_KVN).unwrap();
+        let base = parse_kvn(ISS_KVN)
+            .unwrap()
+            .with_ccsds_header("2.0", "2026-06-17T05:00:00", "TEST")
+            .unwrap();
         type EpochMutation = fn(&mut OmmEpoch);
         let cases: [(EpochMutation, OmmInputErrorKind); 4] = [
             (
@@ -5179,7 +6194,10 @@ USER_DEFINED_C3 = 29.376 [km**2/s**2]
 
     #[test]
     fn kvn_writer_refuses_text_that_would_read_back_differently() {
-        let base = parse_kvn(ISS_KVN).unwrap();
+        let base = parse_kvn(ISS_KVN)
+            .unwrap()
+            .with_ccsds_header("2.0", "2026-06-17T05:00:00", "TEST")
+            .unwrap();
 
         let mut omm = base.clone();
         omm.object_name = Some("ISS\nMEAN_MOTION = 1".to_string());
@@ -5204,13 +6222,10 @@ USER_DEFINED_C3 = 29.376 [km**2/s**2]
 
         let mut omm = base.clone();
         omm.ccsds_omm_vers = Some(String::new());
-        assert!(matches!(
+        assert_eq!(
             encode_kvn(&omm),
-            Err(OmmError::UnwritableText {
-                issue: TextIssue::Empty,
-                ..
-            })
-        ));
+            Err(OmmError::MissingField("CCSDS_OMM_VERS"))
+        );
 
         let mut omm = base.clone();
         omm.comments.header = vec!["trailing ".to_string()];
@@ -5258,7 +6273,7 @@ USER_DEFINED_C3 = 29.376 [km**2/s**2]
         // Blank optional text is written blank and reads back as absent.
         let mut omm = base;
         omm.object_id = Some(String::new());
-        let reparsed = parse_kvn(&encode_kvn(&omm).unwrap()).unwrap();
+        let reparsed = parse_kvn(&encode_kvn_lenient(&omm).unwrap()).unwrap();
         assert_eq!(reparsed.object_id, None);
     }
 
@@ -5417,7 +6432,7 @@ AGOM = 0.001 [m**2/kg]
         let without = DSST_KVN.replace("SEMI_MAJOR_AXIS = 42164.1 [km]\n", "");
         assert_eq!(
             parse_kvn(&without),
-            Err(OmmError::MissingField("SEMI_MAJOR_AXIS or MEAN_MOTION"))
+            Err(OmmError::MissingOneOf(&["SEMI_MAJOR_AXIS", "MEAN_MOTION"]))
         );
     }
 
@@ -5615,14 +6630,19 @@ AGOM = 0.001 [m**2/kg]
     }
 
     #[test]
-    fn an_unstated_version_is_not_written() {
+    fn an_unstated_version_requires_the_explicit_lenient_writers() {
         let omm = parse_csv(ISS_CSV).unwrap();
         assert_eq!(omm.ccsds_omm_vers, None);
-        assert!(!encode_kvn(&omm).unwrap().contains("CCSDS_OMM_VERS"));
-        assert!(!encode_xml(&omm).unwrap().contains("CCSDS_OMM_VERS"));
-        assert!(!encode_json(&omm).unwrap().contains("CCSDS_OMM_VERS"));
-        assert_eq!(parse_kvn(&encode_kvn(&omm).unwrap()).unwrap(), omm);
-        assert_eq!(parse_xml(&encode_xml(&omm).unwrap()).unwrap(), omm);
+        assert_eq!(
+            encode_kvn(&omm),
+            Err(OmmError::MissingField("CCSDS_OMM_VERS"))
+        );
+        assert_eq!(
+            encode_xml(&omm),
+            Err(OmmError::MissingField("CCSDS_OMM_VERS"))
+        );
+        assert_eq!(parse_kvn(&encode_kvn_lenient(&omm).unwrap()).unwrap(), omm);
+        assert_eq!(parse_xml(&encode_xml_lenient(&omm).unwrap()).unwrap(), omm);
         assert_eq!(parse_json(&encode_json(&omm).unwrap()).unwrap(), omm);
     }
 
@@ -5755,7 +6775,10 @@ AGOM = 0.001 [m**2/kg]
 
     #[test]
     fn xml_writer_refuses_text_that_would_read_back_differently() {
-        let base = parse_kvn(ISS_KVN).unwrap();
+        let base = parse_kvn(ISS_KVN)
+            .unwrap()
+            .with_ccsds_header("2.0", "2026-06-17T05:00:00", "TEST")
+            .unwrap();
 
         let mut omm = base.clone();
         omm.object_name = Some("ISS ".to_string());
@@ -5792,11 +6815,7 @@ AGOM = 0.001 [m**2/kg]
         omm.ccsds_omm_vers = Some(String::new());
         assert_eq!(
             encode_xml(&omm),
-            Err(OmmError::UnwritableText {
-                field: "CCSDS_OMM_VERS".to_string(),
-                value: String::new(),
-                issue: TextIssue::Empty,
-            })
+            Err(OmmError::MissingField("CCSDS_OMM_VERS"))
         );
 
         // A line break inside a value or comment reads back unchanged from XML,
@@ -5804,7 +6823,7 @@ AGOM = 0.001 [m**2/kg]
         let mut omm = base.clone();
         omm.object_name = Some("ISS\n(ZARYA)".to_string());
         omm.comments.header = vec!["first\nsecond".to_string()];
-        assert_eq!(parse_xml(&encode_xml(&omm).unwrap()).unwrap(), omm);
+        assert_eq!(parse_xml(&encode_xml_lenient(&omm).unwrap()).unwrap(), omm);
         assert!(matches!(
             encode_kvn(&omm),
             Err(OmmError::UnwritableText {
@@ -5816,8 +6835,8 @@ AGOM = 0.001 [m**2/kg]
         // A comment keeps its leading whitespace in XML as in KVN.
         let mut omm = base;
         omm.comments.metadata = vec!["  indented".to_string()];
-        assert_eq!(parse_xml(&encode_xml(&omm).unwrap()).unwrap(), omm);
-        assert_eq!(parse_kvn(&encode_kvn(&omm).unwrap()).unwrap(), omm);
+        assert_eq!(parse_xml(&encode_xml_lenient(&omm).unwrap()).unwrap(), omm);
+        assert_eq!(parse_kvn(&encode_kvn_lenient(&omm).unwrap()).unwrap(), omm);
     }
 
     #[test]
@@ -5895,7 +6914,10 @@ AGOM = 0.001 [m**2/kg]
 
     #[test]
     fn writers_refuse_a_user_defined_parameter_given_twice() {
-        let mut omm = parse_kvn(ISS_KVN).unwrap();
+        let mut omm = parse_kvn(ISS_KVN)
+            .unwrap()
+            .with_ccsds_header("2.0", "2026-06-17T05:00:00", "TEST")
+            .unwrap();
         // The readers keep one of two equal repeats and refuse two that differ.
         for second_value in ["WGS-84", "EGM-96"] {
             omm.user_defined = vec![
@@ -5921,7 +6943,10 @@ AGOM = 0.001 [m**2/kg]
 
     #[test]
     fn writers_refuse_an_epoch_the_readers_would_not_accept() {
-        let base = parse_kvn(ISS_KVN).unwrap();
+        let base = parse_kvn(ISS_KVN)
+            .unwrap()
+            .with_ccsds_header("2.0", "2026-06-17T05:00:00", "TEST")
+            .unwrap();
 
         let mut omm = base.clone();
         omm.epoch.month = 13;
@@ -5957,8 +6982,8 @@ AGOM = 0.001 [m**2/kg]
             femtosecond: 0,
         };
         assert_eq!(omm.time_system.as_deref(), Some("UTC"));
-        assert_eq!(parse_kvn(&encode_kvn(&omm).unwrap()).unwrap(), omm);
-        assert_eq!(parse_xml(&encode_xml(&omm).unwrap()).unwrap(), omm);
+        assert_eq!(parse_kvn(&encode_kvn_lenient(&omm).unwrap()).unwrap(), omm);
+        assert_eq!(parse_xml(&encode_xml_lenient(&omm).unwrap()).unwrap(), omm);
         assert_eq!(parse_json(&encode_json(&omm).unwrap()).unwrap(), omm);
         omm.time_system = Some("TAI".to_string());
         assert_eq!(
@@ -6115,8 +7140,8 @@ AGOM = 0.001 [m**2/kg]
                 "{spelling}"
             );
         }
-        // A tenth of a microsecond is no instant python-sgp4 can read: the
-        // OMM is bridged as a TLE.
+        // A tenth of a microsecond is no instant python-sgp4 can read, so the
+        // OMM uses its direct civil-epoch bridge rather than epoch-day input.
         let omm = parse_kvn(&kvn_with_field("EPOCH", "2026-06-17T04:32:52.0992961")).unwrap();
         assert_eq!(omm.to_element_set().unwrap().omm_epoch_days, None);
     }

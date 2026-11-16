@@ -1,0 +1,3 @@
+CelesTrak stations element-set fixture.
+Source: https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=TLE
+Captured: 2026-04-05 (the epoch fields are day 095 of 2026).
