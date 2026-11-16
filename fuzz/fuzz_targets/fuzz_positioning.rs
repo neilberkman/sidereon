@@ -417,6 +417,7 @@ fuzz_target!(|data: &[u8]| {
             enu_m2: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         },
         posterior_variance_factor,
+        posterior_variance_factor_estimated: input.bits[1] & 1 == 1,
         position_covariance_scale_factor: posterior_variance_factor,
         temporal_position_covariance: sidereon_core::dop::PositionCovariance {
             ecef_m2: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
