@@ -81,6 +81,10 @@ harness = false
 name = "quality_cost"
 harness = false
 
+[[bench]]
+name = "epoch_frames"
+harness = false
+
 [features]
 default = ["parallel"]
 # Data-parallel batch entry points use rayon when enabled; when disabled they

@@ -588,28 +588,39 @@ pub fn teme_to_gcrs_compute(
     skyfield_compat: bool,
 ) -> Result<(Vec3, Vec3), FrameTransformError> {
     validate_time_scales(ts)?;
+    apply_teme_to_gcrs(
+        state,
+        &build_teme_to_gcrs_matrix(ts, skyfield_compat),
+        skyfield_compat,
+    )
+}
+
+fn apply_teme_to_gcrs(
+    state: &TemeStateKm,
+    matrix: &Mat3,
+    skyfield_compat: bool,
+) -> Result<(Vec3, Vec3), FrameTransformError> {
     validate_vec3("position_km", &state.position_km)?;
     validate_vec3("velocity_km_s", &state.velocity_km_s)?;
-    let (position, velocity) = teme_to_gcrs_compute_unchecked(state, ts, skyfield_compat);
+    let (position, velocity) = apply_teme_to_gcrs_unchecked(state, matrix, skyfield_compat);
     Ok((
         validate_tuple3("gcrs_position_km", position)?,
         validate_tuple3("gcrs_velocity_km_s", velocity)?,
     ))
 }
 
-fn teme_to_gcrs_compute_unchecked(
+fn apply_teme_to_gcrs_unchecked(
     state: &TemeStateKm,
-    ts: &TimeScales,
+    t: &Mat3,
     skyfield_compat: bool,
 ) -> (Vec3, Vec3) {
     let [x, y, z] = state.position_km;
     let [vx, vy, vz] = state.velocity_km_s;
-    let t = build_teme_to_gcrs_matrix(ts, skyfield_compat);
 
     if skyfield_compat {
         // AU/day scaling + FMA multiply matching Skyfield's _at() path.
         let r_au = [x / AU_KM, y / AU_KM, z / AU_KM];
-        let r_gcrs_au = mat3_vec3_mul_fma(&t, &r_au);
+        let r_gcrs_au = mat3_vec3_mul_fma(t, &r_au);
         let r_gcrs = (
             r_gcrs_au[0] * AU_KM,
             r_gcrs_au[1] * AU_KM,
@@ -621,7 +632,7 @@ fn teme_to_gcrs_compute_unchecked(
             vy / AU_KM * SECONDS_PER_DAY,
             vz / AU_KM * SECONDS_PER_DAY,
         ];
-        let v_gcrs_au_d = mat3_vec3_mul_fma(&t, &v_au_d);
+        let v_gcrs_au_d = mat3_vec3_mul_fma(t, &v_au_d);
         let v_gcrs = (
             v_gcrs_au_d[0] * AU_KM / SECONDS_PER_DAY,
             v_gcrs_au_d[1] * AU_KM / SECONDS_PER_DAY,
@@ -631,9 +642,9 @@ fn teme_to_gcrs_compute_unchecked(
     } else {
         // Direct km/s multiply -- no AU round-trip, no FMA.
         let r_teme = [x, y, z];
-        let r_g = mat3_vec3_mul_unchecked(&t, &r_teme);
+        let r_g = mat3_vec3_mul_unchecked(t, &r_teme);
         let v_teme = [vx, vy, vz];
-        let v_g = mat3_vec3_mul_unchecked(&t, &v_teme);
+        let v_g = mat3_vec3_mul_unchecked(t, &v_teme);
         ((r_g[0], r_g[1], r_g[2]), (v_g[0], v_g[1], v_g[2]))
     }
 }
@@ -841,19 +852,21 @@ fn gcrs_to_itrs_compute_unchecked(
     ts: &TimeScales,
     skyfield_compat: bool,
 ) -> (f64, f64, f64) {
-    let mat = gcrs_to_itrs_matrix_unchecked(ts);
+    apply_gcrs_to_itrs(x, y, z, &gcrs_to_itrs_matrix_unchecked(ts), skyfield_compat)
+}
 
+fn apply_gcrs_to_itrs(x: f64, y: f64, z: f64, mat: &Mat3, skyfield_compat: bool) -> Vec3 {
     if skyfield_compat {
         // Skyfield: mxv(R, pos_au) in AU, then convert to km.
         // For ITRS, scalar (non-FMA) multiply matches einsum's rounding.
         // (Unlike TEME->GCRS where FMA is needed -- the difference is due to
         // the specific matrix/vector values and how rounding interacts.)
         let pos_au = [x / AU_KM, y / AU_KM, z / AU_KM];
-        let r = mat3_vec3_mul_unchecked(&mat, &pos_au);
+        let r = mat3_vec3_mul_unchecked(mat, &pos_au);
         (r[0] * AU_KM, r[1] * AU_KM, r[2] * AU_KM)
     } else {
         let pos = [x, y, z];
-        let r = mat3_vec3_mul_unchecked(&mat, &pos);
+        let r = mat3_vec3_mul_unchecked(mat, &pos);
         (r[0], r[1], r[2])
     }
 }
@@ -884,17 +897,13 @@ fn gcrs_to_itrs_compute_with_polar_motion_unchecked(
     skyfield_compat: bool,
     pole: PolarMotion,
 ) -> (f64, f64, f64) {
-    let mat = gcrs_to_itrs_matrix_with_polar_motion_unchecked(ts, pole);
-
-    if skyfield_compat {
-        let pos_au = [x / AU_KM, y / AU_KM, z / AU_KM];
-        let r = mat3_vec3_mul_unchecked(&mat, &pos_au);
-        (r[0] * AU_KM, r[1] * AU_KM, r[2] * AU_KM)
-    } else {
-        let pos = [x, y, z];
-        let r = mat3_vec3_mul_unchecked(&mat, &pos);
-        (r[0], r[1], r[2])
-    }
+    apply_gcrs_to_itrs(
+        x,
+        y,
+        z,
+        &gcrs_to_itrs_matrix_with_polar_motion_unchecked(ts, pole),
+        skyfield_compat,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,10 +1255,52 @@ fn gcrs_to_topocentric_compute_unchecked(
         );
     }
 
-    // Standard path: GCRS->ITRS->ENU topocentric reduction.
-    let (sat_itrs_x, sat_itrs_y, sat_itrs_z) =
-        gcrs_to_itrs_compute_unchecked(sat_x, sat_y, sat_z, ts, false);
-    itrs_to_topocentric_unchecked([sat_itrs_x, sat_itrs_y, sat_itrs_z], station)
+    apply_gcrs_to_topocentric(sat_gcrs_km, station, &gcrs_to_itrs_matrix_unchecked(ts))
+}
+
+fn apply_gcrs_to_topocentric(sat: [f64; 3], station: &GeodeticStationKm, matrix: &Mat3) -> Vec3 {
+    let (x, y, z) = apply_gcrs_to_itrs(sat[0], sat[1], sat[2], matrix, false);
+    itrs_to_topocentric_unchecked([x, y, z], station)
+}
+
+pub(crate) struct TemeEpochFrames {
+    teme_to_gcrs: Mat3,
+    gcrs_to_itrs: Mat3,
+}
+
+impl TemeEpochFrames {
+    pub(crate) fn new(ts: &TimeScales) -> Result<Self, FrameTransformError> {
+        validate_ut1_time_scales(ts)?;
+        Ok(Self {
+            teme_to_gcrs: build_teme_to_gcrs_matrix(ts, false),
+            gcrs_to_itrs: gcrs_to_itrs_matrix_unchecked(ts),
+        })
+    }
+
+    pub(crate) fn topocentric(
+        &self,
+        state: &TemeStateKm,
+        station: &GeodeticStationKm,
+    ) -> Result<Vec3, FrameTransformError> {
+        let ((x, y, z), _) = apply_teme_to_gcrs(state, &self.teme_to_gcrs, false)?;
+        validate_geodetic_degrees_km(
+            station.latitude_deg,
+            station.longitude_deg,
+            station.altitude_km,
+        )?;
+        validate_tuple3(
+            "topocentric",
+            apply_gcrs_to_topocentric([x, y, z], station, &self.gcrs_to_itrs),
+        )
+    }
+
+    pub(crate) fn itrs(&self, state: &TemeStateKm) -> Result<Vec3, FrameTransformError> {
+        let ((x, y, z), _) = apply_teme_to_gcrs(state, &self.teme_to_gcrs, false)?;
+        validate_tuple3(
+            "itrs_position_km",
+            apply_gcrs_to_itrs(x, y, z, &self.gcrs_to_itrs, false),
+        )
+    }
 }
 
 /// Topocentric az/el/range from a station to an Earth-fixed (ITRS/ECEF) target.

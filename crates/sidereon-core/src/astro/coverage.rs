@@ -1,11 +1,11 @@
 //! One-epoch satellite/station coverage grid.
 //!
 //! The public helpers here build row-major `[satellite][station]` products by
-//! wrapping the scalar look-angle kernel. Every cell equals the corresponding
+//! applying one epoch's frame matrices to each satellite. Every cell equals the corresponding
 //! per-pair [`crate::astro::passes::look_angle_arc`] result.
 
 use crate::astro::passes::{
-    look_angle_arc_with_validity, GroundStation, LookAngle, LookAngleError, UtcInstant,
+    look_at_epoch, look_epoch, GroundStation, LookAngle, LookAngleError, UtcInstant,
 };
 use crate::astro::sgp4::Satellite;
 use crate::astro::time::{Validated, ValidityMode};
@@ -15,9 +15,8 @@ pub type LookAngleGrid = Vec<Vec<Result<LookAngle, LookAngleError>>>;
 
 /// Compute topocentric look angles for all satellite/station pairs at one epoch.
 ///
-/// Each cell is produced by calling [`crate::astro::passes::look_angle_arc`]
-/// for exactly that satellite/station pair with a one-element epoch slice, so
-/// the cell is element-wise identical to the scalar kernel.
+/// Each cell equals [`crate::astro::passes::look_angle_arc`] for its
+/// satellite and station with a one-element epoch slice.
 ///
 /// An epoch outside the UT1 table puts the refusal in every cell; see
 /// [`look_angles_batch_with_validity`].
@@ -41,20 +40,16 @@ pub fn look_angles_batch_with_validity(
     datetime: UtcInstant,
     mode: ValidityMode,
 ) -> Validated<LookAngleGrid> {
+    let frames = look_epoch(
+        datetime,
+        &crate::astro::frames::transforms::Ut1Gate::new(mode),
+    );
     let grid = satellites
         .iter()
         .map(|satellite| {
             stations
                 .iter()
-                .map(|&station| {
-                    look_angle_arc_with_validity(
-                        satellite,
-                        station,
-                        std::slice::from_ref(&datetime),
-                        mode,
-                    )
-                    .map(|arc| arc.value[0])
-                })
+                .map(|&station| look_at_epoch(satellite, station, datetime, &frames))
                 .collect()
         })
         .collect();
