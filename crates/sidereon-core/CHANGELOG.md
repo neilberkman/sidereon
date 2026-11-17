@@ -7,10 +7,20 @@ All notable changes to `sidereon-core` are documented here.
 ### Added
 
 - `ground_track_batch_serial`, `ground_track_batch_parallel` and their `_with_validity` forms: ground tracks for many satellites over a shared epoch grid. Each element equals `ground_track` for that satellite, including errors.
+- `UtcInstant::try_time_scales`: the instant's UT1, TT and TDB time scales, or `None` outside UTC years 0 through 9999.
 
 ### Changed
 
 - The look-angle batch, ground-track batch, visibility and coverage-grid paths build each epoch's frame matrices once and apply them to every satellite, instead of rebuilding them per satellite. Results are unchanged bit for bit. 143 satellites over 51 epochs take about 5 ms instead of 250 ms; extra memory is bounded by a fixed 256-epoch chunk. Pass search still evaluates each satellite on its own grid.
+
+### Deprecated
+
+- Deprecate `UtcInstant::time_scales`, which panics outside UTC years 0 through 9999. Use `UtcInstant::try_time_scales`.
+
+### Fixed
+
+- Coverage grids return a typed invalid-datetime error in each valid station's cell for UTC instants outside years 0 through 9999, with no UT1 degradation reported.
+- Almanac, transit, body-observation and rise/set functions return a typed invalid-datetime error for UTC instants outside years 0 through 9999 instead of panicking.
 
 ## [4.0.0] - 2026-11-16
 

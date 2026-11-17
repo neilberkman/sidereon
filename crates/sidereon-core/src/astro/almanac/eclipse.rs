@@ -33,6 +33,7 @@ pub fn lunar_solar_eclipses(
 ) -> Result<Vec<EclipseEvent>, AlmanacError> {
     validate_scan_controls(step_seconds, time_tolerance_seconds, PHASE_STEP_MAX_SECONDS)?;
 
+    super::validate_window_datetimes(start, end)?;
     let padded_start = offset_instant(start, -ECLIPSE_PAD_SECONDS);
     let padded_end = offset_instant(end, ECLIPSE_PAD_SECONDS);
     let phases = crate::astro::almanac::moon_phases(

@@ -302,12 +302,22 @@ pub(crate) fn validate_station(station: &GeodeticStationKm) -> Result<(), Almana
     .map_err(map_frame_input)
 }
 
+pub(crate) fn validate_window_datetimes(
+    start: UtcInstant,
+    end: UtcInstant,
+) -> Result<(), FrameTransformError> {
+    start.time_scales_or_error()?;
+    end.time_scales_or_error()?;
+    Ok(())
+}
+
 pub(crate) fn event_finder(
     start: UtcInstant,
     end: UtcInstant,
     step_seconds: f64,
     time_tolerance_seconds: f64,
 ) -> Result<EventFinder, AlmanacError> {
+    validate_window_datetimes(start, end)?;
     EventFinder::new(
         0.0,
         seconds_between(start, end)?,
@@ -343,7 +353,7 @@ pub(crate) fn body_ecliptic(
     target_naif: i32,
     time: UtcInstant,
 ) -> Result<EclipticLonLat, AlmanacError> {
-    let ts = time.time_scales();
+    let ts = time.time_scales_or_error()?;
     let pos = apparent_geocentric(target_naif, &ts, source)?;
     geocentric_ecliptic(pos, &ts)
 }
@@ -353,7 +363,7 @@ pub(crate) fn apparent_km(
     target_naif: i32,
     time: UtcInstant,
 ) -> Result<[f64; 3], AlmanacError> {
-    let pos_m = apparent_geocentric(target_naif, &time.time_scales(), source)?;
+    let pos_m = apparent_geocentric(target_naif, &time.time_scales_or_error()?, source)?;
     Ok([pos_m[0] * 1.0e-3, pos_m[1] * 1.0e-3, pos_m[2] * 1.0e-3])
 }
 

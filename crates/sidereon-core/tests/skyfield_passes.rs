@@ -223,7 +223,9 @@ fn frames_and_station_match_skyfield() {
     let fx = fixture();
     let mut worst = 0.0_f64;
     for row in fx["epochs"].as_array().unwrap() {
-        let ts = UtcInstant::from_unix_microseconds(row["unix_us"].as_i64().unwrap()).time_scales();
+        let ts = UtcInstant::from_unix_microseconds(row["unix_us"].as_i64().unwrap())
+            .try_time_scales()
+            .unwrap();
 
         let skyfield_itrs = row["gcrs_to_itrs"].as_array().unwrap();
         let ours_itrs = gcrs_to_itrs_matrix(&ts).unwrap();

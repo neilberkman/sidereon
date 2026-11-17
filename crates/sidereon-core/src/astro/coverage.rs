@@ -4,6 +4,7 @@
 //! applying one epoch's frame matrices to each satellite. Every cell equals the corresponding
 //! per-pair [`crate::astro::passes::look_angle_arc`] result.
 
+use crate::astro::frames::transforms::Ut1Gate;
 use crate::astro::passes::{
     look_at_epoch, look_epoch, GroundStation, LookAngle, LookAngleError, UtcInstant,
 };
@@ -40,10 +41,8 @@ pub fn look_angles_batch_with_validity(
     datetime: UtcInstant,
     mode: ValidityMode,
 ) -> Validated<LookAngleGrid> {
-    let frames = look_epoch(
-        datetime,
-        &crate::astro::frames::transforms::Ut1Gate::new(mode),
-    );
+    let gate = Ut1Gate::new(mode);
+    let frames = look_epoch(datetime, &gate);
     let grid = satellites
         .iter()
         .map(|satellite| {
@@ -53,10 +52,7 @@ pub fn look_angles_batch_with_validity(
                 .collect()
         })
         .collect();
-    let degraded = match mode {
-        ValidityMode::Strict => None,
-        ValidityMode::Permissive => datetime.time_scales().ut1_degraded,
-    };
+    let degraded = gate.finish(()).ok().and_then(|result| result.degraded);
     Validated {
         value: grid,
         degraded,

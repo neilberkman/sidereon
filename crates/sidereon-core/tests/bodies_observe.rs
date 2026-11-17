@@ -720,7 +720,7 @@ fn aberration_estimate_arcsec(
     kernel: &Spk,
     direction: sidereon_core::astro::bodies::Equatorial,
 ) -> f64 {
-    let ts = time.time_scales();
+    let ts = time.try_time_scales().unwrap();
     let et = (ts.jd_tdb - J2000_JD) * SECONDS_PER_DAY;
     let (x, y, z) = geodetic_to_itrs(
         station.latitude_deg,

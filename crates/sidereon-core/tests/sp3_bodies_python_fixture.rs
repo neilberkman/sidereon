@@ -4,7 +4,7 @@
 //!
 //! Every value is computed with the exact functions the binding calls: Sun/Moon
 //! come from `sun_moon_eci_at` / `sun_moon_ecef` driven by the precise
-//! `UtcInstant::time_scales` path, and the SP3 numbers come from the same
+//! `UtcInstant::try_time_scales` path, and the SP3 numbers come from the same
 //! `epochs_j2000_seconds` / `position_at_j2000_seconds` / `to_sp3_string` the
 //! binding marshals. The binding loads the SAME committed SP3 fixture verbatim, so
 //! the fixture carries the engine's numbers (emitted as IEEE-754 hex bits for an
@@ -71,7 +71,8 @@ fn sp3_bodies_reference_self_validates() {
             .unwrap()
             .unix_microseconds(),
     )
-    .time_scales();
+    .try_time_scales()
+    .unwrap();
     let eci = sun_moon_eci_at(&ts).expect("valid time scales");
     let ecef = sun_moon_ecef(&ts).expect("valid time scales");
     let sun_norm = (eci.sun[0].powi(2) + eci.sun[1].powi(2) + eci.sun[2].powi(2)).sqrt();
@@ -117,7 +118,9 @@ fn body_epoch_json(epoch: (i32, i32, i32, i32, i32, i32, i32)) -> serde_json::Va
     let unix_micros = UtcInstant::from_utc(y, mo, d, h, mi, s, us)
         .expect("dump: valid calendar epoch")
         .unix_microseconds();
-    let ts = UtcInstant::from_unix_microseconds(unix_micros).time_scales();
+    let ts = UtcInstant::from_unix_microseconds(unix_micros)
+        .try_time_scales()
+        .unwrap();
     let eci = sun_moon_eci_at(&ts).expect("valid time scales");
     let ecef = sun_moon_ecef(&ts).expect("valid time scales");
 

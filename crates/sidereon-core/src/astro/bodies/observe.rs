@@ -256,7 +256,7 @@ pub fn observe_with_validity(
     options: ObserveOptions,
     mode: ValidityMode,
 ) -> Result<Validated<Observation>, ObserveError> {
-    with_ut1_validity(&time.time_scales(), mode, |ts| {
+    with_ut1_validity(&time.time_scales_or_error()?, mode, |ts| {
         observe_with_time_scales(station, ts, target, options)
     })
 }
@@ -392,7 +392,7 @@ pub fn sun_az_el_with_validity(
     time: UtcInstant,
     mode: ValidityMode,
 ) -> Result<Validated<BodyAzEl>, BodyObservationError> {
-    with_ut1_validity(&time.time_scales(), mode, |ts| {
+    with_ut1_validity(&time.time_scales_or_error()?, mode, |ts| {
         body_az_el(station, sun_moon_ecef(ts)?.sun)
     })
 }
@@ -417,7 +417,7 @@ pub fn moon_az_el_with_validity(
     time: UtcInstant,
     mode: ValidityMode,
 ) -> Result<Validated<BodyAzEl>, BodyObservationError> {
-    with_ut1_validity(&time.time_scales(), mode, |ts| {
+    with_ut1_validity(&time.time_scales_or_error()?, mode, |ts| {
         body_az_el(station, sun_moon_ecef(ts)?.moon)
     })
 }
@@ -463,7 +463,7 @@ pub fn moon_illumination_with_validity(
     time: UtcInstant,
     mode: ValidityMode,
 ) -> Result<Validated<MoonIllumination>, BodyObservationError> {
-    with_ut1_validity(&time.time_scales(), mode, |ts| {
+    with_ut1_validity(&time.time_scales_or_error()?, mode, |ts| {
         moon_illumination_at(station, ts)
     })
 }
@@ -1049,6 +1049,54 @@ mod tests {
     }
 
     #[test]
+    fn body_observation_rejects_invalid_datetimes() {
+        let station = greenwich();
+        let kernel = observe_fixture_spk();
+        let options = ObserveOptions::default();
+        let error = FrameTransformError::InvalidInput {
+            field: "datetime",
+            reason: "invalid UTC instant",
+        };
+        for micros in [i64::MIN, i64::MAX] {
+            let time = UtcInstant::from_unix_microseconds(micros);
+            for result in [
+                observe(&station, time, Target::Sun, options).unwrap_err(),
+                observe_spk_body(&station, time, &kernel, 10).unwrap_err(),
+            ] {
+                assert!(matches!(result, ObserveError::FrameTransform(found) if found == error));
+            }
+            for result in [
+                sun_az_el(&station, time).unwrap_err(),
+                moon_az_el(&station, time).unwrap_err(),
+                moon_illumination(&station, time).unwrap_err(),
+            ] {
+                assert!(
+                    matches!(result, BodyObservationError::FrameTransform(found) if found == error)
+                );
+            }
+            for mode in [ValidityMode::Strict, ValidityMode::Permissive] {
+                for result in [
+                    observe_with_validity(&station, time, Target::Sun, options, mode).unwrap_err(),
+                    observe_spk_body_with_validity(&station, time, &kernel, 10, mode).unwrap_err(),
+                ] {
+                    assert!(
+                        matches!(result, ObserveError::FrameTransform(found) if found == error)
+                    );
+                }
+                for result in [
+                    sun_az_el_with_validity(&station, time, mode).unwrap_err(),
+                    moon_az_el_with_validity(&station, time, mode).unwrap_err(),
+                    moon_illumination_with_validity(&station, time, mode).unwrap_err(),
+                ] {
+                    assert!(
+                        matches!(result, BodyObservationError::FrameTransform(found) if found == error)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn observation_after_the_ut1_table_is_refused_or_reported() {
         // 2027-09-01 is past the embedded UT1 table, which ends in 2027-07.
         let time = UtcInstant::from_utc(2027, 9, 1, 12, 0, 0, 0).expect("valid UTC");
@@ -1205,7 +1253,8 @@ mod tests {
         let station = greenwich();
         let ts = UtcInstant::from_utc(2024, 1, 1, 0, 0, 0, 0)
             .expect("valid UTC")
-            .time_scales();
+            .try_time_scales()
+            .unwrap();
         let et = (ts.jd_tdb - J2000_JD) * SECONDS_PER_DAY;
         let observer =
             observer_barycentric(&station, &ts, &kernel, et, None).expect("observer state");
@@ -1225,7 +1274,7 @@ mod tests {
         let kernel = observe_fixture_spk();
         let station = greenwich();
         let time = UtcInstant::from_utc(2024, 1, 1, 0, 0, 0, 0).expect("valid UTC");
-        let ts = time.time_scales();
+        let ts = time.try_time_scales().unwrap();
         let et = (ts.jd_tdb - J2000_JD) * SECONDS_PER_DAY;
         let observer =
             observer_barycentric(&station, &ts, &kernel, et, None).expect("observer state");

@@ -146,24 +146,33 @@ impl UtcInstant {
         }
     }
 
-    /// Resolve the precise split-Julian-date time scales (UT1/TT/TDB) for this
-    /// UTC instant, via the parity-critical [`TimeScales::from_utc`] path.
+    /// Resolve split Julian dates for UT1, TT and TDB at this UTC instant.
     ///
-    /// Exposed so a Rust or Python consumer can reach the precise time scales for
-    /// an instant given only its unix-microsecond UTC stamp, without restating the
-    /// calendar breakdown. The numerics are unchanged from the internal pass-finder
-    /// use.
+    /// Returns `None` outside UTC calendar years 0 through 9999.
+    pub fn try_time_scales(self) -> Option<TimeScales> {
+        time_scales_from_instant(self)
+    }
+
+    pub(crate) fn time_scales_or_error(self) -> Result<TimeScales, FrameTransformError> {
+        self.try_time_scales()
+            .ok_or(FrameTransformError::InvalidInput {
+                field: "datetime",
+                reason: "invalid UTC instant",
+            })
+    }
+
+    /// Resolve split Julian dates for UT1, TT and TDB at this UTC instant.
+    ///
+    /// # Panics
+    ///
+    /// Panics outside UTC calendar years 0 through 9999.
+    #[deprecated(
+        since = "4.1.0",
+        note = "use try_time_scales; time_scales panics outside years 0 through 9999"
+    )]
     pub fn time_scales(self) -> TimeScales {
-        let c = self.components();
-        TimeScales::from_utc(
-            c.year,
-            c.month,
-            c.day,
-            c.hour,
-            c.minute,
-            c.second as f64 + c.microsecond as f64 / 1_000_000.0,
-        )
-        .expect("UtcInstant components produce a finite UTC second")
+        self.try_time_scales()
+            .expect("UtcInstant components produce a finite UTC second")
     }
 
     /// The split Julian date Skyfield 1.54 propagates SGP4 at for this
@@ -2963,7 +2972,7 @@ mod tests {
         let pred = satellite
             .propagate_jd(datetime.sgp4_julian_date())
             .expect("satellite propagates at subpoint instant");
-        let ts = datetime.time_scales();
+        let ts = datetime.try_time_scales().unwrap();
         let (gcrs_position, _) = teme_to_gcrs_compute(
             &TemeStateKm {
                 position_km: pred.position,
@@ -3419,7 +3428,7 @@ mod tests {
         // whose TT Julian date is exactly the table's last covered instant.
         let start = UtcInstant::from_utc(2027, 7, 2, 0, 0, 0, 0).unwrap();
         let end = UtcInstant::from_utc(2027, 7, 3, 0, 0, 0, 0).unwrap();
-        assert_eq!(end.time_scales().ut1_degraded, None);
+        assert_eq!(end.try_time_scales().unwrap().ut1_degraded, None);
         let found = find_passes(
             &drag_free_iss_elements(),
             london(),
