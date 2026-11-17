@@ -339,9 +339,7 @@ pub(crate) fn seconds_between(start: UtcInstant, end: UtcInstant) -> Result<f64,
 }
 
 pub(crate) fn instant_at_offset_seconds(start: UtcInstant, offset_seconds: f64) -> UtcInstant {
-    UtcInstant::from_unix_microseconds(
-        start.unix_microseconds() + (offset_seconds * MICROSECONDS_PER_SECOND).floor() as i64,
-    )
+    start.add_microseconds((offset_seconds * MICROSECONDS_PER_SECOND).floor() as i64)
 }
 
 pub(crate) fn offset_instant(start: UtcInstant, offset_seconds: f64) -> UtcInstant {

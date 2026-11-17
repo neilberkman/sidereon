@@ -560,9 +560,7 @@ where
 }
 
 fn instant_at_offset_seconds(start_time: UtcInstant, offset_seconds: f64) -> UtcInstant {
-    UtcInstant::from_unix_microseconds(
-        start_time.unix_microseconds() + (offset_seconds * MICROSECONDS_PER_SECOND).floor() as i64,
-    )
+    start_time.add_microseconds((offset_seconds * MICROSECONDS_PER_SECOND).floor() as i64)
 }
 
 /// Validate a ground station's geodetic coordinates up front, returning a typed
@@ -636,6 +634,14 @@ mod tests {
 
     fn day_start() -> UtcInstant {
         UtcInstant::from_utc(2024, 3, 20, 0, 0, 0, 0).expect("valid UTC")
+    }
+
+    #[test]
+    fn offsets_saturate_at_timestamp_limits() {
+        for (micros, offset) in [(i64::MIN, -1.0), (i64::MAX, 1.0)] {
+            let instant = UtcInstant::from_unix_microseconds(micros);
+            assert_eq!(instant_at_offset_seconds(instant, offset), instant);
+        }
     }
 
     #[test]

@@ -588,3 +588,563 @@ fn empty_and_exact_chunks_preserve_late_ut1_departure() {
         }
     }
 }
+
+#[test]
+fn pass_searches_reject_invalid_window_endpoints() {
+    let recent = UtcInstant::from_utc(2024, 1, 1, 0, 0, 0, 0).unwrap();
+    let earlier = UtcInstant::from_utc(1969, 1, 1, 0, 0, 0, 0).unwrap();
+    let min = UtcInstant::from_unix_microseconds(i64::MIN);
+    let max = UtcInstant::from_unix_microseconds(i64::MAX);
+    let mut elements = elements_at(recent, 2);
+    let satellite = Satellite::from_elements(&elements[0]).unwrap();
+    elements[1].eccentricity = 1.5;
+    let station = stations()[0];
+    let predict = PassPredictionOptions::default();
+    let find = PassFinderOptions::default();
+    let opsmode = OpsMode::Improved;
+    let error = PassError::InvalidInput {
+        field: "datetime",
+        reason: "invalid UTC instant",
+    };
+
+    for (start, end) in [
+        (recent, min),
+        (earlier, min),
+        (min, min.add_microseconds(60_000_000)),
+        (max.add_microseconds(-60_000_000), max),
+        (recent, max),
+        (min, earlier),
+        (min, max),
+        (max, recent),
+        (min, min),
+        (max, max),
+    ] {
+        for actual in [
+            predict_passes(&elements[0], station, start, end, predict).unwrap_err(),
+            predict_passes_with_opsmode(&elements[0], station, start, end, predict, opsmode)
+                .unwrap_err(),
+            find_passes(&elements[0], station, start, end, find).unwrap_err(),
+            find_passes_with_opsmode(&elements[0], station, start, end, find, opsmode).unwrap_err(),
+            find_passes_for_satellite(&satellite, station, start, end, find).unwrap_err(),
+        ] {
+            assert_eq!(actual, error);
+        }
+        for actual in [
+            find_passes_batch_serial(&elements, station, start, end, find),
+            find_passes_batch_parallel(&elements, station, start, end, find),
+            find_passes_batch_serial_with_opsmode(&elements, station, start, end, find, opsmode),
+            find_passes_batch_parallel_with_opsmode(&elements, station, start, end, find, opsmode),
+        ] {
+            assert_eq!(actual, vec![Err(error); elements.len()]);
+        }
+        for mode in [ValidityMode::Strict, ValidityMode::Permissive] {
+            for actual in [
+                predict_passes_with_validity(
+                    &elements[0],
+                    station,
+                    start,
+                    end,
+                    predict,
+                    opsmode,
+                    mode,
+                )
+                .unwrap_err(),
+                find_passes_with_validity(&elements[0], station, start, end, find, opsmode, mode)
+                    .unwrap_err(),
+                find_passes_for_satellite_with_validity(
+                    &satellite, station, start, end, find, mode,
+                )
+                .unwrap_err(),
+            ] {
+                assert_eq!(actual, error);
+            }
+            for actual in [
+                find_passes_batch_serial_with_validity(
+                    &elements, station, start, end, find, opsmode, mode,
+                ),
+                find_passes_batch_parallel_with_validity(
+                    &elements, station, start, end, find, opsmode, mode,
+                ),
+            ] {
+                assert_eq!(actual, vec![Err(error); elements.len()]);
+            }
+        }
+    }
+}
+
+#[test]
+fn pass_input_errors_keep_precedence_over_invalid_window_endpoints() {
+    let recent = UtcInstant::from_utc(2024, 1, 1, 0, 0, 0, 0).unwrap();
+    let day_later = recent.add_microseconds(86_400_000_000);
+    let min = UtcInstant::from_unix_microseconds(i64::MIN);
+    let max = UtcInstant::from_unix_microseconds(i64::MAX);
+    let elements = elements_at(recent, 2);
+    let satellite = Satellite::from_elements(&elements[0]).unwrap();
+    let opsmode = OpsMode::Improved;
+    let good_station = stations()[0];
+    let bad_station = GroundStation {
+        latitude_deg: 91.0,
+        ..good_station
+    };
+    let good_predict = PassPredictionOptions::default();
+    let bad_predict = PassPredictionOptions {
+        step_seconds: 0,
+        ..good_predict
+    };
+    let good_find = PassFinderOptions::default();
+    let bad_find = PassFinderOptions {
+        coarse_step_seconds: f64::NAN,
+        ..good_find
+    };
+    let cases = [
+        (bad_station, good_predict, good_find),
+        (good_station, bad_predict, bad_find),
+        (bad_station, bad_predict, bad_find),
+    ];
+    for (station, predict, find) in cases {
+        for mode in [ValidityMode::Strict, ValidityMode::Permissive] {
+            let predict_at = |start, end| {
+                predict_passes_with_validity(
+                    &elements[0],
+                    station,
+                    start,
+                    end,
+                    predict,
+                    opsmode,
+                    mode,
+                )
+                .unwrap_err()
+            };
+            let find_at = |start, end| {
+                find_passes_with_validity(&elements[0], station, start, end, find, opsmode, mode)
+                    .unwrap_err()
+            };
+            let satellite_at = |start, end| {
+                find_passes_for_satellite_with_validity(&satellite, station, start, end, find, mode)
+                    .unwrap_err()
+            };
+            let serial_at = |start, end| {
+                find_passes_batch_serial_with_validity(
+                    &elements, station, start, end, find, opsmode, mode,
+                )
+            };
+            let parallel_at = |start, end| {
+                find_passes_batch_parallel_with_validity(
+                    &elements, station, start, end, find, opsmode, mode,
+                )
+            };
+            let expected = (
+                predict_at(recent, day_later),
+                find_at(recent, day_later),
+                satellite_at(recent, day_later),
+                serial_at(recent, day_later),
+            );
+            assert!(expected.3.iter().all(Result::is_err));
+            for (start, end) in [(recent, min), (min, max), (max, recent)] {
+                assert_eq!(predict_at(start, end), expected.0);
+                assert_eq!(find_at(start, end), expected.1);
+                assert_eq!(satellite_at(start, end), expected.2);
+                assert_eq!(serial_at(start, end), expected.3);
+                assert_eq!(parallel_at(start, end), expected.3);
+            }
+        }
+    }
+}
+
+#[test]
+fn visibility_rejects_invalid_datetimes() {
+    let base = UtcInstant::from_utc(2024, 1, 1, 0, 0, 0, 0).unwrap();
+    let elements = elements_at(base, 1).pop().unwrap();
+    let satellites = [Satellite::from_elements(&elements).unwrap()];
+    let ids = ["1".to_owned()];
+    let members = [ConstellationMember {
+        catalog_number: ids[0].clone(),
+        elements,
+    }];
+    let station = stations()[0];
+    let error = PassError::InvalidInput {
+        field: "datetime",
+        reason: "invalid UTC instant",
+    };
+    for micros in [i64::MIN, i64::MAX] {
+        let time = UtcInstant::from_unix_microseconds(micros);
+        assert_eq!(
+            visible_from_constellation(&members, station, time, 0.0).unwrap_err(),
+            error
+        );
+        assert_eq!(
+            visible_from_satellites(&satellites, &ids, station, time, 0.0).unwrap_err(),
+            error
+        );
+        for mode in [ValidityMode::Strict, ValidityMode::Permissive] {
+            assert_eq!(
+                visible_from_constellation_with_validity(&members, station, time, 0.0, mode)
+                    .unwrap_err(),
+                error
+            );
+            assert_eq!(
+                visible_from_satellites_with_validity(&satellites, &ids, station, time, 0.0, mode)
+                    .unwrap_err(),
+                error
+            );
+        }
+    }
+}
+
+#[test]
+fn rounded_final_sample_stays_above_the_mask() {
+    let start = UtcInstant::from_utc(9699, 1, 1, 0, 0, 0, 0).unwrap();
+    let end = UtcInstant::from_utc(9999, 12, 31, 23, 59, 59, 999_999).unwrap();
+    let epoch = UtcInstant::from_utc(8900, 1, 1, 0, 0, 0, 0).unwrap();
+    let elements = elements_at(epoch, 1).pop().unwrap();
+    let satellite = Satellite::from_elements(&elements).unwrap();
+    let short_start = end.add_microseconds(-10_000_000);
+    let mode = ValidityMode::Permissive;
+    let track = ground_track_with_validity(&satellite, &[end], mode)
+        .unwrap()
+        .value[0];
+    let station = GroundStation {
+        latitude_deg: track.lat_rad.to_degrees(),
+        longitude_deg: track.lon_rad.to_degrees(),
+        altitude_m: 0.0,
+    };
+    let span = end.diff_microseconds(start);
+    let end_offset = offset_seconds(span);
+    assert!(span > 1_i64 << 53);
+    assert!((end_offset * MICROSECONDS_PER_SECOND_I64 as f64).floor() as i64 > span);
+    assert_eq!(instant_in_window(start, end, end_offset), end);
+    assert_eq!(instant_in_window(start, end, -1.0), start);
+
+    let gate = Ut1Gate::new(mode);
+    let search = PassSearch {
+        satellite: &satellite,
+        ground_station: station,
+        start_time: start,
+        end_time: end,
+        step_us: 1_000_000,
+        tol_us: 1_000,
+        mask: 0.0,
+        gate: &gate,
+    };
+    assert!(search.masked_elevation_at(end) > 0.0);
+    assert_eq!(
+        search.value_at(end_offset).to_bits(),
+        search.masked_elevation_at(end).to_bits()
+    );
+    let crossings = find_crossings_in_offsets(search, span - 10_000_000, span, 1.0, 0.001).unwrap();
+    assert!(crossings.is_empty());
+    assert!(assemble_passes_from_crossings(search, crossings)
+        .unwrap()
+        .is_empty());
+    assert_eq!(search.refine_event_mask_crossing_to_utc(end_offset), end);
+
+    let quarter_span = span / 4;
+    let culmination =
+        find_culmination_with(start, end, quarter_span, 1_000_000, (start, end), |time| {
+            assert!((start..=end).contains(&time));
+            offset_seconds(time.diff_microseconds(start))
+        })
+        .unwrap();
+    assert_eq!(culmination.0, end);
+
+    let elements = [elements];
+    let find = PassFinderOptions::default();
+    let predict = PassPredictionOptions::default();
+    let opsmode = OpsMode::Improved;
+    let reason = crate::astro::time::DegradeReason::AfterCoverage;
+    let strict_error = PassError::Ut1OutsideCoverage(reason);
+    for (window_start, mode) in [
+        (start, ValidityMode::Strict),
+        (short_start, ValidityMode::Strict),
+        (short_start, ValidityMode::Permissive),
+    ] {
+        let expected = match mode {
+            ValidityMode::Strict => Err(strict_error),
+            ValidityMode::Permissive => Ok(Validated {
+                value: Vec::new(),
+                degraded: Some(reason),
+            }),
+        };
+        let single = find_passes_with_validity(
+            &elements[0],
+            station,
+            window_start,
+            end,
+            find,
+            opsmode,
+            mode,
+        );
+        assert_eq!(single, expected);
+        assert_eq!(
+            find_passes_for_satellite_with_validity(
+                &satellite,
+                station,
+                window_start,
+                end,
+                find,
+                mode
+            ),
+            expected
+        );
+        assert_eq!(
+            find_passes_batch_serial_with_validity(
+                &elements,
+                station,
+                window_start,
+                end,
+                find,
+                opsmode,
+                mode
+            ),
+            vec![expected.clone()]
+        );
+        assert_eq!(
+            find_passes_batch_parallel_with_validity(
+                &elements,
+                station,
+                window_start,
+                end,
+                find,
+                opsmode,
+                mode
+            ),
+            vec![expected]
+        );
+        assert_eq!(
+            predict_passes_with_validity(
+                &elements[0],
+                station,
+                window_start,
+                end,
+                predict,
+                opsmode,
+                mode
+            ),
+            match mode {
+                ValidityMode::Strict => Err(strict_error),
+                ValidityMode::Permissive => Ok(Validated {
+                    value: Vec::new(),
+                    degraded: Some(reason)
+                }),
+            },
+        );
+        if mode == ValidityMode::Strict {
+            assert_eq!(
+                find_passes(&elements[0], station, window_start, end, find),
+                Err(strict_error)
+            );
+            assert_eq!(
+                find_passes_with_opsmode(&elements[0], station, window_start, end, find, opsmode),
+                Err(strict_error)
+            );
+            assert_eq!(
+                find_passes_for_satellite(&satellite, station, window_start, end, find),
+                Err(strict_error)
+            );
+            assert_eq!(
+                predict_passes(&elements[0], station, window_start, end, predict),
+                Err(strict_error)
+            );
+            assert_eq!(
+                predict_passes_with_opsmode(
+                    &elements[0],
+                    station,
+                    window_start,
+                    end,
+                    predict,
+                    opsmode
+                ),
+                Err(strict_error)
+            );
+            assert_eq!(
+                find_passes_batch_serial(&elements, station, window_start, end, find),
+                vec![Err(strict_error)]
+            );
+            assert_eq!(
+                find_passes_batch_parallel(&elements, station, window_start, end, find),
+                vec![Err(strict_error)]
+            );
+            assert_eq!(
+                find_passes_batch_serial_with_opsmode(
+                    &elements,
+                    station,
+                    window_start,
+                    end,
+                    find,
+                    opsmode
+                ),
+                vec![Err(strict_error)]
+            );
+            assert_eq!(
+                find_passes_batch_parallel_with_opsmode(
+                    &elements,
+                    station,
+                    window_start,
+                    end,
+                    find,
+                    opsmode
+                ),
+                vec![Err(strict_error)]
+            );
+        }
+    }
+}
+
+#[test]
+fn empty_and_reversed_pass_windows_preserve_ut1_validity() {
+    let utc = |year| UtcInstant::from_utc(year, 1, 1, 0, 0, 0, 0).unwrap();
+    let inside = utc(2024);
+    let before = utc(1969);
+    let after = utc(2050);
+    let elements = elements_at(inside, 2);
+    let satellites: Vec<_> = elements
+        .iter()
+        .map(|e| Satellite::from_elements(e).unwrap())
+        .collect();
+    let mut members = elements.clone();
+    let mut invalid = elements[0].clone();
+    invalid.eccentricity = 1.5;
+    members.insert(1, invalid);
+    let station = stations()[0];
+    let find = PassFinderOptions::default();
+    let predict = PassPredictionOptions::default();
+    let opsmode = OpsMode::Improved;
+    for (start, end) in [
+        (inside, inside),
+        (inside.add_microseconds(1_000_000), inside),
+        (before, before),
+        (before.add_microseconds(1_000_000), before),
+        (after, after),
+        (after.add_microseconds(1_000_000), after),
+        (after, before),
+        (inside, before),
+    ] {
+        let departure = start
+            .try_time_scales()
+            .unwrap()
+            .ut1_degraded
+            .or(end.try_time_scales().unwrap().ut1_degraded);
+        for mode in [ValidityMode::Strict, ValidityMode::Permissive] {
+            let expected = match (mode, departure) {
+                (ValidityMode::Strict, Some(reason)) => Err(PassError::Ut1OutsideCoverage(reason)),
+                _ => Ok(Validated {
+                    value: Vec::new(),
+                    degraded: departure,
+                }),
+            };
+            let rows: Vec<_> = members
+                .iter()
+                .map(|e| find_passes_with_validity(e, station, start, end, find, opsmode, mode))
+                .collect();
+            assert_eq!(rows, vec![expected.clone(); members.len()]);
+            assert_eq!(
+                find_passes_batch_serial_with_validity(
+                    &members, station, start, end, find, opsmode, mode
+                ),
+                rows
+            );
+            assert_eq!(
+                find_passes_batch_parallel_with_validity(
+                    &members, station, start, end, find, opsmode, mode
+                ),
+                rows
+            );
+            for satellite in &satellites {
+                assert_eq!(
+                    find_passes_for_satellite_with_validity(
+                        satellite, station, start, end, find, mode
+                    ),
+                    expected
+                );
+            }
+            for element in &members {
+                assert_eq!(
+                    predict_passes_with_validity(
+                        element, station, start, end, predict, opsmode, mode
+                    ),
+                    expected
+                        .as_ref()
+                        .map(|v| Validated {
+                            value: Vec::new(),
+                            degraded: v.degraded
+                        })
+                        .map_err(|e| *e)
+                );
+            }
+            if mode == ValidityMode::Strict {
+                let rows = strict_batch(rows);
+                for (index, element) in members.iter().enumerate() {
+                    assert_eq!(find_passes(element, station, start, end, find), rows[index]);
+                    assert_eq!(
+                        find_passes_with_opsmode(element, station, start, end, find, opsmode),
+                        rows[index]
+                    );
+                    let predicted = rows[index].as_ref().map(|_| Vec::new()).map_err(|e| *e);
+                    assert_eq!(
+                        predict_passes(element, station, start, end, predict),
+                        predicted
+                    );
+                    assert_eq!(
+                        predict_passes_with_opsmode(element, station, start, end, predict, opsmode),
+                        predicted
+                    );
+                }
+                for (satellite, index) in satellites.iter().zip([0, 2]) {
+                    assert_eq!(
+                        find_passes_for_satellite(satellite, station, start, end, find),
+                        rows[index]
+                    );
+                }
+                assert_eq!(
+                    find_passes_batch_serial(&members, station, start, end, find),
+                    rows
+                );
+                assert_eq!(
+                    find_passes_batch_parallel(&members, station, start, end, find),
+                    rows
+                );
+                assert_eq!(
+                    find_passes_batch_serial_with_opsmode(
+                        &members, station, start, end, find, opsmode
+                    ),
+                    rows
+                );
+                assert_eq!(
+                    find_passes_batch_parallel_with_opsmode(
+                        &members, station, start, end, find, opsmode
+                    ),
+                    rows
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn crossing_refinement_stays_after_the_first_utc_microsecond() {
+    let start = UtcInstant::from_utc(0, 1, 1, 0, 0, 0, 0).unwrap();
+    let end = start.add_microseconds(2_000_000);
+    let satellite = Satellite::from_elements(&elements_at(start, 1)[0]).unwrap();
+    let gate = Ut1Gate::new(ValidityMode::Permissive);
+    let elevation = PassSearch {
+        satellite: &satellite,
+        ground_station: stations()[0],
+        start_time: start,
+        end_time: end,
+        step_us: 1_000_000,
+        tol_us: 1_000,
+        mask: 0.0,
+        gate: &gate,
+    };
+    // A mask above -90 degrees makes a sample before the window, scored as
+    // below the horizon, look like a crossing.
+    let mask = elevation
+        .masked_elevation_at(start)
+        .min(elevation.value_at(1.0))
+        - 1.0;
+    assert!(mask > -89.0);
+    let search = PassSearch { mask, ..elevation };
+    assert!(search.masked_elevation_at(start) > 0.0);
+    assert!(search.value_at(1.0) > 0.0);
+    assert_eq!(search.refine_event_mask_crossing_to_utc(0.0), start);
+}
