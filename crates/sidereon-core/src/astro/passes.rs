@@ -22,7 +22,7 @@ use crate::astro::events::{
 };
 use crate::astro::frames::transforms::{
     gcrs_to_topocentric_compute, geodetic_to_itrs, teme_to_gcrs_compute, FrameTransformError,
-    GeodeticStationKm, TemeStateKm, Ut1Gate,
+    GeodeticStationKm, TemeEpochFrames, TemeStateKm, Ut1Gate,
 };
 use crate::astro::sgp4::{
     ElementSet, Error as Sgp4Error, JulianDate, OpsMode, Prediction, Satellite,
@@ -538,10 +538,15 @@ pub fn look_angle_batch_serial(
     ground_station: GroundStation,
     datetimes: &[UtcInstant],
 ) -> Vec<Result<Vec<LookAngle>, LookAngleError>> {
-    satellites
-        .iter()
-        .map(|satellite| look_angle_arc(satellite, ground_station, datetimes))
-        .collect()
+    look_angle_batch_serial_with_validity(
+        satellites,
+        ground_station,
+        datetimes,
+        ValidityMode::Strict,
+    )
+    .into_iter()
+    .map(|result| result.map(|value| value.value))
+    .collect()
 }
 
 /// [`look_angle_batch_serial`] under an explicit UT1 [`ValidityMode`]; each
@@ -552,30 +557,33 @@ pub fn look_angle_batch_serial_with_validity(
     datetimes: &[UtcInstant],
     mode: ValidityMode,
 ) -> Vec<Result<Validated<Vec<LookAngle>>, LookAngleError>> {
-    satellites
-        .iter()
-        .map(|satellite| look_angle_arc_with_validity(satellite, ground_station, datetimes, mode))
-        .collect()
+    if let Err(error) = validate_ground_station(ground_station).map_err(map_look_angle_input) {
+        return vec![Err(error); satellites.len()];
+    }
+    frame_grid(satellites, datetimes, mode, false, |frames, prediction| {
+        look_with_frames(prediction, frames, ground_station)
+    })
 }
 
 /// Topocentric look angles for many already-initialized SGP4 satellites over a
 /// shared epoch grid, fanned across a rayon thread pool.
 ///
-/// Each satellite's arc is computed by the same serial [`look_angle_arc`] kernel
-/// and the indexed parallel collect preserves input order, so element `i` is
-/// byte-for-byte identical to element `i` of [`look_angle_batch_serial`].
+/// Satellites share the frame matrices for each chunk of epochs. Result order
+/// and values match [`look_angle_batch_serial`].
 pub fn look_angle_batch_parallel(
     satellites: &[Satellite],
     ground_station: GroundStation,
     datetimes: &[UtcInstant],
 ) -> Vec<Result<Vec<LookAngle>, LookAngleError>> {
-    #[cfg(feature = "parallel")]
-    let satellites = satellites.par_iter();
-    #[cfg(not(feature = "parallel"))]
-    let satellites = satellites.iter();
-    satellites
-        .map(|satellite| look_angle_arc(satellite, ground_station, datetimes))
-        .collect()
+    look_angle_batch_parallel_with_validity(
+        satellites,
+        ground_station,
+        datetimes,
+        ValidityMode::Strict,
+    )
+    .into_iter()
+    .map(|result| result.map(|value| value.value))
+    .collect()
 }
 
 /// [`look_angle_batch_parallel`] under an explicit UT1 [`ValidityMode`]; each
@@ -586,13 +594,12 @@ pub fn look_angle_batch_parallel_with_validity(
     datetimes: &[UtcInstant],
     mode: ValidityMode,
 ) -> Vec<Result<Validated<Vec<LookAngle>>, LookAngleError>> {
-    #[cfg(feature = "parallel")]
-    let satellites = satellites.par_iter();
-    #[cfg(not(feature = "parallel"))]
-    let satellites = satellites.iter();
-    satellites
-        .map(|satellite| look_angle_arc_with_validity(satellite, ground_station, datetimes, mode))
-        .collect()
+    if let Err(error) = validate_ground_station(ground_station).map_err(map_look_angle_input) {
+        return vec![Err(error); satellites.len()];
+    }
+    frame_grid(satellites, datetimes, mode, true, |frames, prediction| {
+        look_with_frames(prediction, frames, ground_station)
+    })
 }
 
 /// Sub-satellite (ground-track) geodetic points for one already-initialized
@@ -657,6 +664,175 @@ pub fn ground_track_with_validity(
     Ok(gate.finish(track)?)
 }
 
+/// Ground tracks for satellites over a shared epoch grid, serially.
+///
+/// Each element equals [`ground_track`] for that satellite, including errors.
+pub fn ground_track_batch_serial(
+    satellites: &[Satellite],
+    datetimes: &[UtcInstant],
+) -> Vec<Result<Vec<crate::frame::Wgs84Geodetic>, LookAngleError>> {
+    ground_track_batch_serial_with_validity(satellites, datetimes, ValidityMode::Strict)
+        .into_iter()
+        .map(|result| result.map(|validated| validated.value))
+        .collect()
+}
+
+/// [`ground_track_batch_serial`] with an explicit UT1 validity policy.
+pub fn ground_track_batch_serial_with_validity(
+    satellites: &[Satellite],
+    datetimes: &[UtcInstant],
+    mode: ValidityMode,
+) -> Vec<Result<Validated<Vec<crate::frame::Wgs84Geodetic>>, LookAngleError>> {
+    frame_grid(satellites, datetimes, mode, false, track_with_frames)
+}
+
+/// Ground tracks for satellites over a shared epoch grid, in parallel.
+///
+/// Each element equals [`ground_track`] for that satellite, including errors.
+pub fn ground_track_batch_parallel(
+    satellites: &[Satellite],
+    datetimes: &[UtcInstant],
+) -> Vec<Result<Vec<crate::frame::Wgs84Geodetic>, LookAngleError>> {
+    ground_track_batch_parallel_with_validity(satellites, datetimes, ValidityMode::Strict)
+        .into_iter()
+        .map(|result| result.map(|validated| validated.value))
+        .collect()
+}
+
+/// [`ground_track_batch_parallel`] with an explicit UT1 validity policy.
+pub fn ground_track_batch_parallel_with_validity(
+    satellites: &[Satellite],
+    datetimes: &[UtcInstant],
+    mode: ValidityMode,
+) -> Vec<Result<Validated<Vec<crate::frame::Wgs84Geodetic>>, LookAngleError>> {
+    frame_grid(satellites, datetimes, mode, true, track_with_frames)
+}
+
+const FRAME_CHUNK_SIZE: usize = 256;
+
+pub(crate) fn look_epoch(
+    datetime: UtcInstant,
+    gate: &Ut1Gate,
+) -> Result<TemeEpochFrames, LookAngleError> {
+    Ok(TemeEpochFrames::new(&time_scales_for_look_angle(
+        datetime, gate,
+    )?)?)
+}
+
+fn frame_grid<T: Send>(
+    satellites: &[Satellite],
+    datetimes: &[UtcInstant],
+    mode: ValidityMode,
+    parallel: bool,
+    apply: impl Fn(&TemeEpochFrames, &Prediction) -> Result<T, LookAngleError> + Sync,
+) -> Vec<Result<Validated<Vec<T>>, LookAngleError>> {
+    if satellites.is_empty() {
+        return Vec::new();
+    }
+    let gate = Ut1Gate::new(mode);
+    let mut rows: Vec<_> = satellites.iter().map(|_| Ok(Vec::new())).collect();
+    let mut epochs = Vec::with_capacity(FRAME_CHUNK_SIZE.min(datetimes.len()));
+    for chunk in datetimes.chunks(FRAME_CHUNK_SIZE) {
+        epochs.extend(
+            chunk
+                .iter()
+                .map(|&datetime| (datetime.sgp4_julian_date(), look_epoch(datetime, &gate))),
+        );
+        let extend = |(satellite, row): (&Satellite, &mut Result<Vec<T>, LookAngleError>)| {
+            if let Ok(values) = row {
+                for (jd, frames) in &epochs {
+                    let value = frames.as_ref().map_err(Clone::clone).and_then(|frames| {
+                        let prediction = satellite
+                            .propagate_jd(*jd)
+                            .map_err(LookAngleError::Propagate)?;
+                        apply(frames, &prediction)
+                    });
+                    match value {
+                        Ok(value) => {
+                            if values.is_empty() {
+                                values.reserve_exact(datetimes.len());
+                            }
+                            values.push(value);
+                        }
+                        Err(error) => {
+                            *row = Err(error);
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+        #[cfg(feature = "parallel")]
+        if parallel {
+            satellites.par_iter().zip(&mut rows).for_each(extend);
+        } else {
+            satellites.iter().zip(&mut rows).for_each(extend);
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let _ = parallel;
+            satellites.iter().zip(&mut rows).for_each(extend);
+        }
+        epochs.clear();
+        if rows.iter().all(Result::is_err) {
+            break;
+        }
+    }
+    rows.into_iter()
+        .map(|row| row.and_then(|values| Ok(gate.finish(values)?)))
+        .collect()
+}
+
+fn track_with_frames(
+    frames: &TemeEpochFrames,
+    pred: &Prediction,
+) -> Result<crate::frame::Wgs84Geodetic, LookAngleError> {
+    let (x, y, z) = frames.itrs(&TemeStateKm {
+        position_km: pred.position,
+        velocity_km_s: pred.velocity,
+    })?;
+    let (lat, lon, alt) = crate::astro::frames::transforms::itrs_to_geodetic_compute(x, y, z)?;
+    crate::frame::Wgs84Geodetic::new(lat.to_radians(), lon.to_radians(), alt * 1000.0)
+        .map_err(map_frame_value_to_look_angle)
+}
+
+pub(crate) fn look_with_frames(
+    pred: &Prediction,
+    frames: &TemeEpochFrames,
+    ground_station: GroundStation,
+) -> Result<LookAngle, LookAngleError> {
+    let (azimuth_deg, elevation_deg, range_km) = frames.topocentric(
+        &TemeStateKm {
+            position_km: pred.position,
+            velocity_km_s: pred.velocity,
+        },
+        &GeodeticStationKm {
+            latitude_deg: ground_station.latitude_deg,
+            longitude_deg: ground_station.longitude_deg,
+            altitude_km: ground_station.altitude_m / 1000.0,
+        },
+    )?;
+    validate_look_angle(LookAngle {
+        azimuth_deg,
+        elevation_deg,
+        range_km,
+    })
+}
+
+pub(crate) fn look_at_epoch(
+    satellite: &Satellite,
+    station: GroundStation,
+    datetime: UtcInstant,
+    frames: &Result<TemeEpochFrames, LookAngleError>,
+) -> Result<LookAngle, LookAngleError> {
+    validate_ground_station(station).map_err(map_look_angle_input)?;
+    let frames = frames.as_ref().map_err(Clone::clone)?;
+    let prediction = satellite
+        .propagate_jd(datetime.sgp4_julian_date())
+        .map_err(LookAngleError::Propagate)?;
+    look_with_frames(&prediction, frames, station)
+}
+
 fn map_frame_value_to_look_angle(error: crate::frame::FrameValueError) -> LookAngleError {
     match error {
         crate::frame::FrameValueError::InvalidInput { field, reason } => {
@@ -700,6 +876,7 @@ pub fn visible_from_constellation_with_validity(
     validate_elevation_threshold(min_elevation_deg, "min_elevation_deg").map_err(map_pass_input)?;
     let gate = Ut1Gate::new(mode);
     let ts = time_scales_for_pass(datetime, &gate)?;
+    let frames = TemeEpochFrames::new(&ts);
 
     let mut visible = Vec::new();
 
@@ -713,7 +890,11 @@ pub fn visible_from_constellation_with_validity(
             Ok(pred) => pred,
             Err(_) => continue,
         };
-        let look = match look_angle_from_teme_prediction(&pred, &ts, ground_station) {
+        let look = match frames
+            .as_ref()
+            .map_err(|error| LookAngleError::from(*error))
+            .and_then(|frames| look_with_frames(&pred, frames, ground_station))
+        {
             Ok(look) => look,
             Err(_) => continue,
         };
@@ -794,6 +975,7 @@ pub fn visible_from_satellites_with_validity(
     }
     let gate = Ut1Gate::new(mode);
     let ts = time_scales_for_pass(datetime, &gate)?;
+    let frames = TemeEpochFrames::new(&ts);
 
     let mut visible = Vec::new();
 
@@ -802,7 +984,11 @@ pub fn visible_from_satellites_with_validity(
             Ok(pred) => pred,
             Err(_) => continue,
         };
-        let look = match look_angle_from_teme_prediction(&pred, &ts, ground_station) {
+        let look = match frames
+            .as_ref()
+            .map_err(|error| LookAngleError::from(*error))
+            .and_then(|frames| look_with_frames(&pred, frames, ground_station))
+        {
             Ok(look) => look,
             Err(_) => continue,
         };
@@ -2705,7 +2891,7 @@ mod tests {
         }
     }
 
-    fn iss_fixture_elements() -> ElementSet {
+    pub(super) fn iss_fixture_elements() -> ElementSet {
         ElementSet {
             epoch: crate::astro::sgp4::sgp4_julian_date_from_day_of_year(2026, 95.55331950),
             bstar: 0.000_164_20,
@@ -5253,3 +5439,7 @@ mod tests {
         assert_eq!(negative_fractions, 74);
     }
 }
+
+#[cfg(test)]
+#[path = "passes_frame_tests.rs"]
+mod frame_tests;

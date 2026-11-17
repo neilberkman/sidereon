@@ -4,6 +4,14 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `ground_track_batch_serial`, `ground_track_batch_parallel` and their `_with_validity` forms: ground tracks for many satellites over a shared epoch grid. Each element equals `ground_track` for that satellite, including errors.
+
+### Changed
+
+- The look-angle batch, ground-track batch, visibility and coverage-grid paths build each epoch's frame matrices once and apply them to every satellite, instead of rebuilding them per satellite. Results are unchanged bit for bit. 143 satellites over 51 epochs take about 5 ms instead of 250 ms; extra memory is bounded by a fixed 256-epoch chunk. Pass search still evaluates each satellite on its own grid.
+
 ## [4.0.0] - 2026-11-16
 
 ### Added

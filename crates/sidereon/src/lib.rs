@@ -417,8 +417,9 @@ pub use sidereon_core::astro::doppler::{
     doppler_shift, range_rate_and_ratio, DopplerError, DopplerShift,
 };
 pub use sidereon_core::astro::passes::{
-    ground_track, ground_track_with_validity, look_angle, look_angle_arc,
-    look_angle_arc_with_validity, look_angle_batch_parallel,
+    ground_track, ground_track_batch_parallel, ground_track_batch_parallel_with_validity,
+    ground_track_batch_serial, ground_track_batch_serial_with_validity, ground_track_with_validity,
+    look_angle, look_angle_arc, look_angle_arc_with_validity, look_angle_batch_parallel,
     look_angle_batch_parallel_with_validity, look_angle_batch_serial,
     look_angle_batch_serial_with_validity, look_angle_with_validity, GroundStation, LookAngle,
     LookAngleError, PassError, PassPredictionOptions, PredictedPass, UtcInstant, VisibleSatellite,

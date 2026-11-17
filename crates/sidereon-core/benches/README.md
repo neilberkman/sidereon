@@ -8,6 +8,11 @@ probabilities, from 1e-300 through 1-1e-9. There is no wall-clock assertion.
 also reports normalization/residual costs and the full noncentral reference-grid
 cost, separately from normal tests.
 
+`cargo bench -p sidereon-core --bench epoch_frames` prints milliseconds per
+call for `visible_from_satellites`, `look_angle_batch_serial` and
+`ground_track_batch_serial` at 1, 10 and 143 satellites over 1 and 51 epochs,
+one minute apart. It has no wall-clock assertion.
+
 `hotpath.rs` measures the observable batch paths and the dynamic linear
 algebra sizes used by precise positioning: normal products and Cholesky
 decompositions at orders 50, 200, and 500, plus `J^T J` for a 2000 by 200
