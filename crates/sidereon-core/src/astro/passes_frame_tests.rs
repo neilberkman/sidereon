@@ -132,53 +132,8 @@ fn frame_grids_match_single_satellite_bits() {
             .map(|e| Satellite::from_elements(e).unwrap())
             .collect();
         for mode in [ValidityMode::Strict, ValidityMode::Permissive] {
-            let tracks: Vec<_> = satellites
-                .iter()
-                .map(|sat| ground_track_with_validity(sat, &epochs, mode))
-                .collect();
-            identical(
-                ground_track_batch_serial_with_validity(&satellites, &epochs, mode),
-                &tracks,
-            );
-            identical(
-                ground_track_batch_parallel_with_validity(&satellites, &epochs, mode),
-                &tracks,
-            );
-            if mode == ValidityMode::Strict {
-                let tracks: Vec<_> = satellites
-                    .iter()
-                    .map(|sat| ground_track(sat, &epochs))
-                    .collect();
-                identical(ground_track_batch_serial(&satellites, &epochs), &tracks);
-                identical(ground_track_batch_parallel(&satellites, &epochs), &tracks);
-            }
             for station in stations() {
-                let looks: Vec<_> = satellites
-                    .iter()
-                    .map(|sat| look_angle_arc_with_validity(sat, station, &epochs, mode))
-                    .collect();
-                identical(
-                    look_angle_batch_serial_with_validity(&satellites, station, &epochs, mode),
-                    &looks,
-                );
-                identical(
-                    look_angle_batch_parallel_with_validity(&satellites, station, &epochs, mode),
-                    &looks,
-                );
-                if mode == ValidityMode::Strict {
-                    let looks: Vec<_> = satellites
-                        .iter()
-                        .map(|sat| look_angle_arc(sat, station, &epochs))
-                        .collect();
-                    identical(
-                        look_angle_batch_serial(&satellites, station, &epochs),
-                        &looks,
-                    );
-                    identical(
-                        look_angle_batch_parallel(&satellites, station, &epochs),
-                        &looks,
-                    );
-                }
+                assert_grid_matches_single_satellite(&satellites, station, &epochs, mode);
             }
             let invalid = GroundStation {
                 latitude_deg: f64::NAN,
@@ -204,7 +159,7 @@ fn frame_grids_match_single_satellite_bits() {
                 assert_eq!(
                     actual.degraded,
                     if mode == ValidityMode::Permissive {
-                        epoch.time_scales().ut1_degraded
+                        epoch.try_time_scales().unwrap().ut1_degraded
                     } else {
                         None
                     }
@@ -352,5 +307,284 @@ fn grid_errors_follow_epoch_order() {
             ground_track_batch_parallel_with_validity(&satellites, &epochs, mode),
             expected
         );
+    }
+}
+
+#[test]
+#[allow(deprecated)]
+fn checked_time_scales_match_legacy_across_leap_seconds() {
+    for micros in [i64::MIN, i64::MAX] {
+        assert!(UtcInstant::from_unix_microseconds(micros)
+            .try_time_scales()
+            .is_none());
+    }
+    let bits = |ts: TimeScales| {
+        (
+            [
+                ts.jd_whole,
+                ts.ut1_fraction,
+                ts.tt_fraction,
+                ts.tdb_fraction,
+                ts.jd_ut1,
+                ts.jd_tt,
+                ts.jd_tdb,
+            ]
+            .map(f64::to_bits),
+            ts.ut1_degraded,
+        )
+    };
+    for (year, month, day, next_year, next_month) in
+        [(2015, 6, 30, 2015, 7), (2016, 12, 31, 2017, 1)]
+    {
+        let start = UtcInstant::from_utc(year, month, day, 23, 59, 59, 875_000).unwrap();
+        for offset in [0, 124_999, 125_000, 125_001, 1_125_000] {
+            let epoch = start.add_microseconds(offset);
+            let calendar = if offset < 125_000 {
+                TimeScales::from_utc(
+                    year,
+                    month,
+                    day,
+                    23,
+                    59,
+                    59.0 + (875_000 + offset) as f64 / 1_000_000.0,
+                )
+            } else {
+                TimeScales::from_utc(
+                    next_year,
+                    next_month,
+                    1,
+                    0,
+                    0,
+                    (offset - 125_000) as f64 / 1_000_000.0,
+                )
+            };
+            let checked = bits(epoch.try_time_scales().unwrap());
+            assert_eq!(checked, bits(epoch.time_scales()));
+            assert_eq!(checked, bits(calendar.unwrap()));
+        }
+    }
+}
+
+fn assert_grid_matches_single_satellite(
+    satellites: &[Satellite],
+    station: GroundStation,
+    epochs: &[UtcInstant],
+    mode: ValidityMode,
+) {
+    let looks: Vec<_> = satellites
+        .iter()
+        .map(|sat| look_angle_arc_with_validity(sat, station, epochs, mode))
+        .collect();
+    identical(
+        look_angle_batch_serial_with_validity(satellites, station, epochs, mode),
+        &looks,
+    );
+    identical(
+        look_angle_batch_parallel_with_validity(satellites, station, epochs, mode),
+        &looks,
+    );
+    let tracks: Vec<_> = satellites
+        .iter()
+        .map(|sat| ground_track_with_validity(sat, epochs, mode))
+        .collect();
+    identical(
+        ground_track_batch_serial_with_validity(satellites, epochs, mode),
+        &tracks,
+    );
+    identical(
+        ground_track_batch_parallel_with_validity(satellites, epochs, mode),
+        &tracks,
+    );
+    if mode == ValidityMode::Strict {
+        let looks: Vec<_> = satellites
+            .iter()
+            .map(|sat| look_angle_arc(sat, station, epochs))
+            .collect();
+        identical(look_angle_batch_serial(satellites, station, epochs), &looks);
+        identical(
+            look_angle_batch_parallel(satellites, station, epochs),
+            &looks,
+        );
+        let tracks: Vec<_> = satellites
+            .iter()
+            .map(|sat| ground_track(sat, epochs))
+            .collect();
+        identical(ground_track_batch_serial(satellites, epochs), &tracks);
+        identical(ground_track_batch_parallel(satellites, epochs), &tracks);
+    }
+}
+
+#[test]
+fn invalid_epochs_and_stations_preserve_error_precedence() {
+    let base = UtcInstant::from_utc(2016, 12, 31, 23, 59, 58, 0).unwrap();
+    let satellites: Vec<_> = elements_at(base, 2)
+        .iter()
+        .map(|e| Satellite::from_elements(e).unwrap())
+        .collect();
+    let invalid_site = GroundStation {
+        latitude_deg: f64::NAN,
+        ..stations()[0]
+    };
+    for micros in [i64::MIN, i64::MAX] {
+        let epoch = UtcInstant::from_unix_microseconds(micros);
+        for mode in [ValidityMode::Strict, ValidityMode::Permissive] {
+            let invalid_datetime = LookAngleError::InvalidInput {
+                field: "datetime",
+                reason: "invalid UTC instant",
+            };
+            for sites in [stations().to_vec(), vec![invalid_site, stations()[0]]] {
+                let expected: Vec<Vec<_>> = satellites
+                    .iter()
+                    .map(|sat| {
+                        sites
+                            .iter()
+                            .map(|&site| {
+                                look_angle_arc_with_validity(sat, site, &[epoch], mode)
+                                    .map(|arc| arc.value[0])
+                            })
+                            .collect()
+                    })
+                    .collect();
+                for (row, sat) in expected.iter().zip(&satellites) {
+                    for (&site, result) in sites.iter().zip(row) {
+                        if site.latitude_deg.is_finite() {
+                            assert_eq!(*result, Err(invalid_datetime.clone()));
+                        } else {
+                            assert_ne!(*result, Err(invalid_datetime.clone()));
+                            assert_eq!(
+                                *result,
+                                look_angle_arc_with_validity(sat, site, &[base], mode)
+                                    .map(|arc| arc.value[0])
+                            );
+                        }
+                    }
+                }
+                let actual =
+                    coverage::look_angles_batch_with_validity(&satellites, &sites, epoch, mode);
+                assert_eq!(actual.degraded, None);
+                identical(actual.value, &expected);
+                if mode == ValidityMode::Strict {
+                    identical(
+                        coverage::look_angles_batch(&satellites, &sites, epoch),
+                        &expected,
+                    );
+                }
+            }
+            assert_grid_matches_single_satellite(&satellites, invalid_site, &[epoch], mode);
+        }
+    }
+}
+
+#[test]
+fn propagation_error_precedes_later_invalid_epoch() {
+    let base = UtcInstant::from_utc(2005, 11, 29, 0, 30, 0, 0).unwrap();
+    let mut satellites: Vec<_> = elements_at(base, 2)
+        .iter()
+        .map(|e| Satellite::from_elements(e).unwrap())
+        .collect();
+    satellites.insert(
+        1,
+        Satellite::from_tle(
+            "1 28872U 05037B   05333.02012661  .25992681  00000-0  24476-3 0  1534",
+            "2 28872  96.4736 157.9986 0303955 244.0492 110.6523 16.46015938 10708",
+        )
+        .unwrap(),
+    );
+    let mut epochs = vec![base; FRAME_CHUNK_SIZE + 1];
+    epochs.push(base.add_microseconds(MICROSECONDS_PER_DAY_I64));
+    let station = stations()[0];
+    assert!(look_angle_arc(&satellites[1], station, &epochs[..FRAME_CHUNK_SIZE + 1]).is_ok());
+    assert!(matches!(
+        look_angle_arc(&satellites[1], station, &epochs),
+        Err(LookAngleError::Propagate(_))
+    ));
+    for index in [0, 2] {
+        assert!(look_angle_arc(&satellites[index], station, &epochs).is_ok());
+        assert!(ground_track(&satellites[index], &epochs).is_ok());
+    }
+    let failure_len = epochs.len();
+    epochs.push(UtcInstant::from_unix_microseconds(i64::MAX));
+    for mode in [ValidityMode::Strict, ValidityMode::Permissive] {
+        assert_grid_matches_single_satellite(&satellites, station, &epochs, mode);
+        let decaying = &satellites[1];
+        let look_error =
+            look_angle_arc_with_validity(decaying, station, &epochs[..failure_len], mode)
+                .unwrap_err();
+        let track_error =
+            ground_track_with_validity(decaying, &epochs[..failure_len], mode).unwrap_err();
+        assert!(matches!(look_error, LookAngleError::Propagate(_)));
+        assert_eq!(track_error, look_error);
+        assert_eq!(
+            look_angle_arc_with_validity(decaying, station, &epochs, mode).unwrap_err(),
+            look_error
+        );
+        assert_eq!(
+            ground_track_with_validity(decaying, &epochs, mode).unwrap_err(),
+            track_error
+        );
+        for index in [0, 2] {
+            let invalid_datetime = LookAngleError::InvalidInput {
+                field: "datetime",
+                reason: "invalid UTC instant",
+            };
+            assert_eq!(
+                look_angle_arc_with_validity(&satellites[index], station, &epochs, mode)
+                    .unwrap_err(),
+                invalid_datetime
+            );
+            assert_eq!(
+                ground_track_with_validity(&satellites[index], &epochs, mode).unwrap_err(),
+                invalid_datetime
+            );
+        }
+    }
+}
+
+#[test]
+fn empty_and_exact_chunks_preserve_late_ut1_departure() {
+    let base = UtcInstant::from_utc(2027, 7, 2, 23, 59, 55, 0).unwrap();
+    let boundary = UtcInstant::from_utc(2027, 7, 3, 0, 0, 0, 0).unwrap();
+    let satellites: Vec<_> = elements_at(base, 2)
+        .iter()
+        .map(|e| Satellite::from_elements(e).unwrap())
+        .collect();
+    let epochs: Vec<_> = (0..512)
+        .map(|i| {
+            if i < 256 {
+                base.add_microseconds(i * 10_000)
+            } else {
+                boundary.add_microseconds((i - 255) * 10_000)
+            }
+        })
+        .collect();
+    assert!(epochs[..256]
+        .iter()
+        .all(|e| e.try_time_scales().unwrap().ut1_degraded.is_none()));
+    let departure = Some(crate::astro::time::DegradeReason::AfterCoverage);
+    assert_eq!(
+        epochs[256].try_time_scales().unwrap().ut1_degraded,
+        departure
+    );
+    let station = stations()[0];
+    for sat in &satellites {
+        assert_eq!(
+            look_angle_arc_with_validity(sat, station, &epochs, ValidityMode::Permissive)
+                .unwrap()
+                .degraded,
+            departure
+        );
+        assert_eq!(
+            ground_track_with_validity(sat, &epochs, ValidityMode::Permissive)
+                .unwrap()
+                .degraded,
+            departure
+        );
+    }
+    let covered: Vec<_> = (0..512).map(|i| base.add_microseconds(i * 5_000)).collect();
+    assert_grid_matches_single_satellite(&satellites, station, &covered, ValidityMode::Strict);
+    for len in [0, 256, 512] {
+        for mode in [ValidityMode::Strict, ValidityMode::Permissive] {
+            assert_grid_matches_single_satellite(&satellites, station, &epochs[..len], mode);
+        }
     }
 }

@@ -78,7 +78,7 @@ pub fn meridian_transits_with_validity(
                 latch_scalar(&latch, || {
                     let time =
                         crate::astro::almanac::instant_at_offset_seconds(start, offset_seconds);
-                    let ts = gate.admit(time.time_scales())?;
+                    let ts = gate.admit(time.time_scales_or_error()?)?;
                     let apparent = topocentric_apparent(target_naif, station, &ts, source)?;
                     Ok(libm::sin(apparent.hour_angle_deg.to_radians()))
                 })
@@ -90,7 +90,7 @@ pub fn meridian_transits_with_validity(
     let mut events = Vec::new();
     for crossing in crossings {
         let time = crossing_time(start, crossing);
-        let ts = gate.admit(time.time_scales())?;
+        let ts = gate.admit(time.time_scales_or_error()?)?;
         let apparent = topocentric_apparent(target_naif, station, &ts, source)?;
         let cos_h = libm::cos(apparent.hour_angle_deg.to_radians());
         let kind = if cos_h > 0.0 {

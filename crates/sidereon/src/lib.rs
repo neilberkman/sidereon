@@ -2300,15 +2300,16 @@ mod tests {
             same.apparent.right_ascension_deg.to_bits(),
             mars.apparent.right_ascension_deg.to_bits()
         );
-        let tod =
-            gcrs_to_true_of_date_matrix(&observe_time.time_scales()).expect("true-of-date matrix");
+        let tod = gcrs_to_true_of_date_matrix(&observe_time.try_time_scales().unwrap())
+            .expect("true-of-date matrix");
         assert!(tod[0][0].is_finite());
         let gcrs_state = astro::frames::transforms::TemeStateKm {
             position_km: [7000.0, 100.0, -50.0],
             velocity_km_s: [0.0, 7.5, 0.1],
         };
-        let (teme_pos, _) = gcrs_to_teme_compute(&gcrs_state, &observe_time.time_scales(), false)
-            .expect("TEME inverse transform");
+        let (teme_pos, _) =
+            gcrs_to_teme_compute(&gcrs_state, &observe_time.try_time_scales().unwrap(), false)
+                .expect("TEME inverse transform");
         assert!(teme_pos.0.is_finite());
     }
 
@@ -2346,7 +2347,7 @@ mod tests {
         assert!((projected[0] + 0.1).abs() < 1.0e-6);
         assert!((projected[1] - 51.5).abs() < 1.0e-6);
 
-        let ts = datetime.time_scales();
+        let ts = datetime.try_time_scales().unwrap();
         let shifted = doppler_shift(
             [3700.2112112039954, 2015.9122181206055, 5309.513078070448],
             [-3.398428894395407, 6.869656830559572, -0.239850181126689],

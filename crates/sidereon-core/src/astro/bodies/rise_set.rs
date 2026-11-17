@@ -8,7 +8,8 @@
 //! almanac work belongs behind a higher-precision ephemeris source.
 
 use crate::astro::almanac::{
-    meridian_transits_with_validity, AlmanacError, CulminationKind, EphemerisSource, TransitBody,
+    meridian_transits_with_validity, validate_window_datetimes, AlmanacError, CulminationKind,
+    EphemerisSource, TransitBody,
 };
 use crate::astro::bodies::observe::{body_az_el, BodyObservationError};
 use crate::astro::bodies::sun_moon::{sun_moon_ecef, SunMoonError};
@@ -154,7 +155,7 @@ pub fn sun_elevation_deg_with_validity(
     time: UtcInstant,
     mode: ValidityMode,
 ) -> Result<Validated<f64>, BodyObservationError> {
-    with_ut1_validity(&time.time_scales(), mode, |ts| {
+    with_ut1_validity(&time.time_scales_or_error()?, mode, |ts| {
         body_elevation_deg(station, ts, Body::Sun)
     })
 }
@@ -275,7 +276,7 @@ pub fn moon_elevation_deg_with_validity(
     time: UtcInstant,
     mode: ValidityMode,
 ) -> Result<Validated<f64>, BodyObservationError> {
-    with_ut1_validity(&time.time_scales(), mode, |ts| {
+    with_ut1_validity(&time.time_scales_or_error()?, mode, |ts| {
         body_elevation_deg(station, ts, Body::Moon)
     })
 }
@@ -369,6 +370,7 @@ pub fn find_moon_transits_with_validity(
     time_tolerance_seconds: f64,
     mode: ValidityMode,
 ) -> Result<Validated<Vec<MoonTransit>>, EventFinderError> {
+    validate_window_datetimes(start_time, end_time).map_err(map_frame_input)?;
     if end_time <= start_time {
         return Ok(Validated {
             value: Vec::new(),
@@ -444,9 +446,9 @@ impl<'a> ElevationSearch<'a> {
     }
 
     fn elevation_deg(&self, time: UtcInstant) -> f64 {
-        let evaluated = self
-            .gate
-            .admit(time.time_scales())
+        let evaluated = time
+            .time_scales_or_error()
+            .and_then(|ts| self.gate.admit(ts))
             .map_err(BodyObservationError::from)
             .and_then(|ts| body_elevation_deg(self.station, &ts, self.body));
         match evaluated {
@@ -502,6 +504,7 @@ fn elevation_crossings<F>(
 where
     F: Fn(UtcInstant) -> f64,
 {
+    validate_window_datetimes(start_time, end_time).map_err(map_frame_input)?;
     if end_time <= start_time {
         return Ok(Vec::new());
     }
@@ -633,6 +636,80 @@ mod tests {
 
     fn day_start() -> UtcInstant {
         UtcInstant::from_utc(2024, 3, 20, 0, 0, 0, 0).expect("valid UTC")
+    }
+
+    #[test]
+    fn elevation_and_transit_searches_reject_invalid_datetimes() {
+        let station = GeodeticStationKm {
+            latitude_deg: 51.4769,
+            longitude_deg: 0.0,
+            altitude_km: 0.046,
+        };
+        let valid = day_start();
+        let frame_error = FrameTransformError::InvalidInput {
+            field: "datetime",
+            reason: "invalid UTC instant",
+        };
+        let event_error = EventFinderError::InvalidInput {
+            field: "datetime",
+            reason: "invalid UTC instant",
+        };
+        for micros in [i64::MIN, i64::MAX] {
+            let invalid = UtcInstant::from_unix_microseconds(micros);
+            for result in [
+                sun_elevation_deg(&station, invalid).unwrap_err(),
+                moon_elevation_deg(&station, invalid).unwrap_err(),
+            ] {
+                assert!(
+                    matches!(result, BodyObservationError::FrameTransform(found) if found == frame_error)
+                );
+            }
+            for mode in [ValidityMode::Strict, ValidityMode::Permissive] {
+                for result in [
+                    sun_elevation_deg_with_validity(&station, invalid, mode).unwrap_err(),
+                    moon_elevation_deg_with_validity(&station, invalid, mode).unwrap_err(),
+                ] {
+                    assert!(
+                        matches!(result, BodyObservationError::FrameTransform(found) if found == frame_error)
+                    );
+                }
+            }
+            for (start, end) in [(invalid, valid), (valid, invalid)] {
+                let sun = SunElevationOptions::default();
+                let moon = MoonElevationOptions::default();
+                assert_eq!(
+                    find_sun_elevation_crossings(&station, start, end, sun).unwrap_err(),
+                    event_error
+                );
+                assert_eq!(
+                    find_moon_elevation_crossings(&station, start, end, moon).unwrap_err(),
+                    event_error
+                );
+                assert_eq!(
+                    find_moon_transits(&station, start, end, 600.0, 1.0).unwrap_err(),
+                    event_error
+                );
+                for mode in [ValidityMode::Strict, ValidityMode::Permissive] {
+                    assert_eq!(
+                        find_sun_elevation_crossings_with_validity(&station, start, end, sun, mode)
+                            .unwrap_err(),
+                        event_error
+                    );
+                    assert_eq!(
+                        find_moon_elevation_crossings_with_validity(
+                            &station, start, end, moon, mode
+                        )
+                        .unwrap_err(),
+                        event_error
+                    );
+                    assert_eq!(
+                        find_moon_transits_with_validity(&station, start, end, 600.0, 1.0, mode)
+                            .unwrap_err(),
+                        event_error
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! fixture for the Python binding's pytest (`test_frames_time.py`).
 //!
 //! Every value is computed with the exact functions the binding calls: the
-//! precise time scales come from `UtcInstant::time_scales`, the transforms are
+//! precise time scales come from `UtcInstant::try_time_scales`, the transforms are
 //! the engine's own `*_compute`, and sidereal time / nutation / precession come
 //! from the public frame helpers. The binding marshals these same calls, so the
 //! fixture carries the engine's numbers (emitted as IEEE-754 hex bits for an exact
@@ -65,7 +65,8 @@ fn frames_time_reference_self_validates() {
             .unwrap()
             .unix_microseconds(),
     )
-    .time_scales();
+    .try_time_scales()
+    .unwrap();
     let gmst = greenwich_mean_sidereal_time_radians(&ts).expect("valid sidereal time");
     let gast = greenwich_apparent_sidereal_time_radians(&ts).expect("valid sidereal time");
     assert!(gmst.is_finite() && gast.is_finite());
@@ -95,7 +96,9 @@ fn epoch_json(epoch: (i32, i32, i32, i32, i32, i32, i32)) -> serde_json::Value {
     let unix_micros = UtcInstant::from_utc(y, mo, d, h, mi, s, us)
         .expect("dump: valid calendar epoch")
         .unix_microseconds();
-    let ts: TimeScales = UtcInstant::from_unix_microseconds(unix_micros).time_scales();
+    let ts: TimeScales = UtcInstant::from_unix_microseconds(unix_micros)
+        .try_time_scales()
+        .unwrap();
 
     let mean_ob = skyfield_mean_obliquity_radians(ts.jd_tdb).expect("valid TDB Julian date");
     let (dpsi, deps) = skyfield_iau2000a_radians(ts.jd_tt).expect("valid TT Julian date");

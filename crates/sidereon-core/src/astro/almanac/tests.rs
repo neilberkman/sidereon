@@ -490,3 +490,71 @@ fn meridian_transits_after_the_ut1_table_are_refused_or_reported() {
         "{straddle:?}"
     );
 }
+
+#[test]
+fn almanac_rejects_invalid_instants_and_window_endpoints() {
+    use crate::astro::time::ValidityMode;
+
+    let kernel = spk();
+    let source = EphemerisSource::Analytic;
+    let station = greenwich();
+    let valid = utc(2024, 4, 1, 0, 0, 0, 0);
+    let error = AlmanacError::InvalidInput {
+        field: "datetime",
+        reason: "invalid UTC instant",
+    };
+    for micros in [i64::MIN, i64::MAX] {
+        let invalid = UtcInstant::from_unix_microseconds(micros);
+        assert_eq!(
+            body_ecliptic(source, NAIF_MOON, invalid).unwrap_err(),
+            error
+        );
+        assert_eq!(apparent_km(source, NAIF_MOON, invalid).unwrap_err(), error);
+        assert_eq!(moon_phase_deg(source, invalid).unwrap_err(), error);
+        for (start, end) in [(invalid, valid), (valid, invalid)] {
+            assert_eq!(seasons(source, start, end, 600.0, 1.0).unwrap_err(), error);
+            assert_eq!(
+                moon_phases(source, start, end, 600.0, 1.0).unwrap_err(),
+                error
+            );
+            assert_eq!(
+                lunar_solar_eclipses(source, start, end, 600.0, 1.0).unwrap_err(),
+                error
+            );
+            assert_eq!(
+                planetary_events(
+                    EphemerisSource::Spk(&kernel),
+                    Planet::Mars,
+                    PlanetaryEventKind::Conjunction,
+                    start,
+                    end,
+                    600.0,
+                    1.0
+                )
+                .unwrap_err(),
+                error
+            );
+            assert_eq!(
+                meridian_transits(source, TransitBody::Moon, &station, start, end, 600.0, 1.0)
+                    .unwrap_err(),
+                error
+            );
+            for mode in [ValidityMode::Strict, ValidityMode::Permissive] {
+                assert_eq!(
+                    meridian_transits_with_validity(
+                        source,
+                        TransitBody::Moon,
+                        &station,
+                        start,
+                        end,
+                        600.0,
+                        1.0,
+                        mode
+                    )
+                    .unwrap_err(),
+                    error
+                );
+            }
+        }
+    }
+}

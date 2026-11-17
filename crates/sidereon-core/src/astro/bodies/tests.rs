@@ -149,8 +149,9 @@ fn moon_eci_bits_are_pinned() {
         ),
     ];
     for &(unix_micros, want) in PINS {
-        let ts =
-            crate::astro::passes::UtcInstant::from_unix_microseconds(unix_micros).time_scales();
+        let ts = crate::astro::passes::UtcInstant::from_unix_microseconds(unix_micros)
+            .try_time_scales()
+            .unwrap();
         let sm = sun_moon_eci_at(&ts).expect("valid time scales");
         for (axis, (got, pinned)) in sm.moon.iter().zip(want.iter()).enumerate() {
             assert_eq!(
