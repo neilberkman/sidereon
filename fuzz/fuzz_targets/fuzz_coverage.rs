@@ -58,7 +58,13 @@ fuzz_target!(|data: &[u8]| {
     let instant = UtcInstant::from_unix_microseconds(input.epoch_us);
 
     let grid = coverage::look_angles_batch(&satellites, &stations, instant);
-    let _ = coverage::visible_mask(&grid, input.min_elevation_deg);
-    let _ = coverage::access_counts(&grid, input.min_elevation_deg);
+    let _ = coverage::try_visible_mask(&grid, input.min_elevation_deg);
+    let _ = coverage::try_access_counts(&grid, input.min_elevation_deg);
+    // The unchecked forms stay public until removal, so they stay fuzzed.
+    #[allow(deprecated)]
+    {
+        let _ = coverage::visible_mask(&grid, input.min_elevation_deg);
+        let _ = coverage::access_counts(&grid, input.min_elevation_deg);
+    }
     let _ = coverage::max_elevation(&grid);
 });
