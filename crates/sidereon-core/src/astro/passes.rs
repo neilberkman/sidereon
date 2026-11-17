@@ -101,13 +101,7 @@ impl UtcInstant {
         self.unix_microseconds
     }
 
-    // Time arithmetic saturates rather than panicking (debug) or wrapping
-    // (release). `UtcInstant` is public and constructible at the i64 extremes, so
-    // an out-of-range window must degrade gracefully; the public entry points
-    // additionally reject an unrepresentable span up front via
-    // [`validate_pass_window`]. For every in-range window these are exact, so no
-    // golden trajectory changes.
-    fn add_microseconds(self, delta: i64) -> Self {
+    pub(crate) fn add_microseconds(self, delta: i64) -> Self {
         Self {
             unix_microseconds: self.unix_microseconds.saturating_add(delta),
         }
@@ -116,12 +110,6 @@ impl UtcInstant {
     fn diff_microseconds(self, earlier: Self) -> i64 {
         self.unix_microseconds
             .saturating_sub(earlier.unix_microseconds)
-    }
-
-    /// Microsecond span `self - earlier`, or `None` if it overflows `i64`.
-    fn checked_diff_microseconds(self, earlier: Self) -> Option<i64> {
-        self.unix_microseconds
-            .checked_sub(earlier.unix_microseconds)
     }
 
     fn diff_seconds(self, earlier: Self) -> i64 {
@@ -1088,9 +1076,13 @@ pub fn predict_passes_with_validity(
 ) -> Result<Validated<Vec<PredictedPass>>, PassError> {
     validate_ground_station(ground_station).map_err(map_pass_input)?;
     let step_seconds = validate_pass_prediction_options(options)?;
-    validate_pass_window(start_time, end_time)?;
+    let window_scales = pass_window_time_scales(start_time, end_time)?;
     let gate = Ut1Gate::new(mode);
-    admit_pass_window(start_time, end_time, &gate)?;
+    admit_pass_window(window_scales, &gate)?;
+
+    if end_time <= start_time {
+        return finish_pass(&gate, Vec::new());
+    }
 
     let satellite = match Satellite::from_elements_with_opsmode(elements, opsmode) {
         Ok(satellite) => satellite,
@@ -1228,6 +1220,8 @@ fn find_max_elevation(
         let x1 = (a as f64 + GOLDEN_RESPHI * span as f64).round() as i64;
         let x2 = (b as f64 - GOLDEN_RESPHI * span as f64).round() as i64;
 
+        let x1 = x1.clamp(a, b);
+        let x2 = x2.clamp(a, b);
         let dt1 = rise.add_microseconds(x1);
         let dt2 = rise.add_microseconds(x2);
         let el1 = elevation_at(satellite, dt1, ground_station, gate);
@@ -1249,6 +1243,7 @@ fn find_max_elevation(
 /// Elevation for the pass search, which treats an instant it cannot evaluate
 /// as below the horizon. A UT1 refusal is also remembered by `gate`, so the
 /// search fails in [`Ut1Gate::finish`] instead of returning a partial result.
+/// Sample times stay between the validated window endpoints.
 fn elevation_at(
     satellite: &Satellite,
     datetime: UtcInstant,
@@ -1259,7 +1254,10 @@ fn elevation_at(
         Ok(pred) => pred,
         Err(_) => return -90.0,
     };
-    let ts = match time_scales_for_look_angle(datetime, gate) {
+    let scales = datetime
+        .try_time_scales()
+        .expect("pass sample lies within the validated UTC window");
+    let ts = match gate.admit(scales) {
         Ok(ts) => ts,
         Err(_) => return -90.0,
     };
@@ -1435,13 +1433,9 @@ pub fn find_passes_with_validity(
 ) -> Result<Validated<Vec<SatellitePass>>, PassError> {
     validate_ground_station(ground_station).map_err(map_pass_input)?;
     let validated_options = validate_pass_finder_options(options)?;
-    // Validate the window before SGP4 init so an unrepresentable window, or
-    // one outside the UT1 table under Strict, is a typed error regardless of
-    // element validity, matching `predict_passes_with_validity` (an invalid
-    // element set otherwise short-circuits to Ok(empty) first).
-    validate_pass_window(start_time, end_time)?;
+    let window_scales = pass_window_time_scales(start_time, end_time)?;
     let gate = Ut1Gate::new(mode);
-    admit_pass_window(start_time, end_time, &gate)?;
+    admit_pass_window(window_scales, &gate)?;
     let satellite = match Satellite::from_elements_with_opsmode(elements, opsmode) {
         Ok(satellite) => satellite,
         Err(_) => return finish_pass(&gate, Vec::new()),
@@ -1640,6 +1634,7 @@ pub fn find_passes_for_satellite_with_validity(
 ) -> Result<Validated<Vec<SatellitePass>>, PassError> {
     validate_ground_station(ground_station).map_err(map_pass_input)?;
     let validated_options = validate_pass_finder_options(options)?;
+    let window_scales = pass_window_time_scales(start_time, end_time)?;
     find_passes_for_satellite_validated(
         satellite,
         ground_station,
@@ -1647,6 +1642,7 @@ pub fn find_passes_for_satellite_with_validity(
         end_time,
         validated_options,
         mode,
+        window_scales,
     )
 }
 
@@ -1657,8 +1653,10 @@ fn find_passes_for_satellite_validated(
     end_time: UtcInstant,
     options: ValidatedPassFinderOptions,
     mode: ValidityMode,
+    window_scales: [TimeScales; 2],
 ) -> Result<Validated<Vec<SatellitePass>>, PassError> {
     let gate = Ut1Gate::new(mode);
+    admit_pass_window(window_scales, &gate)?;
     let passes = find_passes_for_satellite_gated(
         satellite,
         ground_station,
@@ -1681,8 +1679,6 @@ fn find_passes_for_satellite_gated(
     if end_time <= start_time {
         return Ok(Vec::new());
     }
-    validate_pass_window(start_time, end_time)?;
-    admit_pass_window(start_time, end_time, gate)?;
     let search_step_us = robust_crossing_step_us(
         satellite,
         ground_station,
@@ -2058,16 +2054,14 @@ fn find_passes_batch(
         Ok(validated) => validated,
         Err(error) => return vec![Err(error); elements.len()],
     };
-    // Reject an unrepresentable window up front (before SGP4 init), so the result
-    // does not depend on which element sets happen to initialize - consistent with
-    // the single-satellite entry points.
-    if let Err(error) = validate_pass_window(start_time, end_time) {
-        return vec![Err(error); elements.len()];
-    }
+    let window_scales = match pass_window_time_scales(start_time, end_time) {
+        Ok(scales) => scales,
+        Err(error) => return vec![Err(error); elements.len()],
+    };
     // The window's own UT1 departure, which an element set that does not
     // initialize still reports; Strict refuses it for every element.
     let window_gate = Ut1Gate::new(validity);
-    let empty = admit_pass_window(start_time, end_time, &window_gate)
+    let empty = admit_pass_window(window_scales, &window_gate)
         .and_then(|()| finish_pass(&window_gate, Vec::new()));
     if let Err(error) = &empty {
         return vec![Err(*error); elements.len()];
@@ -2094,6 +2088,7 @@ fn find_passes_batch(
         validated_options,
         mode,
         validity,
+        window_scales,
     );
     for (index, result) in valid_indices.into_iter().zip(valid_results) {
         results[index] = result;
@@ -2102,6 +2097,7 @@ fn find_passes_batch(
     results
 }
 
+#[allow(clippy::too_many_arguments)]
 fn find_passes_batch_for_satellites_validated(
     satellites: &[Satellite],
     ground_station: GroundStation,
@@ -2110,6 +2106,7 @@ fn find_passes_batch_for_satellites_validated(
     options: ValidatedPassFinderOptions,
     mode: PassBatchMode,
     validity: ValidityMode,
+    window_scales: [TimeScales; 2],
 ) -> Vec<Result<Validated<Vec<SatellitePass>>, PassError>> {
     match mode {
         PassBatchMode::Serial => satellites
@@ -2122,6 +2119,7 @@ fn find_passes_batch_for_satellites_validated(
                     end_time,
                     options,
                     validity,
+                    window_scales,
                 )
             })
             .collect(),
@@ -2139,6 +2137,7 @@ fn find_passes_batch_for_satellites_validated(
                         end_time,
                         options,
                         validity,
+                        window_scales,
                     )
                 })
                 .collect()
@@ -2481,38 +2480,19 @@ fn invalid_pass_input(field: &'static str, reason: &'static str) -> PassError {
     PassError::InvalidInput { field, reason }
 }
 
-/// Reject a `[start, end]` window whose microsecond span overflows `i64`.
-///
-/// `UtcInstant` is public and can be built at the i64 extremes, so a span of
-/// `end - start` can overflow. The sampling/bisection arithmetic assumes a
-/// representable span; rather than rely on that arithmetic saturating silently,
-/// the public entry points reject an unrepresentable window with a typed error.
-/// Every realistic window (hours to years) is far inside the representable range
-/// (~292,000 years of microseconds), so this never fires for valid inputs.
-fn validate_pass_window(start_time: UtcInstant, end_time: UtcInstant) -> Result<(), PassError> {
-    if end_time.checked_diff_microseconds(start_time).is_none() {
-        return Err(invalid_pass_input(
-            "time window",
-            "span between start_time and end_time exceeds the representable range",
-        ));
-    }
-    Ok(())
+fn pass_window_time_scales(
+    start: UtcInstant,
+    end: UtcInstant,
+) -> Result<[TimeScales; 2], PassError> {
+    Ok([
+        start.time_scales_or_error().map_err(pass_frame_error)?,
+        end.time_scales_or_error().map_err(pass_frame_error)?,
+    ])
 }
 
-/// Pass a window's two ends through the UT1 policy. The UT1 table's coverage
-/// is one interval, so under Strict this refuses, before any search, every
-/// window with an instant outside it. Steps the search takes just past the
-/// window (a central difference at an end, say) go through the same gate and
-/// are caught by [`Ut1Gate::finish`].
-fn admit_pass_window(
-    start_time: UtcInstant,
-    end_time: UtcInstant,
-    gate: &Ut1Gate,
-) -> Result<(), PassError> {
-    for instant in [start_time, end_time] {
-        if let Some(ts) = time_scales_from_instant(instant) {
-            gate.admit(ts).map_err(pass_frame_error)?;
-        }
+fn admit_pass_window(window_scales: [TimeScales; 2], gate: &Ut1Gate) -> Result<(), PassError> {
+    for scales in window_scales {
+        gate.admit(scales).map_err(pass_frame_error)?;
     }
     Ok(())
 }
@@ -2538,9 +2518,9 @@ fn map_event_finder_input(error: EventFinderError) -> PassError {
     }
 }
 
-fn instant_at_offset_seconds(start_time: UtcInstant, offset_seconds: f64) -> UtcInstant {
-    start_time
-        .add_microseconds((offset_seconds * MICROSECONDS_PER_SECOND_I64 as f64).floor() as i64)
+fn instant_in_window(start: UtcInstant, end: UtcInstant, offset_seconds: f64) -> UtcInstant {
+    let offset_us = (offset_seconds * MICROSECONDS_PER_SECOND_I64 as f64).floor() as i64;
+    start.add_microseconds(offset_us.clamp(0, end.diff_microseconds(start)))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2557,7 +2537,11 @@ struct PassSearch<'a> {
 
 impl ScalarEventPredicate for PassSearch<'_> {
     fn value_at(&self, offset_seconds: f64) -> f64 {
-        self.masked_elevation_at(instant_at_offset_seconds(self.start_time, offset_seconds))
+        self.masked_elevation_at(instant_in_window(
+            self.start_time,
+            self.end_time,
+            offset_seconds,
+        ))
     }
 }
 
@@ -2589,24 +2573,24 @@ impl PassSearch<'_> {
         if low_offset >= total_us && total_us > 0 {
             low_offset = ((total_us - 1) / self.step_us) * self.step_us;
         }
-        let mut high_offset = (low_offset + self.step_us).min(total_us);
+        let mut high_offset = low_offset.saturating_add(self.step_us).min(total_us);
         if high_offset == low_offset && low_offset > 0 {
             low_offset = low_offset.saturating_sub(self.step_us);
-            high_offset = (low_offset + self.step_us).min(total_us);
+            high_offset = low_offset.saturating_add(self.step_us).min(total_us);
         }
 
         if let Some(refined) = self.refine_mask_crossing_in_offsets(low_offset, high_offset) {
             return refined;
         }
 
-        let previous_low = low_offset.saturating_sub(self.step_us);
+        let previous_low = low_offset.saturating_sub(self.step_us).max(0);
         if previous_low < low_offset {
             if let Some(refined) = self.refine_mask_crossing_in_offsets(previous_low, low_offset) {
                 return refined;
             }
         }
 
-        instant_at_offset_seconds(self.start_time, crossing_time_seconds)
+        instant_in_window(self.start_time, self.end_time, crossing_time_seconds)
     }
 
     fn refine_mask_crossing_in_offsets(
@@ -2725,7 +2709,7 @@ where
     let time_tolerance_seconds = tol_us as f64 / MICROSECONDS_PER_SECOND_I64 as f64;
 
     let extrema = find_segmented_extrema(
-        |offset_seconds| elevation_at_time(instant_at_offset_seconds(aos, offset_seconds)),
+        |offset_seconds| elevation_at_time(instant_in_window(aos, los, offset_seconds)),
         span_us,
         extremum_step_us,
         extremum_step_seconds,
@@ -2737,7 +2721,7 @@ where
         if extremum.kind != ExtremumKind::Maximum {
             continue;
         }
-        let candidate_time = instant_at_offset_seconds(aos, extremum.time_seconds);
+        let candidate_time = instant_in_window(aos, los, extremum.time_seconds);
         let candidate_elevation = elevation_at_time(candidate_time);
         if candidate_elevation > best.1 {
             best = (candidate_time, candidate_elevation);
@@ -3180,52 +3164,6 @@ mod tests {
         assert_eq!(passes.len(), 1);
         assert!(passes[0].rise.unix_microseconds() >= start.unix_microseconds());
         assert!(passes[0].set.unix_microseconds() <= end.unix_microseconds());
-    }
-
-    #[test]
-    fn predict_passes_rejects_unrepresentable_window_instead_of_panicking() {
-        // A window spanning the full i64 microsecond range overflows the internal
-        // span arithmetic. It must surface as a typed error, never a debug panic
-        // or a release wrap.
-        let station = GroundStation {
-            latitude_deg: 51.5074,
-            longitude_deg: -0.1278,
-            altitude_m: 11.0,
-        };
-        let start = UtcInstant::from_unix_microseconds(i64::MIN);
-        let end = UtcInstant::from_unix_microseconds(i64::MAX);
-
-        let predict_err = predict_passes(
-            &iss_2024_12_19_elements(),
-            station,
-            start,
-            end,
-            PassPredictionOptions::default(),
-        )
-        .expect_err("an unrepresentable window must be a typed error");
-        assert!(matches!(
-            predict_err,
-            PassError::InvalidInput {
-                field: "time window",
-                ..
-            }
-        ));
-
-        let find_err = find_passes(
-            &iss_2024_12_19_elements(),
-            station,
-            start,
-            end,
-            PassFinderOptions::default(),
-        )
-        .expect_err("an unrepresentable window must be a typed error");
-        assert!(matches!(
-            find_err,
-            PassError::InvalidInput {
-                field: "time window",
-                ..
-            }
-        ));
     }
 
     #[test]

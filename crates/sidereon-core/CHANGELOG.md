@@ -21,6 +21,9 @@ All notable changes to `sidereon-core` are documented here.
 
 - Coverage grids return a typed invalid-datetime error in each valid station's cell for UTC instants outside years 0 through 9999, with no UT1 degradation reported.
 - Almanac, transit, body-observation and rise/set functions return a typed invalid-datetime error for UTC instants outside years 0 through 9999 instead of panicking.
+- Pass prediction and pass search return a typed invalid-datetime error for window endpoints outside years 0 through 9999 instead of an empty result, a time-window error or an unbounded scan.
+- Pass searches keep samples and event times within the requested window, including when floating-point offsets round past an endpoint.
+- Pass searches apply the same UT1 validity policy to empty and reversed windows for single satellites and batches.
 
 ## [4.0.0] - 2026-11-16
 

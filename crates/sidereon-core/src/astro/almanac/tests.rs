@@ -558,3 +558,11 @@ fn almanac_rejects_invalid_instants_and_window_endpoints() {
         }
     }
 }
+
+#[test]
+fn offsets_saturate_at_timestamp_limits() {
+    for (micros, offset) in [(i64::MIN, -1.0), (i64::MAX, 1.0)] {
+        let instant = UtcInstant::from_unix_microseconds(micros);
+        assert_eq!(offset_instant(instant, offset), instant);
+    }
+}
