@@ -4,6 +4,8 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-11-19
+
 ### Added
 
 - `ground_track_batch_serial`, `ground_track_batch_parallel` and their `_with_validity` forms: ground tracks for many satellites over a shared epoch grid. Each element equals `ground_track` for that satellite, including errors.
