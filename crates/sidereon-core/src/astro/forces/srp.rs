@@ -10,12 +10,15 @@
 //! model ([`shadow_fraction`]). Callers can opt into lunar occultation via
 //! [`SolarRadiationPressure::with_moon_eclipse`], which evaluates combined
 //! Earth and Moon apparent-disc occultation
-//! ([`shadow_fraction_with_model_and_moon`]) using the Sun and Moon positions
-//! from [`sun_moon_eci`].
+//! ([`shadow_fraction_with_model_and_moon`]).
+//!
+//! [`ForceModel::acceleration`] takes the Sun and Moon positions from the
+//! analytic series in GCRS ([`sun_moon_gcrs_at_tdb_seconds`]), the frame of the
+//! propagation state; [`SolarRadiationPressure::acceleration_with_sun_moon`]
+//! takes caller positions in the state's frame.
 
-use crate::astro::bodies::sun_moon::sun_moon_eci;
+use crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds;
 use crate::astro::constants::astro::{AU_KM, SOLAR_RADIATION_PRESSURE_N_M2};
-use crate::astro::constants::time::{DAYS_PER_JULIAN_CENTURY, SECONDS_PER_DAY};
 use crate::astro::constants::units::M_PER_KM;
 use crate::astro::error::PropagationError;
 use crate::astro::events::eclipse::{
@@ -70,7 +73,7 @@ impl SolarRadiationPressure {
     /// Off by default so existing Earth-only propagation results stay
     /// bit-identical. When enabled, [`ForceModel::acceleration`] combines
     /// Earth and Moon apparent-disc occultation using the Moon position from
-    /// [`sun_moon_eci`].
+    /// [`sun_moon_gcrs_at_tdb_seconds`].
     pub fn with_moon_eclipse(mut self, enabled: bool) -> Self {
         self.include_moon_eclipse = enabled;
         self
@@ -157,8 +160,7 @@ fn sun_position_km(epoch_tdb_seconds: f64) -> Result<Vector3<f64>, PropagationEr
 fn sun_moon_positions_km(
     epoch_tdb_seconds: f64,
 ) -> Result<(Vector3<f64>, Vector3<f64>), PropagationError> {
-    let t_tt_centuries = epoch_tdb_seconds / (DAYS_PER_JULIAN_CENTURY * SECONDS_PER_DAY);
-    let bodies = sun_moon_eci(t_tt_centuries)
+    let bodies = sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
         .map_err(|error| PropagationError::ForceModelFailure(format!("Sun/Moon: {error}")))?;
     Ok((
         Vector3::new(
@@ -377,6 +379,98 @@ mod tests {
         assert!(
             matches!(err, PropagationError::ForceModelFailure(_)),
             "expected ForceModelFailure, got {err:?}"
+        );
+    }
+
+    /// TDB epochs from 1990 to 2050, one at the 2024-04-08 solar eclipse.
+    fn epochs_1990_to_2050() -> [f64; 4] {
+        use crate::astro::time::civil::j2000_seconds;
+        [
+            j2000_seconds(1990, 2, 1, 0, 0, 0.0),
+            j2000_seconds(2024, 4, 8, 18, 17, 0.0),
+            j2000_seconds(2026, 11, 23, 0, 0, 0.0),
+            j2000_seconds(2050, 6, 30, 12, 0, 0.0),
+        ]
+    }
+
+    fn gcrs_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
+        let bodies =
+            crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
+                .expect("GCRS Sun/Moon");
+        let km = |v: [f64; 3]| Vector3::new(v[0] / M_PER_KM, v[1] / M_PER_KM, v[2] / M_PER_KM);
+        (km(bodies.sun), km(bodies.moon))
+    }
+
+    fn mean_of_date_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
+        let t = crate::astro::time::scales::tt_seconds_from_tdb_seconds(epoch_tdb_seconds)
+            / (36_525.0 * 86_400.0);
+        let bodies = crate::astro::bodies::sun_moon::sun_moon_eci(t).expect("mean of date");
+        let km = |v: [f64; 3]| Vector3::new(v[0] / M_PER_KM, v[1] / M_PER_KM, v[2] / M_PER_KM);
+        (km(bodies.sun), km(bodies.moon))
+    }
+
+    #[test]
+    fn acceleration_equals_the_caller_vector_path_with_the_gcrs_sun_and_moon() {
+        let ctx = PropagationContext::default();
+        let base = SolarRadiationPressure::new(1.3, 0.02).expect("valid SRP");
+        let models = [
+            base,
+            base.with_moon_eclipse(true),
+            base.with_earth_shadow_model(EarthShadowModel::Wgs84Oblate),
+            base.with_moon_eclipse(true)
+                .with_earth_shadow_model(EarthShadowModel::Wgs84Oblate),
+        ];
+        for epoch in epochs_1990_to_2050() {
+            let (sun, moon) = gcrs_sun_moon_km(epoch);
+            let s_hat = sun.normalize();
+            let across = s_hat.cross(&Vector3::z()).normalize();
+            // Sunlit, Earth penumbra, GEO behind the Earth, and a GNSS orbit.
+            let positions = [
+                s_hat * 7_000.0,
+                -s_hat * 7_000.0 + across * 6_365.0,
+                -s_hat * 42_164.0 + across * 1_000.0,
+                Vector3::new(26_560.0, 1_200.0, -3_400.0),
+            ];
+            for position in positions {
+                let state = CartesianState::new(epoch, position.into(), [0.0, 7.5, 0.0]);
+                for model in models {
+                    let from_state = model.acceleration(&state, &ctx).expect("acceleration");
+                    let from_vectors = model
+                        .acceleration_with_sun_moon(position, sun, moon)
+                        .expect("caller vectors");
+                    assert_eq!(
+                        from_state, from_vectors,
+                        "epoch {epoch} position {position:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn acceleration_turns_away_from_the_mean_of_date_sun_by_the_precession() {
+        // Read as GCRS, the mean of date Sun is off by the precession since
+        // J2000.0 plus the frame bias, 0.376 deg at 2026-11-23; SRP on a sunlit
+        // satellite turns by that angle between the two.
+        let epoch = crate::astro::time::civil::j2000_seconds(2026, 11, 23, 0, 0, 0.0);
+        let (sun, moon) = gcrs_sun_moon_km(epoch);
+        let (mean_sun, mean_moon) = mean_of_date_sun_moon_km(epoch);
+        let model = SolarRadiationPressure::new(1.3, 0.02).expect("valid SRP");
+        let position = sun.normalize() * 7_000.0;
+        let state = CartesianState::new(epoch, position.into(), [0.0, 7.5, 0.0]);
+        let used = model
+            .acceleration(&state, &PropagationContext::default())
+            .expect("acceleration");
+        let with_mean = model
+            .acceleration_with_sun_moon(position, mean_sun, mean_moon)
+            .expect("mean of date Sun");
+        let angle_deg = used.angle(&with_mean).to_degrees();
+        assert!((0.37..0.38).contains(&angle_deg), "{angle_deg} deg");
+        assert_eq!(
+            used,
+            model
+                .acceleration_with_sun_moon(position, sun, moon)
+                .expect("GCRS")
         );
     }
 }

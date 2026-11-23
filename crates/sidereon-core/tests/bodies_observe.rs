@@ -482,6 +482,60 @@ fn reduced_sun_observation_reproduces_existing_sun_az_el() {
 }
 
 #[test]
+fn reduced_observation_places_the_analytic_series_on_gcrs_axes() {
+    use sidereon_core::astro::bodies::observe_with_time_scales;
+    use sidereon_core::astro::bodies::sun_moon::{sun_moon_eci_at, sun_moon_gcrs_at};
+    use sidereon_core::astro::frames::nutation::build_skyfield_nutation_matrix;
+    use sidereon_core::astro::frames::nutation::{
+        skyfield_iau2000a_radians, skyfield_mean_obliquity_radians,
+    };
+
+    let station = station_greenwich();
+    let ts = TimeScales::from_utc(2026, 11, 23, 6, 0, 0.0).expect("valid UTC");
+    let gcrs = sun_moon_gcrs_at(&ts).expect("GCRS Sun/Moon");
+    let mean = sun_moon_eci_at(&ts).expect("mean-of-date Sun/Moon");
+    let (dpsi, deps) = skyfield_iau2000a_radians(ts.jd_tt).expect("nutation angles");
+    let mean_ob = skyfield_mean_obliquity_radians(ts.jd_tdb).expect("mean obliquity");
+    let nutation =
+        build_skyfield_nutation_matrix(mean_ob, mean_ob + deps, dpsi).expect("nutation matrix");
+    for (target, gcrs_m, mean_m) in [
+        (Target::Sun, gcrs.sun, mean.sun),
+        (Target::Moon, gcrs.moon, mean.moon),
+    ] {
+        let obs = observe_with_time_scales(&station, &ts, target, ObserveOptions::default())
+            .expect("reduced observation");
+        assert!(obs.reduced);
+        // Astrometric and apparent ICRS places: the series rotated to GCRS.
+        let ra = libm::atan2(gcrs_m[1], gcrs_m[0])
+            .to_degrees()
+            .rem_euclid(360.0);
+        let dec = libm::asin(gcrs_m[2] / norm3(gcrs_m)).to_degrees();
+        assert!((obs.astrometric.right_ascension_deg - ra).abs() < 1.0e-12);
+        assert!((obs.astrometric.declination_deg - dec).abs() < 1.0e-12);
+        assert!((obs.astrometric.distance_km - norm3(gcrs_m) / M_PER_KM).abs() < 1.0e-6);
+        assert_eq!(obs.apparent_icrs, obs.astrometric);
+        // The apparent place stays the nutated mean-of-date series, which is the
+        // GCRS place through the GCRS to true-of-date rotation.
+        let true_m = mat3_vec3_mul(&nutation, &mean_m).expect("true of date");
+        let ra_true = libm::atan2(true_m[1], true_m[0])
+            .to_degrees()
+            .rem_euclid(360.0);
+        assert!((obs.apparent.right_ascension_deg - ra_true).abs() < 1.0e-12);
+        let tod = gcrs_to_true_of_date_matrix(&ts).expect("true of date matrix");
+        let via_gcrs = mat3_vec3_mul(&tod, &gcrs_m).expect("GCRS to true of date");
+        let ra_via = libm::atan2(via_gcrs[1], via_gcrs[0])
+            .to_degrees()
+            .rem_euclid(360.0);
+        assert!((obs.apparent.right_ascension_deg - ra_via).abs() < 1.0e-10);
+        // Mean of date and GCRS are 0.37 deg apart at 2026.
+        let mean_ra = libm::atan2(mean_m[1], mean_m[0])
+            .to_degrees()
+            .rem_euclid(360.0);
+        assert!((obs.astrometric.right_ascension_deg - mean_ra).abs() > 0.1);
+    }
+}
+
+#[test]
 fn correction_toggles_have_expected_scales() {
     let kernel = observe_kernel();
     let station = station_greenwich();

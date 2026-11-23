@@ -13,8 +13,12 @@ suite requires the repository.
   reference (see Credits).
 - **Numerical propagation:** Cartesian state propagation under two-body and J2 gravity, with
   fixed-step RK4 and adaptive Dormand-Prince 5(4) integrators.
-- **Frames and time:** ITRS/GCRS transforms with precession, nutation, and GAST; TT/TAI/UT1
-  time scales backed by IERS/IAU tables.
+- **Frames and time:** ITRS/GCRS transforms with precession, nutation, and GAST, and the
+  rotation between GCRS and the mean equator and equinox of date (IAU 2006 precession and frame
+  bias, checked against Orekit); TT/TAI/UT1 time scales backed by IERS/IAU tables.
+- **Sun and Moon:** low-precision analytic positions in GCRS for use with inertial states
+  (checked against JPL DE440 through Orekit), in the mean-of-date frame of the series, and
+  Earth-fixed.
 - **Geometry and events:** topocentric look angles, pass prediction, and eclipse/shadow
   geometry.
 - **Conjunctions:** close-approach screening, collision probability, and RTN-frame covariance.

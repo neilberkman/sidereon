@@ -84,6 +84,15 @@ fuzz_target!(|data: &[u8]| {
     );
     assert_ok_finite_or_err("bodies::sun_moon_eci_at", sun_moon::sun_moon_eci_at(&ts));
     assert_ok_finite_or_err("bodies::sun_moon_ecef", sun_moon::sun_moon_ecef(&ts));
+    assert_ok_finite_or_err(
+        "bodies::sun_moon_gcrs",
+        sun_moon::sun_moon_gcrs(input.scalars[0]),
+    );
+    assert_ok_finite_or_err("bodies::sun_moon_gcrs_at", sun_moon::sun_moon_gcrs_at(&ts));
+    assert_ok_finite_or_err(
+        "bodies::sun_moon_gcrs_at_tdb_seconds",
+        sun_moon::sun_moon_gcrs_at_tdb_seconds(input.scalars[1]),
+    );
 
     assert_ok_finite_or_err(
         "events::eclipse::shadow_fraction",

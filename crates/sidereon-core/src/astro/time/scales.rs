@@ -1045,7 +1045,9 @@ pub(crate) fn tt_seconds_from_tdb_seconds(tdb_seconds: f64) -> f64 {
     tdb_seconds - tdb_minus_tt_seconds_at_tt_jd(jd_tt)
 }
 
-fn tdb_minus_tt_seconds_at_tt_jd(jd_tt: f64) -> f64 {
+/// TDB - TT in seconds at a TT Julian date: the periodic series [`TimeScales`]
+/// uses for its TDB, whose magnitude stays under 1.71 ms.
+pub(crate) fn tdb_minus_tt_seconds_at_tt_jd(jd_tt: f64) -> f64 {
     let t = (jd_tt - J2000_JD) / DAYS_PER_JULIAN_CENTURY;
     0.001657 * libm::sin(628.3076 * t + 6.2401)
         + 0.000022 * libm::sin(575.3385 * t + 4.2970)

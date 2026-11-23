@@ -30,11 +30,10 @@
 
 use nalgebra::Vector3;
 use serde::Deserialize;
-use sidereon_core::astro::bodies::sun_moon::sun_moon_eci;
+use sidereon_core::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds;
 use sidereon_core::astro::constants::{
     astro::{IAU_2015_SOLAR_RADIUS_KM, MOON_RADIUS_KM},
     earth::MEAN_EARTH_RADIUS_KM,
-    time::{DAYS_PER_JULIAN_CENTURY, SECONDS_PER_DAY},
     units::M_PER_KM,
 };
 use sidereon_core::astro::events::eclipse::{
@@ -669,9 +668,11 @@ fn srp_acceleration_with_moon_matches_quadrature_on_overlapping_cases() {
 #[test]
 fn force_models_use_crate_sun_moon_ephemeris_during_2024_solar_eclipse() {
     // 2024-04-08 18:17:00 TDB (near greatest solar eclipse).
+    // The force models take the Sun and Moon in GCRS from
+    // `sun_moon_gcrs_at_tdb_seconds` at the state epoch; build the shadow axis
+    // from the same vectors.
     let epoch_tdb_s = j2000_seconds(2024, 4, 8, 18, 17, 0.0);
-    let t_centuries = epoch_tdb_s / (DAYS_PER_JULIAN_CENTURY * SECONDS_PER_DAY);
-    let bodies = sun_moon_eci(t_centuries).expect("sun_moon_eci");
+    let bodies = sun_moon_gcrs_at_tdb_seconds(epoch_tdb_s).expect("sun_moon_gcrs_at_tdb_seconds");
     let sun_km = Vector3::from(to_km(bodies.sun));
     let moon_km = Vector3::from(to_km(bodies.moon));
 
