@@ -1,0 +1,15 @@
+product_type gravity_field
+modelname T
+earth_gravity_constant 3.986004415e14
+radius 6378136.3
+max_degree 2
+errors no
+format icgem2.0
+tide_system tide_free
+end_of_head
+gfct 2 0 -4.8e-4 0.0 20000101.0000 20300101.0000
+trnd 2 0 1e300 0.0 20000101.0000 20300101.0000
+acos 2 0 1.0e-11 0.0 20000101.0000 20300101.0000 1e-320
+gfc 2 1 0.0 0.0
+gfc 2 2 2.4e-6 -1.4e-6
+begin_of_head comment

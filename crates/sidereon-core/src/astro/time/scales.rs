@@ -1036,6 +1036,15 @@ fn tdb_to_tt_jd_for_tdb_input(jd_tdb: f64) -> f64 {
     jd_tt
 }
 
+/// TT seconds since J2000 for an instant given as TDB seconds since J2000,
+/// using the same TDB-TT series as [`TimeScales`]. Non-finite input passes
+/// through unchanged.
+pub(crate) fn tt_seconds_from_tdb_seconds(tdb_seconds: f64) -> f64 {
+    let jd_tdb = J2000_JD + tdb_seconds / SECONDS_PER_DAY;
+    let jd_tt = tdb_to_tt_jd_for_tdb_input(jd_tdb);
+    tdb_seconds - tdb_minus_tt_seconds_at_tt_jd(jd_tt)
+}
+
 fn tdb_minus_tt_seconds_at_tt_jd(jd_tt: f64) -> f64 {
     let t = (jd_tt - J2000_JD) / DAYS_PER_JULIAN_CENTURY;
     0.001657 * libm::sin(628.3076 * t + 6.2401)

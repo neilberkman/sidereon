@@ -419,5 +419,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "icgem_parse"
+path = "fuzz_targets/icgem_parse.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
