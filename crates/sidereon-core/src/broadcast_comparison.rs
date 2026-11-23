@@ -16,14 +16,27 @@
 //! neighbours. The SP3 velocity is a centered finite difference of the precise
 //! position (one-sided at a window edge), since SP3 interpolation exposes position
 //! only. Time-scale and calendar handling stay at the (Elixir) interface boundary;
-//! this module owns the evaluation orchestration and all of the difference algebra.
+//! this module owns the evaluation orchestration; the difference algebra (the
+//! finite-difference velocity, the triad projection, the clock difference and the
+//! RMS, maximum and median kernels) is shared with [`crate::orbit_scoring`], which
+//! scores any orbit source against a later precise product by prediction horizon
+//! and adds the weighted signal-in-space range error.
+//!
+//! The triad here is built from the Earth-fixed velocity of the precise product
+//! ([`crate::orbit_scoring::TriadVelocity::EarthFixed`]), and the broadcast
+//! position is the antenna phase centre while the precise position is the centre
+//! of mass; no antenna offset is applied.
 
-use crate::astro::math::vec3::{cross3, dot3, norm3, scale3, sub3, unit3};
-use crate::astro::time::model::{Instant, JulianDateSplit, TimeScale};
-use crate::constants::{C_M_S, SECONDS_PER_DAY};
+use crate::astro::time::civil::j2000_seconds_from_split;
+use crate::astro::time::model::JulianDateSplit;
+use crate::constants::SECONDS_PER_DAY;
 use crate::ephemeris::{BroadcastEphemeris, Sp3};
 use crate::error::{Error, Result};
 use crate::observables::ObservableEphemerisSource;
+use crate::orbit_scoring::{
+    finite_difference_velocity, max_abs, median_by_epoch, orbit_difference, reference_position_at,
+    reference_state_at, rms,
+};
 use crate::GnssSatelliteId;
 
 /// The per-epoch evaluation keys for one sample, marshaled by the interface.
@@ -155,15 +168,13 @@ pub fn compare(
 ) -> Result<CompareReport> {
     validate_compare_inputs(epochs, velocity_half_s)?;
 
-    let scale = precise.header.time_scale;
-
     // Per-satellite compared diffs (in epoch order) plus the skipped-epoch count.
     let mut per_sat: Vec<SatelliteDiffs> = Vec::with_capacity(satellites.len());
     for &sat in satellites {
         let mut diffs = Vec::new();
         let mut missing = 0usize;
         for (idx, ep) in epochs.iter().enumerate() {
-            match diff_at(broadcast, precise, scale, sat, idx, ep, velocity_half_s) {
+            match diff_at(broadcast, precise, sat, idx, ep, velocity_half_s) {
                 Some(diff) => diffs.push(diff),
                 None => missing += 1,
             }
@@ -385,31 +396,24 @@ fn invalid_input(field: &'static str, reason: &'static str) -> Error {
 fn diff_at(
     broadcast: &BroadcastEphemeris,
     precise: &Sp3,
-    scale: TimeScale,
     sat: GnssSatelliteId,
     epoch_index: usize,
     ep: &EpochInputs,
     velocity_half_s: f64,
 ) -> Option<Diff> {
     let (b_pos, b_clock) = broadcast_state(broadcast, sat, ep.broadcast_t_j2000_s)?;
-    let (p_pos, p_clock) = precise_state(precise, scale, sat, ep.precise)?;
-    let vel = precise_velocity(precise, scale, sat, ep, p_pos, velocity_half_s)?;
+    let (p_pos, p_clock) = precise_state(precise, sat, ep.precise)?;
+    let vel = precise_velocity(precise, sat, ep, p_pos, velocity_half_s)?;
 
-    let d = sub3(b_pos, p_pos);
-    let (radial, along, cross) = project_rac(d, p_pos, vel);
-
-    let clock_m = match (b_clock, p_clock) {
-        (Some(bc), Some(pc)) => Some((bc - pc) * C_M_S),
-        _ => None,
-    };
+    let difference = orbit_difference(b_pos, b_clock, p_pos, p_clock, vel);
 
     Some(Diff {
         epoch_index,
-        orbit_3d: norm3(d),
-        radial,
-        along,
-        cross,
-        clock_m,
+        orbit_3d: difference.orbit_3d,
+        radial: difference.radial,
+        along: difference.along,
+        cross: difference.cross,
+        clock_m: difference.clock_m,
         clock_residual_m: None,
     })
 }
@@ -424,6 +428,12 @@ fn broadcast_state(
     Some((state.position_ecef_m, state.clock_s))
 }
 
+/// Seconds since J2000 of a split Julian date in the precise product's time
+/// scale, the axis the product is interpolated on.
+fn precise_query_s(split: JulianDateSplit) -> f64 {
+    j2000_seconds_from_split(split.jd_whole, split.fraction)
+}
+
 /// Precise ECEF position and clock at the split-Julian-date epoch, or `None`.
 ///
 /// The clock carries the relativistic term RTKLIB `peph2pos` applies to a precise clock,
@@ -432,30 +442,10 @@ fn broadcast_state(
 /// epoch has no precise clock.
 fn precise_state(
     precise: &Sp3,
-    scale: TimeScale,
     sat: GnssSatelliteId,
     split: JulianDateSplit,
 ) -> Option<([f64; 3], Option<f64>)> {
-    let epoch = Instant::from_julian_date(scale, split);
-    let state = precise.position(sat, epoch).ok()?;
-    let clock_s = state
-        .clock_s
-        .and_then(|clock_s| match precise.clock_relativity_at(sat, epoch) {
-            crate::spp::ClockRelativity::Term(term_s) => Some(clock_s + term_s),
-            crate::spp::ClockRelativity::NotApplicable => Some(clock_s),
-            crate::spp::ClockRelativity::Unavailable => None,
-        });
-    Some((state.position.as_array(), clock_s))
-}
-
-/// Precise ECEF position only at the split-Julian-date epoch, or `None`.
-fn precise_position(
-    precise: &Sp3,
-    scale: TimeScale,
-    sat: GnssSatelliteId,
-    split: JulianDateSplit,
-) -> Option<[f64; 3]> {
-    precise_state(precise, scale, sat, split).map(|(pos, _clock)| pos)
+    reference_state_at(precise, sat, precise_query_s(split), true).ok()
 }
 
 /// Centered finite-difference velocity of the precise position, falling back to a
@@ -463,57 +453,26 @@ fn precise_position(
 /// precise position already evaluated at the epoch (reused for the one-sided case).
 fn precise_velocity(
     precise: &Sp3,
-    scale: TimeScale,
     sat: GnssSatelliteId,
     ep: &EpochInputs,
     r0: [f64; 3],
     half_s: f64,
 ) -> Option<[f64; 3]> {
-    let rp = precise_position(precise, scale, sat, ep.precise_plus);
-    let rm = precise_position(precise, scale, sat, ep.precise_minus);
+    let rp = reference_position_at(precise, sat, precise_query_s(ep.precise_plus));
+    let rm = reference_position_at(precise, sat, precise_query_s(ep.precise_minus));
     finite_difference_velocity(rp, rm, r0, half_s)
-}
-
-/// Combine the neighbour positions into a velocity: a centered difference when
-/// both neighbours are available, a one-sided difference (using the epoch position
-/// `r0`) when only one is, and `None` when neither is. Pure arithmetic, split out
-/// from the evaluation so the operation order can be pinned independently.
-fn finite_difference_velocity(
-    rp: Option<[f64; 3]>,
-    rm: Option<[f64; 3]>,
-    r0: [f64; 3],
-    half_s: f64,
-) -> Option<[f64; 3]> {
-    match (rp, rm) {
-        (Some(rp), Some(rm)) => Some(scale3(sub3(rp, rm), 1.0 / (2.0 * half_s))),
-        (Some(rp), None) => Some(scale3(sub3(rp, r0), 1.0 / half_s)),
-        (None, Some(rm)) => Some(scale3(sub3(r0, rm), 1.0 / half_s)),
-        (None, None) => None,
-    }
-}
-
-/// Project a difference vector onto the radial/along-track/cross-track triad of
-/// the orbit defined by position `r` and velocity `v`. Radial is along `r`,
-/// cross-track along the angular momentum `r x v`, along-track completes the
-/// right-handed set.
-fn project_rac(d: [f64; 3], r: [f64; 3], v: [f64; 3]) -> (f64, f64, f64) {
-    let radial_hat = unit3(r).unwrap_or([0.0, 0.0, 0.0]);
-    let cross_hat = unit3(cross3(r, v)).unwrap_or([0.0, 0.0, 0.0]);
-    let along_hat = cross3(cross_hat, radial_hat);
-    (dot3(d, radial_hat), dot3(d, along_hat), dot3(d, cross_hat))
 }
 
 /// Per-epoch common reference-clock offset (meters): the median over all
 /// satellites at the epoch of the raw clock difference. `None` for an epoch with
 /// no clocked satellite.
 fn clock_datum_by_epoch(all: &[Diff], n_epochs: usize) -> Vec<Option<f64>> {
-    let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); n_epochs];
-    for diff in all {
-        if let Some(clock) = diff.clock_m {
-            buckets[diff.epoch_index].push(clock);
-        }
-    }
-    buckets.iter().map(|clocks| median(clocks)).collect()
+    median_by_epoch(
+        all.iter()
+            .filter_map(|diff| diff.clock_m.map(|clock| (diff.epoch_index, clock))),
+        n_epochs,
+        1,
+    )
 }
 
 /// Attach the datum-removed clock residual to each diff: raw clock difference
@@ -564,27 +523,12 @@ fn aggregate(diffs: &[Diff]) -> CompareStats {
     }
 }
 
-/// Root-mean-square over a non-empty slice, folding left from `0.0`.
-fn rms(values: &[f64]) -> f64 {
-    let sum_sq = values.iter().fold(0.0, |acc, &x| acc + x * x);
-    (sum_sq / values.len() as f64).sqrt()
-}
-
 fn rms_or_none(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         None
     } else {
         Some(rms(values))
     }
-}
-
-/// Maximum absolute value over a non-empty slice.
-fn max_abs(values: &[f64]) -> f64 {
-    values
-        .iter()
-        .map(|v| v.abs())
-        .reduce(f64::max)
-        .expect("max_abs requires a non-empty slice")
 }
 
 fn max_abs_or_none(values: &[f64]) -> Option<f64> {
@@ -595,15 +539,11 @@ fn max_abs_or_none(values: &[f64]) -> Option<f64> {
     }
 }
 
-/// Median of a slice (`None` if empty); even counts average the two middles.
-fn median(values: &[f64]) -> Option<f64> {
-    let mut sorted = values.to_vec();
-    crate::astro::math::robust::median_sorting_in_place(&mut sorted)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::astro::math::vec3::norm3;
+    use crate::orbit_scoring::{median, project_rac};
 
     fn cell(epoch_index: usize, orbit: f64, r: f64, a: f64, c: f64, clock: Option<f64>) -> Diff {
         Diff {

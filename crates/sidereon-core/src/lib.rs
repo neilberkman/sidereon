@@ -159,6 +159,7 @@ pub mod qc_obs {
 }
 pub mod orbit;
 pub mod orbit_determination;
+pub mod orbit_scoring; // orbit source vs final SP3 by prediction horizon (RTN, SISRE)
 pub mod positioning;
 pub mod prelude;
 pub mod quality; // measurement weighting, RAIM, and FDE integrity checks

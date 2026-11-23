@@ -103,3 +103,10 @@
 !/corpus/icgem_parse/valid-synthetic-icgem2.gfc
 !/corpus/icgem_parse/valid-egm96-d8-unnormalized.gfc
 !/corpus/icgem_parse/time-variable-beyond-double-range.gfc
+
+# Orbit scoring: a difference of length f64::MAX, whose accurate components
+# once failed the target's length check by rounding an unscaled length past
+# f64::MAX.
+!/corpus/fuzz_orbit_scoring/
+/corpus/fuzz_orbit_scoring/*
+!/corpus/fuzz_orbit_scoring/regression-difference-at-f64-max

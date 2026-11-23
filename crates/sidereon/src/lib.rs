@@ -238,9 +238,9 @@ pub use sidereon_core::{
     antex, araim, astro, atmosphere, bias, broadcast_comparison, carrier_phase, clock_stability,
     combinations, constants, constellation, data, dgnss, dop, ephemeris, frame_catalog,
     frequencies, fusion, geodesic, geodetic_time_series, geofence, geometry, geometry_quality, ils,
-    inertial, navigation, nmea, observables, orbit, positioning, ppp_corrections, qc_obs, quality,
-    rinex, rtcm, rtk, sbas, sbas_pl, sidereal, signal, source_localization, ssr, staleness,
-    static_positioning, terrain, terrain_store, tides, velocity,
+    inertial, navigation, nmea, observables, orbit, orbit_scoring, positioning, ppp_corrections,
+    qc_obs, quality, rinex, rtcm, rtk, sbas, sbas_pl, sidereal, signal, source_localization, ssr,
+    staleness, static_positioning, terrain, terrain_store, tides, velocity,
 };
 
 /// Sans-I/O NTRIP request, handshake, stream, sourcetable, and GGA APIs.

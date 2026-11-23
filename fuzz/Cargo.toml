@@ -203,6 +203,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_orbit_scoring"
+path = "fuzz_targets/fuzz_orbit_scoring.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_propagation"
 path = "fuzz_targets/fuzz_propagation.rs"
 test = false
