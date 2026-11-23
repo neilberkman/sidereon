@@ -15,6 +15,7 @@ use crate::astro::constants::time::{
 };
 use crate::astro::constants::units::M_PER_KM;
 use crate::astro::error::PropagationError;
+use crate::astro::events::eclipse::moon_shadow_fraction;
 use crate::astro::forces::r#trait::ForceModel;
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
@@ -43,6 +44,7 @@ const MAX_LATITUDE_RAD: f64 = std::f64::consts::FRAC_PI_2;
 pub struct EarthRadiationPressure {
     cr: f64,
     area_to_mass_m2_kg: f64,
+    include_moon_eclipse: bool,
 }
 
 impl EarthRadiationPressure {
@@ -56,7 +58,26 @@ impl EarthRadiationPressure {
         Ok(Self {
             cr,
             area_to_mass_m2_kg,
+            include_moon_eclipse: false,
         })
+    }
+
+    /// Enable or disable lunar occultation of sunlight on Earth's surface
+    /// elements.
+    ///
+    /// Off by default so existing Earth-only albedo results stay bit-identical.
+    /// When enabled, each sunlit Earth surface element attenuates its reflected
+    /// shortwave albedo flux by `1.0 - moon_shadow_fraction` using the Moon
+    /// position from [`sun_moon_eci`], while emitted thermal infrared remains
+    /// unchanged.
+    pub fn with_moon_eclipse(mut self, enabled: bool) -> Self {
+        self.include_moon_eclipse = enabled;
+        self
+    }
+
+    /// Whether lunar occultation of Earth surface elements is enabled.
+    pub fn moon_eclipse_enabled(&self) -> bool {
+        self.include_moon_eclipse
     }
 
     /// Cannonball radiation coefficient.
@@ -94,6 +115,29 @@ impl EarthRadiationPressure {
         validate_latitude(latitude_rad)?;
         Ok(knocke_albedo_emissivity(epoch_tdb_seconds, latitude_rad))
     }
+
+    /// Evaluate Earth albedo and infrared radiation pressure acceleration
+    /// (km/s^2) using explicit inertial Sun and Moon positions (km).
+    ///
+    /// When [`Self::moon_eclipse_enabled`] is `true`, each sunlit surface
+    /// element scales its reflected shortwave contribution by the unocculted
+    /// solar fraction past the Moon. When `false`, `moon_pos_km` is still
+    /// validated for finiteness and the result is bit-identical to the
+    /// Earth-only model.
+    pub fn acceleration_with_sun_moon(
+        &self,
+        state: &CartesianState,
+        sun_pos_km: Vector3<f64>,
+        moon_pos_km: Vector3<f64>,
+    ) -> Result<Vector3<f64>, PropagationError> {
+        validate_vector(moon_pos_km, "moon_pos_km")?;
+        let moon = if self.include_moon_eclipse {
+            Some(moon_pos_km)
+        } else {
+            None
+        };
+        earth_radiation_acceleration_with_bodies(state, sun_pos_km, moon, *self)
+    }
 }
 
 impl ForceModel for EarthRadiationPressure {
@@ -102,19 +146,37 @@ impl ForceModel for EarthRadiationPressure {
         state: &CartesianState,
         _ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        let sun_pos_km = sun_position_km(state.epoch_tdb_seconds)?;
-        earth_radiation_acceleration_with_sun(state, sun_pos_km, *self)
+        if !self.include_moon_eclipse {
+            let sun_pos_km = sun_position_km(state.epoch_tdb_seconds)?;
+            return earth_radiation_acceleration_with_sun(state, sun_pos_km, *self);
+        }
+        let (sun_pos_km, moon_pos_km) = sun_moon_positions_km(state.epoch_tdb_seconds)?;
+        earth_radiation_acceleration_with_bodies(state, sun_pos_km, Some(moon_pos_km), *self)
     }
 }
 
 fn sun_position_km(epoch_tdb_seconds: f64) -> Result<Vector3<f64>, PropagationError> {
+    let (sun, _moon) = sun_moon_positions_km(epoch_tdb_seconds)?;
+    Ok(sun)
+}
+
+fn sun_moon_positions_km(
+    epoch_tdb_seconds: f64,
+) -> Result<(Vector3<f64>, Vector3<f64>), PropagationError> {
     let t_tt_centuries = epoch_tdb_seconds / (DAYS_PER_JULIAN_CENTURY * SECONDS_PER_DAY);
     let bodies = sun_moon_eci(t_tt_centuries)
         .map_err(|error| PropagationError::ForceModelFailure(format!("Sun/Moon: {error}")))?;
-    Ok(Vector3::new(
-        bodies.sun[0] / M_PER_KM,
-        bodies.sun[1] / M_PER_KM,
-        bodies.sun[2] / M_PER_KM,
+    Ok((
+        Vector3::new(
+            bodies.sun[0] / M_PER_KM,
+            bodies.sun[1] / M_PER_KM,
+            bodies.sun[2] / M_PER_KM,
+        ),
+        Vector3::new(
+            bodies.moon[0] / M_PER_KM,
+            bodies.moon[1] / M_PER_KM,
+            bodies.moon[2] / M_PER_KM,
+        ),
     ))
 }
 
@@ -123,8 +185,20 @@ fn earth_radiation_acceleration_with_sun(
     sun_pos_km: Vector3<f64>,
     model: EarthRadiationPressure,
 ) -> Result<Vector3<f64>, PropagationError> {
+    earth_radiation_acceleration_with_bodies(state, sun_pos_km, None, model)
+}
+
+fn earth_radiation_acceleration_with_bodies(
+    state: &CartesianState,
+    sun_pos_km: Vector3<f64>,
+    moon_pos_km: Option<Vector3<f64>>,
+    model: EarthRadiationPressure,
+) -> Result<Vector3<f64>, PropagationError> {
     validate_state(state)?;
     validate_vector(sun_pos_km, "sun_pos_km")?;
+    if let Some(moon) = moon_pos_km {
+        validate_vector(moon, "moon_pos_km")?;
+    }
 
     let sat_radius_km = state.position_km.norm();
     if sat_radius_km <= model.earth_radius_km() {
@@ -137,6 +211,24 @@ fn earth_radiation_acceleration_with_sun(
         return Err(PropagationError::NumericalFailure(
             "Zero Sun position magnitude".to_string(),
         ));
+    }
+    if !sun_r2.is_finite() {
+        return Err(PropagationError::NumericalFailure(
+            "Non-finite Sun position magnitude".to_string(),
+        ));
+    }
+    if let Some(moon) = moon_pos_km {
+        let moon_r2 = moon.norm_squared();
+        if moon_r2 == 0.0 {
+            return Err(PropagationError::NumericalFailure(
+                "Zero Moon position magnitude".to_string(),
+            ));
+        }
+        if !moon_r2.is_finite() {
+            return Err(PropagationError::NumericalFailure(
+                "Non-finite Moon position magnitude".to_string(),
+            ));
+        }
     }
 
     let radial_hat = state.position_km / sat_radius_km;
@@ -152,17 +244,20 @@ fn earth_radiation_acceleration_with_sun(
     for (ring_index, &segments) in KNOCKE_RING_SEGMENTS.iter().enumerate() {
         if ring_index == 0 {
             let sample = SurfaceElementSample {
+                element_pos_km: radial_hat * model.earth_radius_km(),
                 normal: radial_hat,
                 element_to_sat_hat: radial_hat,
             };
             accel_m_s2 += element_acceleration(
                 state.epoch_tdb_seconds,
                 sample,
+                sun_pos_km,
+                moon_pos_km,
                 sun_hat,
                 solar_pressure,
                 apparent_weight,
                 model,
-            );
+            )?;
         } else {
             let current_elements = previous_elements + segments;
             let inner_mu =
@@ -187,21 +282,30 @@ fn earth_radiation_acceleration_with_sun(
                 accel_m_s2 += element_acceleration(
                     state.epoch_tdb_seconds,
                     sample,
+                    sun_pos_km,
+                    moon_pos_km,
                     sun_hat,
                     solar_pressure,
                     apparent_weight,
                     model,
-                );
+                )?;
             }
         }
         previous_elements += segments;
     }
 
-    Ok(accel_m_s2 / M_PER_KM)
+    let accel_km_s2 = accel_m_s2 / M_PER_KM;
+    if !accel_km_s2.iter().all(|v| v.is_finite()) {
+        return Err(PropagationError::NumericalFailure(
+            "Non-finite Earth radiation acceleration".to_string(),
+        ));
+    }
+    Ok(accel_km_s2)
 }
 
 #[derive(Debug, Clone, Copy)]
 struct SurfaceElementSample {
+    element_pos_km: Vector3<f64>,
     normal: Vector3<f64>,
     element_to_sat_hat: Vector3<f64>,
 }
@@ -225,30 +329,48 @@ fn surface_sample_from_ray(
     let element_pos_km = sat_pos_km + path_km * sat_to_element_hat;
     let normal = element_pos_km / earth_radius_km;
     Ok(SurfaceElementSample {
+        element_pos_km,
         normal,
         element_to_sat_hat: -sat_to_element_hat,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn element_acceleration(
     epoch_tdb_seconds: f64,
     sample: SurfaceElementSample,
+    sun_pos_km: Vector3<f64>,
+    moon_pos_km: Option<Vector3<f64>>,
     sun_hat: Vector3<f64>,
     solar_pressure_n_m2: f64,
     apparent_weight: f64,
     model: EarthRadiationPressure,
-) -> Vector3<f64> {
-    let latitude_rad = libm::asin(sample.normal.z);
+) -> Result<Vector3<f64>, PropagationError> {
+    let latitude_rad = libm::asin(sample.normal.z.clamp(-1.0, 1.0));
     let (albedo, emissivity) = knocke_albedo_emissivity(epoch_tdb_seconds, latitude_rad);
     let cos_solar_zenith = sample.normal.dot(&sun_hat);
     let reflected = if cos_solar_zenith > 0.0 {
-        albedo * cos_solar_zenith
+        if let Some(moon) = moon_pos_km {
+            let shadow = moon_shadow_fraction(
+                [
+                    sample.element_pos_km.x,
+                    sample.element_pos_km.y,
+                    sample.element_pos_km.z,
+                ],
+                [sun_pos_km.x, sun_pos_km.y, sun_pos_km.z],
+                [moon.x, moon.y, moon.z],
+            )
+            .map_err(|error| PropagationError::ForceModelFailure(format!("eclipse: {error}")))?;
+            albedo * cos_solar_zenith * (1.0 - shadow)
+        } else {
+            albedo * cos_solar_zenith
+        }
     } else {
         0.0
     };
     let pressure_scale = solar_pressure_n_m2 * (reflected + 0.25 * emissivity) * apparent_weight;
 
-    sample.element_to_sat_hat * (model.cr * model.area_to_mass_m2_kg * pressure_scale)
+    Ok(sample.element_to_sat_hat * (model.cr * model.area_to_mass_m2_kg * pressure_scale))
 }
 
 fn knocke_albedo_emissivity(epoch_tdb_seconds: f64, latitude_rad: f64) -> (f64, f64) {
@@ -426,5 +548,75 @@ mod tests {
             .expect_err("latitude outside physical domain must be rejected");
 
         assert!(matches!(err, PropagationError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn moon_eclipse_is_opt_in_and_attenuates_reflected_albedo_only() {
+        let default_model = EarthRadiationPressure::new(1.2, 0.011).expect("valid model");
+        assert!(!default_model.moon_eclipse_enabled());
+        let moon_model = default_model.with_moon_eclipse(true);
+        assert!(moon_model.moon_eclipse_enabled());
+
+        let state = dayside_leo_state();
+        let sun = Vector3::new(AU_KM, 0.0, 0.0);
+        let moon_clear = Vector3::new(0.0, 384_400.0, 0.0);
+        let moon_eclipse = Vector3::new(356_000.0, 0.0, 0.0);
+
+        // When the Moon is off-axis, moon-enabled albedo is bit-identical to default.
+        let accel_default = default_model
+            .acceleration_with_sun_moon(&state, sun, moon_clear)
+            .expect("default albedo");
+        let accel_clear = moon_model
+            .acceleration_with_sun_moon(&state, sun, moon_clear)
+            .expect("clear moon albedo");
+        for i in 0..3 {
+            assert_eq!(accel_clear[i].to_bits(), accel_default[i].to_bits());
+        }
+
+        // During a central solar eclipse over the sub-satellite cap, reflected
+        // shortwave drops while emitted thermal IR keeps the acceleration positive.
+        let accel_eclipse = moon_model
+            .acceleration_with_sun_moon(&state, sun, moon_eclipse)
+            .expect("lunar-eclipsed albedo");
+        assert!(accel_eclipse.x > 0.0);
+        assert!(accel_eclipse.x < accel_default.x);
+
+        // Compare against nightside (pure thermal IR): eclipsed dayside must
+        // still exceed pure IR because outer ring elements lie outside lunar umbra.
+        let accel_night = default_model
+            .acceleration_with_sun_moon(&state, -sun, moon_clear)
+            .expect("nightside IR");
+        assert!(accel_eclipse.x > accel_night.x);
+
+        let err = moon_model
+            .acceleration_with_sun_moon(&state, sun, Vector3::new(f64::INFINITY, 0.0, 0.0))
+            .expect_err("non-finite moon rejected");
+        assert!(matches!(err, PropagationError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn moon_eclipse_rejects_overflowing_moon_position_on_both_dayside_and_nightside() {
+        let moon_model = EarthRadiationPressure::new(1.2, 0.011)
+            .expect("valid model")
+            .with_moon_eclipse(true);
+        let sun = Vector3::new(AU_KM, 0.0, 0.0);
+        let overflowing_moon = Vector3::new(1.0e200, 0.0, 0.0);
+
+        let dayside = dayside_leo_state();
+        let nightside =
+            CartesianState::new(0.0, [-(WGS84_A_KM + 700.0), 0.0, 0.0], [0.0, 7.5, 0.0]);
+
+        assert!(
+            moon_model
+                .acceleration_with_sun_moon(&dayside, sun, overflowing_moon)
+                .is_err(),
+            "dayside must reject overflowing moon position"
+        );
+        assert!(
+            moon_model
+                .acceleration_with_sun_moon(&nightside, sun, overflowing_moon)
+                .is_err(),
+            "nightside must also reject overflowing moon position"
+        );
     }
 }

@@ -9,8 +9,10 @@ use sidereon_core::astro::{
     bodies::sun_moon,
     conjunction::{self, ConjunctionState, PcMethod},
     events::{self, eclipse, root, EventFinder},
+    forces::{EarthRadiationPressure, SolarRadiationPressure},
     passes::{self, GroundStation, UtcInstant},
     sgp4::ElementSet,
+    state::CartesianState,
     tca::{self, TcaCandidate, TcaPcOptions},
     time::TimeScales,
 };
@@ -88,6 +90,53 @@ fuzz_target!(|data: &[u8]| {
         eclipse::shadow_fraction(input.sat, input.sun),
     );
     let _ = eclipse::status(input.sat, input.sun);
+    for model in [
+        eclipse::EarthShadowModel::Spherical,
+        eclipse::EarthShadowModel::Wgs84Oblate,
+    ] {
+        let res = eclipse::shadow_fraction_with_model(input.sat, input.sun, model);
+        if let Ok(fraction) = res {
+            assert!(
+                fraction.is_finite() && (0.0..=1.0).contains(&fraction),
+                "shadow_fraction_with_model out of [0, 1]: {fraction}"
+            );
+        }
+        let moon_res =
+            eclipse::shadow_fraction_with_model_and_moon(input.sat, input.sun, input.r1, model);
+        if let Ok(fraction) = moon_res {
+            assert!(
+                fraction.is_finite() && (0.0..=1.0).contains(&fraction),
+                "shadow_fraction_with_model_and_moon out of [0, 1]: {fraction}"
+            );
+        }
+        let _ = eclipse::status_with_model_and_moon(input.sat, input.sun, input.r1, model);
+    }
+    let moon_only = eclipse::moon_shadow_fraction(input.sat, input.sun, input.r1);
+    if let Ok(fraction) = moon_only {
+        assert!(
+            fraction.is_finite() && (0.0..=1.0).contains(&fraction),
+            "moon_shadow_fraction out of [0, 1]: {fraction}"
+        );
+    }
+    let _ = eclipse::status_with_moon(input.sat, input.sun, input.r1);
+
+    if let Ok(srp) = SolarRadiationPressure::new(1.2, 0.02) {
+        let srp = srp.with_moon_eclipse(input.bytes[3] & 1 == 1);
+        assert_ok_finite_or_err(
+            "forces::SolarRadiationPressure::acceleration_with_sun_moon",
+            srp.acceleration_with_sun_moon(input.sat.into(), input.sun.into(), input.r1.into())
+                .map(|v| [v.x, v.y, v.z]),
+        );
+    }
+    if let Ok(erp) = EarthRadiationPressure::new(1.2, 0.011) {
+        let erp = erp.with_moon_eclipse(input.bytes[3] & 2 == 2);
+        let state = CartesianState::new(input.scalars[0], input.sat, input.v1);
+        assert_ok_finite_or_err(
+            "forces::EarthRadiationPressure::acceleration_with_sun_moon",
+            erp.acceleration_with_sun_moon(&state, input.sun.into(), input.r1.into())
+                .map(|v| [v.x, v.y, v.z]),
+        );
+    }
 
     let start = bounded_abs_or_raw(input.scalars[1], 1_000.0);
     let span = bounded_positive_or_raw(input.scalars[2], 1.0, 1_000.0);
