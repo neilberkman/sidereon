@@ -28,6 +28,9 @@ suite requires the repository.
 - Single-point positioning, double-differenced RTK with LAMBDA ambiguity resolution, and
   static precise point positioning.
 - Broadcast Klobuchar ionosphere and Saastamoinen plus Niell troposphere.
+- GNSS satellite attitude (`astro::attitude::gnss`): nominal yaw steering, the published
+  noon/midnight turn and shadow laws of GPS IIA/IIR/IIF/III, GLONASS-M, Galileo IOV/FOC and
+  BeiDou-2/-3, orbit-normal mode, and the Sun-fixed DYB frame, checked against Orekit.
 - EGM96/EGM2008 geoid grids, including the public PROJ EGM96 GTX loader with
   explicit fused or separately rounded PROJ 9.3 interpolation.
 

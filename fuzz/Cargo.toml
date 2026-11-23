@@ -440,5 +440,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "gnss_attitude"
+path = "fuzz_targets/gnss_attitude.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

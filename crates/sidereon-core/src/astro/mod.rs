@@ -18,6 +18,7 @@ pub mod angles;
 pub mod anomaly;
 pub mod apparent;
 pub mod atmosphere;
+pub mod attitude;
 pub mod bodies;
 pub mod cdm;
 pub mod conjunction;
