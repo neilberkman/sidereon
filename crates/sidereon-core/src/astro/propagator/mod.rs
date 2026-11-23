@@ -1,3 +1,7 @@
+/// Closed-form zonal-harmonic propagators: Eckstein-Hechler (J2-J6,
+/// near-circular orbits) and Brouwer-Lyddane (J2-J5), with mean/osculating
+/// element conversions.
+pub mod analytic;
 /// Propagation context and integrator configuration options.
 ///
 /// Provides [`PropagationContext`] for passing optional body-fixed frame
@@ -30,6 +34,7 @@ pub mod numerical;
 pub mod result;
 
 pub use crate::astro::forces::DragParameters;
+pub use analytic::{AnalyticPropagationError, BrouwerLyddanePropagator, EcksteinHechlerPropagator};
 pub use api::{IntegratorOptions, PropagationContext};
 pub use covariance::{
     transport_covariance, CovarianceEphemeris, CovarianceFrame, CovarianceNode,
