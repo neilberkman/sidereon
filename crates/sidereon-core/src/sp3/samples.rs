@@ -45,6 +45,7 @@ use std::collections::BTreeMap;
 use crate::astro::frames::orientation::EarthOrientation;
 use crate::astro::frames::transforms::FrameTransformError;
 use crate::astro::state::CartesianState;
+use crate::astro::time::civil::j2000_seconds_from_split;
 use crate::astro::time::model::{Instant, TimeScale};
 use crate::constants::{KM_TO_M, US_TO_S};
 use crate::id::GnssSatelliteId;
@@ -191,16 +192,27 @@ impl PreciseEphemerisStateSample {
 ///
 /// The supplied [`EarthOrientation`] is the single evaluated frame state for the
 /// sample epoch. The velocity uses the full rotating-frame transport
-/// `v_gcrf = R^T (v_itrf + omega_itrf x r_itrf)`.
+/// `v_gcrf = R^T (v_itrf + omega_itrf x r_itrf)`. The state's epoch is the TDB
+/// of the orientation's resolved time scales, seconds past J2000, as every
+/// propagated state's is; the sample's own time scale (GPS time for most SP3
+/// products) is converted, not relabelled.
 pub fn sp3_ecef_state_to_eci(
     sample: &PreciseEphemerisStateSample,
     orientation: &EarthOrientation,
 ) -> core::result::Result<CartesianState, FrameTransformError> {
     validate_state_sample(sample)?;
-    let epoch_j2000_s = instant_to_j2000_seconds(&sample.epoch)
+    let sample_j2000_s = instant_to_j2000_seconds(&sample.epoch)
         .ok_or_else(|| frame_error("epoch", "must be a split Julian date"))?;
-    if !epoch_j2000_s.is_finite() {
+    if !sample_j2000_s.is_finite() {
         return Err(frame_error("epoch", "J2000 seconds must be finite"));
+    }
+    let scales = orientation.time_scales();
+    let epoch_j2000_s = j2000_seconds_from_split(scales.jd_whole, scales.tdb_fraction);
+    if !epoch_j2000_s.is_finite() {
+        return Err(frame_error(
+            "orientation",
+            "TDB J2000 seconds must be finite",
+        ));
     }
     let position_itrf_km = [
         sample.position_ecef_m[0] / KM_TO_M,

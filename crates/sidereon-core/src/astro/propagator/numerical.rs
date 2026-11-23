@@ -632,7 +632,7 @@ impl StatePropagator {
         }
     }
 
-    pub(super) fn build_force(&self) -> Result<Box<dyn ForceModel>, PropagationError> {
+    pub(crate) fn build_force(&self) -> Result<Box<dyn ForceModel>, PropagationError> {
         let gravity = self.force_model.build()?;
         match (self.drag, self.space_weather.clone()) {
             (Some(drag), Some(source)) => {

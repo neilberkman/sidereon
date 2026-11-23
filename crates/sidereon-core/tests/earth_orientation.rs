@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use sidereon_core::astro::forces::TwoBodyGravity;
 use sidereon_core::astro::frames::orientation::{EarthOrientation, TdbEarthOrientationProvider};
 use sidereon_core::astro::frames::transforms::{
     gcrs_to_itrs_matrix, itrs_to_gcrs_compute, mat3_vec3_mul,
@@ -21,10 +22,13 @@ use sidereon_core::astro::frames::transforms::{
 use sidereon_core::astro::math::least_squares::SolveOptions;
 use sidereon_core::astro::math::mat3::Mat3;
 use sidereon_core::astro::propagator::{
-    ForceModelKind, IntegratorKind, IntegratorOptions, PropagationContext, StatePropagator,
+    propagate_variational, ForceModelKind, IntegratorKind, IntegratorOptions, PropagationContext,
+    StatePropagator, VariationalEpoch, VariationalEquations,
 };
 use sidereon_core::astro::state::CartesianState;
-use sidereon_core::astro::time::civil::{j2000_seconds, split_julian_date_from_j2000_seconds};
+use sidereon_core::astro::time::civil::{
+    j2000_seconds, j2000_seconds_from_split, split_julian_date_from_j2000_seconds,
+};
 use sidereon_core::astro::time::model::{Instant, JulianDateSplit, TimeScale};
 use sidereon_core::astro::time::scales::TimeScales;
 use sidereon_core::ephemeris::{
@@ -295,10 +299,12 @@ fn sp3_bridge_matches_existing_position_path_and_transport_bits() {
     )
     .expect("velocity rotation");
 
-    assert_eq!(
-        got.epoch_tdb_seconds.to_bits(),
-        j2000_seconds(2026, 6, 1, 0, 0, 0.0).to_bits()
-    );
+    // The state is labelled with the TDB of the sample's GPS-time epoch:
+    // 51.184 s plus TDB - TT later than the GPS-time seconds.
+    let scales = orientation.time_scales();
+    let tdb = j2000_seconds_from_split(scales.jd_whole, scales.tdb_fraction);
+    assert_eq!(got.epoch_tdb_seconds.to_bits(), tdb.to_bits());
+    assert!((got.epoch_tdb_seconds - j2000_seconds(2026, 6, 1, 0, 0, 0.0) - 51.184).abs() < 2.0e-3);
     for i in 0..3 {
         assert_eq!(
             got.position_array()[i].to_bits(),
@@ -384,22 +390,53 @@ fn oriented_state_samples_feed_orbit_fit() {
     let sat = gps(9);
     let start = j2000_seconds(2026, 6, 1, 0, 0, 0.0) as i64;
     let epochs: Vec<i64> = (0..=8).map(|step| start + step * 60).collect();
-    let initial = CartesianState::new(start as f64, [7078.0, -30.0, 820.0], [0.20, 7.35, 1.05]);
-    let options = fit_options(ForceModelKind::two_body());
-    let propagator = StatePropagator {
-        initial,
-        force_model: ForceModelKind::two_body(),
-        integrator: IntegratorKind::Dp54,
-        options: options.integrator_options,
-        drag: None,
-        space_weather: None,
+    let orientations: Vec<EarthOrientation> = epochs
+        .iter()
+        .map(|&epoch| {
+            EarthOrientation::from_instant(instant_at(TimeScale::Gpst, epoch)).expect("orientation")
+        })
+        .collect();
+    // The truth arc is propagated as the fit propagates: TT elapsed between
+    // the samples, states at their TDB.
+    let seconds = |orientation: &EarthOrientation| {
+        let scales = orientation.time_scales();
+        (
+            j2000_seconds_from_split(scales.jd_whole, scales.tdb_fraction),
+            j2000_seconds_from_split(scales.jd_whole, scales.tt_fraction),
+        )
     };
-    let query_epochs: Vec<f64> = epochs.iter().map(|&epoch| epoch as f64).collect();
-    let states = propagator.ephemeris(&query_epochs).expect("truth arc");
+    let (tdb0, tt0) = seconds(&orientations[0]);
+    let propagation_epochs: Vec<VariationalEpoch> = orientations
+        .iter()
+        .map(|orientation| {
+            let (tdb, tt) = seconds(orientation);
+            VariationalEpoch {
+                tdb_j2000_s: tdb,
+                elapsed_tt_s: tt - tt0,
+            }
+        })
+        .collect();
+    let initial = CartesianState::new(tdb0, [7078.0, -30.0, 820.0], [0.20, 7.35, 1.05]);
+    let options = fit_options(ForceModelKind::two_body());
+    let states: Vec<CartesianState> = propagate_variational(
+        initial,
+        &propagation_epochs,
+        &VariationalEquations {
+            force: &TwoBodyGravity::default(),
+            parameters: &[],
+            sensitivity_parameters: &[],
+        },
+        IntegratorKind::Dp54,
+        &options.integrator_options,
+        &PropagationContext::default(),
+    )
+    .expect("truth arc")
+    .into_iter()
+    .map(|propagated| propagated.state)
+    .collect();
     let mut oriented = Vec::new();
-    for (state, &epoch) in states.iter().zip(&epochs) {
+    for ((state, &epoch), orientation) in states.iter().zip(&epochs).zip(orientations) {
         let instant = instant_at(TimeScale::Gpst, epoch);
-        let orientation = EarthOrientation::from_instant(instant).expect("orientation");
         let (position_itrf_km, velocity_itrf_km_s) = orientation
             .gcrf_to_itrf_state_km(state.position_array(), state.velocity_array())
             .expect("GCRF to ITRF");
@@ -436,6 +473,7 @@ fn oriented_state_samples_feed_orbit_fit() {
         stats.rms_3d_m
     );
 
+    assert_eq!(fit.initial_state.epoch_tdb_seconds, tdb0);
     let pos_error = (fit.initial_state.position_km - initial.position_km).norm();
     let vel_error = (fit.initial_state.velocity_km_s - initial.velocity_km_s).norm();
     assert!(pos_error < 2.0e-7, "position error {pos_error:.17e} km");

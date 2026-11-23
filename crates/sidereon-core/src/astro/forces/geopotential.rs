@@ -40,7 +40,7 @@ use crate::astro::forces::icgem::TimeVariableCoefficients;
 use crate::astro::forces::r#trait::ForceModel;
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
-use crate::astro::time::scales::tt_seconds_from_tdb_seconds;
+use crate::astro::time::scales::tt_from_tdb_j2000_seconds;
 use nalgebra::Vector3;
 use std::sync::Arc;
 
@@ -784,7 +784,7 @@ impl ForceModel for SphericalHarmonicGravity {
         };
         let accel_body_fixed = if self.time_variable.is_some() {
             // ICGEM epochs are TT; the state epoch is TDB.
-            let epoch_tt_seconds = tt_seconds_from_tdb_seconds(state.epoch_tdb_seconds);
+            let epoch_tt_seconds = tt_from_tdb_j2000_seconds(state.epoch_tdb_seconds);
             self.body_fixed_acceleration_at_km_s2(position_body_fixed_km, epoch_tt_seconds)?
         } else {
             self.body_fixed_acceleration_km_s2(position_body_fixed_km)?

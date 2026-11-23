@@ -32,6 +32,7 @@ pub mod numerical;
 /// Defines [`PropagationResult`], discrete [`PropagationPoint`] trajectory
 /// samples at TDB epochs, and work counters in [`PropagationStats`].
 pub mod result;
+pub mod variational;
 
 pub use crate::astro::forces::DragParameters;
 pub use analytic::{AnalyticPropagationError, BrouwerLyddanePropagator, EcksteinHechlerPropagator};
@@ -51,3 +52,6 @@ pub use numerical::{
     ForceModelComponents, ForceModelKind, IntegratorKind, StatePropagator, StateTransitionMatrix,
 };
 pub use result::{PropagationPoint, PropagationResult, PropagationStats};
+pub use variational::{
+    propagate_variational, VariationalEpoch, VariationalEquations, VariationalState,
+};

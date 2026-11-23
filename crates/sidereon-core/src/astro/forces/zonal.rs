@@ -5,17 +5,21 @@
 //! Legendre polynomials listed by Montenbruck & Gill, "Satellite Orbits",
 //! section 3.2, and Vallado, "Fundamentals of Astrodynamics and Applications",
 //! section 8.7. The Earth pole is the inertial +Z axis, matching the existing
-//! J2 force model.
+//! J2 force model. The position partials of the acceleration are the second
+//! derivatives of the same potential, in closed form.
 
 use crate::astro::constants::{
     J2_EARTH, J3_EARTH, J4_EARTH, J5_EARTH, J6_EARTH, MU_EARTH, RE_EARTH,
 };
 use crate::astro::error::PropagationError;
 use crate::astro::forces::geopotential::TideSystem;
-use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::forces::r#trait::{
+    expect_parameter_count, finite_partials, validate_finite_state, AccelerationPartials,
+    ForceModel,
+};
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
-use nalgebra::Vector3;
+use nalgebra::{Matrix3, Vector3};
 
 /// Active zonal harmonic degrees for [`ZonalGravity`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +231,40 @@ impl ForceModel for ZonalGravity {
         }
         Ok(accel)
     }
+
+    fn acceleration_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        _ctx: &PropagationContext,
+    ) -> Result<AccelerationPartials, PropagationError> {
+        expect_parameter_count(parameters, 0)?;
+        validate_finite_state(state)?;
+        let r_mag2 = state.position_km.norm_squared();
+        if r_mag2 == 0.0 {
+            return Err(PropagationError::NumericalFailure(
+                "Zero position magnitude".to_string(),
+            ));
+        }
+        let r_mag = r_mag2.sqrt();
+        let s = state.position_km.z / r_mag;
+
+        let mut gradient = Matrix3::zeros();
+        for degree in 2_u8..=6 {
+            if self.degrees.is_active(degree) {
+                gradient += zonal_degree_gradient(
+                    state.position_km,
+                    r_mag,
+                    s,
+                    degree,
+                    self.mu_km3_s2,
+                    self.re_km,
+                    self.coefficients.get(degree),
+                );
+            }
+        }
+        finite_partials(AccelerationPartials::position_only(gradient))
+    }
 }
 
 fn zonal_degree_acceleration(
@@ -252,6 +290,64 @@ fn zonal_degree_acceleration(
         xy_scale * position_km.y * xy_bracket,
         z_scale * z_bracket,
     )
+}
+
+/// Position gradient of [`zonal_degree_acceleration`].
+///
+/// With `A = (n + 1) P + s P'` and `B = (n + 1) s P - (1 - s²) P'`, the
+/// acceleration is `c [x A, y A, r B] / r^(n+3)`. Differentiating with
+/// `ds/dx = -s x / r²`, `ds/dy = -s y / r²` and `ds/dz = (1 - s²) / r` gives the
+/// entries below; the matrix is symmetric and trace-free because the
+/// acceleration is the gradient of a harmonic potential.
+fn zonal_degree_gradient(
+    position_km: Vector3<f64>,
+    r_mag: f64,
+    s: f64,
+    degree: u8,
+    mu_km3_s2: f64,
+    re_km: f64,
+    coefficient: f64,
+) -> Matrix3<f64> {
+    let degree_i32 = i32::from(degree);
+    let n = f64::from(degree);
+    let (p, dp) = legendre_and_derivative(degree, s);
+    let ddp = legendre_second_derivative(degree, s);
+    let one_minus_s2 = 1.0 - s * s;
+    let a = (n + 1.0) * p + s * dp;
+    let da = (n + 2.0) * dp + s * ddp;
+    let b = (n + 1.0) * s * p - one_minus_s2 * dp;
+    let db = (n + 1.0) * p + (n + 3.0) * s * dp - one_minus_s2 * ddp;
+
+    let scale = mu_km3_s2 * coefficient * re_km.powi(degree_i32) / r_mag.powi(degree_i32 + 3);
+    let (x, y) = (position_km.x / r_mag, position_km.y / r_mag);
+    // In-plane block: A on the diagonal plus (x_i x_j / r²) * xy_cross.
+    let xy_cross = -(s * da + (n + 3.0) * a);
+    // Coupling of the equatorial components with z.
+    let xz = one_minus_s2 * da - (n + 3.0) * s * a;
+    let zz = one_minus_s2 * db - (n + 2.0) * s * b;
+    Matrix3::new(
+        a + x * x * xy_cross,
+        x * y * xy_cross,
+        x * xz,
+        x * y * xy_cross,
+        a + y * y * xy_cross,
+        y * xz,
+        x * xz,
+        y * xz,
+        zz,
+    ) * scale
+}
+
+fn legendre_second_derivative(degree: u8, s: f64) -> f64 {
+    let s2 = s * s;
+    match degree {
+        2 => 3.0,
+        3 => 15.0 * s,
+        4 => (105.0 * s2 - 15.0) / 2.0,
+        5 => (315.0 * s2 * s - 105.0 * s) / 2.0,
+        6 => (3465.0 * s2 * s2 - 1890.0 * s2 + 105.0) / 8.0,
+        _ => 0.0,
+    }
 }
 
 fn legendre_and_derivative(degree: u8, s: f64) -> (f64, f64) {

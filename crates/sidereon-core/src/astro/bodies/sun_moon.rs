@@ -44,7 +44,7 @@ use crate::astro::frames::transforms::{
     mean_of_date_to_itrs_matrix_with_polar_motion, FrameTransformError, PolarMotion,
 };
 use crate::astro::time::scales::{
-    tdb_minus_tt_seconds_at_tt_jd, tt_seconds_from_tdb_seconds, TimeScales,
+    tdb_minus_tt_seconds_at_tt_jd, tt_from_tdb_j2000_seconds, TimeScales,
 };
 use crate::validate;
 
@@ -279,8 +279,8 @@ pub(crate) fn sun_moon_mean_to_gcrs(
 /// methods reproduces `acceleration` bit for bit. See [`sun_moon_gcrs`].
 pub fn sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds: f64) -> Result<SunMoon, SunMoonError> {
     validate::finite(epoch_tdb_seconds, "epoch_tdb_seconds").map_err(map_sun_moon_input)?;
-    let t_tt_centuries = tt_seconds_from_tdb_seconds(epoch_tdb_seconds)
-        / (DAYS_PER_JULIAN_CENTURY * SECONDS_PER_DAY);
+    let t_tt_centuries =
+        tt_from_tdb_j2000_seconds(epoch_tdb_seconds) / (DAYS_PER_JULIAN_CENTURY * SECONDS_PER_DAY);
     let jd_tdb = J2000_JD + epoch_tdb_seconds / SECONDS_PER_DAY;
     validate_sun_moon(rotate_to_gcrs(
         sun_moon_eci_unchecked(t_tt_centuries),
@@ -438,11 +438,11 @@ mod tests {
     #[test]
     fn gcrs_entry_points_agree_on_one_instant() {
         let century_s = DAYS_PER_JULIAN_CENTURY * SECONDS_PER_DAY;
-        for epoch_tdb_seconds in [-3.0e8, 0.0, 8.17e8, 1.57e9] {
+        for epoch_tdb_seconds in [-3.0e8, 0.0, 10_001.0, 8.17e8, 1.57e9] {
             // Same TT argument for the series, so the two differ only in how the
             // TDB of the precession is formed (TDB - TT from TT here, the given
             // TDB there): Julian-date rounding, under 1e-15 rad of rotation.
-            let t_tt = tt_seconds_from_tdb_seconds(epoch_tdb_seconds) / century_s;
+            let t_tt = tt_from_tdb_j2000_seconds(epoch_tdb_seconds) / century_s;
             let from_tdb = sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds).expect("TDB seconds");
             let from_tt = sun_moon_gcrs(t_tt).expect("TT centuries");
             assert!(relative_difference(from_tdb.sun, from_tt.sun) <= 1.0e-14);

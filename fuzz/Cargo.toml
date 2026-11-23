@@ -447,5 +447,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "orbit_parameter_fit"
+path = "fuzz_targets/orbit_parameter_fit.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

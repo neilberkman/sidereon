@@ -14,8 +14,16 @@
 //! fixed GCRS z axis. Polar motion is outside this model's inputs, so the
 //! polar-motion offset between the celestial intermediate pole and the ITRS
 //! pole (below about 1e-5 rad of latitude) is omitted.
+//!
+//! The Sun and Moon positions come from the crate's analytic series in GCRS
+//! ([`sun_moon_gcrs_at_tdb_seconds`](crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds)),
+//! with the series evaluated at the TT of the state's TDB epoch and rotated
+//! to GCRS at TDB. With [`EarthRadiationPressure::with_moon_eclipse`], the
+//! Moon's shadow on each sunlit surface element attenuates its reflected
+//! flux. The model has no estimable parameters; its state partials are the
+//! central difference quotients of [`ForceModel::acceleration_partials`]'s
+//! default, which see the Moon's shadow through the acceleration.
 
-use crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds;
 use crate::astro::constants::astro::AU_KM;
 use crate::astro::constants::earth::WGS84_A_KM;
 use crate::astro::constants::time::{DAYS_PER_JULIAN_YEAR, J2000_JD, SECONDS_PER_DAY};
@@ -23,10 +31,11 @@ use crate::astro::constants::units::M_PER_KM;
 use crate::astro::error::PropagationError;
 use crate::astro::events::eclipse::moon_shadow_fraction;
 use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::forces::third_body::sun_moon_positions_km;
 use crate::astro::frames::transforms::celestial_pole_gcrs_unchecked;
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
-use crate::astro::time::scales::tt_seconds_from_tdb_seconds;
+use crate::astro::time::scales::tt_from_tdb_j2000_seconds;
 use nalgebra::Vector3;
 
 const KNOCKE_ELEMENT_COUNT: usize = 19;
@@ -73,11 +82,12 @@ impl EarthRadiationPressure {
     /// Enable or disable lunar occultation of sunlight on Earth's surface
     /// elements.
     ///
-    /// Off by default so existing Earth-only albedo results stay bit-identical.
-    /// When enabled, each sunlit Earth surface element attenuates its reflected
+    /// Off by default, which leaves the Moon out of the model. When enabled,
+    /// each sunlit Earth surface element attenuates its reflected
     /// shortwave albedo flux by `1.0 - moon_shadow_fraction` using the Moon
-    /// position from [`sun_moon_gcrs_at_tdb_seconds`], while emitted thermal
-    /// infrared remains unchanged.
+    /// position from
+    /// [`sun_moon_gcrs_at_tdb_seconds`](crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds),
+    /// while emitted thermal infrared remains unchanged.
     pub fn with_moon_eclipse(mut self, enabled: bool) -> Self {
         self.include_moon_eclipse = enabled;
         self
@@ -164,33 +174,13 @@ impl ForceModel for EarthRadiationPressure {
             let sun_pos_km = sun_position_km(state.epoch_tdb_seconds)?;
             return earth_radiation_acceleration_with_sun(state, sun_pos_km, *self);
         }
-        let (sun_pos_km, moon_pos_km) = sun_moon_positions_km(state.epoch_tdb_seconds)?;
-        earth_radiation_acceleration_with_bodies(state, sun_pos_km, Some(moon_pos_km), *self)
+        let bodies = sun_moon_positions_km(state.epoch_tdb_seconds)?;
+        earth_radiation_acceleration_with_bodies(state, bodies.sun_km, Some(bodies.moon_km), *self)
     }
 }
 
 fn sun_position_km(epoch_tdb_seconds: f64) -> Result<Vector3<f64>, PropagationError> {
-    let (sun, _moon) = sun_moon_positions_km(epoch_tdb_seconds)?;
-    Ok(sun)
-}
-
-fn sun_moon_positions_km(
-    epoch_tdb_seconds: f64,
-) -> Result<(Vector3<f64>, Vector3<f64>), PropagationError> {
-    let bodies = sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
-        .map_err(|error| PropagationError::ForceModelFailure(format!("Sun/Moon: {error}")))?;
-    Ok((
-        Vector3::new(
-            bodies.sun[0] / M_PER_KM,
-            bodies.sun[1] / M_PER_KM,
-            bodies.sun[2] / M_PER_KM,
-        ),
-        Vector3::new(
-            bodies.moon[0] / M_PER_KM,
-            bodies.moon[1] / M_PER_KM,
-            bodies.moon[2] / M_PER_KM,
-        ),
-    ))
+    Ok(sun_moon_positions_km(epoch_tdb_seconds)?.sun_km)
 }
 
 fn earth_radiation_acceleration_with_sun(
@@ -203,7 +193,7 @@ fn earth_radiation_acceleration_with_sun(
 
 fn celestial_pole_gcrs(epoch_tdb_seconds: f64) -> Result<Vector3<f64>, PropagationError> {
     let jd_tdb = J2000_JD + epoch_tdb_seconds / SECONDS_PER_DAY;
-    let jd_tt = J2000_JD + tt_seconds_from_tdb_seconds(epoch_tdb_seconds) / SECONDS_PER_DAY;
+    let jd_tt = J2000_JD + tt_from_tdb_j2000_seconds(epoch_tdb_seconds) / SECONDS_PER_DAY;
     let pole = celestial_pole_gcrs_unchecked(jd_tt, jd_tdb);
     if !pole.iter().all(|v| v.is_finite()) {
         return Err(PropagationError::NumericalFailure(
@@ -683,32 +673,9 @@ mod tests {
         );
     }
 
-    /// TDB epochs from 1990 to 2050, one at the 2024-04-08 solar eclipse.
-    fn epochs_1990_to_2050() -> [f64; 4] {
-        use crate::astro::time::civil::j2000_seconds;
-        [
-            j2000_seconds(1990, 2, 1, 0, 0, 0.0),
-            j2000_seconds(2024, 4, 8, 18, 17, 0.0),
-            j2000_seconds(2026, 11, 23, 0, 0, 0.0),
-            j2000_seconds(2050, 6, 30, 12, 0, 0.0),
-        ]
-    }
-
-    fn gcrs_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
-        let bodies =
-            crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
-                .expect("GCRS Sun/Moon");
-        let km = |v: [f64; 3]| Vector3::new(v[0] / M_PER_KM, v[1] / M_PER_KM, v[2] / M_PER_KM);
-        (km(bodies.sun), km(bodies.moon))
-    }
-
-    fn mean_of_date_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
-        let t = crate::astro::time::scales::tt_seconds_from_tdb_seconds(epoch_tdb_seconds)
-            / (36_525.0 * 86_400.0);
-        let bodies = crate::astro::bodies::sun_moon::sun_moon_eci(t).expect("mean of date");
-        let km = |v: [f64; 3]| Vector3::new(v[0] / M_PER_KM, v[1] / M_PER_KM, v[2] / M_PER_KM);
-        (km(bodies.sun), km(bodies.moon))
-    }
+    use crate::astro::forces::test_helpers::{
+        epochs_1990_to_2050, gcrs_sun_moon_km, mean_of_date_sun_moon_km,
+    };
 
     #[test]
     fn acceleration_equals_the_caller_vector_path_with_the_gcrs_sun_and_moon() {

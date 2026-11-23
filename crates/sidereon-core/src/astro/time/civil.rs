@@ -225,17 +225,48 @@ pub fn civil_from_julian_day_number(jdn: i64) -> (i64, i64, i64) {
 /// [`civil_from_julian_day_number`], and the within-day clock fields are read
 /// from the floored second-of-day. No leap second is applied (the epoch stays in
 /// the caller's own time scale, the same no-leap contract as the forward
-/// conversions).
+/// conversions). Every `i64` is accepted: the noon offset is added to the
+/// second within the day, so no sum overflows.
 #[must_use]
 pub fn civil_from_j2000_seconds(seconds: i64) -> (i64, i64, i64, i64, i64, i64) {
-    let from_midnight = seconds + J2000_NOON_OFFSET_S;
-    let day_index = from_midnight.div_euclid(SECONDS_PER_DAY_I64);
-    let second_of_day = from_midnight.rem_euclid(SECONDS_PER_DAY_I64);
+    let shifted_second = seconds.rem_euclid(SECONDS_PER_DAY_I64) + J2000_NOON_OFFSET_S;
+    let day_index =
+        seconds.div_euclid(SECONDS_PER_DAY_I64) + shifted_second.div_euclid(SECONDS_PER_DAY_I64);
+    let second_of_day = shifted_second.rem_euclid(SECONDS_PER_DAY_I64);
     let (year, month, day) = civil_from_julian_day_number(day_index + J2000_JULIAN_DAY_NUMBER);
     let hour = second_of_day / 3_600;
     let minute = (second_of_day % 3_600) / 60;
     let second = second_of_day % 60;
     (year, month, day, hour, minute, second)
+}
+
+/// Largest magnitude of seconds past J2000 that
+/// [`civil_fields_from_j2000_seconds`] converts: about 12 700 years either
+/// side of J2000, beyond the years 0 through 9999 any time scale accepts.
+const CIVIL_FIELDS_MAX_J2000_SECONDS: f64 = 4.0e11;
+
+/// Civil fields `(year, month, day, hour, minute, second)` of `seconds` past
+/// J2000, the whole seconds through [`civil_from_j2000_seconds`] and the
+/// fraction added to the second, or `None` for a value that is not finite or
+/// lies more than about 12 700 years from J2000, where no year fits the
+/// calendar of any time scale.
+pub(crate) fn civil_fields_from_j2000_seconds(
+    seconds: f64,
+) -> Option<(i32, i32, i32, i32, i32, f64)> {
+    let whole = seconds.floor();
+    if !whole.is_finite() || whole.abs() > CIVIL_FIELDS_MAX_J2000_SECONDS {
+        return None;
+    }
+    let fraction = seconds - whole;
+    let (year, month, day, hour, minute, second) = civil_from_j2000_seconds(whole as i64);
+    Some((
+        i32::try_from(year).ok()?,
+        month as i32,
+        day as i32,
+        hour as i32,
+        minute as i32,
+        second as f64 + fraction,
+    ))
 }
 
 /// Modified Julian Date from a Julian Date (`MJD = JD - 2_400_000.5`).
@@ -683,6 +714,39 @@ mod tests {
             let month = mm + 3 - 12 * (mm / 10);
             let year = 100 * b + dd - 4800 + mm / 10;
             assert_eq!(civil_from_julian_day_number(jdn), (year, month, day));
+        }
+    }
+
+    #[test]
+    fn civil_from_j2000_seconds_covers_every_i64() {
+        // The noon offset added to i64::MAX seconds does not overflow; the
+        // date is 292 billion years on.
+        let (year, month, day, hour, minute, second) = civil_from_j2000_seconds(i64::MAX);
+        assert!(year > 292_000_000_000, "{year}");
+        assert!((1..=12).contains(&month) && (1..=31).contains(&day));
+        assert!(hour < 24 && minute < 60 && second < 60);
+        let (year, ..) = civil_from_j2000_seconds(i64::MIN);
+        assert!(year < -292_000_000_000, "{year}");
+        // Each field agrees with the offset taken first where that fits.
+        for seconds in [i64::MAX - 43_200, i64::MIN, -1, 0, 43_199, 43_200] {
+            let shifted = civil_from_j2000_seconds(seconds);
+            let reference = if let Some(from_midnight) = seconds.checked_add(J2000_NOON_OFFSET_S) {
+                let day_index = from_midnight.div_euclid(SECONDS_PER_DAY_I64);
+                let second_of_day = from_midnight.rem_euclid(SECONDS_PER_DAY_I64);
+                let (year, month, day) =
+                    civil_from_julian_day_number(day_index + J2000_JULIAN_DAY_NUMBER);
+                (
+                    year,
+                    month,
+                    day,
+                    second_of_day / 3_600,
+                    (second_of_day % 3_600) / 60,
+                    second_of_day % 60,
+                )
+            } else {
+                continue;
+            };
+            assert_eq!(shifted, reference, "{seconds}");
         }
     }
 

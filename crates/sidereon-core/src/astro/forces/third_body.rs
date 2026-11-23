@@ -6,16 +6,23 @@
 //! "Fundamentals of Astrodynamics and Applications", section 8.6. Body
 //! positions come from the crate's analytic Sun/Moon series at the state epoch,
 //! in GCRS ([`sun_moon_gcrs_at_tdb_seconds`]), the frame of the propagation
-//! state.
+//! state (the series evaluated at the TT of the state's TDB epoch and rotated
+//! to GCRS at TDB). Only the direct term depends on the satellite position, so
+//! the position partials are `-mu_b / d^3 * (I - 3 d̂ d̂ᵀ)` with `d = r_b - r`
+//! (Montenbruck & Gill, section 7.3).
 
 use crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds;
 use crate::astro::constants::astro::{GM_MOON_KM3_S2, GM_SUN_KM3_S2};
 use crate::astro::constants::units::M_PER_KM;
 use crate::astro::error::PropagationError;
-use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::forces::r#trait::{
+    expect_parameter_count, finite_partials, validate_finite_state, AccelerationPartials,
+    ForceModel,
+};
+use crate::astro::forces::two_body::point_mass_gradient;
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
-use nalgebra::Vector3;
+use nalgebra::{Matrix3, Vector3};
 
 /// Enabled third bodies for [`ThirdBodyGravity`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,14 +124,43 @@ impl ForceModel for ThirdBodyGravity {
         }
         Ok(accel)
     }
+
+    fn acceleration_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        _ctx: &PropagationContext,
+    ) -> Result<AccelerationPartials, PropagationError> {
+        expect_parameter_count(parameters, 0)?;
+        validate_finite_state(state)?;
+        let bodies = sun_moon_positions_km(state.epoch_tdb_seconds)?;
+        let mut gradient = Matrix3::zeros();
+        if self.bodies.sun {
+            gradient -= point_mass_gradient(bodies.sun_km - state.position_km, self.gm_sun_km3_s2)
+                .map_err(|_| coincident_with_third_body())?;
+        }
+        if self.bodies.moon {
+            gradient -=
+                point_mass_gradient(bodies.moon_km - state.position_km, self.gm_moon_km3_s2)
+                    .map_err(|_| coincident_with_third_body())?;
+        }
+        finite_partials(AccelerationPartials::position_only(gradient))
+    }
 }
 
-struct SunMoonKm {
-    sun_km: Vector3<f64>,
-    moon_km: Vector3<f64>,
+fn coincident_with_third_body() -> PropagationError {
+    PropagationError::NumericalFailure("Satellite coincident with third body".to_string())
 }
 
-fn sun_moon_positions_km(epoch_tdb_seconds: f64) -> Result<SunMoonKm, PropagationError> {
+/// Geocentric Sun and Moon positions in GCRS, km.
+pub(crate) struct SunMoonKm {
+    pub(crate) sun_km: Vector3<f64>,
+    pub(crate) moon_km: Vector3<f64>,
+}
+
+/// The Sun and Moon positions in GCRS at a TDB epoch (seconds past J2000),
+/// from [`sun_moon_gcrs_at_tdb_seconds`], for the force models that use them.
+pub(crate) fn sun_moon_positions_km(epoch_tdb_seconds: f64) -> Result<SunMoonKm, PropagationError> {
     let bodies = sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
         .map_err(|error| PropagationError::ForceModelFailure(format!("Sun/Moon: {error}")))?;
     Ok(SunMoonKm {
@@ -250,32 +286,9 @@ mod tests {
         );
     }
 
-    /// TDB epochs from 1990 to 2050, one at the 2024-04-08 solar eclipse.
-    fn epochs_1990_to_2050() -> [f64; 4] {
-        use crate::astro::time::civil::j2000_seconds;
-        [
-            j2000_seconds(1990, 2, 1, 0, 0, 0.0),
-            j2000_seconds(2024, 4, 8, 18, 17, 0.0),
-            j2000_seconds(2026, 11, 23, 0, 0, 0.0),
-            j2000_seconds(2050, 6, 30, 12, 0, 0.0),
-        ]
-    }
-
-    fn gcrs_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
-        let bodies =
-            crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
-                .expect("GCRS Sun/Moon");
-        let km = |v: [f64; 3]| Vector3::new(v[0] / M_PER_KM, v[1] / M_PER_KM, v[2] / M_PER_KM);
-        (km(bodies.sun), km(bodies.moon))
-    }
-
-    fn mean_of_date_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
-        let t = crate::astro::time::scales::tt_seconds_from_tdb_seconds(epoch_tdb_seconds)
-            / (36_525.0 * 86_400.0);
-        let bodies = crate::astro::bodies::sun_moon::sun_moon_eci(t).expect("mean of date");
-        let km = |v: [f64; 3]| Vector3::new(v[0] / M_PER_KM, v[1] / M_PER_KM, v[2] / M_PER_KM);
-        (km(bodies.sun), km(bodies.moon))
-    }
+    use crate::astro::forces::test_helpers::{
+        epochs_1990_to_2050, gcrs_sun_moon_km, mean_of_date_sun_moon_km,
+    };
 
     #[test]
     fn acceleration_equals_the_point_mass_terms_of_the_gcrs_sun_and_moon() {
@@ -315,6 +328,16 @@ mod tests {
                         .expect("Moon"),
                     moon_only
                 );
+                let mut expected_partials = Matrix3::zeros();
+                expected_partials -=
+                    point_mass_gradient(sun - position, GM_SUN_KM3_S2).expect("Sun gradient");
+                expected_partials -=
+                    point_mass_gradient(moon - position, GM_MOON_KM3_S2).expect("Moon gradient");
+                let both_partials = ThirdBodyGravity::default()
+                    .acceleration_partials(&[], &state, &ctx)
+                    .expect("Sun and Moon partials");
+                assert_eq!(both_partials.wrt_position, expected_partials);
+                assert_eq!(both_partials.wrt_velocity, Matrix3::zeros());
             }
         }
     }

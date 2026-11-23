@@ -1036,19 +1036,15 @@ fn tdb_to_tt_jd_for_tdb_input(jd_tdb: f64) -> f64 {
     jd_tt
 }
 
-/// TT seconds since J2000 for an instant given as TDB seconds since J2000,
-/// using the same TDB-TT series as [`TimeScales`]. Non-finite input passes
-/// through unchanged.
-pub(crate) fn tt_seconds_from_tdb_seconds(tdb_seconds: f64) -> f64 {
-    let jd_tdb = J2000_JD + tdb_seconds / SECONDS_PER_DAY;
-    let jd_tt = tdb_to_tt_jd_for_tdb_input(jd_tdb);
-    tdb_seconds - tdb_minus_tt_seconds_at_tt_jd(jd_tt)
-}
-
 /// TDB - TT in seconds at a TT Julian date: the periodic series [`TimeScales`]
 /// uses for its TDB, whose magnitude stays under 1.71 ms.
 pub(crate) fn tdb_minus_tt_seconds_at_tt_jd(jd_tt: f64) -> f64 {
-    let t = (jd_tt - J2000_JD) / DAYS_PER_JULIAN_CENTURY;
+    tdb_minus_tt_series((jd_tt - J2000_JD) / DAYS_PER_JULIAN_CENTURY)
+}
+
+/// TDB - TT in seconds at `t` Julian centuries of TT past J2000: the series
+/// every [`TimeScales`] constructor applies.
+fn tdb_minus_tt_series(t: f64) -> f64 {
     0.001657 * libm::sin(628.3076 * t + 6.2401)
         + 0.000022 * libm::sin(575.3385 * t + 4.2970)
         + 0.000014 * libm::sin(1256.6152 * t + 6.1969)
@@ -1056,6 +1052,31 @@ pub(crate) fn tdb_minus_tt_seconds_at_tt_jd(jd_tt: f64) -> f64 {
         + 0.000005 * libm::sin(52.9691 * t + 0.4444)
         + 0.000002 * libm::sin(21.3299 * t + 5.5431)
         + 0.000010 * t * libm::sin(628.3076 * t + 4.2490)
+}
+
+/// TDB - TT in seconds at the instant `tt_j2000_s` TT seconds past J2000, by
+/// the series [`TimeScales`] applies. Within a thousand years of J2000 its
+/// magnitude stays below 1.8 ms and its rate below 3.4e-10.
+pub fn tdb_minus_tt_seconds(tt_j2000_s: f64) -> f64 {
+    tdb_minus_tt_series(tt_j2000_s / (DAYS_PER_JULIAN_CENTURY * SECONDS_PER_DAY))
+}
+
+/// TDB seconds past J2000 of the instant `tt_j2000_s` TT seconds past J2000,
+/// by [`tdb_minus_tt_seconds`], rounded once.
+pub fn tdb_from_tt_j2000_seconds(tt_j2000_s: f64) -> f64 {
+    tt_j2000_s + tdb_minus_tt_seconds(tt_j2000_s)
+}
+
+/// TT seconds past J2000 of the instant `tdb_j2000_s` TDB seconds past J2000,
+/// the inverse of [`tdb_from_tt_j2000_seconds`].
+///
+/// Two fixed-point steps leave the series argument wrong by the square of
+/// its rate times its magnitude, under 1e-21 s, so a TT value carried to TDB
+/// by [`tdb_from_tt_j2000_seconds`] and back is returned unchanged unless
+/// its TDB rounded within that distance of a tie.
+pub fn tt_from_tdb_j2000_seconds(tdb_j2000_s: f64) -> f64 {
+    let first = tdb_j2000_s - tdb_minus_tt_seconds(tdb_j2000_s);
+    tdb_j2000_s - tdb_minus_tt_seconds(first)
 }
 
 fn normalize_calendar_seconds(mut cal: ScaleCal, second: f64) -> ScaleCal {
@@ -2318,6 +2339,53 @@ fn ut1_coverage_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tdb_and_tt_seconds_convert_both_ways() {
+        let rounding = |seconds: f64| 2.0 * f64::EPSILON * seconds.abs();
+        for (year, month, day) in [
+            (2000, 1, 1),
+            (2020, 4, 1),
+            (2020, 6, 25),
+            (2026, 5, 13),
+            (2050, 10, 1),
+        ] {
+            let scales =
+                TimeScales::from_scale(TimeScale::Tt, year, month, day, 7, 30, 15.25).expect("TT");
+            let tt = civil::j2000_seconds_from_split(scales.jd_whole, scales.tt_fraction);
+            let tdb = civil::j2000_seconds_from_split(scales.jd_whole, scales.tdb_fraction);
+            // The series of the time scales: the two TDB values differ by
+            // their rounding alone.
+            assert!(
+                (tdb_from_tt_j2000_seconds(tt) - tdb).abs() <= rounding(tdb).max(1.0e-12),
+                "{year}-{month}-{day}"
+            );
+            assert!((tt_from_tdb_j2000_seconds(tdb) - tt).abs() <= rounding(tt).max(1.0e-12));
+            assert_eq!(tt_from_tdb_j2000_seconds(tdb_from_tt_j2000_seconds(tt)), tt);
+            assert!(tdb_minus_tt_seconds(tt).abs() < 1.8e-3);
+        }
+        // TT values on a grid through 2020-2022, carried to TDB and back,
+        // come back unchanged: inside one binade the two roundings cancel.
+        for step in 0..10_000 {
+            let tt = 6.3e8 + f64::from(step) * 8_640.123;
+            assert_eq!(tt_from_tdb_j2000_seconds(tdb_from_tt_j2000_seconds(tt)), tt);
+        }
+        // Near J2000 (0 to 1230 s, and 10_001 s) where full-Julian-date
+        // quantization would introduce sub-picosecond drift: the seconds-based
+        // inverse round-trips bit-exact.
+        assert_eq!(
+            tt_from_tdb_j2000_seconds(tdb_from_tt_j2000_seconds(0.000_123_456_789)),
+            0.000_123_456_789
+        );
+        for step in 1..10_000 {
+            let tt = f64::from(step) * (1_230.0 / 10_000.0);
+            assert_eq!(tt_from_tdb_j2000_seconds(tdb_from_tt_j2000_seconds(tt)), tt);
+        }
+        for tdb in [0.0, 10_001.0] {
+            let tt = tt_from_tdb_j2000_seconds(tdb);
+            assert_eq!(tdb_from_tt_j2000_seconds(tt), tdb);
+        }
+    }
 
     #[test]
     fn julian_day_number_is_proleptic_gregorian_for_every_year() {

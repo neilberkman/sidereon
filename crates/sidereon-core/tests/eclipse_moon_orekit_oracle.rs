@@ -9,24 +9,31 @@
 //!
 //! Notes on Orekit 13.1.10 behaviour investigated and accounted for here:
 //!
-//! 1. Single-body occultation: Orekit's `SolarRadiationPressure.maskingRatio`
-//!    computes `c^2 + a^2 - b^2` directly (losing digits when `b ≈ c >> a`,
-//!    up to ~1.2e-9 on LEO Earth penumbra) and lacks an explicit annular branch
-//!    (clamping `acos` arguments to `±nextDown(1.0)`, giving ~8.4e-10 error on
-//!    annular lunar eclipses). The fixture therefore also records a 40-digit
-//!    Montenbruck & Gill §3.4.2 evaluation on Orekit's angles.
+//! 1. Single-body occultation: `sidereon-core` ports Orekit 13.1.10's
+//!    `OccultationEngine.angles` and `SolarRadiationPressure.maskingRatio`
+//!    operation for operation (including Hipparchus 4.0.3 `FastMath`), so
+//!    single-body Earth and Moon lighting ratios agree with Orekit within
+//!    `1.11e-16` on all 207 Earth cases (from the two-body `(l_earth + 1) - 1`
+//!    evaluation with a clear Moon) and `9.33e-15` on Moon cases (the fixture's
+//!    metre-to-kilometre round-trip). Against the 40-digit Montenbruck & Gill
+//!    §3.4.2 reference, Orekit's `maskingRatio` computes `c^2 + a^2 - b^2`
+//!    directly (up to `1.163e-9` on LEO Earth penumbra) and clamps `acos`
+//!    arguments to `±nextDown(1.0)` on annular eclipses (up to `8.408e-10` on
+//!    lunar annular cases).
 //! 2. Two-body overlap: Orekit 13.1.10's `getLightingRatio` subtracts the
 //!    unclipped Earth-Moon overlap `|E ∩ M| / |S|` instead of adding back the
 //!    triple intersection `|S ∩ E ∩ M| / |S|`, and omits checking whether Earth
 //!    actually occults the Sun before subtracting it. Whenever `|E ∩ M| > 0`
 //!    during a partial or annular lunar eclipse (53 of 207 cases even go
-//!    negative, down to `-9.5`, and one DE440 `earth_clear+moon_partial` case
+//!    negative, down to `-10.0527`, and one DE440 `earth_clear+moon_partial` case
 //!    drops from `0.874` to `0.483`), Orekit disagrees with the published
-//!    apparent-disc model. On every case where `|E ∩ M| == 0` (including
-//!    simultaneous opposite-limb eclipses), we assert agreement with Orekit;
-//!    on ALL 207 cases we independently verify our combined shadow fraction
-//!    against piecewise 16-point Gauss-Legendre numerical quadrature of
-//!    `Area(D_S ∩ (D_E ∪ D_M)) / (pi * a^2)`.
+//!    apparent-disc model. On every case where Orekit's mutual subtraction does
+//!    not fire (145 cases), we assert agreement with Orekit within `9.4e-15`
+//!    (measured max `9.326e-15`); on ALL 207 cases we independently verify our
+//!    combined shadow fraction against piecewise 16-point Gauss-Legendre
+//!    numerical quadrature of `Area(D_S ∩ (D_E ∪ D_M)) / (pi * a^2)` within
+//!    Orekit's single-body `maskingRatio` bound (`1.17e-9`, measured max
+//!    `1.163e-9`).
 
 use nalgebra::Vector3;
 use serde::Deserialize;
@@ -320,18 +327,17 @@ fn single_body_earth_and_moon_match_orekit_and_montenbruck_gill_reference() {
     let fixture = load_fixture();
     let all_cases = fixture.constructed.iter().chain(fixture.de440.iter());
 
-    // Tolerance vs 40-digit Montenbruck & Gill reference: 5e-12.
-    // Reason: at exact tangency (c == a + b or c == b - a) and LEO limb scale
-    // (b ~ 1.18 rad vs a ~ 4.6e-3 rad), 1-2 ULP differences (~1e-15 rad) in
-    // limb/separation angles between Rust and Java FastMath scale by
-    // O(sqrt(delta_angle / a)) or O(1 / a) up to ~2.2e-12.
-    const REF_TOL: f64 = 5.0e-12;
+    // Tolerance vs 40-digit Montenbruck & Gill reference: 1.17e-9.
+    // Cause: Orekit 13.1.10's maskingRatio computes c^2 + a^2 - b^2 directly
+    // (measured max 1.163e-9 on LEO Earth penumbra) and clamps acos inputs to
+    // ±nextDown(1.0) on annular eclipses (measured max 8.408e-10 on Moon).
+    const REF_TOL: f64 = 1.17e-9;
 
-    // Tolerance vs Orekit 13.1.10 double-precision maskingRatio: 1.5e-9.
-    // Reason: Orekit evaluates c^2 + a^2 - b^2 directly (cancellation error up
-    // to 1.16e-9 on LEO Earth penumbra) and has no annular branch (clamping
-    // acos inputs to ±nextDown(1.0), giving 8.41e-10 error on lunar annular).
-    const OREKIT_SINGLE_TOL: f64 = 1.5e-9;
+    // Tolerance vs Orekit 13.1.10 double-precision maskingRatio: 9.4e-15.
+    // Cause: fixture metre -> km -> metre round-trip (measured max 9.326e-15
+    // on lunar annular cases) and two-body (l_earth + 1) - 1 rounding on
+    // Earth cases (measured max 1.110e-16 = 0.5 * EPSILON).
+    const OREKIT_SINGLE_TOL: f64 = 9.4e-15;
 
     let mut max_earth_ref = 0.0_f64;
     let mut max_moon_ref = 0.0_f64;
@@ -406,10 +412,16 @@ fn single_body_earth_and_moon_match_orekit_and_montenbruck_gill_reference() {
         );
     }
 
-    assert!(max_earth_ref < 3.0e-12);
-    assert!(max_moon_ref < 1.0e-12);
-    assert!(max_earth_orekit < 1.2e-9);
-    assert!(max_moon_orekit < 9.0e-10);
+    assert!(max_earth_ref <= 1.17e-9, "max_earth_ref={max_earth_ref:e}");
+    assert!(max_moon_ref <= 8.41e-10, "max_moon_ref={max_moon_ref:e}");
+    assert!(
+        max_earth_orekit <= 0.5 * f64::EPSILON,
+        "max_earth_orekit={max_earth_orekit:e}"
+    );
+    assert!(
+        max_moon_orekit <= 9.4e-15,
+        "max_moon_orekit={max_moon_orekit:e}"
+    );
 }
 
 #[test]
@@ -417,17 +429,24 @@ fn combined_earth_and_moon_matches_orekit_where_valid_and_quadrature_everywhere(
     let fixture = load_fixture();
     let all_cases = fixture.constructed.iter().chain(fixture.de440.iter());
 
-    // Tolerance vs Orekit 13.1.10 where |E ∩ M| == 0 (no mutual disc overlap):
-    // 1.5e-9. Reason: identical single-body maskingRatio rounding (cancellation
-    // up to 1.16e-9 on LEO Earth penumbra and 8.41e-10 on lunar annular).
-    const OREKIT_DISJOINT_TOL: f64 = 1.5e-9;
+    // Tolerance vs Orekit 13.1.10 where Orekit's mutual subtraction does not
+    // fire (145 cases): 9.4e-15 (measured max 9.326e-15, caused solely by the
+    // fixture's metre -> km -> metre round-trip).
+    const OREKIT_DISJOINT_TOL: f64 = 9.4e-15;
 
     // Tolerance vs independent piecewise Gauss-Legendre quadrature across all
-    // 207 cases: 1e-11. Reason: 16-point regularized quadrature on <= 10 smooth
-    // subintervals agrees with exact circular-arc integration to ~1e-13, plus
-    // 1-2 ULP limb-angle rounding (~2e-12) from using Orekit's recorded angles
-    // in the quadrature input.
-    const QUAD_TOL: f64 = 1.0e-11;
+    // 207 cases: 1.17e-9 (measured max 1.163e-9, caused by Orekit's single-body
+    // maskingRatio cancellation and ±nextDown(1.0) annular clamping).
+    const QUAD_TOL: f64 = 1.17e-9;
+
+    // Measured bounds on unclamped two-body shadow properties across the 207
+    // fixture cases: overshoot 4.936e-13 (geo partial+partial), monotonicity
+    // residual 2.098e-10 (leo_oblate partial+partial, difference between
+    // Orekit's maskingRatio and the exact triple-disc area), subadditivity
+    // residual 4.936e-13.
+    const OVERSHOOT_BOUND: f64 = 5.0e-13;
+    const MONO_TOL: f64 = 2.1e-10;
+    const SUBADD_TOL: f64 = 5.0e-13;
 
     let mut orekit_checked = 0usize;
     let mut orekit_defect_cases = 0usize;
@@ -445,7 +464,7 @@ fn combined_earth_and_moon_matches_orekit_where_valid_and_quadrature_everywhere(
             shadow_fraction_with_model_and_moon(sat, sun, moon, model).expect("combined shadow");
         let lighting_both = 1.0 - f_both;
         assert!(
-            (0.0..=1.0).contains(&f_both) && f_both.is_finite(),
+            f_both.is_finite() && (-OVERSHOOT_BOUND..=1.0 + OVERSHOOT_BOUND).contains(&f_both),
             "{} ({}): shadow fraction out of bounds: {f_both}",
             case.name,
             case.kind
@@ -456,13 +475,13 @@ fn combined_earth_and_moon_matches_orekit_where_valid_and_quadrature_everywhere(
         let f_earth =
             shadow_fraction_with_model_and_moon(sat, sun, far_moon, model).expect("earth shadow");
         assert!(
-            f_both + 1.0e-14 >= f_earth.max(f_moon),
+            f_both + MONO_TOL >= f_earth.max(f_moon),
             "{} ({}): combined shadow {f_both} < max({f_earth}, {f_moon})",
             case.name,
             case.kind
         );
         assert!(
-            f_both - 1.0e-14 <= (f_earth + f_moon).min(1.0),
+            f_both - SUBADD_TOL <= (f_earth + f_moon).min(1.0),
             "{} ({}): combined shadow {f_both} > min(1, {f_earth} + {f_moon})",
             case.name,
             case.kind
@@ -485,14 +504,13 @@ fn combined_earth_and_moon_matches_orekit_where_valid_and_quadrature_everywhere(
             quad_diff
         );
 
-        // Identify whether Orekit's buggy mutual-overlap subtraction triggered:
-        // Orekit enters the mutual-overlap subtraction when neither body is total
-        // (lighting > 0), Moon is partial/annular (lighting_moon < 1), AND the
-        // Earth and Moon apparent discs overlap (mutual sep < limb + occ - 1e-10).
+        // Identify whether Orekit's buggy mutual-overlap subtraction triggered
+        // using Orekit's exact tests: lighting_earth != 0.0, lighting_moon != 0.0,
+        // lighting_moon != 1.0, and mutual sep < limb + occ - 1e-10.
         let [mut_sep, mut_limb, mut_occ] = case.mutual_angles;
-        let orekit_subtracts_mutual = case.lighting_earth > 0.0
-            && case.lighting_moon > 0.0
-            && case.lighting_moon < 1.0
+        let orekit_subtracts_mutual = case.lighting_earth != 0.0
+            && case.lighting_moon != 0.0
+            && case.lighting_moon != 1.0
             && (mut_sep - mut_limb - mut_occ < -1.0e-10);
 
         if !orekit_subtracts_mutual {
@@ -530,8 +548,8 @@ fn combined_earth_and_moon_matches_orekit_where_valid_and_quadrature_everywhere(
     assert_eq!(orekit_checked, 145);
     assert_eq!(orekit_defect_cases, 62);
     assert_eq!(orekit_negative_cases, 53);
-    assert!(max_orekit_disjoint_diff < 1.2e-9);
-    assert!(max_quad_diff < 5.0e-12);
+    assert!(max_orekit_disjoint_diff <= 9.4e-15);
+    assert!(max_quad_diff <= 1.17e-9);
 }
 
 #[test]
@@ -547,22 +565,19 @@ fn srp_acceleration_with_moon_matches_orekit_on_non_overlapping_cases() {
     .expect("valid SRP")
     .with_moon_eclipse(true);
 
-    // Tolerance on rescaled SRP acceleration normalized by full-sunlight SRP
-    // magnitude: 1.5e-9. Reason: sidereon-core scales inverse-square solar flux
-    // by `|r_sun|^2` while Orekit scales by `|r_sun - r_sat|^2`; after
-    // multiplying our acceleration by `|r_sun|^2 / |r_sun - r_sat|^2`, the
-    // normalized vector residual equals the lighting-ratio difference against
-    // Orekit's single-body maskingRatio (<= 1.16e-9 on LEO Earth penumbra and
-    // <= 8.41e-10 on annular lunar eclipse, independent of how small the
-    // remaining sunlit sliver is in deep penumbra such as de440_orbit_3).
-    const FULL_SRP_NORM_TOL: f64 = 1.5e-9;
+    // Tolerance on the SRP acceleration normalized by full-sunlight SRP
+    // magnitude: 9.4e-15 (measured max 9.313e-15). Both the lighting ratio and
+    // cannonball SRP follow Orekit 13.1.10 operation for operation; the residual
+    // comes only from the fixture's metre -> km -> metre round-trip and
+    // `AREA * CR / MASS` vs `area_to_mass * CR`.
+    const FULL_SRP_NORM_TOL: f64 = 9.4e-15;
 
     let mut checked = 0usize;
     for case in fixture.constructed.iter().chain(fixture.de440.iter()) {
         let [mut_sep, mut_limb, mut_occ] = case.mutual_angles;
-        let orekit_subtracts_mutual = case.lighting_earth > 0.0
-            && case.lighting_moon > 0.0
-            && case.lighting_moon < 1.0
+        let orekit_subtracts_mutual = case.lighting_earth != 0.0
+            && case.lighting_moon != 0.0
+            && case.lighting_moon != 1.0
             && (mut_sep - mut_limb - mut_occ < -1.0e-10);
         if orekit_subtracts_mutual {
             continue;
@@ -582,12 +597,10 @@ fn srp_acceleration_with_moon_matches_orekit_on_non_overlapping_cases() {
             * (d_ref_km * d_ref_km / sat_to_sun_r2)
             * fixture.cr
             * fixture.area_to_mass_m2_kg;
-        let distance_scale = sun.norm_squared() / sat_to_sun_r2;
-        let rescaled = accel_m_s2 * distance_scale;
-        let norm_err = (rescaled - orekit_m_s2).norm() / full_srp_m_s2;
+        let norm_err = (accel_m_s2 - orekit_m_s2).norm() / full_srp_m_s2;
         assert!(
             norm_err <= FULL_SRP_NORM_TOL,
-            "{} ({}): rescaled SRP err / full_srp {:.3e} > {:.3e}",
+            "{} ({}): SRP err / full_srp {:.3e} > {:.3e}",
             case.name,
             case.kind,
             norm_err,
@@ -612,16 +625,18 @@ fn srp_acceleration_with_moon_matches_quadrature_on_overlapping_cases() {
     .expect("valid SRP")
     .with_moon_eclipse(true);
 
-    // Same 1e-11 tolerance as the shadow-fraction quadrature test, applied to
-    // the cannonball SRP acceleration vector normalized by full-sunlight SRP.
-    const OVERLAP_SRP_TOL: f64 = 1.0e-11;
+    // Tolerance on overlapping cannonball SRP acceleration normalized by
+    // full-sunlight SRP: 8.5e-10 (measured max 8.416e-10, caused by Orekit's
+    // single-body maskingRatio annular ±nextDown(1.0) clamping and
+    // aE2 - alpha2^2 cancellation).
+    const OVERLAP_SRP_TOL: f64 = 8.5e-10;
 
     let mut checked = 0usize;
     for case in fixture.constructed.iter().chain(fixture.de440.iter()) {
         let [mut_sep, mut_limb, mut_occ] = case.mutual_angles;
-        let orekit_subtracts_mutual = case.lighting_earth > 0.0
-            && case.lighting_moon > 0.0
-            && case.lighting_moon < 1.0
+        let orekit_subtracts_mutual = case.lighting_earth != 0.0
+            && case.lighting_moon != 0.0
+            && case.lighting_moon != 1.0
             && (mut_sep - mut_limb - mut_occ < -1.0e-10);
         if !orekit_subtracts_mutual {
             continue;
@@ -646,7 +661,7 @@ fn srp_acceleration_with_moon_matches_quadrature_on_overlapping_cases() {
         let sun_v = Vector3::from(sun);
         let s_hat = (sun_v - sat_v).normalize();
         let full_srp_m_s2 = fixture.p_ref_n_m2
-            * (d_ref_km * d_ref_km / sun_v.norm_squared())
+            * (d_ref_km * d_ref_km / (sun_v - sat_v).norm_squared())
             * fixture.cr
             * fixture.area_to_mass_m2_kg;
         let expected_m_s2 = -full_srp_m_s2 * lighting_quad * s_hat;
