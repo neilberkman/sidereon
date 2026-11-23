@@ -357,23 +357,6 @@ impl Sp3 {
     }
 }
 
-impl Sp3 {
-    /// The relativistic term a positioning model applies to this product's clock of `sat`
-    /// at `epoch` (see `peph2pos_clock_relativity`).
-    pub(crate) fn clock_relativity_at(
-        &self,
-        sat: GnssSatelliteId,
-        epoch: Instant,
-    ) -> crate::spp::ClockRelativity {
-        let Some(t_j2000_s) = instant_to_j2000_seconds(&epoch) else {
-            return crate::spp::ClockRelativity::Unavailable;
-        };
-        peph2pos_clock_relativity(self.position_at_j2000_seconds(sat, t_j2000_s), || {
-            self.position_after_ephpos_step(sat, t_j2000_s)
-        })
-    }
-}
-
 /// The relativistic clock term RTKLIB `peph2pos` applies to a precise product's clock,
 /// `-2 r·v / c / c`, with no satellite antenna offset (`peph2pos` with `opt = 0`, or with
 /// no ANTEX loaded, where the offset is zero), `r` the interpolated position and `v` the
@@ -1387,7 +1370,7 @@ fn fitted_span_distance(arc: &ClockSplineArc, query: f64) -> f64 {
 ///   a sub-second query epoch would discard up to ~1 s, a kilometre-scale
 ///   position error at orbital speed (this was a real bug - the node and query
 ///   conversions must NOT share quantization).
-pub(super) fn instant_to_j2000_seconds(instant: &Instant) -> Option<f64> {
+pub(crate) fn instant_to_j2000_seconds(instant: &Instant) -> Option<f64> {
     match instant.repr {
         InstantRepr::JulianDate(split) => {
             // (jd - J2000_JD) days -> seconds, whole/fraction kept separate to

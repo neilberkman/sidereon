@@ -16,12 +16,15 @@
 //! clock-datum shrink are checked as structural invariants of the difference
 //! algebra. The bit-exact operation-order pins for the RAC projection, the
 //! finite-difference velocity, and the RMS/median/datum aggregation live as unit
-//! tests in the module itself.
+//! tests in the module itself. `broadcast_comparison_report_bits.json` freezes
+//! every statistic of the full-day report bit for bit, so a change to the shared
+//! difference algebra in `orbit_scoring` cannot move a broadcast result.
 
 use serde_json::Value;
 use sidereon_core::astro::time::model::JulianDateSplit;
 use sidereon_core::broadcast_comparison::{
-    compare, compare_window, compare_window_epochs, CompareReport, CompareWindow, EpochInputs,
+    compare, compare_window, compare_window_epochs, CompareReport, CompareStats, CompareWindow,
+    EpochInputs,
 };
 use sidereon_core::ephemeris::{BroadcastEphemeris, Sp3};
 use sidereon_core::{GnssSatelliteId, GnssSystem};
@@ -41,6 +44,7 @@ const CLOCK_DATUM_REMOVED_RMS_M: f64 = 0.6445;
 const CLOCK_RMS_MARGIN: f64 = 2.0;
 
 const GOLDEN: &str = include_str!("fixtures/broadcast_comparison_golden.json");
+const REPORT_BITS: &str = include_str!("fixtures/broadcast_comparison_report_bits.json");
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -253,4 +257,70 @@ fn per_satellite_stats_and_missing_are_populated() {
         .per_satellite
         .iter()
         .any(|(_sat, stats)| stats.count > 0));
+}
+
+/// The statistics of a report as `(name, value)` pairs, in the fixture's keys.
+fn stats_fields(stats: &CompareStats) -> [(&'static str, Option<f64>); 12] {
+    [
+        ("orbit_3d_rms_m", stats.orbit_3d_rms_m),
+        ("orbit_3d_max_m", stats.orbit_3d_max_m),
+        ("radial_rms_m", stats.radial_rms_m),
+        ("radial_max_m", stats.radial_max_m),
+        ("along_rms_m", stats.along_rms_m),
+        ("along_max_m", stats.along_max_m),
+        ("cross_rms_m", stats.cross_rms_m),
+        ("cross_max_m", stats.cross_max_m),
+        ("clock_rms_m", stats.clock_rms_m),
+        ("clock_max_m", stats.clock_max_m),
+        ("clock_datum_removed_rms_m", stats.clock_datum_removed_rms_m),
+        ("clock_datum_removed_max_m", stats.clock_datum_removed_max_m),
+    ]
+}
+
+fn assert_stats_bits(label: &str, stats: &CompareStats, expected: &Value) {
+    assert_eq!(
+        stats.count as u64,
+        expected["count"].as_u64().expect("count"),
+        "{label} count"
+    );
+    for (name, value) in stats_fields(stats) {
+        let expected = &expected[name];
+        match value {
+            Some(value) => assert_eq!(
+                value.to_bits(),
+                hex_bits(expected).to_bits(),
+                "{label} {name}: {value:e}"
+            ),
+            None => assert!(expected.is_null(), "{label} {name} missing"),
+        }
+    }
+}
+
+// Every statistic of the full-day comparison, 0 ULP. The fixture was written by
+// `compare` before its difference kernel moved to `orbit_scoring`, so this pins
+// that the move changed no bit.
+#[test]
+fn full_day_report_is_unchanged_bit_for_bit() {
+    let report = run();
+    let doc: Value = serde_json::from_str(REPORT_BITS).expect("parse report bits");
+
+    assert_stats_bits("overall", &report.overall, &doc["overall"]);
+
+    let per_satellite = doc["per_satellite"].as_array().expect("per_satellite");
+    assert_eq!(report.per_satellite.len(), per_satellite.len());
+    for ((sat, stats), expected) in report.per_satellite.iter().zip(per_satellite) {
+        let token = expected["satellite"].as_str().expect("satellite token");
+        assert_eq!(*sat, parse_token(token));
+        assert_stats_bits(token, stats, &expected["stats"]);
+    }
+
+    let missing = doc["missing"].as_array().expect("missing");
+    assert_eq!(report.missing.len(), missing.len());
+    for ((sat, count), expected) in report.missing.iter().zip(missing) {
+        assert_eq!(
+            *sat,
+            parse_token(expected["satellite"].as_str().expect("satellite"))
+        );
+        assert_eq!(*count as u64, expected["count"].as_u64().expect("count"));
+    }
 }

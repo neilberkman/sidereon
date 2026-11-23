@@ -2356,13 +2356,17 @@ mod coverage;
 mod exact;
 mod grid;
 mod interp;
-pub(crate) use interp::{peph2pos_clock_relativity, peph2pos_state_clock_relativity};
+pub(crate) use combine::{decimal_year as sp3_decimal_year, sp3_coordinate_label_frame};
+pub(crate) use interp::{
+    instant_to_j2000_seconds, peph2pos_clock_relativity, peph2pos_state_clock_relativity,
+};
 mod interpolant;
 mod interpolant_store;
 mod provenance;
 mod samples;
 mod verify;
 mod write;
+pub(crate) use write::record_epoch_j2000_seconds;
 
 pub use combine::{
     align_clock_reference, clock_reference_offset, merge, AgreementMetric, CellProvenance,

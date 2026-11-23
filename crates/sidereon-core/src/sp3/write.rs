@@ -3133,6 +3133,61 @@ pub(super) fn epoch_tick(epoch: &Instant, time_system: Sp3TimeSystem) -> Option<
     }
 }
 
+/// Seconds since J2000 at which a parsed record that states `epoch` sits on
+/// [`Sp3::epochs_j2000_seconds`]: the parser's own reading of that record's
+/// civil fields, or `None` when no record states `epoch` exactly.
+///
+/// An instant reduced through its split Julian date can land a unit in the last
+/// place away from the whole second its record states, and a UTC-like
+/// `23:59:60.xx` label held on the next day's boundary reduces to the second
+/// before the one the parser counts it at. Restating the record and reading
+/// it as [`Sp3::parse`] reads an epoch line puts the instant exactly where the
+/// parser put the record. The record is chosen as [`epoch_tick`] chooses it:
+/// the statement whose readback is exactly the instant held.
+pub(crate) fn record_epoch_j2000_seconds(
+    epoch: &Instant,
+    time_system: Sp3TimeSystem,
+) -> Option<f64> {
+    let (primary, alternative) = match epoch.repr {
+        InstantRepr::Nanos(nanos) => {
+            if nanos.rem_euclid(NANOS_PER_TICK) != 0 {
+                return None;
+            }
+            let (day, ticks) = tick_day(nanos.div_euclid(NANOS_PER_TICK));
+            (civil_fields(day, ticks), None)
+        }
+        InstantRepr::JulianDate(split) => {
+            if !split.jd_whole.is_finite() || !split.fraction.is_finite() {
+                return None;
+            }
+            epoch_candidates(split, time_system)
+        }
+    };
+    core::iter::once(primary)
+        .chain(alternative)
+        .find_map(|fields| {
+            if !(0..10i64.pow(CALENDAR_YEAR_COLUMNS as u32)).contains(&fields.year) {
+                return None;
+            }
+            let civil = restated_civil(&fields.record_text(), time_system)?;
+            if let InstantRepr::JulianDate(split) = epoch.repr {
+                let restated = super::civil_to_julian_split(civil).ok()?;
+                if exact_instant(restated) != exact_instant(split) {
+                    return None;
+                }
+            }
+            Some(crate::astro::time::civil::j2000_seconds(
+                i32::try_from(civil.year).ok()?,
+                civil.month as i32,
+                civil.day as i32,
+                civil.hour as i32,
+                civil.minute as i32,
+                civil.second,
+            ))
+        })
+        .filter(|seconds| seconds.is_finite())
+}
+
 /// The civil day a split Julian date falls in, the whole tick count within that
 /// day, and the day the split's own `jd_whole` boundary opens - as
 /// `(day, ticks, boundary_day)`, with both days Julian Day Numbers and `ticks`

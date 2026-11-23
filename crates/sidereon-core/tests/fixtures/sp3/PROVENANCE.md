@@ -110,6 +110,42 @@ are of the committed files.
 - **Used by:** the ZIM2 decimeter PPP arc test (`tests/ppp_decimeter_arc.rs`),
   among others.
 
+## `IGS0OPSULT_20261311800_02D_15M_ORB_2245_0415.SP3`
+
+- **Upstream product:** IGS ultra-rapid GPS orbits issued 2026-05-11 18:00
+  (2026 day-of-year 131), GPS week 2418, SP3-c, frame IGc20, 15-minute grid,
+  `https://igs.bkg.bund.de/root_ftp/IGS/products/2418/IGS0OPSULT_20261311800_02D_15M_ORB.SP3.gz`.
+  The fitted half ends at 2026-05-12 18:00; the predicted half follows.
+- **Trim:** the header unchanged (it still gives the full product's start
+  epoch and 192 epochs), then the 23 epochs from 2026-05-12 22:45 through
+  2026-05-13 04:15 GPST verbatim, then `EOF`.
+- **Content:** 32 GPS satellites; every record carries the orbit and clock
+  prediction flags.
+- **Committed file:** 61698 bytes, SHA-256
+  `ae3420789b7b830c2fe571c98989c6ac212f1f60d259f1b9d5e7bc43ae6f6606`.
+- **Used by:** the orbit scoring tests (`tests/orbit_scoring.rs`), which score
+  its predictions 6 to 9 hours past the 18:00 cut-off against
+  `IGS0OPSFIN_20261330000_03H_15M_ORB.SP3`, and the Orekit frame oracle
+  (`fixtures-generators/orekit_lof_oracle`).
+
+## `IGS0OPSULT_20261320000_02D_15M_ORB_2145_0415.SP3`
+
+- **Upstream product:** IGS ultra-rapid GPS orbits issued 2026-05-12 00:00
+  (2026 day-of-year 132), GPS week 2418, SP3-c, frame IGc20, 15-minute grid,
+  `https://igs.bkg.bund.de/root_ftp/IGS/products/2418/IGS0OPSULT_20261320000_02D_15M_ORB.SP3.gz`.
+- **Trim:** the header unchanged (it still gives the full product's start
+  epoch and 192 epochs), then the 27 epochs from 2026-05-12 21:45 through
+  2026-05-13 04:15 GPST verbatim, then `EOF`.
+- **Content:** 32 GPS satellites; the records through 2026-05-12 23:45 are
+  fitted, those from 2026-05-13 00:00 carry the orbit and clock prediction
+  flags.
+- **Committed file:** 72194 bytes, SHA-256
+  `ba7cb498fbb109d724ddf059033210abd37ceef1771e66f0e4f6b2b2e480c115`.
+- **Used by:** the orbit scoring tests (`tests/orbit_scoring.rs`), which take
+  the prediction origin from its flags and score its predictions up to 3
+  hours out against `IGS0OPSFIN_20261330000_03H_15M_ORB.SP3`, and the Orekit
+  frame oracle (`fixtures-generators/orekit_lof_oracle`).
+
 ## `GRG0OPSULT_20261880600_02D_05M_ORB_C19_C23_E02_E05_1500_1730.SP3`
 
 - **Upstream product:** `GRG0OPSULT_20261880600_02D_05M_ORB.SP3.gz`, the

@@ -2827,7 +2827,7 @@ fn epoch_year_span(source: &Sp3) -> Option<[f64; 2]> {
     Some([first, last])
 }
 
-fn decimal_year(epoch: Instant) -> f64 {
+pub(crate) fn decimal_year(epoch: Instant) -> f64 {
     let jd_midnight = julian_date_from_instant(epoch) + 0.5;
     let (year, _, _) = civil_from_julian_day_number(jd_midnight.floor() as i64);
     let days = if is_leap_year(year) { 366.0 } else { 365.0 };
@@ -2838,7 +2838,7 @@ fn normalized_sp3_frame_label(label: &str) -> String {
     label.trim().to_string()
 }
 
-fn sp3_coordinate_label_frame(label: &str) -> Option<TerrestrialFrame> {
+pub(crate) fn sp3_coordinate_label_frame(label: &str) -> Option<TerrestrialFrame> {
     match label.trim() {
         "ITRF2020" | "ITRF20" | "IGS20" | "IGc20" => Some(TerrestrialFrame::Itrf2020),
         "ITRF2014" | "ITRF14" | "IGS14" | "IGb14" => Some(TerrestrialFrame::Itrf2014),
