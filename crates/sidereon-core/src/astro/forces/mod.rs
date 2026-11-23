@@ -4,6 +4,7 @@ pub mod albedo;
 pub mod composite;
 pub mod drag;
 pub mod geopotential;
+pub mod icgem;
 /// Provides [`J2Gravity`], a degree-2 zonal-harmonic perturbation model built
 /// after [`TwoBodyGravity`] by [`crate::astro::propagator::ForceModelKind::TwoBodyJ2`].
 pub mod j2;
@@ -28,6 +29,10 @@ pub use geopotential::{
     SphericalHarmonicCoefficient, SphericalHarmonicGravity, SphericalHarmonicGravityConfig,
     TideSystem, EGM96_DEGREE_ORDER_36, EGM96_EMBEDDED_MAX_DEGREE, EGM96_EMBEDDED_MAX_ORDER,
     EGM96_MU_KM3_S2, EGM96_REFERENCE_RADIUS_KM,
+};
+pub use icgem::{
+    IcgemError, IcgemErrors, IcgemFormat, IcgemGravityField, IcgemHeader, IcgemNormalization,
+    IcgemSigmas, IcgemTermKind, IcgemTimeVariableTerm,
 };
 pub use j2::J2Gravity;
 pub use r#trait::ForceModel;

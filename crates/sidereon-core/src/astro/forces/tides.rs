@@ -553,7 +553,7 @@ fn empty_solid_tide_coefficients() -> [SphericalHarmonicCoefficient; 10] {
 /// external potential with its own `r^2` dependence. A tide-free `C20` holds
 /// neither part. The products are formed
 /// as Orekit forms its IERS 2010 permanent tide, `(A0 * H0) * k20`.
-fn permanent_tide_c20(tide_system: TideSystem) -> f64 {
+pub(crate) fn permanent_tide_c20(tide_system: TideSystem) -> f64 {
     let potential = SOLID_EARTH_TIDE_A0_PER_M * PERMANENT_TIDE_H0_M;
     let deformation = potential * SOLID_EARTH_TIDE_K20_REAL;
     match tide_system {

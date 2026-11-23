@@ -93,3 +93,13 @@
 !/corpus/antex_parse/valid-igs01-relative-trim.atx
 !/corpus/antex_parse/valid-igs20-block-i-g03-trim.atx
 !/corpus/antex_parse/valid-rms-repeated-frequency.atx
+
+# Curated seeds for the ICGEM target: the icgem2.0 and icgem1.0 time-variable
+# reader fixtures, the unnormalized EGM96 excerpt, and time-variable records
+# whose values leave the double range.
+!/corpus/icgem_parse/
+/corpus/icgem_parse/*
+!/corpus/icgem_parse/valid-synthetic-icgem1.gfc
+!/corpus/icgem_parse/valid-synthetic-icgem2.gfc
+!/corpus/icgem_parse/valid-egm96-d8-unnormalized.gfc
+!/corpus/icgem_parse/time-variable-beyond-double-range.gfc

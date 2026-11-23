@@ -6,13 +6,43 @@
 //! GCRF position is rotated into ITRF and the resulting acceleration is rotated
 //! back to GCRF. Non-zonal terms require that provider; zonal-only models can
 //! be evaluated directly in the input frame.
+//!
+//! # Evaluation algorithm
+//!
+//! Every model, whether built from the embedded EGM96 table, from caller
+//! coefficients or from an ICGEM file
+//! ([`crate::astro::forces::IcgemGravityField`]), is evaluated by the method
+//! of Holmes and Featherstone (2002), "A unified approach to the Clenshaw
+//! summation and the recursive computation of very high degree and order
+//! normalised associated Legendre functions", *Journal of Geodesy*
+//! 76:279-299. For each order `m`, the functions `Pnm(t) / u^m` (with
+//! `t = sin(latitude)` and `u = cos(latitude)`) are built by the forward
+//! column recursion over degree from sectoral seeds scaled by `2^-930`, and
+//! the sum over order is a Horner scheme in `u`. No intermediate underflows
+//! at high degree near the poles, where `u^m` would, and nothing overflows
+//! through degree 2700 (Holmes and Featherstone, Section 3). The gradient is
+//! formed directly in Cartesian coordinates: with `dPnm/dt = k_nm Pn,m+1 / u`
+//! and `u^m cos(m lambda) = Re((x + i y)^m) / r^m` every term is a polynomial
+//! in `u`, so the acceleration has no `1/u` factor and holds on the polar
+//! axis. Orekit's `HolmesFeatherstoneAttractionModel` uses the same recursion
+//! and scaling. The acceleration
+//! ([`SphericalHarmonicGravity::body_fixed_acceleration_km_s2`]) and the
+//! potential ([`SphericalHarmonicGravity::body_fixed_potential_km2_s2`]) come
+//! from one sum.
+//!
+//! A model holds its coefficient triangle and the position-independent
+//! recursion factors of that one method through its maximum degree; clones
+//! share the factors.
 
 use crate::astro::constants::{MU_EARTH, RE_EARTH};
 use crate::astro::error::PropagationError;
+use crate::astro::forces::icgem::TimeVariableCoefficients;
 use crate::astro::forces::r#trait::ForceModel;
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
+use crate::astro::time::scales::tt_seconds_from_tdb_seconds;
 use nalgebra::Vector3;
+use std::sync::Arc;
 
 /// EGM96 gravitational parameter used with the embedded coefficient table.
 pub const EGM96_MU_KM3_S2: f64 = 398_600.441_5;
@@ -58,13 +88,13 @@ pub enum TideSystem {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct CoefficientPair {
-    c: f64,
-    s: f64,
+pub(crate) struct CoefficientPair {
+    pub(crate) c: f64,
+    pub(crate) s: f64,
 }
 
 impl CoefficientPair {
-    const ZERO: Self = Self { c: 0.0, s: 0.0 };
+    pub(crate) const ZERO: Self = Self { c: 0.0, s: 0.0 };
 }
 
 /// Fully normalized real spherical-harmonic coefficient.
@@ -176,6 +206,10 @@ impl SphericalHarmonicGravityConfig {
 ///
 /// The force is perturbation-only: degree 0 and degree 1 rows are ignored, and
 /// acceleration sums begin at degree 2.
+///
+/// A model read from an ICGEM file with time-variable coefficients evaluates
+/// them at the epoch of each state it is given; see
+/// [`SphericalHarmonicGravity::body_fixed_acceleration_at_km_s2`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct SphericalHarmonicGravity {
     mu_km3_s2: f64,
@@ -185,6 +219,93 @@ pub struct SphericalHarmonicGravity {
     coefficients: Vec<CoefficientPair>,
     has_non_zonal_terms: bool,
     tide_system: TideSystem,
+    holmes_featherstone: Arc<HolmesFeatherstoneTables>,
+    time_variable: Option<Arc<TimeVariableCoefficients>>,
+}
+
+/// Position-independent factors of the Holmes and Featherstone (2002)
+/// recursion through one maximum degree.
+#[derive(Debug, PartialEq)]
+struct HolmesFeatherstoneTables {
+    /// `[a_nm, b_nm, k_nm]` at [`coefficient_index`]`(n, m)`: the column
+    /// recursion `Q_nm = a_nm t Q_n-1,m - b_nm Q_n-2,m` (Holmes and
+    /// Featherstone 2002, Equations 11 and 12) and the derivative factor
+    /// `dQ_nm/dt = k_nm Q_n,m+1`.
+    recursion: Vec<[f64; 3]>,
+    /// Sectoral seeds `Q_mm = Pmm / u^m`, scaled by `2^-930`, for
+    /// `m = 0..=max_degree` (Equation 13).
+    sectoral: Vec<f64>,
+}
+
+/// Binary exponent of the Holmes and Featherstone sectoral scaling. Orekit
+/// uses the same value; `2^-930` is about `1e-280`, the factor of Holmes and
+/// Featherstone (2002), Section 3.
+const HOLMES_FEATHERSTONE_SCALING_EXPONENT: i32 = 930;
+
+impl HolmesFeatherstoneTables {
+    fn new(max_degree: u16) -> Self {
+        let n_max = usize::from(max_degree);
+        let mut recursion = vec![[0.0; 3]; triangular_len(max_degree)];
+        for n in 0..=n_max {
+            for m in 0..=n {
+                let idx = n * (n + 1) / 2 + m;
+                let mut entry = [0.0; 3];
+                if n > m {
+                    // Integer products stay below 2^53 through degree 65535,
+                    // so each factor is one rounded quotient and one sqrt.
+                    let nn = n as u64;
+                    let mm = m as u64;
+                    entry[0] = (((2 * nn - 1) * (2 * nn + 1)) as f64
+                        / ((nn - mm) * (nn + mm)) as f64)
+                        .sqrt();
+                    if n > m + 1 {
+                        entry[1] = (((2 * nn + 1) * (nn + mm - 1) * (nn - mm - 1)) as f64
+                            / ((nn - mm) * (nn + mm) * (2 * nn - 3)) as f64)
+                            .sqrt();
+                    }
+                    // Ratio of the normalization factors of orders m and
+                    // m + 1; the order-zero factor carries no 2.
+                    entry[2] = if m == 0 {
+                        ((nn * (nn + 1)) as f64 / 2.0).sqrt()
+                    } else {
+                        (((nn - mm) * (nn + mm + 1)) as f64).sqrt()
+                    };
+                }
+                recursion[idx] = entry;
+            }
+        }
+        let mut sectoral = vec![0.0; n_max + 1];
+        sectoral[0] = f64::powi(2.0, -HOLMES_FEATHERSTONE_SCALING_EXPONENT);
+        if n_max >= 1 {
+            sectoral[1] = 3.0_f64.sqrt() * sectoral[0];
+        }
+        for m in 2..=n_max {
+            sectoral[m] = ((2 * m + 1) as f64 / (2 * m) as f64).sqrt() * sectoral[m - 1];
+        }
+        Self {
+            recursion,
+            sectoral,
+        }
+    }
+
+    /// Fill `column[n]` with the scaled `Q_nm` for `n = m..=n_max`.
+    fn fill_column(&self, m: usize, n_max: usize, t: f64, column: &mut [f64]) {
+        column[m] = self.sectoral[m];
+        if m < n_max {
+            let idx = (m + 1) * (m + 2) / 2 + m;
+            column[m + 1] = self.recursion[idx][0] * t * column[m];
+            for n in (m + 2)..=n_max {
+                let [a, b, _] = self.recursion[n * (n + 1) / 2 + m];
+                column[n] = a * t * column[n - 1] - b * column[n - 2];
+            }
+        }
+    }
+}
+
+/// Potential and acceleration of the degree 2 and higher terms.
+struct HarmonicSum {
+    potential_km2_s2: f64,
+    acceleration_km_s2: [f64; 3],
 }
 
 impl Default for SphericalHarmonicGravity {
@@ -234,7 +355,6 @@ impl SphericalHarmonicGravity {
         let len = triangular_len(max_degree);
         let mut dense = vec![CoefficientPair::ZERO; len];
         let mut seen = vec![false; len];
-        let mut has_non_zonal_terms = false;
 
         for coefficient in coefficients {
             validate_coefficient(*coefficient)?;
@@ -256,20 +376,53 @@ impl SphericalHarmonicGravity {
                 c: coefficient.c,
                 s: coefficient.s,
             };
-            if coefficient.order > 0 && (coefficient.c != 0.0 || coefficient.s != 0.0) {
-                has_non_zonal_terms = true;
-            }
         }
 
-        Ok(Self {
+        Ok(Self::from_dense(
             mu_km3_s2,
             reference_radius_km,
             max_degree,
             max_order,
-            coefficients: dense,
+            dense,
+            tide_system,
+            None,
+        ))
+    }
+
+    /// Build a model from a dense coefficient triangle through `max_degree`,
+    /// with entries above `max_order` zero. The caller has validated every
+    /// argument.
+    pub(crate) fn from_dense(
+        mu_km3_s2: f64,
+        reference_radius_km: f64,
+        max_degree: u16,
+        max_order: u16,
+        coefficients: Vec<CoefficientPair>,
+        tide_system: TideSystem,
+        time_variable: Option<TimeVariableCoefficients>,
+    ) -> Self {
+        debug_assert_eq!(coefficients.len(), triangular_len(max_degree));
+        let static_non_zonal = (2..=max_degree).any(|degree| {
+            (1..=degree.min(max_order)).any(|order| {
+                let pair = coefficients[coefficient_index(degree, order)];
+                pair.c != 0.0 || pair.s != 0.0
+            })
+        });
+        let has_non_zonal_terms = static_non_zonal
+            || time_variable
+                .as_ref()
+                .is_some_and(TimeVariableCoefficients::has_non_zonal_terms);
+        Self {
+            mu_km3_s2,
+            reference_radius_km,
+            max_degree,
+            max_order,
+            coefficients,
             has_non_zonal_terms,
             tide_system,
-        })
+            holmes_featherstone: Arc::new(HolmesFeatherstoneTables::new(max_degree)),
+            time_variable: time_variable.map(Arc::new),
+        }
     }
 
     /// Build from an ASCII coefficient table in the tide system
@@ -322,6 +475,10 @@ impl SphericalHarmonicGravity {
     }
 
     /// Return the coefficient at `degree, order`, if it lies inside the model.
+    ///
+    /// For a time-variable model this is the static part only: zero for a
+    /// coefficient the file gives by `gfct` records. Use
+    /// [`Self::coefficient_at`] for its value at an epoch.
     pub fn coefficient(&self, degree: u16, order: u16) -> Option<SphericalHarmonicCoefficient> {
         if degree > self.max_degree || order > degree || order > self.max_order {
             return None;
@@ -335,16 +492,149 @@ impl SphericalHarmonicGravity {
         })
     }
 
+    /// Whether any coefficient varies with time.
+    pub fn is_time_variable(&self) -> bool {
+        self.time_variable.is_some()
+    }
+
+    /// Return the coefficient at `degree, order` at `epoch_tt_seconds` (TT
+    /// seconds since J2000), or `None` if it lies outside the model.
+    ///
+    /// For a static model the epoch is validated and otherwise ignored.
+    pub fn coefficient_at(
+        &self,
+        degree: u16,
+        order: u16,
+        epoch_tt_seconds: f64,
+    ) -> Result<Option<SphericalHarmonicCoefficient>, PropagationError> {
+        let low = self.time_variable_coefficients(epoch_tt_seconds)?;
+        if degree > self.max_degree || order > degree || order > self.max_order {
+            return Ok(None);
+        }
+        let idx = coefficient_index(degree, order);
+        let pair = low.get(idx).copied().unwrap_or(self.coefficients[idx]);
+        Ok(Some(SphericalHarmonicCoefficient {
+            degree,
+            order,
+            c: pair.c,
+            s: pair.s,
+        }))
+    }
+
+    /// Coefficients through the highest time-variable degree evaluated at
+    /// `epoch_tt_seconds`, empty for a static model.
+    fn time_variable_coefficients(
+        &self,
+        epoch_tt_seconds: f64,
+    ) -> Result<Vec<CoefficientPair>, PropagationError> {
+        validate_finite(epoch_tt_seconds, "epoch_tt_seconds")?;
+        match &self.time_variable {
+            Some(time_variable) => time_variable
+                .coefficients_at(&self.coefficients, epoch_tt_seconds)
+                .map_err(|error| PropagationError::InvalidInput(error.to_string())),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Evaluate the perturbation acceleration in the body-fixed frame at
+    /// `epoch_tt_seconds` (TT seconds since J2000), the epoch at which
+    /// time-variable coefficients are evaluated.
+    ///
+    /// For a static model this equals
+    /// [`Self::body_fixed_acceleration_km_s2`]. For a time-variable model an
+    /// epoch outside the validity of a coefficient's `gfct` records is an
+    /// [`PropagationError::InvalidInput`].
+    pub fn body_fixed_acceleration_at_km_s2(
+        &self,
+        position_body_fixed_km: [f64; 3],
+        epoch_tt_seconds: f64,
+    ) -> Result<[f64; 3], PropagationError> {
+        if self.time_variable.is_none() {
+            validate_finite(epoch_tt_seconds, "epoch_tt_seconds")?;
+            return self.body_fixed_acceleration_km_s2(position_body_fixed_km);
+        }
+        let low = self.time_variable_coefficients(epoch_tt_seconds)?;
+        Ok(self
+            .holmes_featherstone_sum(position_body_fixed_km, &low)?
+            .acceleration_km_s2)
+    }
+
+    /// Perturbing potential of the degree 2 and higher terms in the
+    /// body-fixed frame, km^2/s^2, positive with the convention
+    /// `V = mu / r (1 + sum ...)` whose gradient is the acceleration.
+    ///
+    /// Evaluated by the Holmes and Featherstone (2002) method for every model.
+    /// A time-variable model needs an epoch: use
+    /// [`Self::body_fixed_potential_at_km2_s2`].
+    pub fn body_fixed_potential_km2_s2(
+        &self,
+        position_body_fixed_km: [f64; 3],
+    ) -> Result<f64, PropagationError> {
+        self.require_static()?;
+        Ok(self
+            .holmes_featherstone_sum(position_body_fixed_km, &[])?
+            .potential_km2_s2)
+    }
+
+    /// Perturbing potential at `epoch_tt_seconds` (TT seconds since J2000);
+    /// see [`Self::body_fixed_potential_km2_s2`].
+    pub fn body_fixed_potential_at_km2_s2(
+        &self,
+        position_body_fixed_km: [f64; 3],
+        epoch_tt_seconds: f64,
+    ) -> Result<f64, PropagationError> {
+        let low = self.time_variable_coefficients(epoch_tt_seconds)?;
+        Ok(self
+            .holmes_featherstone_sum(position_body_fixed_km, &low)?
+            .potential_km2_s2)
+    }
+
+    fn require_static(&self) -> Result<(), PropagationError> {
+        if self.time_variable.is_some() {
+            return Err(PropagationError::InvalidInput(
+                "a time-variable spherical-harmonic model is evaluated at an epoch; \
+                 use the _at form"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Evaluate the perturbation acceleration in the body-fixed frame.
+    ///
+    /// A time-variable model needs an epoch: use
+    /// [`Self::body_fixed_acceleration_at_km_s2`].
     pub fn body_fixed_acceleration_km_s2(
         &self,
         position_body_fixed_km: [f64; 3],
     ) -> Result<[f64; 3], PropagationError> {
-        validate_vec3(position_body_fixed_km, "position_body_fixed_km")?;
+        self.require_static()?;
+        Ok(self
+            .holmes_featherstone_sum(position_body_fixed_km, &[])?
+            .acceleration_km_s2)
+    }
 
-        let x = position_body_fixed_km[0];
-        let y = position_body_fixed_km[1];
-        let z = position_body_fixed_km[2];
+    /// Holmes and Featherstone (2002) sum with Cartesian gradient; see the
+    /// module documentation. Coefficients at indices below `low.len()` are
+    /// read from `low` instead of the static table.
+    ///
+    /// With `t = z/r`, `u = rho/r`, `q = a/r`, `Q_nm = Pnm/u^m` and
+    /// `Phi_m = C cos(m lambda) + S sin(m lambda)`, each term
+    /// `mu/r q^n u^m Q_nm Phi_m` is `mu a^n Q_nm(z/r) (C Re + S Im)(x+iy)^m /
+    /// r^(n+m+1)`. Its Cartesian gradient is
+    /// `mu/r^2 q^n [ -(x_j/r) ((n+m+1) Q + t Q') u^m Phi_m + e_z Q' u^m Phi_m
+    /// + m Q u^(m-1) (e_x Phi'_m + e_y Psi'_m) ]` with
+    /// `Phi'_m = C cos((m-1) lambda) + S sin((m-1) lambda)`,
+    /// `Psi'_m = S cos((m-1) lambda) - C sin((m-1) lambda)` and
+    /// `Q'_nm = k_nm Q_n,m+1`. All powers of `u` are non-negative, so the
+    /// expression holds on the polar axis, where `lambda` is taken as zero.
+    fn holmes_featherstone_sum(
+        &self,
+        position_body_fixed_km: [f64; 3],
+        low: &[CoefficientPair],
+    ) -> Result<HarmonicSum, PropagationError> {
+        validate_vec3(position_body_fixed_km, "position_body_fixed_km")?;
+        let [x, y, z] = position_body_fixed_km;
         let rho2 = x * x + y * y;
         let r2 = rho2 + z * z;
         if r2 == 0.0 {
@@ -352,127 +642,107 @@ impl SphericalHarmonicGravity {
                 "zero position magnitude".to_string(),
             ));
         }
+        if !r2.is_finite() {
+            return Err(PropagationError::NumericalFailure(
+                "position magnitude overflows".to_string(),
+            ));
+        }
         let r = r2.sqrt();
         let rho = rho2.sqrt();
-        let sin_lat = z / r;
-        let cos_lat = rho / r;
+        let t = z / r;
+        let u = rho / r;
+        let (cos_lambda, sin_lambda) = if rho > 0.0 {
+            (x / rho, y / rho)
+        } else {
+            (1.0, 0.0)
+        };
 
-        if rho == 0.0 {
-            return Ok(self.pole_acceleration_km_s2(r, sin_lat));
+        let n_max = usize::from(self.max_degree);
+        let m_max = usize::from(self.max_order);
+        let tables = &*self.holmes_featherstone;
+        let (cos_m, sin_m) = split_longitude_trig(m_max, cos_lambda, sin_lambda);
+        let q_pow = split_powers(n_max, self.reference_radius_km / r);
+
+        let mut column = vec![0.0; n_max + 1];
+        let mut next_column = vec![0.0; n_max + 1];
+        if m_max < n_max {
+            tables.fill_column(m_max + 1, n_max, t, &mut next_column);
         }
 
-        let legendre = normalized_legendre(self.max_degree, self.max_order, sin_lat, cos_lat)?;
-        let (cos_m, sin_m) = longitude_trig(self.max_order, x, y, rho)?;
-
-        let mut radial_accel = 0.0;
-        let mut lat_accel = 0.0;
-        let mut lon_accel = 0.0;
-        let mut radius_power = 1.0;
-        let mu_over_r2 = self.mu_km3_s2 / r2;
-
-        for degree in 1..=self.max_degree {
-            radius_power *= self.reference_radius_km / r;
-            if degree < 2 {
-                continue;
-            }
-            let factor = mu_over_r2 * radius_power;
-            let order_limit = degree.min(self.max_order);
-            let mut w = 0.0;
-            let mut d_w_d_s = 0.0;
-            let mut d_w_d_lambda = 0.0;
-
-            for order in 0..=order_limit {
-                let coefficient = self.coefficients[coefficient_index(degree, order)];
-                if coefficient.c == 0.0 && coefficient.s == 0.0 {
+        // Horner accumulators in u: potential, the radial-like sum shared by
+        // all three axes, the z sum, and the x and y sums of order m >= 1.
+        let mut h_potential = 0.0;
+        let mut h_radial = 0.0;
+        let mut h_z = 0.0;
+        let mut h_x = 0.0;
+        let mut h_y = 0.0;
+        for m in (0..=m_max).rev() {
+            tables.fill_column(m, n_max, t, &mut column);
+            let mut sum_c = 0.0;
+            let mut sum_s = 0.0;
+            let mut radial_c = 0.0;
+            let mut radial_s = 0.0;
+            let mut dt_c = 0.0;
+            let mut dt_s = 0.0;
+            let order_term = (m + 1) as f64;
+            for n in m.max(2)..=n_max {
+                let idx = n * (n + 1) / 2 + m;
+                let pair = if idx < low.len() {
+                    low[idx]
+                } else {
+                    self.coefficients[idx]
+                };
+                if pair.c == 0.0 && pair.s == 0.0 {
                     continue;
                 }
-                let idx = coefficient_index(degree, order);
-                let trig = coefficient.c * cos_m[usize::from(order)]
-                    + coefficient.s * sin_m[usize::from(order)];
-                w += legendre.p[idx] * trig;
-                d_w_d_s += legendre.dp_ds[idx] * trig;
-                if order > 0 {
-                    let order_f64 = f64::from(order);
-                    d_w_d_lambda += legendre.p[idx]
-                        * order_f64
-                        * (coefficient.s * cos_m[usize::from(order)]
-                            - coefficient.c * sin_m[usize::from(order)]);
-                }
-            }
-
-            radial_accel -= f64::from(degree + 1) * factor * w;
-            lat_accel += factor * cos_lat * d_w_d_s;
-            if d_w_d_lambda != 0.0 {
-                if cos_lat == 0.0 {
-                    return Err(PropagationError::NumericalFailure(
-                        "longitude derivative is singular at the pole".to_string(),
-                    ));
-                }
-                lon_accel += factor * d_w_d_lambda / cos_lat;
-            }
-        }
-
-        if rho == 0.0 {
-            return Ok([0.0, 0.0, radial_accel * sin_lat]);
-        }
-
-        let er = [x / r, y / r, z / r];
-        let e_lat = [-sin_lat * x / rho, -sin_lat * y / rho, cos_lat];
-        let e_lon = [-y / rho, x / rho, 0.0];
-        Ok([
-            radial_accel * er[0] + lat_accel * e_lat[0] + lon_accel * e_lon[0],
-            radial_accel * er[1] + lat_accel * e_lat[1] + lon_accel * e_lon[1],
-            radial_accel * er[2] + lat_accel * e_lat[2] + lon_accel * e_lon[2],
-        ])
-    }
-
-    fn pole_acceleration_km_s2(&self, r: f64, sin_lat: f64) -> [f64; 3] {
-        let mut radial_accel = 0.0;
-        let mut transverse_accel = [0.0_f64; 2];
-        let mut radius_power = 1.0;
-        let mu_over_r2 = self.mu_km3_s2 / (r * r);
-        let is_south_pole = sin_lat < 0.0;
-
-        for degree in 1..=self.max_degree {
-            radius_power *= self.reference_radius_km / r;
-            if degree < 2 {
-                continue;
-            }
-            let factor = mu_over_r2 * radius_power;
-            let zonal = self.coefficients[coefficient_index(degree, 0)];
-            if zonal.c != 0.0 {
-                let pole_sign = if is_south_pole && degree % 2 == 1 {
-                    -1.0
+                let p = column[n] * q_pow[n];
+                let dp = if n > m {
+                    tables.recursion[idx][2] * next_column[n] * q_pow[n]
                 } else {
-                    1.0
+                    0.0
                 };
-                let p_n0 = pole_sign * f64::from(2 * degree + 1).sqrt();
-                radial_accel -= f64::from(degree + 1) * factor * p_n0 * zonal.c;
+                let w = (n as f64 + order_term) * p + t * dp;
+                sum_c += p * pair.c;
+                sum_s += p * pair.s;
+                radial_c += w * pair.c;
+                radial_s += w * pair.s;
+                dt_c += dp * pair.c;
+                dt_s += dp * pair.s;
             }
-
-            if self.max_order >= 1 {
-                let tesseral = self.coefficients[coefficient_index(degree, 1)];
-                if tesseral.c != 0.0 || tesseral.s != 0.0 {
-                    let pole_sign = if is_south_pole && degree % 2 == 0 {
-                        -1.0
-                    } else {
-                        1.0
-                    };
-                    let q_n1 = pole_sign
-                        * (f64::from(degree) * f64::from(degree + 1) * f64::from(2 * degree + 1)
-                            / 2.0)
-                            .sqrt();
-                    transverse_accel[0] += factor * q_n1 * tesseral.c;
-                    transverse_accel[1] += factor * q_n1 * tesseral.s;
-                }
+            let (c_m, s_m) = (cos_m[m], sin_m[m]);
+            h_potential = h_potential * u + (c_m * sum_c + s_m * sum_s);
+            h_radial = h_radial * u + (c_m * radial_c + s_m * radial_s);
+            h_z = h_z * u + (c_m * dt_c + s_m * dt_s);
+            if m >= 1 {
+                let (c_p, s_p) = (cos_m[m - 1], sin_m[m - 1]);
+                let order = m as f64;
+                h_x = h_x * u + order * (c_p * sum_c + s_p * sum_s);
+                h_y = h_y * u + order * (c_p * sum_s - s_p * sum_c);
             }
+            std::mem::swap(&mut column, &mut next_column);
         }
 
-        [
-            transverse_accel[0],
-            transverse_accel[1],
-            radial_accel * sin_lat,
-        ]
+        let unscale = f64::powi(2.0, HOLMES_FEATHERSTONE_SCALING_EXPONENT);
+        let mu_over_r = self.mu_km3_s2 / r;
+        let mu_over_r2 = mu_over_r / r;
+        let radial = h_radial * unscale;
+        let potential_km2_s2 = mu_over_r * (h_potential * unscale);
+        let acceleration_km_s2 = [
+            mu_over_r2 * (h_x * unscale - x / r * radial),
+            mu_over_r2 * (h_y * unscale - y / r * radial),
+            mu_over_r2 * (h_z * unscale - z / r * radial),
+        ];
+        if !potential_km2_s2.is_finite() || acceleration_km_s2.iter().any(|a| !a.is_finite()) {
+            return Err(PropagationError::NumericalFailure(format!(
+                "spherical-harmonic sum through degree {} is not finite at radius {r} km \
+                 (reference radius {} km)",
+                self.max_degree, self.reference_radius_km
+            )));
+        }
+        Ok(HarmonicSum {
+            potential_km2_s2,
+            acceleration_km_s2,
+        })
     }
 }
 
@@ -512,7 +782,13 @@ impl ForceModel for SphericalHarmonicGravity {
                 })?,
             None => state.position_array(),
         };
-        let accel_body_fixed = self.body_fixed_acceleration_km_s2(position_body_fixed_km)?;
+        let accel_body_fixed = if self.time_variable.is_some() {
+            // ICGEM epochs are TT; the state epoch is TDB.
+            let epoch_tt_seconds = tt_seconds_from_tdb_seconds(state.epoch_tdb_seconds);
+            self.body_fixed_acceleration_at_km_s2(position_body_fixed_km, epoch_tt_seconds)?
+        } else {
+            self.body_fixed_acceleration_km_s2(position_body_fixed_km)?
+        };
         let accel_gcrf = match orientation {
             Some(orientation) => orientation
                 .itrf_to_gcrf_position_km(accel_body_fixed)
@@ -525,11 +801,6 @@ impl ForceModel for SphericalHarmonicGravity {
         };
         Ok(Vector3::new(accel_gcrf[0], accel_gcrf[1], accel_gcrf[2]))
     }
-}
-
-struct LegendreValues {
-    p: Vec<f64>,
-    dp_ds: Vec<f64>,
 }
 
 fn parse_ascii_coefficients(
@@ -575,168 +846,38 @@ fn parse_ascii_coefficients(
     Ok(coefficients)
 }
 
-fn normalized_legendre(
-    max_degree: u16,
-    max_order: u16,
-    sin_lat: f64,
-    cos_lat: f64,
-) -> Result<LegendreValues, PropagationError> {
-    let len = triangular_len(max_degree);
-    let mut p = vec![0.0; len];
-    let mut dp_ds = vec![0.0; len];
-    p[0] = 1.0;
-
-    if cos_lat == 0.0 && max_order > 0 {
-        return Err(PropagationError::NumericalFailure(
-            "associated Legendre derivative is singular at the pole".to_string(),
-        ));
-    }
-    let du_ds = if max_order > 0 {
-        -sin_lat / cos_lat
-    } else {
-        0.0
-    };
-
-    initialize_low_degree_legendre(
-        max_degree, max_order, sin_lat, cos_lat, du_ds, &mut p, &mut dp_ds,
-    );
-
-    for degree in 4..=max_degree {
-        let diag_order = degree;
-        if diag_order <= max_order {
-            let coeff = ((f64::from(2 * degree + 1)) / f64::from(2 * degree)).sqrt();
-            let idx = coefficient_index(degree, diag_order);
-            let prev = coefficient_index(degree - 1, diag_order - 1);
-            p[idx] = coeff * cos_lat * p[prev];
-            dp_ds[idx] = coeff * (du_ds * p[prev] + cos_lat * dp_ds[prev]);
-        }
-
-        let order_limit = (degree - 1).min(max_order);
-        for order in 0..=order_limit {
-            let idx = coefficient_index(degree, order);
-            if degree == order + 1 {
-                let coeff = f64::from(2 * degree + 1).sqrt();
-                let prev = coefficient_index(degree - 1, order);
-                p[idx] = coeff * sin_lat * p[prev];
-                dp_ds[idx] = coeff * (p[prev] + sin_lat * dp_ds[prev]);
-            } else {
-                let a = ((f64::from(2 * degree + 1) * f64::from(2 * degree - 1))
-                    / (f64::from(degree - order) * f64::from(degree + order)))
-                .sqrt();
-                let b = ((f64::from(2 * degree + 1)
-                    * f64::from(degree + order - 1)
-                    * f64::from(degree - order - 1))
-                    / (f64::from(2 * degree - 3)
-                        * f64::from(degree - order)
-                        * f64::from(degree + order)))
-                .sqrt();
-                let prev1 = coefficient_index(degree - 1, order);
-                let prev2 = coefficient_index(degree - 2, order);
-                p[idx] = a * sin_lat * p[prev1] - b * p[prev2];
-                dp_ds[idx] = a * (p[prev1] + sin_lat * dp_ds[prev1]) - b * dp_ds[prev2];
-            }
-        }
-    }
-
-    Ok(LegendreValues { p, dp_ds })
-}
-
-fn initialize_low_degree_legendre(
-    max_degree: u16,
-    max_order: u16,
-    sin_lat: f64,
-    cos_lat: f64,
-    du_ds: f64,
-    p: &mut [f64],
-    dp_ds: &mut [f64],
-) {
-    let sqrt3 = 3.0_f64.sqrt();
-    if max_degree >= 1 {
-        let idx = coefficient_index(1, 0);
-        p[idx] = sqrt3 * sin_lat;
-        dp_ds[idx] = sqrt3;
-        if max_order >= 1 {
-            let idx = coefficient_index(1, 1);
-            p[idx] = sqrt3 * cos_lat;
-            dp_ds[idx] = sqrt3 * du_ds;
-        }
-    }
-
-    let sqrt5 = 5.0_f64.sqrt();
-    let sqrt15 = 15.0_f64.sqrt();
-    if max_degree >= 2 {
-        let idx = coefficient_index(2, 0);
-        p[idx] = 0.5 * sqrt5 * (3.0 * sin_lat * sin_lat - 1.0);
-        dp_ds[idx] = 3.0 * sqrt5 * sin_lat;
-        if max_order >= 1 {
-            let idx = coefficient_index(2, 1);
-            p[idx] = sqrt15 * sin_lat * cos_lat;
-            dp_ds[idx] = sqrt15 * (cos_lat + sin_lat * du_ds);
-        }
-        if max_order >= 2 {
-            let idx = coefficient_index(2, 2);
-            p[idx] = 0.5 * sqrt15 * cos_lat * cos_lat;
-            dp_ds[idx] = sqrt15 * cos_lat * du_ds;
-        }
-    }
-
-    if max_degree >= 3 {
-        let sqrt7 = 7.0_f64.sqrt();
-        let sqrt42 = 42.0_f64.sqrt();
-        let sqrt70 = 70.0_f64.sqrt();
-        let sqrt105 = 105.0_f64.sqrt();
-        let sin2 = sin_lat * sin_lat;
-        let cos2 = cos_lat * cos_lat;
-
-        let idx = coefficient_index(3, 0);
-        p[idx] = 0.5 * sqrt7 * (5.0 * sin_lat * sin2 - 3.0 * sin_lat);
-        dp_ds[idx] = 0.5 * sqrt7 * (15.0 * sin2 - 3.0);
-        if max_order >= 1 {
-            let idx = coefficient_index(3, 1);
-            let term = 5.0 * sin2 - 1.0;
-            p[idx] = 0.25 * sqrt42 * cos_lat * term;
-            dp_ds[idx] = 0.25 * sqrt42 * (du_ds * term + cos_lat * 10.0 * sin_lat);
-        }
-        if max_order >= 2 {
-            let idx = coefficient_index(3, 2);
-            p[idx] = 0.5 * sqrt105 * sin_lat * cos2;
-            dp_ds[idx] = 0.5 * sqrt105 * (cos2 + 2.0 * sin_lat * cos_lat * du_ds);
-        }
-        if max_order >= 3 {
-            let idx = coefficient_index(3, 3);
-            p[idx] = 0.25 * sqrt70 * cos_lat * cos2;
-            dp_ds[idx] = 0.75 * sqrt70 * cos2 * du_ds;
-        }
-    }
-}
-
-fn longitude_trig(
-    max_order: u16,
-    x: f64,
-    y: f64,
-    rho: f64,
-) -> Result<(Vec<f64>, Vec<f64>), PropagationError> {
-    let len = usize::from(max_order) + 1;
-    let mut cos_m = vec![0.0; len];
-    let mut sin_m = vec![0.0; len];
+/// `cos(m lambda)` and `sin(m lambda)` for `m = 0..=max_order`, each formed
+/// from two lower orders split near the middle so rounding grows with
+/// `log2(m)` rather than `m`.
+fn split_longitude_trig(max_order: usize, cos_1: f64, sin_1: f64) -> (Vec<f64>, Vec<f64>) {
+    let mut cos_m = vec![0.0; max_order + 1];
+    let mut sin_m = vec![0.0; max_order + 1];
     cos_m[0] = 1.0;
-    if max_order == 0 {
-        return Ok((cos_m, sin_m));
+    if max_order >= 1 {
+        cos_m[1] = cos_1;
+        sin_m[1] = sin_1;
     }
-    if rho == 0.0 {
-        return Err(PropagationError::NumericalFailure(
-            "longitude is undefined at the pole".to_string(),
-        ));
+    for m in 2..=max_order {
+        let p = m / 2;
+        let q = m - p;
+        cos_m[m] = cos_m[p] * cos_m[q] - sin_m[p] * sin_m[q];
+        sin_m[m] = sin_m[p] * cos_m[q] + cos_m[p] * sin_m[q];
     }
-    let cos_1 = x / rho;
-    let sin_1 = y / rho;
-    cos_m[1] = cos_1;
-    sin_m[1] = sin_1;
-    for order in 2..=usize::from(max_order) {
-        cos_m[order] = cos_m[order - 1] * cos_1 - sin_m[order - 1] * sin_1;
-        sin_m[order] = sin_m[order - 1] * cos_1 + cos_m[order - 1] * sin_1;
+    (cos_m, sin_m)
+}
+
+/// `ratio^n` for `n = 0..=max_degree`, split like [`split_longitude_trig`].
+fn split_powers(max_degree: usize, ratio: f64) -> Vec<f64> {
+    let mut powers = vec![0.0; max_degree + 1];
+    powers[0] = 1.0;
+    if max_degree >= 1 {
+        powers[1] = ratio;
     }
-    Ok((cos_m, sin_m))
+    for n in 2..=max_degree {
+        let p = n / 2;
+        powers[n] = powers[p] * powers[n - p];
+    }
+    powers
 }
 
 fn validate_coefficient(coefficient: SphericalHarmonicCoefficient) -> Result<(), PropagationError> {
@@ -756,12 +897,29 @@ fn validate_degree_order(max_degree: u16, max_order: u16) -> Result<(), Propagat
             "max_degree must be at least 2".to_string(),
         ));
     }
+    validate_table_size(max_degree)?;
     if max_order > max_degree {
         return Err(PropagationError::InvalidInput(
             "max_order must not exceed max_degree".to_string(),
         ));
     }
     Ok(())
+}
+
+/// Refuse a degree whose recursion table, the largest per-coefficient
+/// table, holds more bytes than this target can address (`isize::MAX`);
+/// only a 32-bit target reaches the bound below degree 65536.
+fn validate_table_size(max_degree: u16) -> Result<(), PropagationError> {
+    let addressable = triangular_len(max_degree)
+        .checked_mul(core::mem::size_of::<[f64; 3]>())
+        .is_some_and(|bytes| isize::try_from(bytes).is_ok());
+    if addressable {
+        Ok(())
+    } else {
+        Err(PropagationError::InvalidInput(format!(
+            "max_degree {max_degree} needs coefficient tables larger than this target can address"
+        )))
+    }
 }
 
 fn validate_finite_positive(value: f64, field: &'static str) -> Result<(), PropagationError> {
@@ -823,14 +981,22 @@ fn table_error(line_idx: usize, reason: &'static str) -> PropagationError {
     PropagationError::InvalidInput(format!("coefficient table line {}: {reason}", line_idx + 1))
 }
 
-fn triangular_len(max_degree: u16) -> usize {
-    let n = usize::from(max_degree);
-    (n + 1) * (n + 2) / 2
+/// `k (k + 1) / 2`, halving the even factor first so that no intermediate
+/// exceeds the result: for every `k <= 65536` it fits a 32-bit `usize`.
+const fn triangle_number(k: usize) -> usize {
+    if k.is_multiple_of(2) {
+        (k / 2) * (k + 1)
+    } else {
+        k * k.div_ceil(2)
+    }
 }
 
-fn coefficient_index(degree: u16, order: u16) -> usize {
-    let degree = usize::from(degree);
-    degree * (degree + 1) / 2 + usize::from(order)
+pub(crate) fn triangular_len(max_degree: u16) -> usize {
+    triangle_number(max_degree as usize + 1)
+}
+
+pub(crate) fn coefficient_index(degree: u16, order: u16) -> usize {
+    triangle_number(degree as usize) + order as usize
 }
 
 #[cfg(test)]
@@ -921,9 +1087,83 @@ mod tests {
     }
 
     #[test]
-    fn legendre_recursion_matches_low_degree_polynomial_bits() {
-        let legendre =
-            normalized_legendre(3, 3, 0.3125, 0.949_917_759_598_166_5).expect("Legendre values");
+    fn egm96_results_are_pinned() {
+        // Holmes and Featherstone bits. Each component is within 1.3e-15
+        // (8 units in the last place) of the 4.1.0 release, which summed the
+        // same terms by a different recursion; the zonal-only model's bits
+        // are unchanged.
+        let cases: [(SphericalHarmonicGravity, [f64; 3], [u64; 3]); 6] = [
+            (
+                SphericalHarmonicGravity::egm96_degree_order_36().expect("EGM96"),
+                [0.0, 0.0, 7000.0],
+                [0x3e7625f4256e442f, 0xbe530b1ec735a2da, 0x3ef6dc4ac71d4fba],
+            ),
+            (
+                SphericalHarmonicGravity::egm96_degree_order_36().expect("EGM96"),
+                [6778.137, 0.0, 0.0],
+                [0xbeea557b05203aab, 0xbe5bc6af19774773, 0x3e60a7bae13f0290],
+            ),
+            (
+                SphericalHarmonicGravity::egm96_degree_order_36().expect("EGM96"),
+                [3000.0, -6000.0, -1500.0],
+                [0xbed135970c0fa20c, 0x3ee0a504f13268f3, 0x3edda3dfbe02071d],
+            ),
+            (
+                SphericalHarmonicGravity::egm96_truncated(20, 12).expect("EGM96"),
+                [3000.0, -6000.0, -1500.0],
+                [0xbed129350c706049, 0x3ee0a8dc6e1378f7, 0x3eddab485b0c6140],
+            ),
+            (
+                SphericalHarmonicGravity::earth_egm96_truncated(6, 0).expect("EGM96"),
+                [0.0, 0.0, 7000.0],
+                [0, 0, 0x3ef6e60251454b89],
+            ),
+            (
+                SphericalHarmonicGravity::earth_egm96_truncated(6, 0).expect("EGM96"),
+                [3000.0, -6000.0, -1500.0],
+                [0xbed080caa762b83e, 0x3ee080caa762b83e, 0x3eddda192cb043ae],
+            ),
+        ];
+        for (model, position, bits) in cases {
+            let a = model
+                .body_fixed_acceleration_km_s2(position)
+                .expect("acceleration");
+            assert_eq!(a.map(f64::to_bits), bits, "{position:?}");
+        }
+    }
+
+    #[test]
+    fn holmes_featherstone_tables_match_the_recursion_definitions() {
+        let tables = HolmesFeatherstoneTables::new(6);
+        // Holmes and Featherstone (2002) Equations 11 and 12 at n = 5, m = 2.
+        let [a, b, k] = tables.recursion[coefficient_index(5, 2)];
+        assert_close(a, (9.0_f64 * 11.0 / (3.0 * 7.0)).sqrt(), 1.0e-15);
+        assert_close(
+            b,
+            (11.0_f64 * 6.0 * 2.0 / (3.0 * 7.0 * 7.0)).sqrt(),
+            1.0e-15,
+        );
+        assert_close(k, (3.0_f64 * 8.0).sqrt(), 1.0e-15);
+        // Order zero carries the sqrt(2) of the normalization.
+        assert_close(
+            tables.recursion[coefficient_index(3, 0)][2],
+            6.0_f64.sqrt(),
+            1.0e-15,
+        );
+        // Sectorals P_mm / u^m, unscaled: sqrt(3), sqrt(15)/2, sqrt(70)/4.
+        let unscale = f64::powi(2.0, HOLMES_FEATHERSTONE_SCALING_EXPONENT);
+        assert_close(tables.sectoral[1] * unscale, 3.0_f64.sqrt(), 1.0e-15);
+        assert_close(tables.sectoral[2] * unscale, 15.0_f64.sqrt() / 2.0, 1.0e-15);
+        assert_close(tables.sectoral[3] * unscale, 70.0_f64.sqrt() / 4.0, 1.0e-15);
+    }
+
+    #[test]
+    fn holmes_featherstone_columns_match_low_degree_polynomials() {
+        // Pnm(t) = u^m Q_nm(t) at t = 0.3125, u = sqrt(1 - t^2): the
+        // expected values are the fully normalized low-degree polynomials of
+        // Montenbruck and Gill section 3.2.4, evaluated independently.
+        let t = 0.3125_f64;
+        let u = 0.949_917_759_598_166_5_f64;
         let expected = [
             (0_u16, 0_u16, 1.0_f64),
             (1, 0, 0.541_265_877_365_274_1),
@@ -936,11 +1176,16 @@ mod tests {
             (3, 2, 1.444_729_996_909_586_8),
             (3, 3, 1.792_862_776_822_135_2),
         ];
+        let tables = HolmesFeatherstoneTables::new(3);
+        let unscale = f64::powi(2.0, HOLMES_FEATHERSTONE_SCALING_EXPONENT);
+        let mut column = [0.0; 4];
+        // Largest measured 1.3 units in the last place, at degree 3.
         for (degree, order, expected_value) in expected {
-            assert_eq!(
-                legendre.p[coefficient_index(degree, order)].to_bits(),
-                expected_value.to_bits(),
-                "degree={degree} order={order}"
+            tables.fill_column(usize::from(order), 3, t, &mut column);
+            let value = column[usize::from(degree)] * unscale * u.powi(i32::from(order));
+            assert!(
+                (value - expected_value).abs() <= 2.0 * f64::EPSILON * expected_value.abs(),
+                "degree={degree} order={order} value={value} expected={expected_value}"
             );
         }
     }
@@ -1010,51 +1255,21 @@ mod tests {
             TideSystem::TideFree,
         )
         .expect("degree two gravity");
-        let position = [7033.0, -1221.0, 1329.0];
-        let actual = gravity
-            .body_fixed_acceleration_km_s2(position)
-            .expect("body acceleration");
-        let expected = degree_two_closed_form(position, MU_EARTH, RE_EARTH, &coefficients);
-        assert_close_vec(actual, expected, 5.0e-21);
-    }
-
-    #[test]
-    fn degree_two_pole_limit_matches_closed_form_tensor() {
-        let coefficients = [
-            SphericalHarmonicCoefficient {
-                degree: 2,
-                order: 0,
-                c: -J2_EARTH / 5.0_f64.sqrt(),
-                s: 0.0,
-            },
-            SphericalHarmonicCoefficient {
-                degree: 2,
-                order: 1,
-                c: -1.25e-9,
-                s: 2.75e-9,
-            },
-            SphericalHarmonicCoefficient {
-                degree: 2,
-                order: 2,
-                c: 2.4e-6,
-                s: -1.4e-6,
-            },
-        ];
-        let gravity = SphericalHarmonicGravity::from_normalized_coefficients(
-            MU_EARTH,
-            RE_EARTH,
-            2,
-            2,
-            &coefficients,
-            TideSystem::TideFree,
-        )
-        .expect("degree two gravity");
-        let position = [0.0, 0.0, 7000.0];
-        let actual = gravity
-            .body_fixed_acceleration_km_s2(position)
-            .expect("pole acceleration");
-        let expected = degree_two_closed_form(position, MU_EARTH, RE_EARTH, &coefficients);
-        assert_close_vec(actual, expected, 5.0e-21);
+        // |a| is about 2.2e-5 km/s^2, whose unit in the last place is
+        // 3.4e-21. Largest measured differences: 1.7e-21 off the axis and
+        // 6.8e-21 (two units) on it, where the closed form and the sum
+        // each round differently.
+        for (position, tolerance) in [
+            ([7033.0, -1221.0, 1329.0], 5.0e-21),
+            ([0.0, 0.0, 7000.0], 1.0e-20),
+            ([0.0, 0.0, -7000.0], 1.0e-20),
+        ] {
+            let actual = gravity
+                .body_fixed_acceleration_km_s2(position)
+                .expect("body acceleration");
+            let expected = degree_two_closed_form(position, MU_EARTH, RE_EARTH, &coefficients);
+            assert_close_vec(actual, expected, tolerance);
+        }
     }
 
     #[test]
@@ -1316,5 +1531,41 @@ gfc 3 0 0.957161207093D-06 0.000000000000D+00 0.0 0.0
             scale * (dq[1] / r5 - 5.0 * q * y / r7),
             scale * (dq[2] / r5 - 5.0 * q * z / r7),
         ]
+    }
+
+    #[test]
+    fn triangle_indices_hold_in_a_32_bit_usize_through_degree_65535() {
+        // 65536 * 65537 / 2 = 2_147_516_416 < 2^32, though the product is not.
+        assert_eq!(triangular_len(u16::MAX), 2_147_516_416);
+        assert_eq!(coefficient_index(u16::MAX, u16::MAX), 2_147_516_415);
+        assert_eq!(coefficient_index(u16::MAX, 0), 2_147_450_880);
+        for degree in [0_u16, 1, 2, 3, 359, 360, 2190, 65_534] {
+            let n = usize::from(degree);
+            assert_eq!(triangular_len(degree), (n + 1) * (n + 2) / 2);
+            assert_eq!(coefficient_index(degree, degree), n * (n + 1) / 2 + n);
+        }
+    }
+
+    #[test]
+    fn degrees_beyond_the_address_space_are_typed_errors() {
+        // 2_147_516_416 entries of 24 bytes: addressable only with 64 bits.
+        let result = validate_table_size(u16::MAX);
+        if cfg!(target_pointer_width = "64") {
+            assert!(result.is_ok());
+        } else {
+            assert!(matches!(result, Err(PropagationError::InvalidInput(_))));
+            assert!(matches!(
+                SphericalHarmonicGravity::from_normalized_coefficients(
+                    MU_EARTH,
+                    RE_EARTH,
+                    u16::MAX,
+                    0,
+                    &[],
+                    TideSystem::TideFree,
+                ),
+                Err(PropagationError::InvalidInput(_))
+            ));
+        }
+        assert!(validate_table_size(2190).is_ok());
     }
 }

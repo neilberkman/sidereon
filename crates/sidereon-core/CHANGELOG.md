@@ -4,6 +4,24 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `IcgemGravityField` reads ICGEM gravity field files (`.gfc`, ICGEM-format 2023, versions `icgem1.0` and `icgem2.0`) and builds a `SphericalHarmonicGravity` at any degree and order up to the file's maximum, such as EIGEN-6S4 or EGM2008 through degree 2190. It reads the header, static `gfc` records and the time-variable `gfct`, `trnd`, `dot`, `acos` and `asin` records with their sigmas, converts unnormalized coefficients to fully normalized, records the tide system (`gravity_in_tide_system` converts `C20` between tide-free, zero-tide and mean-tide with the IERS 2010 permanent tide), and returns `IcgemError` naming the line and field for malformed input, missing or repeated coefficients, overlapping or uncovered time-variable records, epochs outside a coefficient's `gfct` intervals and time-variable coefficients with no finite value at the epoch. The gravitational constant is read from `earth_gravity_constant`, or from `gravity_constant` as ICGEM's fields of the Moon and other bodies write it. `parse_truncated` keeps only the coefficients a caller needs. A time-variable model evaluates its coefficients at each state's epoch (TT).
+- Against Orekit 13.1.10's `HolmesFeatherstoneAttractionModel` on the same files, models read from ICGEM files agree within 1.0e-15 of the acceleration's magnitude through degree 36 and 8.6e-15 at degree 2190; potentials within 1.4e-15; time-variable coefficients to the bit.
+- A data-section line whose keyword the ICGEM format does not define but which holds an integer degree, an integer order and at least two numbers, a probable misspelt `gfc`, `gfct`, `trnd`, `acos`, `asin` or `dot`, is `IcgemError::UnknownRecordKeyword` naming the line and keyword, instead of a comment that would lose its coefficient or term.
+- A data-section line with no keyword that begins with an integer degree, an integer order and at least two numbers, a record whose keyword is missing, is `IcgemError::MissingRecordKeyword` naming the line, instead of a comment that would lose its coefficient or term. Other undefined lines, including keyword-less lines without that shape, remain comments, as the specification says.
+- `SphericalHarmonicGravity::body_fixed_potential_km2_s2`, `body_fixed_acceleration_at_km_s2`, `body_fixed_potential_at_km2_s2`, `coefficient_at` and `is_time_variable`.
+- The reader follows the ICGEM specification where Orekit 13.1 departs from it: a bare `yyyymmdd` epoch is 00:00 (Orekit: 12:00), `mean_tide` is accepted, time-variable records may precede their `gfct` record, an `icgem2.0` trend runs from its own `t0`, and an epoch where a time-variable coefficient has no `gfct` record is an error rather than a zero coefficient. Tests check these formulas directly against the specification.
+- Fuzz target `icgem_parse`.
+
+### Changed
+
+- The geopotential now uses the Holmes and Featherstone (2002) recursion for all spherical-harmonic models: the embedded EGM96 models, models from `SphericalHarmonicGravity::from_normalized_coefficients` and `from_normalized_ascii_table`, models read from ICGEM files, and the coefficient corrections of `SolidEarthTideGravity` and `SolidEarthPoleTideGravity`. The separate forward column recursion in spherical coordinates is removed, so one implementation evaluates every model. The recursion uses `2^-930` sectoral scaling and a Cartesian gradient that holds on the polar axis; Holmes and Featherstone show it stable through degree 2700, and it is tested here at 2190. EGM96 results change in the last bits: the pinned EGM96 accelerations move by at most 1.3e-15 of their magnitude (8 units in the last place). A LEO state propagated for one day through EGM96 at degree and order 36 moves by 3.1e-9 km (4.6e-13 of its radius), about six times what a one-unit change in its initial position does. The embedded EGM96 model agrees with Orekit 13.1.10's `HolmesFeatherstoneAttractionModel` within 8.8e-16 of the acceleration's magnitude and 5.1e-16 of the potential at degree and order 36 and below, the same bits as EGM96 read from an ICGEM file.
+
+### Fixed
+
+- `SphericalHarmonicGravity::from_normalized_coefficients` on 32-bit targets: degrees above 65,534 no longer overflow the coefficient count (a panic in debug builds, a 32,768-entry table in release builds), and a degree whose tables exceed the address space returns `PropagationError::InvalidInput`.
+
 ## [4.1.0] - 2026-11-19
 
 ### Added
