@@ -210,6 +210,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_analytic_propagation"
+path = "fuzz_targets/fuzz_analytic_propagation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_bodies_events"
 path = "fuzz_targets/fuzz_bodies_events.rs"
 test = false
