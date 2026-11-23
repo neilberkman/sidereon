@@ -5,7 +5,6 @@
 //! continuity, and satellite antenna PCO/PCV projection in the satellite body
 //! frame.
 
-use crate::astro::angles::beta_angle_from_cos_rad;
 use crate::astro::bodies::{sun_moon_ecef, SunMoon};
 use crate::astro::frames::transforms::{FrameTransformError, Ut1Gate};
 use crate::astro::math::vec3::{add3, cross3, dot3, neg3, norm3, scale3, sub3, unit3};
@@ -15,7 +14,6 @@ use crate::astro::time::{
 };
 use crate::validate;
 use std::collections::BTreeMap;
-use std::f64::consts::PI;
 
 use crate::antenna;
 use crate::bias::{BiasError, BiasLookup, BiasSet, ClockReferenceObservables};
@@ -44,7 +42,7 @@ use crate::tides::{
 pub use crate::tides::{OceanLoadingBlq, NUM_OCEAN_CONSTITUENTS};
 use crate::tolerances::{
     FREQUENCY_DENOMINATOR_EPS_HZ, PPP_FREQUENCY_ABS_EPS_HZ, PPP_FREQUENCY_REL_EPS,
-    VECTOR_NORM_ZERO_EPS, YAW_SINGULARITY_EPS_RAD,
+    VECTOR_NORM_ZERO_EPS,
 };
 use crate::{GnssSatelliteId, GnssSystem};
 
@@ -1249,45 +1247,16 @@ fn windup_cycles(
     })
 }
 
+/// Nominal yaw-steering axes `(x, y)` for wind-up. The ECEF velocity is turned
+/// into the inertial velocity direction first, as RTKLIB `sat_yaw` does; the
+/// yaw law is the shared RTKLIB nominal yaw of `astro::attitude::gnss`.
 fn sat_yaw(rs: [f64; 3], vs: [f64; 3], sun_ecef_m: [f64; 3]) -> Option<([f64; 3], [f64; 3])> {
     let ri_v = [
         vs[0] - OMEGA_E_DOT_RAD_S * rs[1],
         vs[1] + OMEGA_E_DOT_RAD_S * rs[0],
         vs[2],
     ];
-    let n = cross3(rs, ri_v);
-    let p = cross3(sun_ecef_m, n);
-
-    let es = unit3(rs)?;
-    let esun = unit3(sun_ecef_m)?;
-    let en = unit3(n)?;
-    let ep = unit3(p)?;
-
-    let beta = beta_angle_from_cos_rad(dot3(esun, en));
-    let ee = libm::acos(clamp(dot3(es, ep)));
-    let mut mu = PI / 2.0 + if dot3(es, esun) <= 0.0 { -ee } else { ee };
-
-    if mu < -PI / 2.0 {
-        mu += std::f64::consts::TAU;
-    } else if mu >= PI / 2.0 {
-        mu -= std::f64::consts::TAU;
-    }
-
-    let yaw = yaw_nominal(beta, mu);
-    let ex = cross3(en, es);
-    let cosy = libm::cos(yaw);
-    let siny = libm::sin(yaw);
-    let exs = add3(scale3(en, -siny), scale3(ex, cosy));
-    let eys = add3(scale3(en, -cosy), scale3(ex, -siny));
-    Some((exs, eys))
-}
-
-fn yaw_nominal(beta: f64, mu: f64) -> f64 {
-    if beta.abs() < YAW_SINGULARITY_EPS_RAD && mu.abs() < YAW_SINGULARITY_EPS_RAD {
-        PI
-    } else {
-        libm::atan2(-libm::tan(beta), libm::sin(mu)) + PI
-    }
+    crate::astro::attitude::gnss::nominal_yaw_axes_rtklib(rs, ri_v, sun_ecef_m)
 }
 
 fn satellite_antenna_correction(
@@ -1453,6 +1422,7 @@ mod tests {
     use crate::constants::F_L2_HZ;
     use crate::observables::j2000_seconds_from_split;
     use crate::GnssSystem;
+    use std::f64::consts::PI;
 
     const REAL_CODE_BIA: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),

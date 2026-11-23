@@ -1159,3 +1159,91 @@ fn zim2_sp3_spp_with_the_peph2pos_relativity_term_is_closer_to_truth() {
         "with the peph2pos term {rms_with_m} m, without {rms_without_m} m"
     );
 }
+
+/// Fixture of the ZIM2 arc's wind-up and satellite-antenna tables, as the bits of
+/// every value. Each line is `kind sat epoch_index bits...` with the bits in
+/// lowercase hexadecimal.
+const ZIM2_CORRECTION_TABLE_BITS: &str = "ppp_corrections/zim2_windup_antenna_bits.txt";
+
+fn zim2_correction_table_bit_lines() -> Vec<String> {
+    let sp3 = load_sp3();
+    let obs = load_obs();
+    let antex = load_antex();
+    let approx = obs
+        .header()
+        .approx_position_m
+        .expect("ZIM2 approx position");
+    let epochs = gps_float_epochs(&sp3, &obs, approx);
+    let prns = observed_prns(&epochs);
+    let mut options = PppCorrectionsOptions::new();
+    options.solid_earth_tide = false;
+    options.pole_tide = None;
+    options.ocean_loading = None;
+    options.phase_windup = true;
+    options.satellite_antenna = Some(satellite_antenna_options(&antex, &prns));
+    let tables = ppp_corrections::build_with_validity(
+        &sp3,
+        &ppp_correction_epochs(&epochs),
+        approx,
+        &options,
+        sidereon_core::astro::time::ValidityMode::Strict,
+    )
+    .expect("build wind-up and satellite antenna tables")
+    .value;
+    let mut lines = Vec::new();
+    for row in &tables.windup_m {
+        lines.push(format!(
+            "windup {} {} {:016x}",
+            row.sat,
+            row.epoch_index,
+            row.value_m.to_bits()
+        ));
+    }
+    for row in &tables.sat_pco_ecef {
+        lines.push(format!(
+            "sat_pco {} {} {:016x} {:016x} {:016x}",
+            row.sat,
+            row.epoch_index,
+            row.vector_m[0].to_bits(),
+            row.vector_m[1].to_bits(),
+            row.vector_m[2].to_bits()
+        ));
+    }
+    for row in &tables.sat_pcv_m {
+        lines.push(format!(
+            "sat_pcv {} {} {:016x}",
+            row.sat,
+            row.epoch_index,
+            row.value_m.to_bits()
+        ));
+    }
+    lines
+}
+
+/// The wind-up and satellite-antenna tables keep their bits. The fixture was
+/// written by the build whose wind-up formed the satellite axes with a yaw copy
+/// private to the PPP corrections; the build now forms them through
+/// `astro::attitude::gnss::nominal_yaw_axes_rtklib`, which keeps RTKLIB's
+/// `yaw_angle` and `sat_yaw` arithmetic in the same order. Every wind-up, PCO and
+/// PCV value on the ZIM2 arc must equal the fixture bit for bit. The PPP solve
+/// consumes only these tables, so equal tables give an equal solve.
+#[test]
+fn zim2_windup_and_satellite_antenna_tables_keep_their_bits() {
+    let lines = zim2_correction_table_bit_lines();
+    if std::env::var_os("SIDEREON_PRINT_PPP_TABLE_BITS").is_some() {
+        for line in &lines {
+            println!("{line}");
+        }
+        return;
+    }
+    let expected = load_text(&[ZIM2_CORRECTION_TABLE_BITS]);
+    let expected: Vec<&str> = expected.lines().collect();
+    assert!(
+        lines.iter().any(|line| line.starts_with("windup ")),
+        "the arc has wind-up rows"
+    );
+    assert_eq!(lines.len(), expected.len(), "table row count");
+    for (got, want) in lines.iter().zip(&expected) {
+        assert_eq!(got, want);
+    }
+}

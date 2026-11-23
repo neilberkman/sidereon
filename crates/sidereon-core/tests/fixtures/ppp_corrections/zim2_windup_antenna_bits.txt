@@ -1,0 +1,4080 @@
+windup G05 0 bf9ee0cd3ff3546a
+windup G10 0 3fa9c7a66f2d3506
+windup G12 0 bfa2b10753bcbb45
+windup G13 0 bfa35d7a0d0ac9f7
+windup G14 0 3fa9671a64c152d2
+windup G15 0 3faac294348318af
+windup G17 0 3fa7b319277a4bff
+windup G19 0 3fa4e821a87a3ba0
+windup G20 0 3fa8e57f82fb3024
+windup G22 0 3fa92afd1088f01b
+windup G23 0 bfab03d62176f0e0
+windup G24 0 bfaac8bfc93cd939
+windup G30 0 3fa7f3e2e0b26d1b
+windup G05 1 bf9e76283a29306d
+windup G10 1 3fa9c63bc43085e0
+windup G12 1 bfa2c8200f9bd5b9
+windup G13 1 bfa370be479e0e3b
+windup G14 1 3fa9646e5b1dd2d8
+windup G15 1 3faabbb8560e333a
+windup G17 1 3fa7b49951351142
+windup G19 1 3fa4ed55acd5fb57
+windup G20 1 3fa8dbccba45b510
+windup G22 1 3fa927e268846d39
+windup G23 1 bfab0424584b66a1
+windup G24 1 bfaad0744f028471
+windup G30 1 3fa7ef94144ec10c
+windup G05 2 bf9e0765f505c654
+windup G10 2 3fa9c4d49c98cf0a
+windup G12 2 bfa2df5c100e9c1d
+windup G13 2 bfa38417c4e93738
+windup G14 2 3fa961c447ee486e
+windup G15 2 3faab4d4ba71bbfc
+windup G17 2 3fa7b611961fbaa5
+windup G19 2 3fa4f27c603e2d09
+windup G20 2 3fa8d2122cecd9c5
+windup G22 2 3fa924c8c6217cd8
+windup G23 2 bfab046e7d59dcd0
+windup G24 2 bfaad82a14a1b556
+windup G30 2 3fa7eb496770b81f
+windup G05 3 bf9d94653d27d6d5
+windup G10 3 3fa9c370f60ad3ec
+windup G12 3 bfa2f6ba3a2d942a
+windup G13 3 bfa39785dd243571
+windup G14 3 3fa95f1c2f36df75
+windup G15 3 3faaade952431400
+windup G17 3 3fa7b781fceae1e3
+windup G19 3 3fa4f795db298cc4
+windup G20 3 3fa8c84fdd2222de
+windup G22 3 3fa921b0292e3b57
+windup G23 3 bfab04b48e99a2a1
+windup G24 3 bfaadfe11264c436
+windup G30 3 3fa7e702dcc08d82
+windup G05 4 bf9d1d07428e1f8b
+windup G10 4 3fa9c210ce3c4a5f
+windup G12 4 bfa30e3969a7090d
+windup G13 4 bfa3ab07e5062f33
+windup G14 4 3fa95c761512b527
+windup G15 4 3faaa6f60dff53b3
+windup G17 4 3fa7b8ea8c2beff0
+windup G19 4 3fa4fca235c123fd
+windup G20 4 3fa8be85cd665ea0
+windup G22 4 3fa91e98918ae4ce
+windup G23 4 bfab04f689f8a434
+windup G24 4 bfaae79940932bbd
+windup G30 4 3fa7e2c076e72d98
+windup G05 5 bf9ca130639465c7
+windup G10 5 3fa9c0b422f38d68
+windup G12 5 bfa325d870fbd1fc
+windup G13 5 bfa3be9d2ddbae2d
+windup G14 5 3fa959d1fdb3f8c4
+windup G15 5 3faa9ffade0baed2
+windup G17 5 3fa7ba4b4a5d8cc0
+windup G19 5 3fa501a187df6c13
+windup G20 5 3fa8b4b4008c37ca
+windup G22 5 3fa91b81ff299485
+windup G23 5 bfab05346d5abc55
+windup G24 5 bfaaef5297704b8d
+windup G30 5 3fa7de82388d2747
+windup G05 6 bf9c20c9117a031f
+windup G10 6 3fa9bf5af2072658
+windup G12 6 bfa33d9619b9d1e7
+windup G13 6 bfa3d24505ac924d
+windup G14 6 3fa9572fed63d7b3
+windup G15 6 3faa98f7b2b59bb8
+windup G17 6 3fa7bba43ddefbf2
+windup G19 6 3fa50693e9115811
+windup G20 6 3fa8aada79b89bad
+windup G22 6 3fa9186c720e93ae
+windup G23 6 bfab056e369a5a2d
+windup G24 6 bfaaf70d0f3b8124
+windup G30 6 3fa7da48245aa913
+windup G05 7 bf9b9bbecd732a02
+windup G10 7 3fa9be05395e5aa2
+windup G12 7 bfa3557124c684be
+windup G13 7 bfa3e5feb74f535a
+windup G14 7 3fa9548fe882e813
+windup G15 7 3faa91ec7c339cd3
+windup G17 7 3fa7bcf56cf52110
+windup G19 7 3fa50b797098bff3
+windup G20 7 3fa8a0f93c65671f
+windup G22 7 3fa91557ea500ba0
+windup G23 7 bfab05a3e3883874
+windup G24 7 bfaafec8a0318d00
+windup G30 7 3fa7d6123cf88e76
+windup G05 8 bf9b12053b3b3431
+windup G10 8 3fa9bcb2f6ef89d5
+windup G12 8 bfa36d684aac7513
+windup G13 8 bfa3f9c98a95a6ab
+windup G14 8 3fa951f1f3894f41
+windup G15 8 3faa8ad92aa5ba57
+windup G17 8 3fa7be3eddca6262
+windup G19 8 3fa51052356bf943
+windup G20 8 3fa897104c61c4fe
+windup G22 8 3fa91244681644b7
+windup G23 8 bfab05d571eb92cd
+windup G24 8 bfab0685428b1b5b
+windup G30 8 3fa7d1e0850f512e
+windup G05 9 bf9a839744d50cf9
+windup G10 9 3fa9bb6428c18128
+windup G12 9 bfa3857a3beccb99
+windup G13 9 bfa40da4c4655554
+windup G14 9 3fa94f561306c720
+windup G15 9 3faa83bdae15bb87
+windup G17 9 3fa7bf80966f1840
+windup G19 9 3fa5151e4e374b0c
+windup G20 9 3fa88d1fadd4d5af
+windup G22 9 3fa90f31eb9b445a
+windup G23 9 bfab0602df8169eb
+windup G24 9 bfab0e42ee7df71a
+windup G30 9 3fa7cdb2ff47080a
+windup G05 10 bf99f078486bc603
+windup G10 10 3fa9ba18cce9b28a
+windup G12 10 bfa39da5a158c1da
+windup G13 10 bfa4218fa6e5f7d9
+windup G14 10 3fa94cbc4ba2cf5a
+windup G15 10 3faa7c99f67801b2
+windup G17 10 3fa7c0ba9cd8ad00
+windup G19 10 3fa519ddd15d7650
+windup G20 10 3fa88327653e5fdf
+windup G22 10 3fa90c20752b0801
+windup G23 10 bfab062c29fd2546
+windup G24 10 bfab16019c3bfd6e
+windup G30 10 3fa7c989ae4872e7
+windup G05 11 bf9958b546ea831f
+windup G10 11 3fa9b8d0e18d56d0
+windup G12 11 bfa3b5e91c7a9c72
+windup G13 11 bfa43589719ae292
+windup G14 11 3fa94a24a21cfff4
+windup G15 11 3faa756df3abfc51
+windup G17 11 3fa7c1ecf6e39c52
+windup G19 11 3fa51e90d4fa03a6
+windup G20 11 3fa8792777780201
+windup G22 11 3fa9091005236dcd
+windup G23 11 bfab06514f084f96
+windup G24 11 bfab1dc143f4c457
+windup G30 11 3fa7c56494bbc035
+windup G05 12 bf98bc660598113e
+windup G10 12 3fa9b78c648190b5
+windup G12 12 bfa3ce4348652ae1
+windup G13 12 bfa4499161f33369
+windup G14 12 3fa9478f1af8cdea
+windup G15 12 3faa6e3994fd7d0f
+windup G17 12 3fa7c317aa14953f
+windup G19 12 3fa523376eb35099
+windup G20 12 3fa86f1fe93a86d1
+windup G22 12 3fa906009b9b44be
+windup G23 12 bfab06724c94d85b
+windup G24 12 bfab2581de37fba4
+windup G30 12 3fa7c143b5278a78
+windup G05 13 bf981bae1eca6bd5
+windup G10 13 3fa9b64b54c70c00
+windup G12 13 bfa3e6b2b8656e2e
+windup G13 13 bfa45da6b1f7555b
+windup G14 13 3fa944fbbbcf4dc4
+windup G15 13 3faa66fccb2230ac
+windup G17 13 3fa7c43abc8e90ab
+windup G19 13 3fa527d1b4717939
+windup G20 13 3fa86510c115778c
+windup G22 13 3fa902f239c60a18
+windup G23 13 bfab068f1f9411e3
+windup G24 13 bfab2d436267730f
+windup G30 13 3fa7bd2712780a0c
+windup G05 14 bf9776bdd6c92bcd
+windup G10 14 3fa9b50db04fce10
+windup G12 14 bfa3ff35fb0eef73
+windup G13 14 bfa471c89a9fe79a
+windup G14 14 3fa9426a8954be77
+windup G15 14 3faa5fb7853f4725
+windup G17 14 3fa7c55633a2e9dd
+windup G19 14 3fa52c5fbb4fe168
+windup G20 14 3fa85afa047d0e31
+windup G22 14 3fa8ffe4dfde29b1
+windup G23 14 bfab06a7c5e3ef38
+windup G24 14 bfab3505c90c7a6d
+windup G30 14 3fa7b90eaf332906
+windup G05 15 bf96cdd2c5858853
+windup G10 15 3fa9b3d3757bdc26
+windup G12 15 bfa417cb98fd1c2a
+windup G13 15 bfa485f6529171a5
+windup G14 15 3fa93fdb88aab3da
+windup G15 15 3faa5869b2e6b00f
+windup G17 15 3fa7c66a14c7b4ab
+windup G19 15 3fa530e198526a20
+windup G20 15 3fa850dbb9c48e3e
+windup G22 15 3fa8fcd88e88e2c0
+windup G23 15 bfab06bc3d059066
+windup G24 15 bfab3cc90a4ad1aa
+windup G30 15 3fa7b4fa8e01057f
+windup G10 16 3fa9b29ca2b8944b
+windup G12 16 bfa4307215b98dfc
+windup G13 16 bfa49a2f0ea4e053
+windup G14 16 3fa93d4ebf0be972
+windup G15 16 3faa511343986a69
+windup G17 16 3fa7c77665590570
+windup G19 16 3fa535576038fa8e
+windup G20 16 3fa846b5e7a08bbc
+windup G22 16 3fa8f9cd467d48ed
+windup G23 16 bfab06cc8270ea9d
+windup G24 16 bfab448d1e42cfd4
+windup G30 16 3fa7b0eab189d7f0
+windup G10 17 3fa9b1693681de7e
+windup G12 17 bfa44927f041a837
+windup G13 17 bfa4ae720210bd41
+windup G14 17 3fa93ac431cbe991
+windup G15 17 3faa49b426c39104
+windup G17 17 3fa7c87b2a9a1ad4
+windup G19 17 3fa539c12781ad51
+windup G20 17 3fa83c889529993c
+windup G22 17 3fa8f6c3088444b6
+windup G23 17 bfab06d893934cd5
+windup G24 17 bfab4c51fd1292e8
+windup G30 17 3fa7acdf1c756b06
+windup G10 18 3fa9b0392f60fd6d
+windup G12 18 bfa461eba38c7ef1
+windup G13 18 bfa4c2be5e9ef0f0
+windup G14 18 3fa9383be65822c6
+windup G15 18 3faa424c4bc6fe71
+windup G17 18 3fa7c97869b53d8f
+windup G19 18 3fa53e1f02685d71
+windup G20 18 3fa83253c9dc8422
+windup G22 18 3fa8f3b9d57892e2
+windup G23 18 bfab06e06dcf4fa6
+windup G24 18 bfab54179ed4fe6a
+windup G30 18 3fa7a8d7d16b9fdc
+windup G10 19 3fa9af0c8bed5ca2
+windup G12 19 bfa47abba710a6e3
+windup G13 19 bfa4d71354d4b189
+windup G14 19 3fa935b5e2372a29
+windup G15 19 3faa3adba1f2332a
+windup G17 19 3fa7ca6e27bbe253
+windup G19 19 3fa5427104e78368
+windup G20 19 3fa828178d9d00c5
+windup G22 19 3fa8f0b1ae46c697
+windup G23 19 bfab06e40e7e389d
+windup G24 19 bfab5bddfba3599b
+windup G30 19 3fa7a4d4d3146ca4
+windup G10 20 3fa9ade34acaffcd
+windup G12 20 bfa493966f54e4e3
+windup G13 20 bfa4eb701427c65e
+windup G14 20 3fa933322b09eb49
+windup G15 20 3faa33621885d016
+windup G17 20 3fa7cb5c69a708ab
+windup G19 20 3fa546b742b9e5c1
+windup G20 20 3fa81dd3e8b5dd82
+windup G22 20 3fa8edaa93ed4be1
+windup G23 20 bfab06e372ee77bf
+windup G24 20 bfab63a50b93df6e
+windup G30 20 3fa7a0d62417541f
+windup G10 21 3fa9acbd6aabb8b5
+windup G12 21 bfa4ac7a6e7fc68b
+windup G13 21 bfa4ffd3cb2a0a7e
+windup G14 21 3fa930b0c68aff17
+windup G15 21 3faa2bdf9eb4c4a6
+windup G17 21 3fa7cc4334565fb0
+windup G19 21 3fa54af1cf5b68db
+windup G20 21 3fa81388e3db5a9d
+windup G22 21 3fa8eaa4877c6b48
+windup G23 21 bfab06de986395b1
+windup G24 21 bfab6b6cc6baae8e
+windup G30 21 3fa79cdbc71beaa6
+windup G10 22 3fa9ab9aea4e2d7c
+windup G12 22 bfa4c56614e5bddb
+windup G13 22 bfa5143da7c0e586
+windup G14 22 3fa92e31ba8f89c9
+windup G15 22 3faa245423a52d27
+windup G17 22 3fa7cd228c921919
+windup G19 22 3fa54f20be090323
+windup G20 22 3fa80936882c8f0f
+windup G22 22 3fa8e79f8a1659ed
+windup G23 22 bfab06d57c179c89
+windup G24 22 bfab73352529b658
+windup G30 22 3fa798e5bec9a5cc
+windup G10 23 3fa9aa7bc87db2cd
+windup G12 23 bfa4de57d1a07499
+windup G13 23 bfa528acd753d117
+windup G14 23 3fa92bb50d0714f3
+windup G15 23 3faa1cbf9670e9d7
+windup G17 23 3fa7cdfa77095511
+windup G19 23 3fa5534421c19070
+windup G20 23 3fa7fedcdf34315b
+windup G22 23 3fa8e49b9cef0788
+windup G23 23 bfab06c81b394c11
+windup G24 23 bfab7afe1ef0f613
+windup G30 23 3fa794f40dc80a39
+windup G10 24 3fa9a9600412b614
+windup G12 24 bfa4f74e13225110
+windup G13 24 bfa53d2086fc5001
+windup G14 24 3fa9293ac3fc1b7a
+windup G15 24 3faa1521e626e175
+windup G17 24 3fa7cecaf852f735
+windup G19 24 3fa5575c0d476cc3
+windup G20 24 3fa7f47bf2e9e8bb
+windup G22 24 3fa8e198c14c8915
+windup G23 24 bfab06b672ed4751
+windup G24 24 bfab82c7ac1dbf35
+windup G10 25 3fa9a8479bf1fd3a
+windup G12 25 bfa5104747cd1209
+windup G13 25 bfa55197e3bb300d
+windup G14 25 3fa926c2e5940b7f
+windup G15 25 3faa0d7b01cbe0e1
+windup G17 25 3fa7cf9414eeb6a2
+windup G19 25 3fa55b6893213867
+windup G20 25 3fa7ea13cdb44b78
+windup G22 25 3fa8de96f886b6a2
+windup G23 25 bfab06a0804cc301
+windup G24 25 bfab8a91c4bc4edd
+windup G10 26 3fa9a7328f0c8076
+windup G12 26 bfa52941de8396e4
+windup G13 26 bfa566121aa9bf5b
+windup G14 26 3fa9244d780f8791
+windup G15 26 3faa05cad85bc0cf
+windup G17 26 3fa7d055d142d71e
+windup G19 26 3fa55f69c599c7e9
+windup G20 26 3fa7dfa47a6a3603
+windup G22 26 3fa8db96440771a8
+windup G23 26 bfab068640677064
+windup G24 26 bfab925c60d65f58
+windup G10 27 3fa9a620dc5fda3f
+windup G12 27 bfa5423c47429ad7
+windup G13 27 bfa57a8e592c04c9
+windup G14 27 3fa921da81cae51e
+windup G15 27 3fa9fe1158c9ed99
+windup G17 27 3fa7d110319ea274
+windup G19 27 3fa5635fb6c0e499
+windup G20 27 3fa7d52e0453167a
+windup G22 27 3fa8d896a54a9a41
+windup G23 27 bfab0667b040ad01
+windup G24 27 bfab9a277874205e
+windup G10 28 3fa9a51282f55586
+windup G12 28 bfa55b34f3b378b3
+windup G13 28 bfa58f0bcd22c966
+windup G14 28 3fa91f6a093e30d7
+windup G15 28 3fa9f64e72035e8a
+windup G17 28 3fa7d1c33a395182
+windup G19 28 3fa5674a786cdb42
+windup G20 28 3fa7cab077292e34
+windup G22 28 3fa8d5981dde1a3f
+windup G23 28 bfab0644ccd22f31
+windup G24 28 bfaba1f3039c4d03
+windup G10 29 3fa9a40781e2cba3
+windup G12 29 bfa5742a57bfcd8c
+windup G13 29 bfa5a389a51e55d7
+windup G14 29 3fa91cfc14fd88fd
+windup G15 29 3fa9ee8212eef80e
+windup G17 29 3fa7d26eef329c9f
+windup G19 29 3fa56b2a1c3b32a5
+windup G20 29 3fa7c02bdf1ad4a9
+windup G22 29 3fa8d29aaf61ff6c
+windup G23 29 bfab061d9309eeae
+windup G24 29 bfaba9befa53662f
+windup G10 30 3fa9a2ffd8491471
+windup G12 30 bfa58d1aea1e4915
+windup G13 30 bfa5b807108bd7a4
+windup G14 30 3fa91a90abb94948
+windup G15 30 3fa9e6ac2a6eabab
+windup G17 30 3fa7d3135491e336
+windup G19 30 3fa56efeb3902c4c
+windup G20 30 3fa7b5a048caffce
+windup G22 30 3fa8cf9e5b8854aa
+windup G23 30 bfab05f1ffcb1434
+windup G24 30 bfabb18b549d4e39
+windup G10 31 3fa9a1fb85551b6f
+windup G12 31 bfa5a60524e40e8e
+windup G13 31 bfa5cc833fed29a8
+windup G14 31 3fa91827d43e97c6
+windup G15 31 3fa9decca7617818
+windup G17 31 3fa7d3b06e47e2cb
+windup G19 31 3fa572c84f991512
+windup G20 31 3fa7ab0dc1527632
+windup G22 31 3fa8cca324155fb8
+windup G23 31 bfab05c20fede2fb
+windup G24 31 bfabb9580a7bdd89
+windup G10 32 3fa9a0fa883f888d
+windup G12 32 bfa5bee7860e34bf
+windup G13 32 bfa5e0fd65011fc4
+windup G14 32 3fa915c1957750b6
+windup G15 32 3fa9d6e378a3b905
+windup G17 32 3fa7d446402cf192
+windup G19 32 3fa57687014b5b30
+windup G20 32 3fa7a07456419db2
+windup G22 32 3fa8c9a90adf9a4f
+windup G23 32 bfab058dc03ee07c
+windup G24 32 bfabc12513efa22d
+windup G10 33 3fa99ffce04c38cb
+windup G12 33 bfa5d7c09008e703
+windup G13 33 bfa5f574b2fade1c
+windup G14 33 3fa9135df66ac27b
+windup G15 33 3fa9cef08d10f77a
+windup G17 33 3fa7d4d4ce02e8e4
+windup G19 33 3fa57a3ad966700f
+windup G20 33 3fa795d415a149aa
+windup G22 33 3fa8c6b011cfc25b
+windup G23 33 bfab05550d7f80b3
+windup G24 33 bfabc8f268f89931
+windup G10 34 3fa99f028c6f84f0
+windup G12 34 bfa5f08ecadf6f20
+windup G13 34 bfa609e85f30349c
+windup G14 34 3fa910fcfdea0079
+windup G15 34 3fa9c6f3d2ffbc74
+windup G17 34 3fa7d55c1b33f5e3
+windup G19 34 3fa57de3e843719d
+windup G20 34 3fa78b2d0d7995a8
+windup G22 34 3fa8c3b83a89bbea
+windup G23 34 bfab0517f4b87379
+windup G24 34 bfabd0c001fd621a
+windup G10 35 3fa99e0b8cb9465c
+windup G12 35 bfa60950c20a8f4e
+windup G13 35 bfa61e579f318050
+windup G14 35 3fa90e9eb3de3cdf
+windup G15 35 3fa9beed3a581a05
+windup G17 35 3fa7d5dc2bd21c17
+windup G19 35 3fa581823e987e09
+windup G20 35 3fa7807f4dbc721f
+windup G22 35 3fa8c0c187c96975
+windup G23 35 bfab04d671ef4b79
+windup G24 35 bfabd88dd62ad7f5
+windup G10 36 3fa99d17e033dc18
+windup G12 36 bfa6220508ec9601
+windup G13 36 bfa632c1ac1bc9fa
+windup G14 36 3fa90c431f546d3f
+windup G15 36 3fa9b6dcb175dd44
+windup G17 36 3fa7d65503196f50
+windup G19 36 3fa58515ec54f4c6
+windup G20 36 3fa775cae567e236
+windup G22 36 3fa8bdcbfb576eac
+windup G23 36 bfab049082155299
+windup G24 36 bfabe05bdde5b7ca
+windup G10 37 3fa99c27864fbb20
+windup G12 37 bfa63aaa38a1062a
+windup G13 37 bfa64725c0a90ea0
+windup G14 37 3fa909ea47cb9171
+windup G15 37 3fa9aec2273e3735
+windup G17 37 3fa7d6c6a46e361b
+windup G19 37 3fa5889f0165aba2
+windup G20 37 3fa76b0fe4709234
+windup G22 37 3fa8bad797660a5a
+windup G23 37 bfab044621be1037
+windup G24 37 bfabe82a1129ed87
+windup G10 38 3fa99b3a7e87bda6
+windup G12 38 bfa6533ef10e63f5
+windup G13 38 bfa65b8319e254b6
+windup G14 38 3fa9079434e0ff77
+windup G15 38 3fa9a69d8a9cb4e4
+windup G17 38 3fa7d731131e4ecf
+windup G19 38 3fa58c1d8d838dc0
+windup G20 38 3fa7604e5b4904d8
+windup G22 38 3fa8b7e45e3a4b87
+windup G23 38 bfab03f74d70bb31
+windup G24 38 bfabeff867f20a03
+windup G10 39 3fa99a50c861d87d
+windup G12 39 bfa66bc1d9550c7c
+windup G13 39 bfa66fd8f74b6190
+windup G14 39 3fa90540ee5155de
+windup G15 39 3fa99e6eca841131
+windup G17 39 3fa7d794526023c7
+windup G19 39 3fa58f91a0355e1f
+windup G20 39 3fa755865ae27a72
+windup G22 39 3fa8b4f2522bb5c9
+windup G23 39 bfab03a401a8ea5e
+windup G24 39 bfabf7c6da38d4f2
+windup G10 40 3fa9996a636e6274
+windup G12 40 bfa68431a02cd3ad
+windup G13 40 bfa684269b0495b0
+windup G14 40 3fa902f07bf8747c
+windup G15 40 3fa99635d5f0d085
+windup G17 40 3fa7d7f06552be36
+windup G19 40 3fa592fb48cff1c6
+windup G20 40 3fa74ab7f4acb919
+windup G22 40 3fa8b20175a4a3e5
+windup G23 40 bfab034c3ad6366f
+windup G24 40 bfabff955ff7ec80
+windup G10 41 3fa998874f47f77d
+windup G12 41 bfa69c8cfc4865fe
+windup G13 41 bfa6986b49f4bebf
+windup G14 41 3fa900a2e5d1e6f0
+windup G15 41 3fa98df29be9b4e9
+windup G17 41 3fa7d8454efee567
+windup G19 41 3fa5965a96772612
+windup G20 41 3fa73fe33a97eaf8
+windup G22 41 3fa8af11cb221b88
+windup G23 41 bfab02eff55c65ec
+windup G24 41 bfac0763f1288130
+windup G10 42 3fa997a78b93c925
+windup G12 42 bfa6b4d2aca83303
+windup G13 42 bfa6aca64bebb84c
+windup G14 42 3fa8fe5833f93bad
+windup G15 42 3fa985a50b829d79
+windup G17 42 3fa7d89312564d2b
+windup G19 42 3fa599af981cfb3b
+windup G20 42 3fa735083f1564c6
+windup G22 42 3fa8ac23553411ce
+windup G23 42 bfab028f2d9280f6
+windup G24 42 bfac0f3285c40d74
+windup G10 43 3fa996cb1801868b
+windup G12 43 bfa6cd0178e6ddef
+windup G13 43 bfa6c0d6ebc8f648
+windup G14 43 3fa8fc106eaa4693
+windup G15 43 3fa97d4d13dd602c
+windup G17 43 3fa7d8d9b233dacc
+windup G19 43 3fa59cfa5c84c228
+windup G20 43 3fa72a2715174659
+windup G22 43 3fa8a936167d83d8
+windup G23 43 bfab0229dfc382c6
+windup G24 43 bfac170115c32c47
+windup G10 44 3fa995f1f44aa07a
+windup G12 44 bfa6e51831897ba3
+windup G13 44 bfa6d4fc779660fe
+windup G14 44 3fa8f9cb9e41d589
+windup G15 44 3fa974eaa42b849d
+windup G17 44 3fa7d919315baa81
+windup G19 44 3fa5a03af24112ed
+windup G20 44 3fa71f3fd0123432
+windup G22 44 3fa8a64a11b4584e
+windup G23 44 bfab01c0082dfbb0
+windup G24 44 bfac1ecf991e8d3a
+windup G10 45 3fa9951c20330a01
+windup G12 45 bfa6fd15b039087d
+windup G13 45 bfa6e91640af1780
+windup G14 45 3fa8f789cb3d6889
+windup G15 45 3fa96c7dabb0e744
+windup G17 45 3fa7d951927b1d44
+windup G19 45 3fa5a37167b6362b
+windup G20 45 3fa7145283fdff0a
+windup G22 45 3fa8a35f49a1bc07
+windup G23 45 bfab0151a3043628
+windup G24 45 bfac269e07ced21c
+windup G10 46 3fa994499b8849e9
+windup G12 46 bfa714f8d805c133
+windup G13 46 bfa6fd239bd6e330
+windup G14 46 3fa8f54afe3c3530
+windup G15 46 3fa9640619c522f1
+windup G17 46 3fa7d982d82913bb
+windup G19 46 3fa5a69dcb18df45
+windup G20 46 3fa7095f45551055
+windup G22 46 3fa8a075c121f851
+windup G23 46 bfab00deac6b4700
+windup G24 46 bfac2e6c59ccdfb5
+windup G10 47 3fa9937a662237c7
+windup G12 47 bfa72cc09593fa45
+windup G13 47 bfa71123e158f061
+windup G14 47 3fa8f30f3fff2374
+windup G15 47 3fa95b83ddd52a53
+windup G17 47 3fa7d9ad04e52285
+windup G19 47 3fa5a9c02a713ce5
+windup G20 47 3fa6fe6629160778
+windup G22 47 3fa89d8d7b24badd
+windup G23 47 bfab0067207bc2b9
+windup G24 47 bfac363a871124d7
+windup G10 48 3fa992ae7fe2135e
+windup G12 48 bfa7446bdf4c67a6
+windup G13 48 bfa725166d23aee2
+windup G14 48 3fa8f0d699694946
+windup G15 48 3fa952f6e765c2c3
+windup G17 48 3fa7d9d01b18d767
+windup G19 48 3fa5acd89398a238
+windup G20 48 3fa6f36744c4347b
+windup G22 48 3fa89aa67aad3386
+windup G23 48 bfaaffeafb419be6
+windup G24 48 bfac3e088794ecd4
+windup G10 49 3fa991e5e8b3431e
+windup G12 49 bfa75bf9b5855f8a
+windup G13 49 bfa738fa9edf59b8
+windup G14 49 3fa8eea113804b13
+windup G15 49 3fa94a5f26156372
+windup G17 49 3fa7d9ec1d16eb08
+windup G19 49 3fa5afe7143ce7f3
+windup G20 49 3fa6e862ae667338
+windup G22 49 3fa897c0c2d1fdd1
+windup G23 49 bfaaff6a38bb2ea1
+windup G24 49 bfac45d65351a6e7
+windup G10 50 3fa99120a08a6612
+windup G12 50 bfa77369229c7668
+windup G13 50 bfa74ccfda01e004
+windup G14 50 3fa8ec6eb76cbbe7
+windup G15 50 3fa941bc899e47e3
+windup G17 50 3fa7da010d1baac6
+windup G19 50 3fa5b2ebb9de6f17
+windup G20 50 3fa6dd587c8a8c8c
+windup G22 50 3fa894dc56bd79e4
+windup G23 50 bfaafee4d4d9f709
+windup G24 50 bfac4da3e2416c50
+windup G10 51 3fa9905ea765e613
+windup G12 51 bfa78ab93b126458
+windup G13 51 bfa7609585e8a384
+windup G14 51 3fa8ea3f8e7a89da
+windup G15 51 3fa9390f01d89fd3
+windup G17 51 3fa7da0eed4c3627
+windup G19 51 3fa5b5e691d21375
+windup G20 51 3fa6d248c6414b65
+windup G22 51 3fa891f939adb01f
+windup G23 51 bfaafe5acb8223a0
+windup G24 51 bfac55712c5e4049
+windup G10 52 3fa98f9ffd4daaa4
+windup G12 52 bfa7a1e91da0468c
+windup G13 52 bfa7744b0de7bcc1
+windup G14 52 3fa8e813a2196114
+windup G15 52 3fa930567ebce905
+windup G17 52 3fa7da15bfb7b1d6
+windup G19 52 3fa5b8d7a9414cb4
+windup G20 52 3fa6c733a32287f4
+windup G22 52 3fa88f176ef49b5b
+windup G23 52 bfaafdcc188abe99
+windup G24 52 bfac5d3e29a3683d
+windup G10 53 3fa98ee4a2533a16
+windup G12 53 bfa7b8f7f33df3d7
+windup G13 53 bfa787efe15bb3ef
+windup G14 53 3fa8e5eafbdcf847
+windup G15 53 3fa92792f0657c38
+windup G17 53 3fa7da158656ac97
+windup G19 53 3fa5bbbf0d2aa95c
+windup G20 53 3fa6bc192b4bc318
+windup G22 53 3fa88c36f9f8560d
+windup G23 53 bfaafd38b7bc682f
+windup G24 53 bfac650ad20ce9bf
+windup G10 54 3fa98e2c96913f44
+windup G12 54 bfa7cfe4ef2acb3c
+windup G13 54 bfa79b8373b79f9f
+windup G14 54 3fa8e3c5a57de8e3
+windup G15 54 3fa91ec447121cd1
+windup G17 54 3fa7da0e430a910c
+windup G19 54 3fa5be9cca624de3
+windup G20 54 3fa6b0f9775f7922
+windup G22 54 3fa88957de32cd97
+windup G23 54 bfaafca0a4d37797
+windup G24 54 bfac6cd71d9701b6
+windup G10 55 3fa98d77da2b74b1
+windup G12 55 bfa7e6af4ef06949
+windup G13 55 bfa7af053c959550
+windup G14 55 3fa8e1a3a8d97da8
+windup G15 55 3fa915ea7328ed6f
+windup G17 55 3fa7d9fff79ed060
+windup G19 55 3fa5c170ed92c205
+windup G20 55 3fa6a5d4a08650cf
+windup G22 55 3fa8867a1f3283cc
+windup G23 55 bfaafc03db7cb058
+windup G24 55 bfac74a3043f78c4
+windup G10 56 3fa98cc66d4efcf5
+windup G12 56 bfa7fd565a5684df
+windup G13 56 bfa7c274b7bc30c9
+windup G14 56 3fa8df850ff285b3
+windup G15 56 3fa90d05653a440e
+windup G17 56 3fa7d9eaa5c81737
+windup G19 56 3fa5c43b833c0a64
+windup G20 56 3fa69aaac06f0fff
+windup G22 56 3fa8839dc09a3bc9
+windup G23 56 bfaafb625757fe2d
+windup G24 56 bfac7c6e7e0522e2
+windup G10 57 3fa98c184fdad153
+windup G12 57 bfa813d9642efd05
+windup G13 57 bfa7d5d165d30ed9
+windup G14 57 3fa8dd69e49f13e1
+windup G15 57 3fa904150d76c3af
+windup G17 57 3fa7d9ce4ee208a8
+windup G19 57 3fa5c6fc9782d275
+windup G20 57 3fa68f7bf0da52a8
+windup G22 57 3fa880c2c5cb19d3
+windup G23 57 bfaafabc144b36e5
+windup G24 57 bfac84398352b142
+windup G10 58 3fa98b6d82bd3da2
+windup G12 58 bfa82a37c6ff119b
+windup G13 58 bfa7e91ac9d30973
+windup G14 58 3fa8db5231d366b3
+windup G15 58 3fa8fb195ddf0c71
+windup G17 58 3fa7d9aaf4f8fe04
+windup G19 58 3fa5c9b436fcc458
+windup G20 58 3fa684484d67f66d
+windup G22 58 3fa87de9333d5fa5
+windup G23 58 bfaafa110d312cca
+windup G24 58 bfac8c040b52bafc
+windup G10 59 3fa98ac605e6f989
+windup G12 59 bfa84070e9cdb6b1
+windup G13 59 bfa7fc506ce9e001
+windup G14 59 3fa8d93e01b29b2b
+windup G15 59 3fa8f2124703cfd9
+windup G17 59 3fa7d980993b9450
+windup G19 59 3fa5cc626d7d96c5
+windup G20 59 3fa6790ff0e3347d
+windup G22 59 3fa87b110c7bb291
+windup G23 59 bfaaf9613dd2dd6e
+windup G24 59 bfac93ce0e73001a
+windup G10 60 3fa98a21d9a953e8
+windup G12 60 bfa856843cc89db3
+windup G13 60 bfa80f71dbeb58a9
+windup G14 60 3fa8d72d5ed9ad1d
+windup G15 60 3fa8e8ffba347eef
+windup G17 60 3fa7d94f3d0424f3
+windup G19 60 3fa5cf0746e48667
+windup G20 60 3fa66dd2f70f91aa
+windup G22 60 3fa8783a557bbf85
+windup G23 60 bfaaf8aca195c517
+windup G24 60 bfac9b9784b6d536
+windup G10 61 3fa98980fe5eb6a8
+windup G12 61 bfa86c7139f5c93f
+windup G13 61 bfa8227ea7fb4334
+windup G14 61 3fa8d520540d4a86
+windup G15 61 3fa8dfe1a8f70f63
+windup G17 61 3fa7d916e19699f5
+windup G19 61 3fa5d1a2cee9878b
+windup G20 61 3fa662917c351009
+windup G22 61 3fa8756512486144
+windup G23 61 bfaaf7f333d1c4b7
+windup G24 61 bfaca3606623ae8c
+windup G10 62 3fa988e37469f24c
+windup G12 62 bfa88237651109da
+windup G13 62 bfa835766688f304
+windup G14 62 3fa8d316ec3a4cdc
+windup G15 62 3fa8d6b8050ac29c
+windup G17 62 3fa7d8d7881fab5a
+windup G19 62 3fa5d435111db067
+windup G20 62 3fa6574b9d2022bd
+windup G22 62 3fa872914701c7da
+windup G23 62 bfaaf734efcee35f
+windup G24 62 bfacab28aac09eb2
+windup G10 63 3fa988493c36d485
+windup G12 63 bfa897d64b65ad13
+windup G13 63 bfa84858b154c8f5
+windup G14 63 3fa8d1113276354d
+windup G15 63 3fa8cd82c06afc4c
+windup G17 63 3fa7d89131b5f42c
+windup G19 63 3fa5d6be18eba2d0
+windup G20 63 3fa64c01771fe588
+windup G22 63 3fa86fbef7dd8010
+windup G23 63 bfaaf671d0c652ac
+windup G24 63 bfacb2f04a95d745
+windup G10 64 3fa987b25639e543
+windup G12 64 bfa8ad4d83a4a288
+windup G13 64 bfa85b2526672097
+windup G14 64 3fa8cf0f31ffac5a
+windup G15 64 3fa8c441cd522bbc
+windup G17 64 3fa7d843df592f42
+windup G19 64 3fa5d93df197f46c
+windup G20 64 3fa640b32806c193
+windup G22 64 3fa86cee2926afd0
+windup G23 64 bfaaf5a9d1e1f3ce
+windup G24 64 bfacbab73dadf19a
+windup G10 65 3fa9871ec2f0901e
+windup G12 65 bfa8c29cadb6a6d7
+windup G13 65 bfa86ddb6814fa06
+windup G14 65 3fa8cd10f63f006a
+windup G15 65 3fa8baf51e3cf33d
+windup G17 65 3fa7d7ef91f25cf9
+windup G19 65 3fa5dbb4a641931f
+windup G20 65 3fa63560ce295276
+windup G22 65 3fa86a1edf3e2e5d
+windup G23 65 bfaaf4dcee3c2a64
+windup G24 65 bfacc27d7c153d15
+windup G10 66 3fa9868e82e06f16
+windup G12 66 bfa8d7c3728ea6e2
+windup G13 66 bfa8807b1cf35c14
+windup G14 66 3fa8cb168ac6c41a
+windup G15 66 3fa8b19ca5ec5b1e
+windup G17 66 3fa7d7944a53b9ad
+windup G19 66 3fa5de2241e1d7c0
+windup G20 66 3fa62a0a885da337
+windup G22 66 3fa867511e9ae330
+windup G23 66 bfaaf40b20dffd3d
+windup G24 66 bfacca42fdda0c0b
+windup G10 67 3fa986019697e854
+windup G12 67 bfa8ecc183f4acc4
+windup G13 67 bfa89303efd3e71a
+windup G14 67 3fa8c91ffb53e341
+windup G15 67 3fa8a838576a2344
+windup G17 67 3fa7d7320938b666
+windup G19 67 3fa5e086cf4e2e3a
+windup G20 67 3fa61eb075facb30
+windup G22 67 3fa86484ebc9b1f8
+windup G23 67 bfaaf33464c7f867
+windup G24 67 bfacd207bb0cc856
+windup G10 68 3fa98577feae2098
+windup G12 68 bfa901969c51afac
+windup G13 68 bfa8a5758fbe8604
+windup G14 68 3fa8c72d53ceef3d
+windup G15 68 3fa89ec8260b1305
+windup G17 68 3fa7d6c8cf4617e9
+windup G19 68 3fa5e2e259363d33
+windup G20 68 3fa61352b6d648f8
+windup G22 68 3fa861ba4b6dead0
+windup G23 68 bfaaf258b4dee778
+windup G24 68 bfacd9cbabc00f1f
+windup G10 69 3fa984f1bbc20edf
+windup G12 69 bfa916427e78767e
+windup G13 69 bfa8b7cfafe63b95
+windup G14 69 3fa8c53ea04bdf6b
+windup G15 69 3fa8954c057260a9
+windup G17 69 3fa7d6589d09393b
+windup G19 69 3fa5e534ea267b13
+windup G20 69 3fa607f16b460945
+windup G22 69 3fa85ef1424146ea
+windup G23 69 bfaaf1780bff561b
+windup G24 69 bface18ec808c8d1
+windup G10 70 3fa9846ece7bfc0f
+windup G12 70 bfa92ac4f56ca36a
+windup G13 70 bfa8ca12079fae9e
+windup G14 70 3fa8c353ed0b0f91
+windup G15 70 3fa88bc3e994f494
+windup G17 70 3fa7d5e172f90b89
+windup G19 70 3fa5e77e8c87480d
+windup G20 70 3fa5fc8cb41c5355
+windup G22 70 3fa85c29d5141922
+windup G23 70 bfaaf09264f35ae7
+windup G24 70 bface95107fe4061
+windup G10 71 3fa983ef378beee8
+windup G12 71 bfa93f1dd4277797
+windup G13 71 bfa8dc3c52552aa6
+windup G14 71 3fa8c16d4679b134
+windup G15 71 3fa8822fc6bcbbcf
+windup G17 71 3fa7d56351755614
+windup G19 71 3fa5e9bf4a9d9b18
+windup G20 71 3fa5f124b2a85f15
+windup G22 71 3fa8596408cdc721
+windup G23 71 bfaaefa7ba74b33f
+windup G24 71 bfacf11263ba3abe
+windup G10 72 3fa98372f7aa8065
+windup G12 72 bfa9534cf55e2b78
+windup G13 72 bfa8ee4e4f7c5fdd
+windup G14 72 3fa8bf8ab93258a9
+windup G15 72 3fa8788f918c0412
+windup G17 72 3fa7d4de38c6d266
+windup G19 72 3fa5ebf72e8b0c25
+windup G20 72 3fa5e5b988b43a5f
+windup G22 72 3fa8569fe26c6c99
+windup G23 72 bfaaeeb8072b4d95
+windup G24 72 bfacf8d2d358e03d
+windup G10 73 3fa982fa0f98d478
+windup G12 73 bfa967523b42ce1e
+windup G13 73 bfa90047c286ea98
+windup G14 73 3fa8bdac51fdae76
+windup G15 73 3fa86ee33f00ed46
+windup G17 73 3fa7d452291f1def
+windup G19 73 3fa5ee26424f1736
+windup G20 73 3fa5da4b588542f2
+windup G22 73 3fa853dd6705d339
+windup G23 73 bfaaedc345af445b
+windup G24 73 bfad00924ef99a1d
+windup G10 74 3fa98284801fe731
+windup G12 74 bfa97b2d8f473604
+windup G13 74 bfa9122872d41250
+windup G14 74 3fa8bbd21dd28bfb
+windup G15 74 3fa8652ac478ea49
+windup G17 74 3fa7d3bf2298ab6b
+windup G19 74 3fa5f04c8fc6d5ec
+windup G20 74 3fa5ceda44d8964f
+windup G22 74 3fa8511c9bc6f8ff
+windup G23 74 bfaaecc970867054
+windup G24 74 bfad0850cebdfd1d
+windup G10 75 3fa982124a10f25f
+windup G12 75 bfa98edee1ddf01d
+windup G13 75 bfa923f02ba3ad59
+windup G14 75 3fa8b9fc29d76474
+windup G15 75 3fa85b6617b44953
+windup G17 75 3fa7d3252536af8f
+windup G19 75 3fa5f26a20ac21d8
+windup G20 75 3fa5c36670e194a6
+windup G22 75 3fa84e5d85f48ab4
+windup G23 75 bfaaebca82257377
+windup G24 75 bfad100e4aca7a74
+windup G10 76 3fa981a36e4611f1
+windup G12 76 bfa9a2662a3d6b47
+windup G13 76 bfa9359ebc0422d2
+windup G14 76 3fa8b82a836207e3
+windup G15 76 3fa851952ed9ce93
+windup G17 76 3fa7d28430e50e54
+windup G19 76 3fa5f47efe98e6ed
+windup G20 76 3fa5b7f0004a953b
+windup G22 76 3fa84ba02aeb3fa9
+windup G23 76 bfaaeac674ef2d30
+windup G24 76 bfad17cabb46da04
+windup G10 77 3fa98137eda0e67e
+windup G12 77 bfa9b5c3661eced6
+windup G13 77 bfa94733f6c2636a
+windup G14 77 3fa8b65d37f8db5a
+windup G15 77 3fa847b8007a2567
+windup G17 77 3fa7d1dc4578215a
+windup G19 77 3fa5f68b33042d25
+windup G20 77 3fa5ac771731876f
+windup G22 77 3fa848e4901fe035
+windup G23 77 bfaae9bd43347c55
+windup G24 77 bfad1f86185db9b0
+windup G10 78 3fa980cfc90ba7fb
+windup G12 78 bfa9c8f6997eedf3
+windup G13 78 bfa958afb257ee4e
+windup G14 78 3fa8b4945552d5c6
+windup G15 78 3fa83dce839480f8
+windup G17 78 3fa7d12d62ad45cd
+windup G19 78 3fa5f88ec744c81d
+windup G20 78 3fa5a0fbda27247f
+windup G22 78 3fa8462abb1f7aa3
+windup G23 78 bfaae8aee7345873
+windup G24 78 bfad27405a3cdbcc
+windup G10 79 3fa9806b0122e2b0
+windup G12 79 bfa9dbffcf392278
+windup G13 79 bfa96a11c98c197d
+windup G14 79 3fa8b2cfe9072bf5
+windup G15 79 3fa833d8af09d899
+windup G17 79 3fa7d07787e3c562
+windup G19 79 3fa5fa89c45ab40d
+windup G20 79 3fa5957e6dc39f9b
+windup G22 79 3fa84372b13a5b6d
+windup G23 79 bfaae79b5b708e0c
+windup G24 79 bfad2ef979824931
+windup G10 80 3fa98009978b92b9
+windup G12 80 bfa9eedf1566842b
+windup G13 80 bfa97b5a1899b6e5
+windup G14 80 3fa8b11001d46cd2
+windup G15 80 3fa829d67bddde62
+windup G17 80 3fa7cfbab5356859
+windup G19 80 3fa5fc7c33c6587c
+windup G20 80 3fa589fef84720ee
+windup G22 80 3fa840bc78da20b6
+windup G23 80 bfaae6829956b7a6
+windup G24 80 bfad36b16d88395c
+windup G10 81 3fa97fab8cf257d8
+windup G12 81 bfaa019482300127
+windup G13 81 bfa98c888146a10d
+windup G14 81 3fa8af54adb6b646
+windup G15 81 3fa81fc7e1e0d82b
+windup G17 81 3fa7cef6e9d270f0
+windup G19 81 3fa5fe661e476ecd
+windup G20 81 3fa57e7d9f26382b
+windup G22 81 3fa83e081780bf07
+windup G23 81 bfaae5649b42c7b8
+windup G24 81 bfad3e682ef36042
+windup G10 82 3fa97f50e261fa4a
+windup G12 82 bfaa14203032a97a
+windup G13 82 bfa99d9ce8072af6
+windup G14 82 3fa8ad9dfb2f24d9
+windup G15 82 3fa815acd9ef0e12
+windup G17 82 3fa7ce2c251932e7
+windup G19 82 3fa600478cb32b4c
+windup G20 82 3fa572fa88a7464a
+windup G22 82 3fa83b55931f37ec
+windup G23 82 bfaae4415b2892a1
+windup G24 82 bfad461db5feba19
+windup G10 83 3fa97ef998ec95ae
+windup G12 83 bfaa26823f16893b
+windup G13 83 bfa9ae97349f1c9e
+windup G14 83 3fa8abebf8f37ffb
+windup G15 83 3fa80b855d65eebf
+windup G17 83 3fa7cd5a66501408
+windup G19 83 3fa6022087bedbf0
+windup G20 83 3fa56775db7ad461
+windup G22 83 3fa838a4f1bff4aa
+windup G23 83 bfaae318d2e76bda
+windup G24 83 bfad4dd1fae96e6b
+windup G10 84 3fa97ea5b1ac8236
+windup G12 84 bfaa38bad355facb
+windup G13 84 bfa9bf77520cbefe
+windup G14 84 3fa8aa3eb5ee2c8a
+windup G15 84 3fa8015166281fb4
+windup G17 84 3fa7cc81aca579eb
+windup G19 84 3fa603f1180110bc
+windup G20 84 3fa55befbeb81c59
+windup G22 84 3fa835f639876f61
+windup G23 84 bfaae1eafc4b2b9c
+windup G24 84 bfad5584f5f5884a
+windup G10 85 3fa97e552dc40fc4
+windup G12 85 bfaa4aca160241bd
+windup G13 85 bfa9d03d2e732dcf
+windup G14 85 3fa8a896413ed2a6
+windup G15 85 3fa7f710eea13d9e
+windup G17 85 3fa7cba1f72f8217
+windup G19 85 3fa605b945f10218
+windup G20 85 3fa5506859d960bc
+windup G22 85 3fa8334970b3eaef
+windup G23 85 bfaae0b7d10b4106
+windup G24 85 bfad5d369f69694c
+windup G10 86 3fa97e080e5dbe71
+windup G12 86 bfaa5cb03485be1a
+windup G13 86 bfa9e0e8bb062e5c
+windup G14 86 3fa8a6f2aa3bdbc4
+windup G15 86 3fa7ecc3f1cabf6a
+windup G17 86 3fa7cabb44ec836e
+windup G19 86 3fa6077919e6d9ed
+windup G20 86 3fa544dfd4bc79c1
+windup G22 86 3fa8309e9d9e5269
+windup G23 86 bfaadf7f4acbc066
+windup G24 86 bfad64e6ef8f1a13
+windup G10 87 3fa97dbe54ab4eb8
+windup G12 87 bfaa6e6d606e1e0d
+windup G13 87 bfa9f179ebf4a912
+windup G14 87 3fa8a55400723ed3
+windup G15 87 3fa7e26a6b2f575b
+windup G17 87 3fa7c9cd94c2094d
+windup G19 87 3fa609309c1cce8c
+windup G20 87 3fa53956579f1970
+windup G22 87 3fa82df5c6b9e84b
+windup G23 87 bfaade41631b0fd4
+windup G24 87 bfad6c95deb48f16
+windup G10 88 3fa97d7801e71bea
+windup G12 88 bfaa8001cf3434d0
+windup G13 88 bfaa01f0b854c472
+windup G14 88 3fa8a3ba53a6dcd1
+windup G15 88 3fa7d80456ef59eb
+windup G17 88 3fa7c8d8e57d4df4
+windup G19 88 3fa60adfd4ae8b92
+windup G20 88 3fa52dcc0b1aec96
+windup G22 88 3fa82b4ef2951080
+windup G23 88 bfaadcfe1372f704
+windup G24 88 bfad7443652b9380
+windup G10 89 3fa97d3517536b3e
+windup G12 89 bfaa916dba014b95
+windup G13 89 bfaa124d1a0ea530
+windup G14 89 3fa8a225b3d6b5d0
+windup G15 89 3fa7cd91b1c4f949
+windup G17 89 3fa7c7dd35d2f777
+windup G19 89 3fa60c86cb9977d5
+windup G20 89 3fa522411825feb0
+windup G22 89 3fa828aa27d95066
+windup G23 89 bfaadbb55537f704
+windup G24 89 bfad7bef7b4a9a98
+windup G10 90 3fa97cf59639b3d1
+windup G12 90 bfaaa2b15d7f7976
+windup G13 90 bfaa228f0dc60e72
+windup G14 90 3fa8a09631380c69
+windup G15 90 3fa7c31279083ba3
+windup G17 90 3fa7c6da845ef709
+windup G19 90 3fa60e2588bd8148
+windup G20 90 3fa516b5a80e4674
+windup G22 90 3fa826076d4bbfdd
+windup G23 90 bfaada6721b8f9e1
+windup G24 90 bfad839a196b85f9
+windup G10 91 3fa97cb97fec3ad9
+windup G12 91 bfaab3ccf99f89cb
+windup G13 91 bfaa32b692c5b7af
+windup G14 91 3fa89f0bdc3b015a
+windup G15 91 3fa7b886aab45607
+windup G17 91 3fa7c5d0cfa465bd
+windup G19 91 3fa60fbc13dd579d
+windup G20 91 3fa50b29e4777fec
+windup G22 91 3fa82366c9cd03fe
+windup G23 91 bfaad913722f0279
+windup G24 91 bfad8b4337ed0de3
+windup G10 92 3fa97c80d5c47092
+windup G12 92 bfaac4c0d16a4eb2
+windup G13 92 bfaa42c3aae98179
+windup G14 92 3fa89d86c58a7c1c
+windup G15 92 3fa7adee4569c6f4
+windup G17 92 3fa7c4c0160d3f61
+windup G19 92 3fa6114a749e2023
+windup G20 92 3fa4ff9df75881f6
+windup G22 92 3fa820c8445a1529
+windup G23 92 bfaad7ba3fbcd5d1
+windup G24 92 bfad92eacf3213ed
+windup G10 93 3fa97c4b9923a1d7
+windup G12 93 bfaad58d2acc8c23
+windup G13 93 bfaa52b65a8a5a47
+windup G14 93 3fa89c06fe0cac6c
+windup G15 93 3fa7a3494875bb7c
+windup G17 93 3fa7c3a855ead3a8
+windup G19 93 3fa612d0b287b655
+windup G20 93 3fa4f4120af80807
+windup G22 93 3fa81e2be40c2dec
+windup G23 93 bfaad65b836ea31e
+windup G24 93 bfad9a90d7a1e57b
+windup G10 94 3fa97c19cb73a5ba
+windup G12 94 bfaae6324e69016e
+windup G13 94 bfaa628ea869b02a
+windup G14 94 3fa89a8c96e3c96f
+windup G15 94 3fa79897b3d347bc
+windup G17 94 3fa7c2898d74bf3b
+windup G19 94 3fa6144ed505ace8
+windup G20 94 3fa4e88649ebd24b
+windup G22 94 3fa81b91b019789b
+windup G23 94 bfaad4f736395635
+windup G24 94 bfada23549a85900
+windup G10 95 3fa97beb6e25785f
+windup G12 95 bfaaf6b08767c495
+windup G13 95 bfaa724c9d98b977
+windup G14 95 3fa89917a16f2eda
+windup G15 95 3fa78dd988321284
+windup G17 95 3fa7c163bac96114
+windup G19 95 3fa615c4e3667e9f
+windup G20 95 3fa4dcfadf12e83b
+windup G22 95 3fa818f9afd4f206
+windup G23 95 bfaad38d50fba0e7
+windup G24 95 bfada9d81db5a93f
+windup G10 96 3fa97bc082b225e9
+windup G12 96 bfab0708234b2283
+windup G13 96 bfaa81f045697334
+windup G14 96 3fa897a82f4c00c4
+windup G15 96 3fa7830ec6f98992
+windup G17 96 3fa7c036dbed8912
+windup G19 96 3fa61732e4dccf6d
+windup G20 96 3fa4d16ff5941cf5
+windup G22 96 3fa81663eaaf0755
+windup G23 96 bfaad21dcc7b8327
+windup G24 96 bfadb1794c3f1eca
+windup G10 97 3fa97b990a9a8e20
+windup G12 97 bfab173971c20b74
+windup G13 97 bfaa9179ad53bb9d
+windup G14 97 3fa8963e52562646
+windup G15 97 3fa77837724d9130
+windup G17 97 3fa7bf02eecc531a
+windup G19 97 3fa61898e07e9a7b
+windup G20 97 3fa4c5e5b8dc1c4d
+windup G22 97 3fa813d06835dad2
+windup G23 97 bfaad0a8a16754f6
+windup G24 97 bfadb918cdbe9334
+windup G10 98 3fa97b75076725db
+windup G12 98 bfab2744c47fca80
+windup G13 98 bfaaa0e8e4e70b55
+windup G14 98 3fa894da1ca8d19b
+windup G15 98 3fa76d538d129974
+windup G17 98 3fa7bdc7f136fc8c
+windup G19 98 3fa619f6dd4670c5
+windup G20 98 3fa4ba5c5498eada
+windup G22 98 3fa8113f301599be
+windup G23 98 bfaacf2dc854ade5
+windup G24 98 bfadc0b69ab2b5c0
+windup G10 99 3fa97b547aa8ed0e
+windup G12 99 bfab372a6f11e947
+windup G13 99 bfaab03dfdb0a4d7
+windup G14 99 3fa8937ba09f58c6
+windup G15 99 3fa762631af2eddc
+windup G17 99 3fa7bc85e0e4bcd0
+windup G19 99 3fa61b4ce212a807
+windup G20 99 3fa4aed3f4b757a0
+windup G22 99 3fa80eb04a18d82b
+windup G23 99 bfaacdad39c1734d
+windup G24 99 bfadc852ab9eed75
+windup G10 100 3fa97b3765f7fa90
+windup G12 100 bfab46eac6b90d35
+windup G13 100 bfaabf790b2b3494
+windup G14 100 3fa89222f0d65657
+windup G15 100 3fa757662061de74
+windup G17 100 3fa7bb3cbb729547
+windup G19 100 3fa61c9af5a69124
+windup G20 100 3fa4a34cc55fda3b
+windup G22 100 3fa80c23be28e672
+windup G23 100 bfaacc26ee10ecad
+windup G24 100 bfadcfecf90c2e3f
+windup G10 101 3fa97b1dcaf47622
+windup G12 101 bfab568622440bba
+windup G13 101 bfaace9a22aa89ff
+windup G14 101 3fa890d0202c8f78
+windup G15 101 3fa74c5ca2a16516
+windup G17 101 3fa7b9ec7e632ae7
+windup G19 101 3fa61de11ea9ab04
+windup G20 101 3fa497c6f2f2f255
+windup G22 101 3fa80999944e4a19
+windup G23 101 bfaaca9add8de105
+windup G24 101 bfadd7857b87bcc1
+windup G10 102 3fa97b07aaf2a034
+windup G12 102 bfab65fcdab8e0c3
+windup G13 102 bfaadda15bf89250
+windup G14 102 3fa88f8341724f84
+windup G15 102 3fa74146a7360140
+windup G17 102 3fa7b89526d459fd
+windup G19 102 3fa61f1f63704de9
+windup G20 102 3fa48c42a9b00896
+windup G22 102 3fa80711d45b7780
+windup G23 102 bfaac90900c2bd6f
+windup G24 102 bfaddf1c2c11cd65
+windup G10 103 3fa97af50849ba69
+windup G12 103 bfab754f47fb36aa
+windup G13 103 bfaaec8ece7cd0d2
+windup G14 103 3fa88e3c68af1e62
+windup G15 103 3fa736243629720f
+windup G17 103 3fa7b736b2a7bc78
+windup G19 103 3fa62055cadcd441
+windup G20 103 3fa480c0170f1fbd
+windup G22 103 3fa8048c8742d9b9
+windup G23 103 bfaac7714f11aa5b
+windup G24 103 bfade6b10267dd8a
+windup G10 104 3fa97ae5e45d9e9b
+windup G12 104 bfab847dc57c8723
+windup G13 104 bfaafb6295537593
+windup G14 104 3fa88cfba93bacb8
+windup G15 104 3fa72af556b25d5f
+windup G17 104 3fa7b5d11ec5daa2
+windup G19 104 3fa621845b0dc173
+windup G20 104 3fa4753f67af464a
+windup G22 104 3fa80209b5173df5
+windup G23 104 bfaac5d3c0cf3e11
+windup G24 104 bfadee43f79445db
+windup G10 105 3fa97ada40edbb67
+windup G12 105 bfab9388aee5dc53
+windup G13 105 bfab0a1ccc73411d
+windup G14 105 3fa88bc11707a343
+windup G15 105 3fa71fba11762b69
+windup G17 105 3fa7b4646845c386
+windup G19 105 3fa622ab1a3fac78
+windup G20 105 3fa469c0c8b33b17
+windup G22 105 3fa7ff89666118d0
+windup G23 105 bfaac4304ddc09c9
+windup G24 105 bfadf5d5043a049d
+windup G10 106 3fa97ad21fc154de
+windup G12 106 bfaba27060c6f826
+windup G13 106 bfab18bd914e4fd9
+windup G14 106 3fa88a8cc6490638
+windup G15 106 3fa714726ffdad6f
+windup G17 106 3fa7b2f08c23997e
+windup G19 106 3fa623ca0e9449c4
+windup G20 106 3fa45e4467656786
+windup G22 106 3fa7fd0ba3ca3e0f
+windup G23 106 bfaac286edfbb98b
+windup G24 106 bfadfd642100cb93
+windup G10 107 3fa97acd82a7841c
+windup G12 107 bfabb13538782fe7
+windup G13 107 bfab274502c05c14
+windup G14 107 3fa8895ecb7cf768
+windup G15 107 3fa7091e7cba5665
+windup G17 107 3fa7b175873ff87b
+windup G19 107 3fa624e13e13522f
+windup G20 107 3fa452ca7136085c
+windup G22 107 3fa7fa90761dabf0
+windup G23 107 bfaac0d798d5bace
+windup G24 107 bfae04f146962a86
+windup G10 108 3fa97acc6b76fc6b
+windup G12 108 bfabbfd793fe60b8
+windup G13 108 bfab35b340fc04d8
+windup G14 108 3fa888373b69cda2
+windup G15 108 3fa6fdbe430928c8
+windup G17 108 3fa7aff3565f666d
+windup G19 108 3fa625f0aeaaae72
+windup G20 108 3fa4475313b6439d
+windup G22 108 3fa7f817e6485041
+windup G23 108 bfaabf2245f5e4dc
+windup G24 108 bfae0c7c6dad9c0c
+windup G10 109 3fa97acedc0f080d
+windup G12 109 bfabce57d1f0f78e
+windup G13 109 bfab44086d7b9e6a
+windup G14 109 3fa887162b1e6b09
+windup G15 109 3fa6f251cf382f1a
+windup G17 109 3fa7ae69f62af63f
+windup G19 109 3fa626f8662de619
+windup G20 109 3fa43bde7c953b82
+windup G22 109 3fa7f5a1fd5959eb
+windup G23 109 bfaabd66ecc95282
+windup G24 109 bfae14058eff8864
+windup G10 110 3fa97ad4d65610d3
+windup G12 110 bfabdcb651605e1b
+windup G13 110 bfab5244aaeed273
+windup G14 110 3fa885fbaff45a35
+windup G15 110 3fa6e6d92e8948f6
+windup G17 110 3fa7acd9632f17e9
+windup G19 110 3fa627f86a574002
+windup G20 110 3fa4306cd99c1c37
+windup G22 110 3fa7f32ec482a9bf
+windup G23 110 bfaabba584a02789
+windup G24 110 bfae1b8ca34a94d7
+windup G10 111 3fa97ade5c3a9f24
+windup G12 111 bfabeaf371bc978d
+windup G13 111 bfab60681d2c273d
+windup G14 111 3fa884e7df90a243
+windup G15 111 3fa6db546f379349
+windup G17 111 3fa7ab4199dc5677
+windup G19 111 3fa628f0c0c6f5af
+windup G20 111 3fa424fe58ac33e6
+windup G22 111 3fa7f0be45194093
+windup G23 111 bfaab9de04ad11c6
+windup G24 111 bfae2311a352d143
+windup G10 112 3fa97aeb6fb31eb8
+windup G12 112 bfabf90f92bf3e2a
+windup G13 112 bfab6e72e91f69d0
+windup G14 112 3fa883dacfe473d8
+windup G15 112 3fa6cfc3a07a66c3
+windup G17 112 3fa7a9a2968646f1
+windup G19 112 3fa629e16f0411c9
+windup G20 112 3fa4199327b9eceb
+windup G22 112 3fa7ee508895c9fb
+windup G23 112 bfaab81064026c1f
+windup G24 112 bfae2a9487e2ab54
+windup G10 113 3fa97afc12bda00b
+windup G12 113 bfac070b14558a16
+windup G13 113 bfab7c6534bc09a6
+windup G14 113 3fa882d4972e2826
+windup G15 113 3fa6c426d2893e86
+windup G17 113 3fa7a7fc5563c614
+windup G19 113 3fa62aca7a7c577d
+windup G20 113 3fa40e2b74c9d3be
+windup G22 113 3fa7ebe59894c872
+windup G23 113 bfaab63c9994d08a
+windup G24 113 bfae321549c9c306
+windup G10 114 3fa97b104760de8c
+windup G12 114 bfac14e6568a6dc9
+windup G13 114 bfab8a3f26ec4d6f
+windup G14 114 3fa881d54bfacb25
+windup G15 114 3fa6b87e16a047c8
+windup G17 114 3fa7a64ed28e9d16
+windup G19 114 3fa62babe884a296
+windup G20 114 3fa402c76dec9202
+windup G22 114 3fa7e97d7ed751c4
+windup G23 114 bfaab4629c37678b
+windup G24 114 bfae3993e1de0ac4
+windup G10 115 3fa97b280faa8231
+windup G12 115 bfac22a1b97436ef
+windup G13 115 bfab9800e78460e7
+windup G14 115 3fa880dd05267791
+windup G15 115 3fa6acc97f042e90
+windup G17 115 3fa7a49a0a03441d
+windup G19 115 3fa62c85be585c16
+windup G20 115 3fa3f767413d030d
+windup G22 115 3fa7e71845437165
+windup G23 115 bfaab282629dae45
+windup G24 115 bfae411048fbd556
+windup G10 116 3fa97b436db126c8
+windup G12 116 bfac303d9d208278
+windup G13 116 bfaba5aa9f3215cc
+windup G14 116 3fa87febd9de1256
+windup G15 116 3fa6a1091f04b6de
+windup G17 116 3fa7a2ddf7a0a078
+windup G19 116 3fa62d58011a4cf5
+windup G20 116 3fa3ec0b1cda956d
+windup G22 116 3fa7e4b5f5e4a11c
+windup G23 116 bfaab09be35ae753
+windup G24 116 bfae488a7804d946
+windup G10 117 3fa97b6263925abb
+windup G12 117 bfac3dba6183e38c
+windup G13 117 bfabb33c77723b70
+windup G14 117 3fa87f01e19fa86a
+windup G15 117 3fa6953d0b01c518
+windup G17 117 3fa7a11a9727df8d
+windup G19 117 3fa62e22b5d4bdea
+windup G20 117 3fa3e0b32ee7e521
+windup G22 117 3fa7e2569aec5e1e
+windup G23 117 bfaaaeaf14df1ac9
+windup G24 117 bfae500267e17c15
+windup G10 118 3fa97b84f374ad10
+windup G12 118 bfac4b1866678c2b
+windup G13 118 bfabc0b69a7f39aa
+windup G14 118 3fa87e1f343c3830
+windup G15 118 3fa68965586d6b5e
+windup G17 118 3fa79f4fe43bc457
+windup G19 118 3fa62ee5e178edf0
+windup G20 118 3fa3d55fa585a746
+windup G22 118 3fa7dffa3eb261f2
+windup G23 118 bfaaacbbed78d9ff
+windup G24 118 bfae577811802aa3
+windup G10 119 3fa97bab1f85a79b
+windup G12 119 bfac58580b5bce5f
+windup G13 119 bfabce193346cec7
+windup G14 119 3fa87d43e9d83efd
+windup G15 119 3fa67d821dd0c118
+windup G17 119 3fa79d7dda61282c
+windup G19 119 3fa62fa188dfde49
+windup G20 119 3fa3ca10aecfaed6
+windup G22 119 3fa7dda0ebb56a2f
+windup G23 119 bfaaaac26354a4db
+windup G24 119 bfae5eeb6dd56b13
+sat_pco G05 0 bfe652ee7f7f4eba 3fbf001f61201516 3fccab6b261a510a
+sat_pco G10 0 bfa217495a794d47 3fea3a6b3ccbccfc bff3c33cea4340d7
+sat_pco G12 0 bfe4b6e8446291d0 3fd0c8c64d273aff 3fc0ebe223d88d57
+sat_pco G13 0 bffa227b82bd0604 3feda31c7e9791ac 3fd0f9b915534e26
+sat_pco G14 0 bfc61eeae906283b bff19b149692cbc1 bff96d1cc5771dc5
+sat_pco G15 0 bfdcf19aa788abd0 3fa24f91e6fa6575 bfd6acb31d50baa4
+sat_pco G17 0 bfd05ad78c17c226 bfe24b2cdac96b5a bfd59f40b4250c2c
+sat_pco G19 0 bfddb523a11c295e bfe17125f8dc3cf9 bfb0063b04906bb9
+sat_pco G20 0 bff8e2272d4a7f2e bfded60337e5cc0c bfef1d053945955e
+sat_pco G22 0 bfd41be4fe4c1732 bfdd84464c51bf5a bfe80e3579c08754
+sat_pco G23 0 bfde7dc7b1d7e2d0 3ff3522e26c98ee2 bff6ac22e40b03ee
+sat_pco G24 0 bff1217fe57857f0 3fe1b96322954e76 bfe748d850f95774
+sat_pco G30 0 bfe0f851df8e7edf bff5bbcdd4be42a8 bfda236b4d1b0a8c
+sat_pco G05 1 bfe64cc59bb2ae80 3fbee238c18a3494 3fccffb3db403528
+sat_pco G10 1 bfa44f0a319f5a87 3fea4677e8c99a9a bff3beb21d79794b
+sat_pco G12 1 bfe4bb27684a0962 3fd0c7203867a16e 3fc09e85cd83fa28
+sat_pco G13 1 bffa27b971ea9cc6 3feda15f4ecac262 3fd083125df9754c
+sat_pco G14 1 bfc563ec22f3f35a bff1a2922218e3dd bff96a6bc3df3efb
+sat_pco G15 1 bfdd03e6714114bc 3fa1e0641ab4999a bfd696a91d1aa94a
+sat_pco G17 1 bfd04993fa462d07 bfe244fc91860570 bfd5c11c54a7a378
+sat_pco G19 1 bfddb014db608e54 bfe170e92087ff59 bfb0a982f72ef0e3
+sat_pco G20 1 bff8ec49fa655554 bfdf05d7c3204fca bfeef08ee0a2619b
+sat_pco G22 1 bfd3efae5eed9f31 bfdd906105e0464a bfe813b0cd3f4aee
+sat_pco G23 1 bfded1b0871b8c19 3ff35929f6344e0a bff69f1341f32c45
+sat_pco G24 1 bff12174a9ad6bf2 3fe1a36da32ca673 bfe759a00cffb7d8
+sat_pco G30 1 bfe0f1852f466495 bff5c2932d1c8228 bfd9da88a146503c
+sat_pco G05 2 bfe64689b2bcafe4 3fbec3e880979392 3fcd53f0def7fb24
+sat_pco G10 2 bfa685f6e1dd2140 3fea5292484a44c0 bff3ba10235bb4f6
+sat_pco G12 2 bfe4bf54ae824c7a 3fd0c5784b2bc68c 3fc0511b66ae9121
+sat_pco G13 2 bffa2cddcf1c3ab5 3fed9f8640c18878 3fd00c4b54fa2ce8
+sat_pco G14 2 bfc4a91904aebb83 bff1aa18913e16f0 bff9679c06114082
+sat_pco G15 2 bfdd162461ba77a0 3fa171d3327d1940 bfd6808211a00fd6
+sat_pco G17 2 bfd038347b9ebcf9 bfe23ec4f2ad9073 bfd5e2dc1d386a98
+sat_pco G19 2 bfddaaeb61c3dd30 bfe1709fa21ab7ce bfb14cbab8edc142
+sat_pco G20 2 bff8f660fe692234 bfdf3568e307be05 bfeec3efacccd8d2
+sat_pco G22 2 bfd3c3749a2bcc88 bfdd9c920c3fc41a bfe8190ee029f83c
+sat_pco G23 2 bfdf255e08c551e5 3ff3602b8b1b056c bff691e692121562
+sat_pco G24 2 bff1216d04be7fcd 3fe18d6b355ff6da bfe76a465b39c266
+sat_pco G30 2 bfe0eac1334caa02 bff5c949770c0c4a bfd991688081fa4a
+sat_pco G05 3 bfe6403ac8f9e60c 3fbea52a80e9190a 3fcda8225fc50f28
+sat_pco G10 3 bfa8bc0c8ea87070 3fea5eba45db17fa bff3b556ff35da3d
+sat_pco G12 3 bfe4c37018aff718 3fd0c3ce7a7fe96c 3fc003a30c88ae26
+sat_pco G13 3 bffa31e89989c44e 3fed9d91001c4ff9 3fcf2aca362621e1
+sat_pco G14 3 bfc3ee7286877231 bff1b1a7d68b9975 bff964ad8f54e312
+sat_pco G15 3 bfdd2854530937a0 3fa103df29afb2cf bfd66a3e1c3c7f5a
+sat_pco G17 3 bfd026b911536a64 bfe23886152fabb8 bfd6047fe61f9992
+sat_pco G19 3 bfdda5a71a445ce6 bfe170498c5ce5fd bfb1efe183fb1474
+sat_pco G20 3 bff9006c1a4d411d bfdf64b69924b976 bfee9727cd50db94
+sat_pco G22 3 bfd39737f080af7b bfdda8d959dc9d4c bfe81e4faddf5ede
+sat_pco G23 3 bfdf78cfcacd79a6 3ff36732cd4b9421 bff6849ce3a4fa50
+sat_pco G24 3 bff12168ff3b0c59 3fe1775bf40cbdf1 bfe77acb317dcbae
+sat_pco G30 3 bfe0e405d05e2317 bff5cff09b5b7d5a bfd9480b3a5ebcca
+sat_pco G05 4 bfe639d8e66e816a 3fbe85fa569705e6 3fcdfc486b51e1a4
+sat_pco G10 4 bfaaf1485d6d3d92 3fea6aefcbb1c7a6 bff3b086b4737fe5
+sat_pco G12 4 bfe4c779a8ac1b1c 3fd0c222ba9fec1a 3fbf6c39b300f394
+sat_pco G13 4 bffa36d9d0a273f6 3fed9b7f3a57b96e 3fce3cc1a7f22cd8
+sat_pco G14 4 bfc333f9a0388a72 bff1b93fe45e2a1c bff961a06319ee40
+sat_pco G15 4 bfdd3a761f58988c 3fa09687f994a0ba bfd653dd5e747852
+sat_pco G17 4 bfd01521bcdf2ffb bfe2324010003868 bfd6260787cee4b8
+sat_pco G19 4 bfdda047eb17d74e bfe16fe6ee307825 bfb292f692c28c63
+sat_pco G20 4 bff90a6b2f11f0d0 bfdf93c0e77aa46e bfee6a3771eb79e9
+sat_pco G22 4 bfd36af8a25ae3c6 bfddb536e8c77fc4 bfe8237331dfb6ec
+sat_pco G23 4 bfdfcc0561c2381e 3ff36e3fa46f9288 bff67736460f6cae
+sat_pco G24 4 bff12168a19e95ac 3fe1613ffa09698c bfe78b2e85b8687e
+sat_pco G30 4 bfe0dd52eaf8ebe3 bff5d68882eeca2c bfd8fe711f0b07ae
+sat_pco G05 5 bfe63364178e833a 3fbe665348a7e6a4 3fce5062e663e65c
+sat_pco G10 5 bfad25a77596a128 3fea7732c3ad0fce bff3ab9f469fd5e3
+sat_pco G12 5 bfe4cb7160847ba2 3fd0c074fee55b3c 3fbed111ca833ae2
+sat_pco G13 5 bffa3bb1740c0d45 3fed99509edd52f8 3fcd4e7f4cbbd952
+sat_pco G14 5 bfc279af48e39c58 bff1c0e0ace6395a bff95e7484f832c4
+sat_pco G15 5 bfdd4c89a0eb39cc 3fa029cd9960c8ca bfd63d5ff9f534ae
+sat_pco G17 5 bfd0036e8004d9dc bfe22bf2fa16ab21 bfd64772dae3d696
+sat_pco G19 5 bfdd9acdbaad47b0 bfe16f77d690a541 bfb335f91fc24879
+sat_pco G20 5 bff9145e1dbde016 bfdfc287d07aa59e bfee3d1eca975f6f
+sat_pco G22 5 bfd33eb6f025cf38 bfddc1aab2b2f3ec bfe8287967cba1da
+sat_pco G23 5 bfe00f7f316cb5a2 3ff37551f80e0f7e bff669b2c8d88828
+sat_pco G24 5 bff1216bf450752d 3fe14b17623069ef bfe79b704de44c5a
+sat_pco G30 5 bfe0d6a86759b09d bff5dd1116c26b76 bfd8b49a7f33e87c
+sat_pco G05 6 bfe62cdc6e160fa4 3fbe463055075eee 3fcea4718409043c
+sat_pco G10 6 bfaf5927007104d0 3fea83831754d030 bff3a6a0b965cac2
+sat_pco G12 6 bfe4cf574279d07a 3fd0bec539b66b72 3fbe35ce89b7c944
+sat_pco G13 6 bffa406f83a64a22 3fed9704df11f2b1 3fcc6005771bbc58
+sat_pco G14 6 bfc1bf947733e709 bff1c88a22269a94 bff95b29f8b02c4d
+sat_pco G15 6 bfdd5e8eb21f2d24 3f9f7b5ffc4046ce bfd626c6108fe6b0
+sat_pco G17 6 bfcfe33eb9a518c0 bfe2259eea6f0ac1 bfd668c1b8214374
+sat_pco G19 6 bfdd95386fad303e bfe16efc5491ba4c bfb3d8e8658b698d
+sat_pco G20 6 bff91e44c7612b98 bfdff10b570e4ec0 bfee0fde07816aef
+sat_pco G22 6 bfd312731a376654 bfddce34b0f86512 bfe82d624b663274
+sat_pco G23 6 bfe038dd31f076b4 3ff37c69af8a582a bff65c127bad9d82
+sat_pco G24 6 bff12172ffa3d20c 3fe134e24760436c bfe7ab90800a021c
+sat_pco G30 6 bfe0d006297bf8c5 bff5e38a3feba16c bfd86a87ac04c226
+sat_pco G05 7 bfe6264201eff328 3fbe258c37969c52 3fcef873bc03e82e
+sat_pco G10 7 bfb0c5e214e76587 3fea8fe0afdc8912 bff3a18b108f172f
+sat_pco G12 7 bfe4d32b50ffdb80 3fd0bd135c747d67 3fbd9a70158fac36
+sat_pco G13 7 bffa4513ff8847a2 3fed949bae660eeb 3fcb71567f411f52
+sat_pco G14 7 bfc105aa2136fd42 bff1d03c35f61aa0 bff957c0c22a7d78
+sat_pco G15 7 bfdd70852d6aca54 3f9ea45e3598abf0 bfd6100fc43df588
+sat_pco G17 7 bfcfbf68ab3c76c6 bfe21f43f8086d00 bfd689f3f8761b1a
+sat_pco G19 7 bfdd8f87f0f8c678 bfe16e747760cc91 bfb47bc39ee31011
+sat_pco G20 7 bff9281f0d12f255 bfe00fa5bf456095 bfede275591537d4
+sat_pco G22 7 bfd2e62d60de4d37 bfdddad4dc941046 bfe8322dd8933b4c
+sat_pco G23 7 bfe0621c7da29989 3ff38386b224ba3c bff64e556e613ab2
+sat_pco G24 7 bff1217dcbd7d462 3fe11ea0c470652d bfe7bb8f12471682
+sat_pco G30 7 bfe0c96c151d56ab bff5e9f3e79600e4 bfd82038f74661dc
+sat_pco G05 8 bfe61f94f21fe528 3fbe046174d24f3c 3fcf4c68c0e54a96
+sat_pco G10 8 bfb1debe0f808795 3fea9c4b76208db4 bff39c5e5005ba47
+sat_pco G12 8 bfe4d6ed8ebc9638 3fd0bb5f576b51a8 3fbcfef68dfab4aa
+sat_pco G13 8 bffa499ee804e172 3fed9214c2623305 3fca8274c1f7ade6
+sat_pco G14 8 bfc04bf13c5a6b38 bff1d7f6d9ffa927 bff95438e577f1b6
+sat_pco G15 8 bfdd826ced5d2924 3f9dce95c09a0056 bfd5f93d3720c666
+sat_pco G17 8 bfcf9b5ada0da2f6 bfe218e239e51e66 bfd6ab0974fb4ccc
+sat_pco G19 8 bfdd89bc25ab5a12 bfe16de04e43983d bfb51e8a06a2587c
+sat_pco G20 8 bff931eccff44d2e bfe026a4255d9cc7 bfedb4e4eff1aa3a
+sat_pco G22 8 bfd2b9e604528c2b bfdde78b2e294db8 bfe836dc0b58e700
+sat_pco G23 8 bfe08b3ce0066acc 3ff38aa8e6fa46f6 bff6407bb0ec0e98
+sat_pco G24 8 bff1218c61176064 3fe10852f43e3100 bfe7cb6bfac4efca
+sat_pco G30 8 bfe0c2da0dbabf51 bff5f04df70689e2 bfd7d5aeb33f9f90
+sat_pco G05 9 bfe618d565ac67d8 3fbde2aa68ac05e8 3fcfa04f75e8764a
+sat_pco G10 9 bfb2f726080ba5dc 3feaa8c352aa7c4e bff3971a7bd215c8
+sat_pco G12 9 bfe4da9dfe86cf64 3fd0b9a919c0e9a1 3fbc63620e2e88c6
+sat_pco G13 9 bffa4e103da8e623 3fed8f6fd2b5a7aa 3fc99362a0e2fbaa
+sat_pco G14 9 bfbf24d57b03ce45 bff1dfb9ffc18416 bff9509266d1f65f
+sat_pco G15 9 bfdd9445cca22ef2 3f9cfa067ac51388 bfd5e24e8b7ce88a
+sat_pco G17 9 bfcf77154be5e8f4 bfe21279c709f25f bfd6cc0206f6184a
+sat_pco G19 9 bfdd83d4f51a4236 bfe16d3fe8984319 bfb5c13ad7c1b1a6
+sat_pco G20 9 bff93badf12deaa4 bfe03d80dfea31f4 bfed872cfcf5951e
+sat_pco G22 9 bfd28d9d44c6a414 bfddf4579dfd96ec bfe83b6cdfddcd88
+sat_pco G23 9 bfe0b43e24f50a6b 3ff391d035069714 bff63285536a03bc
+sat_pco G24 9 bff1219ec77940a3 3fe0f1f8f1a3b4ca bfe7db272fbeacac
+sat_pco G30 9 bfe0bc4ff690d86f bff5f698579beaf4 bfd78ae932b50fbe
+sat_pco G05 10 bfe612038c7b3672 3fbdc06159fe3598 3fcff42665183244
+sat_pco G10 10 bfb40f189758f49d 3feab5482dadd8c0 bff391bf981cbc9f
+sat_pco G12 10 bfe4de3ca365023c 3fd0b7f09165d684 3fbbc7b2ace810fc
+sat_pco G13 10 bffa5268013eb8be 3fed8cac99417197 3fc8a422819ce602
+sat_pco G14 10 bfbdb22f3209c52f bff1e785988d5af0 bff94ccd4a9ab1a6
+sat_pco G15 10 bfdda60fa5ff69fc 3f9c26b03d78dca4 bfd5cb43e3be6202
+sat_pco G17 10 bfcf5298072bafa6 bfe20c0ab67fb57d bfd6ecdd87cf6838
+sat_pco G19 10 bfdd7dd246d58fa4 bfe16c9355d53172 bfb663d54d4e8dc4
+sat_pco G20 10 bff9456251f25889 bfe0543bf13df7b7 bfed594db1374813
+sat_pco G22 10 bfd26153625b3509 bfde013a23fbfc22 bfe83fe0526a3814
+sat_pco G23 10 bfe0dd201895ab0d 3ff398fc83229146 bff62472661d0088
+sat_pco G24 10 bff121b506ffefe5 3fe0db92d7810549 bfe7eac0a77aaa90
+sat_pco G30 10 bfe0b5cdb29f1fcd bff5fcd2f2cc2304 bfd73fe8c9085558
+sat_pco G05 11 bfe60b1fa012dfb6 3fbd9d8092e3f76e 3fd023f5db206546
+sat_pco G10 11 bfb52694578d2658 3feac1d9ef0c1638 bff38c4da92cb685
+sat_pco G12 11 bfe4e1c9808dc9f0 3fd0b635ab055bf8 3fbb2be87c681338
+sat_pco G13 11 bffa56a633cc2524 3fed89cad225c906 3fc7b4b6ce0a7e22
+sat_pco G14 11 bfbc3ff18527463a bff1ef5995897312 bff948e9955c9a30
+sat_pco G15 11 bfddb7ca5455b9ce 3f9b5492dde50052 bfd5b41d6276ea48
+sat_pco G17 11 bfcf2de312cd765a bfe205951f4fee4d bfd70d9bd1234958
+sat_pco G19 11 bfdd77b402a72118 bfe16bdaa588aec8 bfb70658a28c5414
+sat_pco G20 11 bff94f09d37eefd2 bfe06ad55be51df4 bfed2b473e0211d0
+sat_pco G22 11 bfd235089d215c03 bfde0e32b7b46518 bfe844365f67cb7e
+sat_pco G23 11 bfe105e28760d51c 3ff3a02db8052e4e bff61642f96be7fe
+sat_pco G24 11 bff121cf2799dbc6 3fe0c520c0af2d6d bfe7fa385852af28
+sat_pco G30 11 bfe0af5324a4d9b2 bff602fdb227f198 bfd6f4adca13372c
+sat_pco G05 12 bfe60429e4337316 3fbd7a027e07aee6 3fd04dce939e6b1d
+sat_pco G10 12 bfb63d97e2ee5610 3feace787ec2a912 bff386c4b34328f9
+sat_pco G12 12 bfe4e5449964adb6 3fd0b47851f71188 3fba90038b17df3e
+sat_pco G13 12 bffa5acad698d729 3fed86ca3bc731b1 3fc6c521f2f65100
+sat_pco G14 12 bfbace1e5a2185a3 bff1f735e7b8d532 bff944e74bc51412
+sat_pco G15 12 bfddc975b29f590c 3f9a83ae2d5bc170 bfd59cdb2a60996c
+sat_pco G17 12 bfcf08f6765290fc bfe1ff1918873a3d bfd72e3cbcb2ebea
+sat_pco G19 12 bfdd717a10950e9c bfe16b15e7583b63 bfb7a8c412de3372
+sat_pco G20 12 bff958a45713a4ca bfe0814d22baa63a bfecfd19d4e7bbb8
+sat_pco G22 12 bfd208bd351a48cd bfde1b41505a225a bfe8486f0361f694
+sat_pco G23 12 bfe12e853e1cc300 3ff3a763ba3b3f64 bff607f71deaebfc
+sat_pco G24 12 bff121ed3115102c 3fe0aea2c8901c08 bfe8098e38729a0e
+sat_pco G30 12 bfe0a8e02f31a80a bff609187f50a606 bfd6a9388a99b0c8
+sat_pco G05 13 bfe5fd22a736104e 3fbd55e1c8a4ac4e 3fd0779c03240160
+sat_pco G10 13 bfb75421d7a1f4fc 3feadb23c32dba04 bff38124bb300296
+sat_pco G12 13 bfe4e8adf17bce6a 3fd0b2b87033587c 3fb9f403e32cb218
+sat_pco G13 13 bffa5ed5eb23f6ca 3fed83aa96e80af9 3fc5d56661aa927e
+sat_pco G14 13 bfb95cb796708009 bff1ff1a7fda67d0 bff940c672ba8976
+sat_pco G15 13 bfdddb119bf8d1a6 3f99b401f81dbfd8 bfd5857d5e5374c4
+sat_pco G17 13 bfcee3d239cfadf4 bfe1f896b9345f6e bfd74ec0246ad540
+sat_pco G19 13 bfdd6b2458de3746 bfe16a452b02c3d3 bfb84b16d9a0a232
+sat_pco G20 13 bff96231be0970f0 bfe097a34876749d bfeccec5a7b4af28
+sat_pco G22 13 bfd1dc716a3604a3 bfde2865e4ca2350 bfe84c8a3b0428d2
+sat_pco G23 13 bfe1570809ebc9a9 3ff3ae9e70493268 bff5f98ee43af104
+sat_pco G24 13 bff1220f2b4f7078 3fe0981908fac85a bfe818c23ec06026
+sat_pco G30 13 bfe0a274b46c207c bff60f23441b7ad4 bfd65d895ed3f424
+sat_pco G05 14 bfe5f60a4219867a 3fbd311988691e54 3fd0a15c97bc8549
+sat_pco G10 14 bfb86a30d226d5a8 3feae7dba3a6323a bff37b6dc572a431
+sat_pco G12 14 bfe4ec058c8f5df6 3fd0b0f5ee42b824 3fb957e98bbb1482
+sat_pco G13 14 bffa62c7733406ec 3fed806ba69b6a55 3fc4e5868d1fa4a2
+sat_pco G14 14 bfb7ebbf1d86f30e bff207074e993073 bff93c870f3c316d
+sat_pco G15 14 bfddec9deb96756e 3f98e58e07161b78 bfd56e042152130e
+sat_pco G17 14 bfcebe7665f1f1e4 bfe1f20e1867ff1a bfd76f25e25f6af4
+sat_pco G19 14 bfdd64b2c3fee83e bfe16968805ca600 bfb8ed503284c922
+sat_pco G20 14 bff96bb1e9b6a38d bfe0add7d06249a6 bfeca04ae86b2a48
+sat_pco G22 14 bfd1b0257c53d9fb bfde35a06b81e89a bfe85088031c764c
+sat_pco G23 14 bfe17f6ab83944f7 3ff3b5ddc0795882 bff5eb0a5d39cc12
+sat_pco G24 14 bff122351dee8a9b 3fe081839d53a05a bfe827d46181a4a4
+sat_pco G30 14 bfe09c1096677f49 bff6151dea5e5d06 bfd611a09c907506
+sat_pco G05 15 bfe5eee11839fd38 3fbd0ba5645410fc 3fd0cb0e86ba4a02
+sat_pco G10 15 bfb97fc371498812 3feaf4a006c55404 bff3759fd6cdd251
+sat_pco G12 15 bfe4ef4b6e86d75e 3fd0af30b334624a 3fb8bbb4886e9f80
+sat_pco G13 15 bffa669f70ce9cf2 3fed7d0d305ad258 3fc3f584eb20065e
+sat_pco G14 15 bfb67b36d1bf3750 bff20efc446d68bc bff9382926771c7c
+sat_pco G15 15 bfddfe1a7cc9ca10 3f9818521ed0603e bfd5566f9683e5ba
+sat_pco G17 15 bfce98e303ee4cea bfe1eb7f4d32c244 bfd78f6dd0d75ae8
+sat_pco G19 15 bfdd5e253aaea2aa bfe1687ff75207d7 bfb98f6f5949a522
+sat_pco G20 15 bff97524bb7f7503 bfe0c3eabddb1ee8 bfec71a9c952af9c
+sat_pco G22 15 bfd183d9ab411a3e bfde42f0daa5b91c bfe854685899cfb4
+sat_pco G23 15 bfe1a7ad16cd70e0 3ff3bd2190feb449 bff5dc6999dfab50
+sat_pco G24 15 bff1225f108fc391 3fe06ae2a075f048 bfe836c49746d70c
+sat_pco G30 15 bfe095b3b6eb541b bff61b085c1253a2 bfd5c57e99cbf3ca
+sat_pco G10 16 bfba94d854b99874 3feb0170d2d176f4 bff36fbaf42444c7
+sat_pco G12 16 bfe4f27f9b72632c 3fd0ad68a492fc9c 3fb81f64da1e1f28
+sat_pco G13 16 bffa6a5de63bf55d 3fed798efc094018 3fc30563f37865ae
+sat_pco G14 16 bfb50b2093f5c35b bff216f951a5341a bff933acbdc08d36
+sat_pco G15 16 bfde0f872b044260 3f974c4dff92c784 bfd53ebfe1319852
+sat_pco G17 16 bfce73181d9298fc bfe1e4ea6ea7c3ac bfd7af97ca3dd1ca
+sat_pco G19 16 bfdd577ba5e15c46 bfe1678b9fe60b5c bfba317389c65182
+sat_pco G20 16 bff97e8a14d456e1 bfe0d9dc1474b950 bfec42e27ceb0c18
+sat_pco G22 16 bfd1578e36b8b5e7 bfde505727ff38a8 bfe8582b388c6f68
+sat_pco G23 16 bfe1cfcef3b99214 3ff3c469c7e9b408 bff5cdacab4d5b82
+sat_pco G24 16 bff1228d0abc0d90 3fe054362d436afc bfe84592d6a9bc6c
+sat_pco G30 16 bfe08f5df7825bcd bff620e2834aef74 bfd57923ad0f7b9a
+sat_pco G10 17 bfbba96e1d945160 3feb0e4dedc236de bff369bf2276aad9
+sat_pco G12 17 bfe4f5a2178a23b6 3fd0ab9da65a68c0 3fb782fa7eff0016
+sat_pco G13 17 bffa6e02d6071600 3fed75f0d3f99fbc 3fc215261fd181f2
+sat_pco G14 17 bfb39b7e442ece1c bff21efe666139ca bff92f11da98004e
+sat_pco G15 17 bfde20e3d1d42cd0 3f96818165894fc4 bfd526f524c9816e
+sat_pco G17 17 bfce4d15bd3b9260 bfe1de4f93da911e bfd7cfa3a92b3b68
+sat_pco G19 17 bfdd50b5eec66eb0 bfe1668b8a32696b bfbad35c000ae028
+sat_pco G20 17 bff987e1d72faf15 bfe0efabd7f3af43 bfec13f535f96f54
+sat_pco G22 17 bfd12b435e62aa8a bfde5dd348fd8544 bfe85bd0a025d57a
+sat_pco G23 17 bfe1f7d01d689d7f 3ff3cbb64b2b8461 bff5bed3a2c64386
+sat_pco G24 17 bff122bf13e81e09 3fe03d7e5e9abd03 bfe8543f1652efcc
+sat_pco G30 17 bfe0890f39796e8d bff626ac4a37d6d4 bfd52c902d602bc6
+sat_pco G10 18 bfbcbd836e08f032 3feb1b373d3e5c9c bff363ac66e50213
+sat_pco G12 18 bfe4f8b2e72cc384 3fd0a9cf9aef03fe 3fb6e67572fb3ed2
+sat_pco G13 18 bffa718e430095d5 3fed723284f1b783 3fc124cdeadbddd2
+sat_pco G14 18 bfb22c51c08625e0 bff2270b729a6ab8 bff92a5882a416f2
+sat_pco G15 18 bfde32304ce65312 3f95b7ec08b90a5c bfd50f0f84ddcc3a
+sat_pco G17 18 bfce26dbedd73b54 bfe1d7aed3df58b8 bfd7ef91486336e8
+sat_pco G19 18 bfdd49d3feca2fb6 bfe1657fc6676899 bfbb7527f840897a
+sat_pco G20 18 bff9912be418b10a bfe1055a0c52709d bfebe4e2277cbda0
+sat_pco G22 18 bfd0fef961d37133 bfde6b6532b55586 bfe85f588cb8c3c2
+sat_pco G23 18 bfe21fb0629f9c9a 3ff3d30700965b9c bff5afde91b03ef4
+sat_pco G24 18 bff122f533742942 3fe026bb4f612a78 bfe862c94cf3d62c
+sat_pco G30 18 bfe082c75de135b0 bff62c659b23d37a bfd4dfc4724f0360
+sat_pco G10 19 bfbdd116e9bc7dbc 3feb282ca69f10d2 bff35d82c6ad10e9
+sat_pco G12 19 bfe4fbb20edd5f58 3fd0a7fe631671b3 3fb649d5b029b75a
+sat_pco G13 19 bffa7500303e0de8 3fed6e53de2f0eaf 3fc0345dd0563e6a
+sat_pco G14 19 bfb0bd9ce64e244d bff22f20661c0b06 bff92580bbb61ff3
+sat_pco G15 19 bfde436c7805461e 3f94ef8d9d0eebb6 bfd4f70f2525ce3a
+sat_pco G17 19 bfce006abae4c298 bfe1d10845caa712 bfd80f6082d4b41a
+sat_pco G19 19 bfdd42d5bf963f50 bfe1646864cbaab2 bfbc16d6aeaa3d10
+sat_pco G20 19 bff99a681d212172 bfe11ae6b5bb65b4 bfebb5a984bac30e
+sat_pco G22 19 bfd0d2b0808b6d40 bfde790cd9e117b4 bfe862c2fbb939ba
+sat_pco G23 19 bfe2476f926e2c72 3ff3da5bcddab146 bff5a0cd8999a768
+sat_pco G24 19 bff1232f70ac365c 3fe00fed1a75439a bfe87131714e4086
+sat_pco G30 19 bfe07c86458e7b9b bff6320e607526ac bfd492c0d3f8bb0e
+sat_pco G10 20 bfbee42735482a44 3feb352e0eec9dda bff35742472c6ded
+sat_pco G12 20 bfe4fe9f9342a7cc 3fd0a629ddf0e6c4 3fb5ad1b2f0962b0
+sat_pco G13 20 bffa7858a11c5d94 3fed6a54b167f927 3fbe87b098ad9d59
+sat_pco G14 20 bfae9ec321cfbfd9 bff2373d308a06d4 bff9208a8bc68e54
+sat_pco G15 20 bfde54982f1d4612 3f942865d2387190 bfd4def42978f136
+sat_pco G17 20 bfcdd9c23071d340 bfe1ca5c00b0b3d5 bfd82f11339c2b52
+sat_pco G19 20 bfdd3bbb1b10df8a bfe1634575bbd3a3 bfbcb8675fbaad30
+sat_pco G20 20 bff9a39663e82928 bfe13051d88decc4 bfeb864b813479d3
+sat_pco G22 20 bfd0a668f9f65b6d bfde86ca32e11218 bfe8660feabc703e
+sat_pco G23 20 bfe26f0d7c3efaa0 3ff3e1b4988a978e bff591a09c332cfc
+sat_pco G24 20 bff1236dd2c7bf15 3fdff227b578b660 bfe87f777a2c2f1a
+sat_pco G30 20 bfe0764bd11922ae bff637a684af0976 bfd44585aaf570cd
+sat_pco G10 21 bfbff6b2f6c32358 3feb423b5ae2bb6e bff350eaedde5859
+sat_pco G12 21 bfe5017b7925538a 3fd0a451e8f412fd 3fb51045e6de1f12
+sat_pco G13 21 bffa7b97993fada4 3fed6634d2cddab3 3fbca67fb661930a
+sat_pco G14 21 bfabc34335928a1b bff23f61c15b7544 bff91b75f8f85f3f
+sat_pco G15 21 bfde65b34e393c0e 3f93627453cde00f bfd4c6beb5d337da
+sat_pco G17 21 bfcdb2e25b24ca8e bfe1c3aa1ba6e6bc bfd84ea335fb4c90
+sat_pco G19 21 bfdd3483fb5d2eb4 bfe1621709aa4f24 bfbd59d94814ccfe
+sat_pco G20 21 bff9acb69a18bfc6 bfe1459b7959e548 bfeb56c850b030db
+sat_pco G22 21 bfd07a230d6ac140 bfde949d31bb83e6 bfe8693f5778d52c
+sat_pco G23 21 bfe29689efd826e2 3ff3e911461a0763 bff58257db4fb07a
+sat_pco G24 21 bff123b060e9dd8f 3fdfc45f5635f030 bfe88d9b5e640956
+sat_pco G30 21 bfe07017e0ddd8fc bff63d2df270c56a bfd3f81350688a60
+sat_pco G10 22 bfc0845c6abd1c97 3feb4f546eeeeeac bff34a7cc05cdc1d
+sat_pco G12 22 bfe50445c56dfc00 3fd0a2765fe7b789 3fb47355ce2ed264
+sat_pco G13 22 bffa7ebd1c95d3ce 3fed61f4190b8a3a 3fbac52df15a0351
+sat_pco G14 22 bfa8e8bdb96d6d67 bff2478e07dee718 bff916430996abdc
+sat_pco G15 22 bfde76bdb183311e 3f929db8c95342a6 bfd4ae6eee54ff1b
+sat_pco G17 22 bfcd8bcb482a87ae bfe1bcf2adc07a25 bfd86e166567da24
+sat_pco G19 22 bfdd2d304adc5e60 bfe160dd311f4020 bfbdfb2ba476de18
+sat_pco G20 22 bff9b5c8a169fed3 bfe15ac39cdf59a2 bfeb2720273a621c
+sat_pco G22 22 bfd04ddefa266b5e bfdea285ca1db5f2 bfe86c513fc639f6
+sat_pco G23 22 bfe2bde4bd4be7ac 3ff3f071bbdc14c8 bff572f358ea6d78
+sat_pco G24 22 bff123f7222138ea 3fdf96814cedb5d0 bfe89b9d14d72ce6
+sat_pco G30 22 bfe069ea54fdfa6f bff642a494766986 bfd3aa6a1dfb26f8
+sat_pco G10 23 bfc10d1bbcfa122e 3feb5c792f3102ae bff343f7c460cded
+sat_pco G12 23 bfe506fe7d24216a 3fd0a0971ce2d22e 3fb3d64adb052508
+sat_pco G13 23 bffa81c92f56bca8 3fed5d925d44be8e 3fb8e3c03f9fb2a2
+sat_pco G14 23 bfa60f365c6ef456 bff24fc1f337fc83 bff910f1c4164cfa
+sat_pco G15 23 bfde87b735482b60 3f91da32d611db75 bfd49604f73dd643
+sat_pco G17 23 bfcd647d054865e8 bfe1b635ce115668 bfd88d6a9d7d0aa0
+sat_pco G19 23 bfdd25bff42dff3e bfe15f97fcb84e31 bfbe9c5db1bb0426
+sat_pco G20 23 bff9becc5ba0aece bfe16fca4810c558 bfeaf7533920343f
+sat_pco G22 23 bfd0219cff59a335 bfdeb083ef586468 bfe86f45a19d0172
+sat_pco G23 23 bfe2e51db50b78e4 3ff3f7d5df06d2b0 bff56373271fa0f6
+sat_pco G24 23 bff124421d680e9a 3fdf688dcf6a3f08 bfe8a97c9472b75e
+sat_pco G30 23 bfe063c30d60591a bff6480a5598b7b6 bfd35c8a6de14d47
+sat_pco G10 24 bfc19596c71736ef 3feb69a97f7d3dd0 bff33d5bffc0c14d
+sat_pco G12 24 bfe509a5a56c6114 3fd09eb3f84a9e49 3fb339250358500a
+sat_pco G13 24 bffa84bbd6052155 3fed590f7b142b6f 3fb7023b951f7b64
+sat_pco G14 24 bfa336b0ca61310a bff257fd7261aa19 bff90b822f149466
+sat_pco G15 24 bfde989fb5f530ac 3f9117e21941bfa7 bfd47d80f4f1120d
+sat_pco G17 24 bfcd3cf7a0d46670 bfe1af7393ac7c4e bfd8ac9fba01fb7e
+sat_pco G19 24 bfdd1e32e22f47d6 bfe15e477d28461c bfbf3d6eaced43d6
+sat_pco G20 24 bff9c7c1aa8f923c bfe184af8012b27f bfeac761baf04052
+sat_pco G22 24 bfcfeabab8240bfa bfdebe979466674e bfe8721c7b178190
+sat_pco G23 24 bfe30c34a7da6989 3ff3ff3d94b10aa5 bff553d75831af30
+sat_pco G24 24 bff1249159a3efca 3fdf3a8513843d0e bfe8b739d42aece2
+sat_pco G10 25 bfc21dccdeb43b02 3feb76e5435b39e2 bff336a97871f25e
+sat_pco G12 25 bfe50c3b438709b8 3fd09cccc8d2aec6 3fb29be43d6302ad
+sat_pco G13 25 bffa87951570313a 3fed546b50871b74 3fb520a4e27b5304
+sat_pco G14 25 bfa05f30ac5190d2 bff26040742cd71e bff905f451585736
+sat_pco G15 25 bfdea9771018dc5c 3f9056c62dfde2d8 bfd464e30bf3e5df
+sat_pco G17 25 bfcd153b29aa6ed6 bfe1a8ac15a1f57c bfd8cbb596f20f50
+sat_pco G19 25 bfdd1688fffb4bfe bfe15cebc336dfd9 bfbfde5dd34c026c
+sat_pco G20 25 bff9d0a870167d49 bfe199734a38c660 bfea974be181bd3f
+sat_pco G22 25 bfcf92409e9d1cda bfdeccc0abe64fb4 bfe874d5ca709c3a
+sat_pco G23 25 bfe3332966dc20ac 3ff406a8c1d51d75 bff5441ffe83c32e
+sat_pco G24 25 bff124e4dda62312 3fdf0c674f07f1fe bfe8c4d4cb0272d8
+sat_pco G10 26 bfc2a5bd5a13cf7d 3feb842c5e065f9c bff32fe034884101
+sat_pco G12 26 bfe50ebf5ccdfcda 3fd09ae1637ee80a 3fb1fe888023b49c
+sat_pco G13 26 bffa8a54f2b468c6 3fed4fa5be18f23d 3fb33f01145ab3e4
+sat_pco G14 26 bf9b1173510f172c bff2688ae7408a30 bff9004831d203b4
+sat_pco G15 26 bfdeba3d2062b0ec 3f8f2dbd56a5178a bfd44c2b60eec193
+sat_pco G17 26 bfcced47af468e42 bfe1a1df6b0313a1 bfd8eaac10684e56
+sat_pco G19 26 bfdd0ec238ec4104 bfe15b84dfc0b3c3 bfc03f95311993b0
+sat_pco G20 26 bff9d9808e22ac70 bfe1ae15ac057be1 bfea6711e1f5637b
+sat_pco G22 26 bfcf39cc2fe681dc bfdedaff281e48de bfe877718e048430
+sat_pco G23 26 bfe359fbc37f7ddc 3ff40e174b4d2b2e bff5344d2ca24456
+sat_pco G24 26 bff1253cb02b351c 3fdede34b7d085e4 bfe8d24d70028c00
+sat_pco G10 27 bfc32d679039ee6e 3feb917eb270209a bff329003a351a58
+sat_pco G12 27 bfe51131f6b3a246 3fd098f19ba60c5b 3fb16111c39cb4be
+sat_pco G13 27 bffa8cfb733c9753 3fed4abea6ad4a95 3fb15d55129dcbd7
+sat_pco G14 27 bf95669ec3d72cbd bff270dcba1bb07a bff8fa7dd79a981c
+sat_pco G15 27 bfdecaf1c3a80344 3f8db0564815f8de bfd4335a18a66899
+sat_pco G17 27 bfccc51d41aa6ed0 bfe19b0daaddaf3f bfd9098302b43c20
+sat_pco G19 27 bfdd06de789bc75c bfe15a12e3b707ea bfc08fe9cb8e5a5c
+sat_pco G20 27 bff9e249e6b0e46b bfe1c296ab2db522 bfea36b3f1acb2bc
+sat_pco G22 27 bfcee15de9971c6c bfdee952fafb5034 bfe879efc450852a
+sat_pco G23 27 bfe380ab8f9bde5c 3ff4158915d911f6 bff5245ef536f784
+sat_pco G24 27 bff12598d7db2d23 3fdeafed83b8cd56 bfe8dfa3ba3f16d0
+sat_pco G10 28 bfc3b4cad8c81381 3feb9edc233e31d6 bff322098fc8cd08
+sat_pco G12 28 bfe5139316c1276a 3fd096fd42f621b7 3fb0c380013dc6df
+sat_pco G13 28 bffa8f889cc2de44 3fed45b5ef88f89c 3faef74b7f26fea9
+sat_pco G14 28 bf8f7bd5e239ddfa bff27935db13b8ca bff8f49549f4bef1
+sat_pco G15 28 bfdedb94d6dc927c 3f8c35564e1b8034 bfd41a6f58073ce3
+sat_pco G17 28 bfcc9cbbf16a630e bfe19436ec3e26de bfd9283a4a4f9512
+sat_pco G19 28 bfdcfeddaae21f9c bfe15895e01f6ab6 bfc0e02c57db5ae7
+sat_pco G20 28 bff9eb045bcbf5d8 bfe1d6f64d9496ce bfea063246546098
+sat_pco G22 28 bfce88f649138a58 bfdef7bc16115c9a bfe87c506bf2feda
+sat_pco G23 28 bfe3a7389d550999 3ff41cfe0619067a bff514556b14bf41
+sat_pco G24 28 bff125f95b4987bc 3fde8191e89b7a2e bfe8ecd7a0d63c14
+sat_pco G10 29 bfc43be68c2e4412 3febac4492cde9d4 bff31afc3bb0b841
+sat_pco G12 29 bfe515e2c2951a6c 3fd095042979e35d 3fb025d334372234
+sat_pco G13 29 bffa91fc7551cfac 3fed408b8049a40f 3fab33efee26c6c4
+sat_pco G14 29 bf842ebe25c12fe4 bff2819638554bb2 bff8ee8e904c810e
+sat_pco G15 29 bfdeec263719b128 3f8abcbc7e20c248 bfd4016b441b0643
+sat_pco G17 29 bfcc7423cfa7e314 bfe18d5b462e3642 bfd946d1c3e28390
+sat_pco G19 29 bfdcf6bfbbd65fd2 bfe1570de61378aa bfc1305c74f1e0d2
+sat_pco G20 29 bff9f3afcf8d1682 bfe1eb34994b532a bfe9d58d15e544a4
+sat_pco G22 29 bfce3095cb872aa2 bfdf063a6a9c7f0c bfe87e9383ab84f4
+sat_pco G23 29 bfe3cda2bf305422 3ff4247600920812 bff50430a12ee23b
+sat_pco G24 29 bff1265e40f4ed5a 3fde53221c62ffd8 bfe8f9e91aec1682
+sat_pco G10 30 bfc4c2ba036b2f02 3febb9b7e330bac8 bff313d84479c0ce
+sat_pco G12 30 bfe51820ffe16b64 3fd093061da007d0 3faf1016b3ead09e
+sat_pco G13 30 bffa94570344c26e 3fed3b3f42dde9c7 3fa770a11c70dce9
+sat_pco G14 30 bf71cc09753b0e28 bff289fdbfe3f3f4 bff8e869b237b688
+sat_pco G15 30 bfdefca5c19ea7f8 3f894687e533ab48 bfd3e84e020894d0
+sat_pco G17 30 bfcc4b54ee1c38a6 bfe1867acfb688ed bfd965494c3b97c0
+sat_pco G19 30 bfdcee8497d052a2 bfe1557b06c0f241 bfc18079c1cdc633
+sat_pco G20 30 bff9fc4c241d6578 bfe1ff5194937a1c bfe9a4c4969ecde5
+sat_pco G22 30 bfcdd83cedf4a290 bfdf14cde97e251a bfe880b90a5a6692
+sat_pco G23 30 bfe3f3e9c80ab95d 3ff42bf0e9ac1a14 bff4f3f0aa9d4aae
+sat_pco G24 30 bff126c78f479e7f 3fde249e54ee7c60 bfe906d81fb19376
+sat_pco G10 31 bfc5494498468a38 3febc735f6302542 bff30c9db0ce2035
+sat_pco G12 31 bfe51a4dd46a6b2e 3fd09102ec42f53a 3fadd450e4b7046e
+sat_pco G13 31 bffa96984d49c90c 3fed35d12378f779 3fa3ad68a38dc42e
+sat_pco G14 31 3f52f24026f986a0 bff2926c5f9bed24 bff8e226b774e5d8
+sat_pco G15 31 bfdf0d1353ca83c2 3f87d2b788a07cb6 bfd3cf17b71d85a2
+sat_pco G17 31 bfcc224f5f055a4c bfe17f959fdb47c0 bfd983a0c05e1c4a
+sat_pco G19 31 bfdce62c2b66887c bfe153dd53691f02 bfc1d083dd8b0e1f
+sat_pco G20 31 bffa04d93bb63c18 bfe2134d45deb982 bfe973d8ff07dd6e
+sat_pco G22 31 bfcd7fec2d2322c8 bfdf2376834026a4 bfe882c0ff012034
+sat_pco G23 31 bfe41a0d8b1955b6 3ff4336ea5b290c4 bff4e3959a9c796f
+sat_pco G24 31 bff127354c96f78f 3fddf606c82d5dea bfe913a4a65d159c
+sat_pco G10 32 bfc5cf85a5497b4e 3febd4bead4dacc4 bff3054c8775aa3c
+sat_pco G12 32 bfe51c6946052f10 3fd08efa60b233c2 3fac9855004958fa
+sat_pco G13 32 bffa98c05a6161b8 3fed30411089f98c 3f9fd4a019b6b69a
+sat_pco G14 32 3f7b3c33932338b8 bff29ae2053030f0 bff8dbc5a7ece12d
+sat_pco G15 32 bfdf1d6ecb243fca 3f86614a654355d8 bfd3b5c888c2374b
+sat_pco G17 32 bfcbf913353b8052 bfe178abcd9f80f4 bfd9a1d7fd71f7b0
+sat_pco G19 32 bfdcddb66370c994 bfe15234dd610000 bfc2207a6750df4a
+sat_pco G20 32 bffa0d56f8a05939 bfe22727b3cc3126 bfe942ca85f62430
+sat_pco G22 32 bfcd27a405a32e1e bfdf32342813fb2e bfe884ab60c22d52
+sat_pco G23 32 bfe4400ddbf17784 3ff43aef18d5f0c3 bff4d31f848a19ef
+sat_pco G24 32 bff127a77f239943 3fddc75bac13fa84 bfe9204ea62d4b6e
+sat_pco G10 33 bfc6557c85adcb76 3febe251e9c228d6 bff2fde4cf568140
+sat_pco G12 33 bfe51e735a962a68 3fd08cec44bce3fc 3fab5c23127215a4
+sat_pco G13 33 bffa9acf31e06982 3fed2a8efaad5a32 3f984ec19c5d0602
+sat_pco G14 33 3f88d962536043e4 bff2a35e9e2d5dda bff8d5468bb0cc94
+sat_pco G15 33 bfdf2db80556c7e8 3f84f23f6ff11d0a bfd39c609c803149
+sat_pco G17 33 bfcbcfa0841b176a bfe171bd70013ce2 bfd9bfeee0d3ed02
+sat_pco G19 33 bfdcd5232d06aa3c bfe15081b610c9f8 bfc2705cfe61c634
+sat_pco G20 33 bffa15c53d34d04b bfe23ae0e5298dd8 bfe91199628bd50a
+sat_pco G22 33 bfcccf64f3cd8178 bfdf4106c7d2e580 bfe886782ee102be
+sat_pco G23 33 bfe465ea8e816347 3ff44272272aacc6 bff4c28e7be83dfd
+sat_pco G24 33 bff1281e2d19982f 3fdd989d368ff852 bfe92cd6166bd8c0
+sat_pco G10 34 bfc6db2894db01b8 3febefef8ce6a9ce bff2f6668f511d3f
+sat_pco G12 34 bfe5206c180ee236 3fd08ad860bfe08b 3faa1fbb2e5ad6c4
+sat_pco G13 34 bffa9cc4db736af8 3fed24bad495f783 3f90c948904bf2ce
+sat_pco G14 34 3f920809b723c2c8 bff2abe217fdcfc7 bff8cea96af73505
+sat_pco G15 34 bfdf3deee0302668 3f8385959600c4d1 bfd382e01803c3f7
+sat_pco G17 34 bfcba5f75f976f78 bfe16aca9dfc0a3a bfd9dde54808d1f6
+sat_pco G19 34 bfdccc7275813ef0 bfe14ec3eef30e1a bfc2c02b421bc327
+sat_pco G20 34 bffa1e23ebd951f8 bfe24e78e11022a4 bfe8e045cc341dce
+sat_pco G22 34 bfcc772f73b67918 bfdf4fee51fe7e0c bfe8882768c2c0f6
+sat_pco G23 34 bfe48ba37712e255 3ff449f7b4a22d44 bff4b1e29463ed2f
+sat_pco G24 34 bff128995c825b0d 3fdd69cb9eb6b1d0 bfe9393aee3b43fe
+sat_pco G10 35 bfc760893096f940 3febfd977694d644 bff2eed1ceceef98
+sat_pco G12 35 bfe5225384708c2a 3fd088be7ba8155d 3fa8e31d6d9bbe54
+sat_pco G13 35 bffa9ea15f11ec74 3fed1ec4932e4d40 3f82888f30d51441
+sat_pco G14 35 3f97a10f779c954c bff2b46c5fcee146 bff8c7ee4e30850c
+sat_pco G15 35 bfdf4e1339ab5a9a 3f821b4bbad19c15 bfd36947210d4e25
+sat_pco G17 35 bfcb7c17dc30e0d8 bfe163d36e889171 bfd9fbbb10c0dde0
+sat_pco G19 35 bfdcc3a42a7710fe bfe14cfb99974d4b bfc30fe4d1e97cc9
+sat_pco G20 35 bffa2672e7103ac6 bfe261efae6e9f8d bfe8aecffab90486
+sat_pco G22 35 bfcc1f04015527a2 bfdf5eeab5c06be6 bfe889b90deb656a
+sat_pco G23 35 bfe4b1386a4ae78a 3ff4517fa529ce18 bff4a11be1b73660
+sat_pco G24 35 bff12919137b7c70 3fdd3ae7185cdc26 bfe9457d254b08f2
+sat_pco G10 36 bfc7e59db5c76c58 3fec0b49879857b0 bff2e72694ec0c0a
+sat_pco G12 36 bfe52429a5c4ac46 3fd0869e5b0f8221 3fa7a649f34e0184
+sat_pco G13 36 bffaa064c5142886 3fed18ac2d4146c8 3f5bfd11d10f7a10
+sat_pco G14 36 3f9d37bb5e9e6570 bff2bcfd62bc8dad bff8c1153de63cc0
+sat_pco G15 36 bfdf5e24efe1919e 3f80b360bba329ee bfd34f95dd883850
+sat_pco G17 36 bfcb52020ef5603c bfe15cd7f89a4c69 bfda197018dd0138
+sat_pco G19 36 bfdcbab839c3a4d0 bfe14b28c79dc051 bfc35f894d5133b5
+sat_pco G20 36 bffa2eb21161a164 bfe2754554bb0666 bfe87d3826238274
+sat_pco G22 36 bfcbc6e31848eba2 bfdf6dfbe1eac33c bfe88b2d1e01e462
+sat_pco G23 36 bfe4d6a93d2ed4f7 3ff45909dc7def4c bff4903a77d42118
+sat_pco G24 36 bff1299d57e4d9b7 3fdd0befda9ee252 bfe9519cb2cd0016
+sat_pco G10 37 bfc86a6582aa543e 3fec1905a00f3f4e bff2df64e9057a09
+sat_pco G12 37 bfe525ee82208fbc 3fd08477c340e9cb 3fa66940ea938562
+sat_pco G13 37 bffaa20f16253f38 3fed12719b9c14af bf7710228d591e90
+sat_pco G14 37 3fa166033332c2aa bff2c5950db59cea bff8ba1e42d01364
+sat_pco G15 37 bfdf6e23e11738a0 3f7e9ba6d9a4055e bfd335cc7377214c
+sat_pco G17 37 bfcb27b60d846b3a bfe155d8532166b2 bfda37043e682fe6
+sat_pco G19 37 bfdcb1ae9181a896 bfe1494b8ab98f05 bfc3af1853f5e0b8
+sat_pco G20 37 bffa36e14d6bfcc2 bfe28879db7d6dc0 bfe84b7e86cdcf25
+sat_pco G22 37 bfcb6ecd340c3abc bfdf7d21c4f5b788 bfe88c8398cd2ede
+sat_pco G23 37 bfe4fbf5c51cb006 3ff460963e476447 bff47f3e6aca32e5
+sat_pco G24 37 bff12a262f97190b 3fdcdce61b85feec bfe95d998e2790ec
+sat_pco G10 38 bfc8eedff62e84ea 3fec26cb9fd0cca4 bff2d78cd296c734
+sat_pco G12 38 bfe527a21fa26496 3fd0824a774a848a 3fa52c02880cb546
+sat_pco G13 38 bffaa3a05b4798de 3fed0c14d8f1478e bf8a8e6738338280
+sat_pco G14 38 3fa42ef4c738bd16 bff2ce334d7fb4ef bff8b30965d14b22
+sat_pco G15 38 bfdf7e0febb5bfc4 3f7bd54535b8d1b2 bfd31beb08fe0060
+sat_pco G17 38 bfcafd33ee0335aa bfe14ed49508370a bfda54775fa08c82
+sat_pco G19 38 bfdca887200e7e16 bfe14763f4b05aa4 bfc3fe91858768ec
+sat_pco G20 38 bffa3f007ddf4cc9 bfe29b8d4a6ae4a6 bfe819a3556690b6
+sat_pco G22 38 bfcb16c2cfc4e7c0 bfdf8c5c4d0638bc bfe88dbc7e356fe4
+sat_pco G23 38 bfe5211dd7d50e08 3ff46824ae160fde bff46e27cec97b76
+sat_pco G24 38 bff12ab3a055b733 3fdcadca112e153e bfe96973aec546e2
+sat_pco G10 39 bfc9730c701a8498 3fec349b66705a1e bff2cf9e59385738
+sat_pco G12 39 bfe529448470d4ea 3fd08016390d3d7e 3fa3ee8f09e89ad6
+sat_pco G13 39 bffaa5189dd5ae7a 3fed0595e1c6ccb5 bf94c99df5e81a1c
+sat_pco G14 39 3fa6f6aeef159e00 bff2d6d80ebb69e4 bff8abd6aff5a079
+sat_pco G15 39 bfdf8de8ee515ba6 3f79139a13da6d30 bfd301f1c4592dab
+sat_pco G17 39 bfcad27bc72a8166 bfe147ccd53552dc bfda71c95aeda314
+sat_pco G19 39 bfdc9f41d408a83e bfe145721759aacc bfc44df481d2c9b7
+sat_pco G20 39 bffa470f857d7d8c bfe2ae7fa9657fe2 bfe7e7a6caf1d800
+sat_pco G22 39 bfcabec4666c0dd6 bfdf9bab67e7124e bfe88ed7ce4364d6
+sat_pco G23 39 bfe546214b73fdec 3ff46fb50f5fa151 bff45cf6b825ef66
+sat_pco G24 39 bff12b45afcf88ff 3fdc7e9bf1aa28c8 bfe9752b0c1b15ba
+sat_pco G10 40 bfc9f6ea50f2a166 3fec4274d33c076c bff2c79984a094df
+sat_pco G12 40 bfe52ad5b6b9856a 3fd07ddac94e23a3 3fa2b0e6b8c2c265
+sat_pco G13 40 bffaa677e781f3a4 3fecfef4b466ccf2 bf9c4b360df2bdcc
+sat_pco G14 40 3fa9bd2e31be0fae bff2df833de242d0 bff8a4862a731d54
+sat_pco G15 40 bfdf9daec7a1fdde 3f7656a2ed0f82c6 bfd2e7e0cbe9309c
+sat_pco G17 40 bfcaa78db0468982 bfe140c12a8b518b bfda8efa0ee096b0
+sat_pco G19 40 bfdc95de9c509bdc bfe14376049ed4c1 bfc49d40e8bd1798
+sat_pco G20 40 bffa4f0e471c6b45 bfe2c151007fea14 bfe7b58920c02721
+sat_pco G22 40 bfca66d272afb8ac bfdfab0f030e2fdc bfe88fd58920c24a
+sat_pco G23 40 bfe56afff673ede5 3ff4774745806c1e bff44bab3b562abc
+sat_pco G24 40 bff12bdc639e262d 3fdc4f5bf3209436 bfe980bf9da1b5fc
+sat_pco G10 41 bfca7a78f9fad798 3fec5057c53d3426 bff2bf7e5ca3ee0f
+sat_pco G12 41 bfe52c55bcb0e82a 3fd07b97e7c6b2e4 3fa17309e78b1c14
+sat_pco G13 41 bffaa7be4257a33c 3fecf83150cc2d87 bfa1e5f53ce97b83
+sat_pco G14 41 3fac826f199e8612 bff2e834c7477eee bff89d17dea9b2c8
+sat_pco G15 41 bfdfad61568c3a22 3f739e5d2998973c bfd2cdb84624843d
+sat_pco G17 41 bfca7c69c128832c bfe139b1abe63642 bfdaac095a3df492
+sat_pco G19 41 bfdc8c5d680853ee bfe1416fce7aa209 bfc4ec765a490cb0
+sat_pco G20 41 bffa56fca5a49b26 bfe2d40157f9ea9e bfe7834a90794aaa
+sat_pco G22 41 bfca0eed6f0937cc bfdfba870b98b884 bfe890b5af17e404
+sat_pco G23 41 bfe58fb9afab9dd0 3ff47edb33bb322c bff43a456cf48814
+sat_pco G24 41 bff12c77c14619ea 3fdc200a4bbf794e bfe98c315ad84138
+sat_pco G10 42 bfcafdb7cd4b05f8 3fec5e441b3a3904 bff2b74ce933ed84
+sat_pco G12 42 bfe52dc49c911ce6 3fd0794d533702c6 3fa034f8f425d3d8
+sat_pco G13 42 bffaa8ebb8baf200 3fecf14bb890e882 bfa5a5d5042ff151
+sat_pco G14 42 3faf466e34a388fe bff2f0ec97184e9a bff8958bd6234485
+sat_pco G15 42 bfdfbd007a193e84 3f70eac62273f2d6 bfd2b37859a53495
+sat_pco G17 42 bfca51101231c1b6 bfe1329e701d0f3c bfdac8f71bf5faee
+sat_pco G19 42 bfdc82be269616e2 bfe13f5f86f9a1e5 bfc53b947682462a
+sat_pco G20 42 bffa5eda8411a226 bfe2e690b84088d2 bfe750eb541d5610
+sat_pco G22 42 bfc9b715d5aa8174 bfdfca136e4e54a2 bfe891784093fd06
+sat_pco G23 42 bfe5b44e4e55dc1e 3ff48670bd3b0b58 bff428c561bb7be2
+sat_pco G24 42 bff12d17ce371a12 3fdbf0a731b10ac4 bfe997803b469f5e
+sat_pco G10 43 bfcb80a62dd0a2ea 3fec6c39b3b6e852 bff2af05325f28a8
+sat_pco G12 43 bfe52f225c98fbac 3fd076fac9786874 3f9ded6890036bfe
+sat_pco G13 43 bffaaa0055699e16 3fecea43eed983c3 bfa96531e2a7b725
+sat_pco G14 43 3fb104940a09a0ef bff2f9aa995b7d10 bff88de21a943392
+sat_pco G15 43 bfdfcc8c117d8fdc 3f6c77b640911faa bfd299212d1e0fa6
+sat_pco G17 43 bfca2580bc50a286 bfe12b878e013f4b bfdae5c33326a452
+sat_pco G19 43 bfdc7900c7a03442 bfe13d45403902c5 bfc58a9adda2677e
+sat_pco G20 43 bffa66a7c574227c bfe2f8ff29f19fe2 bfe71e6ba5fb97b6
+sat_pco G22 43 bfc95f4c207d26aa bfdfd9b417a168d8 bfe8921d3e210746
+sat_pco G23 43 bfe5d8bdaa0a88e6 3ff48e07c512229a bff4172b2e89034c
+sat_pco G24 43 bff12dbc8fcb7e17 3fdbc132db33ec7a bfe9a2ac36780c70
+sat_pco G10 44 bfcc03437f35103c 3fec7a386cf32db2 bff2a6a74052894f
+sat_pco G12 44 bfe5306f030c2b74 3fd074a0078ebf18 3f9b7078af99fdac
+sat_pco G13 44 bffaaafc237ab7d2 3fece319f844be12 bfad24037bacc624
+sat_pco G14 44 3fb2654ca6a84398 bff3026eb9f3e980 bff8861ab5d96e44
+sat_pco G15 44 bfdfdc03fc196504 3f672332b6e269d8 bfd27eb2e75a3e02
+sat_pco G17 44 bfc9f9bbd9004e90 bfe1246d1c5e3f15 bfdb026d7f1bbe00
+sat_pco G19 44 bfdc6f253b11b898 bfe13b210c674bbd bfc5d9892fec92c0
+sat_pco G20 44 bffa6e644cf091c6 bfe30b4cb5d89186 bfe6ebcbc0bd838e
+sat_pco G22 44 bfc90790c932c5c4 bfdfe968f3ac2a7e bfe892a4a86b9c7a
+sat_pco G23 44 bfe5fd079ac16d57 3ff495a02e3a8f38 bff40576e85d5ed1
+sat_pco G24 44 bff12e660b48881a 3fdb91ad7e8b9a68 bfe9adb543fe784e
+sat_pco G10 45 bfcc858f2603f7b2 3fec884024ee098a bff29e331b577b76
+sat_pco G12 45 bfe531aa9631dea4 3fd0723cc9bc6e94 3f98f32348c7c4d6
+sat_pco G13 45 bffaabdf2e5f4a88 3fecdbcddad4a841 bfb07120c961a90a
+sat_pco G14 45 3fb3c55f3c4e0ebc bff30b38e49cd40c bff87e35b1fbf49a
+sat_pco G15 45 bfdfeb681973dea0 3f61d7fbf9d92fc7 bfd2642daf45bdb8
+sat_pco G17 45 bfc9cdc182487a9e bfe11d4f31f95e5a bfdb1ef5df4efe2a
+sat_pco G19 45 bfdc652b711765a4 bfe138f2fdc37692 bfc6285f0dc7fc7c
+sat_pco G20 45 bffa760ffdbfa388 bfe31d7964ee7f55 bfe6b90bdf67ae35
+sat_pco G22 45 bfc8afe4492ca43e bfdff931ee35026c bfe8930e804119dc
+sat_pco G23 45 bfe6212bf8d033e0 3ff49d39db9620b4 bff3f3a8a45c2ecc
+sat_pco G24 45 bff12f1445de4606 3fdb62175204b6b4 bfe9b89b5b717c84
+sat_pco G10 46 bfcd078887888dd8 3fec9650b9638a3c bff295a8cbd5b0fa
+sat_pco G12 46 bfe532d51c5520c2 3fd06fd0cb93e441 3f96756974b7af1c
+sat_pco G13 46 bffaaca981e2149a 3fecd45f9dddd97c bfb24ff2054389ea
+sat_pco G14 46 3fb524ca1931c255 bff3140904ee07b4 bff87633192d66dc
+sat_pco G15 46 bfdffab8493e92f8 3f592c1877616e72 bfd24991abe7c634
+sat_pco G17 46 bfc9a191d2ba3234 bfe1162de5910c18 bfdb3b5c3369fc6e
+sat_pco G19 46 bfdc5b135a23396a bfe136bb269d6db5 bfc6771c17a60144
+sat_pco G20 46 bffa7daabb30400e bfe32f85405de59a bfe6862c3d50ab80
+sat_pco G22 46 bfc858471991f4d6 bfe00487795548f4 bfe8935ac68f76f4
+sat_pco G23 46 bfe6452a9cf20270 3ff4a4d4aff04872 bff3e1c077c8b8bb
+sat_pco G24 46 bff12fc744a79d58 3fdb32708bf1666c bfe9c35e746f0738
+sat_pco G10 47 bfcd892f09f3b8ec 3feca46a07cfd462 bff28d085a514109
+sat_pco G12 47 bfe533ee9bc3e52e 3fd06d5bc80bb17a 3f93f74c659236cf
+sat_pco G13 47 bffaad5b2a27c56e 3feccccf49f23978 bfb42e7172fc1da6
+sat_pco G14 47 3fb6838b8d473073 bff31cdf0659d762 bff86e12f5ca0fae
+sat_pco G15 47 bfe004fa35abfeaf 3f4d757638f7ad38 bfd22edf045ed97c
+sat_pco G17 47 bfc9752ce57b5fbc bfe10f094dde7dc9 bfdb57a05b3ebaba
+sat_pco G19 47 bfdc50dce6e7f146 bfe134799954d30d bfc6c5bfee271d62
+sat_pco G20 47 bffa853468a6585c bfe34170517f77dc bfe6532d162c089c
+sat_pco G22 47 bfc800b9b33d4bec bfe00c7ff6138847 bfe893897c6557d0
+sat_pco G23 47 bfe6690360409766 3ff4ac708dfcd6ec bff3cfbe78096a4e
+sat_pco G24 47 bff1307f0ca9e344 3fdb02b962b9df28 bfe9cdfe8697e67a
+sat_pco G10 48 bfce0a8214397ea2 3fecb28bed6d0f44 bff28451cf6c7a6c
+sat_pco G12 48 bfe534f71acf0fc6 3fd06add7990f22c 3f9178cd664504eb
+sat_pco G13 48 bffaadf433af067e 3fecc51ce8cc0073 bfb60c9b24bbf4a0
+sat_pco G14 48 3fb7e1a1ea5a90d0 bff325bad42de9e9 bff865d552587093
+sat_pco G15 48 bfe00c8e2fe4670b 3f316f4f209bebe9 bfd21415dfe5bbf2
+sat_pco G17 48 bfc94892d634dd76 bfe107e18192990c bfdb73c236d31158
+sat_pco G19 48 bfdc4688085ea5ac bfe1322e6859f28e bfc7144a31f15b78
+sat_pco G20 48 bffa8cace99b5494 bfe3533aa1da73b0 bfe6200ea60b4294
+sat_pco G22 48 bfc7a93c8ebb98ea bfe0148262b845e0 bfe8939aa2f1fc2c
+sat_pco G23 48 bfe68cb61c34b280 3ff4b40d58584f94 bff3bda2baa7c726
+sat_pco G24 48 bff1313ba2d55c06 3fdad2f20cc48190 bfe9d87b8994a130
+sat_pco G10 49 bfce8b810e36fc72 3fecc0b6473673d6 bff27b8533e5f6d0
+sat_pco G12 49 bfe535ee9fca7f34 3fd068559a1991c5 3f8df3dbb46e3fd8
+sat_pco G13 49 bffaae74ab504e4f 3fecbd48853a7037 bfb7ea6b3d5d5b15
+sat_pco G14 49 3fb93f0b841479fa bff32e9c599377a7 bff85d7a39894d00
+sat_pco G15 49 bfe014180362ac09 bf37c2a77e4a9258 bfd1f93665d15255
+sat_pco G17 49 bfc91bc3c11df3a2 bfe100b697579ad6 bfdb8fc1a6593288
+sat_pco G19 49 bfdc3c14afc185e6 bfe12fd9a62c5b84 bfc762ba83da73c4
+sat_pco G20 49 bffa941421a08444 bfe364e43b295806 bfe5ecd129512966
+sat_pco G22 49 bfc751d0245c8e36 bfe01c8eb47af595 bfe8938e3b85356a
+sat_pco G23 49 bfe6b042aaad94f2 3ff4bbaaf189d452 bff3ab6d554c9d86
+sat_pco G24 49 bff131fd0c04d340 3fdaa31ac08667b8 bfe9e2d575120010
+sat_pco G10 50 bfcf0c2b608fef02 3feccee8f1e639b2 bff272a2909a76d5
+sat_pco G12 50 bfe536d5310c8a74 3fd065c3e33811ba 3f88f55e7ce0fa32
+sat_pco G13 50 bffaaedc9e3db45e 3fecb5522b0f1cbb bfb9c7ddf036512f
+sat_pco G14 50 3fba9bc6affdd5a4 bff33783818f8896 bff85501b637b59c
+sat_pco G15 50 bfe01b97a056fb00 bf502aca739edc98 bfd1de40bd904421
+sat_pco G17 50 bfc8eebfc2f61fbe bfe0f988a5cfe609 bfdbab9e8a337e04
+sat_pco G19 50 bfdc3182ce90dcfa bfe12d7b655bb52d bfc7b11084c38af0
+sat_pco G20 50 bffa9b69f45b7f61 bfe3766d27517d70 bfe5b974dccddae7
+sat_pco G22 50 bfc6fa74ec1a5396 bfe024a4e069b93c bfe89364478f6282
+sat_pco G23 50 bfe6d3a8e5ea31ac 3ff4c3493c01e2ca bff3991e5dc3983f
+sat_pco G24 50 bff132c34cfdbf17 3fda7333b47bb7fa bfe9ed0c40c28abc
+sat_pco G10 51 bfcf8c8074cb8f66 3fecdd23c9f7fc18 bff269a9ee836bb6
+sat_pco G12 51 bfe537aad4ee4012 3fd063280e2d7712 3f83f62652538bdb
+sat_pco G13 51 bffaaf2c1a02de6a 3fecad39e707083b bfbba4ef81f8efb6
+sat_pco G14 51 3fbbf7d1c583c4c1 bff340703703326a bff84c6bd369141a
+sat_pco G15 51 bfe0230cf707b741 bf5a529acbc137fa bfd1c3350eaa9cc2
+sat_pco G17 51 bfc8c186f910cf7c bfe0f257c397aeb2 bfdbc758c2ed2d28
+sat_pco G19 51 bfdc26d2569081fc bfe12b13b886eda9 bfc7ff4bd5ae63a4
+sat_pco G20 51 bffaa2ae458c18c2 bfe387d5706f7563 bfe585f9fd9a609d
+sat_pco G22 51 bfc6a32b5dafbc2e bfe02cc4db6757e9 bfe8931cc8a16dba
+sat_pco G23 51 bfe6f6e8a88beb36 3ff4cae81a1b318e bff386b5e9f9ea30
+sat_pco G24 51 bff1338e6a6fd28c 3fda433d1f3836fc bfe9f71fe45b4a24
+sat_pco G10 52 bfd0063fdaa69925 3feceb66aba896a6 bff2609b56b764b8
+sat_pco G12 52 bfe5386f91cba56a 3fd06081d3fae1d0 3f7dec6d252922ba
+sat_pco G13 52 bffaaf632c84a650 3feca4ffc6b87f6c bfbd819c48554778
+sat_pco G14 52 3fbd532b1dfb8665 bff3496264abd802 bff843b89c4d3663
+sat_pco G15 52 bfe02a77f7d12d4b bf623413fee05b7d bfd1a81380c33d5c
+sat_pco G17 52 bfc8941981431754 bfe0eb240741df5a bfdbe2f031458716
+sat_pco G19 52 bfdc1c0339c8b9e6 bfe128a2b25c286a bfc84d6c17b87458
+sat_pco G20 52 bffaa9e0f907c93d bfe3991d20cc9572 bfe55260c93b7b38
+sat_pco G22 52 bfc64bf3f085cf30 bfe034ee9a2cf913 bfe892b7c06cc0d8
+sat_pco G23 52 bfe71a01cd949648 3ff4d2876e1a7d36 bff374340fff756c
+sat_pco G24 52 bff1345e68f583ef 3fda1337374f5744 bfea0110579862c8
+sat_pco G10 53 bfd0461446af7197 3fecf9b172f74d44 bff25776d269821d
+sat_pco G12 53 bfe539236e0385b8 3fd05dd0ed748b16 3f73eb259d6efa59
+sat_pco G13 53 bffaaf81e400ce22 3fec9ca3d87ecbf0 bfbf5de0aa2e19bb
+sat_pco G14 53 3fbeadd1148f6f30 bff35259f522d5e2 bff83ae81c3eec82
+sat_pco G15 53 bfe031d89327bfe3 bf6735bfafffcc12 bfd18cdc3b90374c
+sat_pco G17 53 bfc8667779ec576e bfe0e3ed8759494f bfdbfe64b62a5aa0
+sat_pco G19 53 bfdc11156a86689a bfe126286598867c bfc89b70ec1b3686
+sat_pco G20 53 bffab101f2bc2417 bfe3aa4442e3ced3 bfe51ea97d94f7f6
+sat_pco G22 53 bfc5f4cf1bacfc52 bfe03d22114ad2a7 bfe8923530c329f6
+sat_pco G23 53 bfe73cf430702887 3ff4da271a30fd86 bff36198e601a5bc
+sat_pco G24 53 bff135334d13b7ed 3fd9e3223360d018 bfea0add923a912a
+sat_pco G10 54 bfd085bd34909612 3fed0803fba4f41c bff24e3c6aea6cb4
+sat_pco G12 54 bfe539c66ff7e24c 3fd05b151352a6fc 3f63d0fb273c18bf
+sat_pco G13 54 bffaaf884f0da22a 3fec94262b6714a1 bfc09cdc8fc3bfda
+sat_pco G14 54 3fc003e1034f2e01 bff35b56d2e01044 bff831fa5ec1cba8
+sat_pco G15 54 bfe0392eb994a18c bf6c2e574247a8fa bfd1718f66e72353
+sat_pco G17 54 bfc838a101ff1e38 bfe0dcb45a61d891 bfdc19b632b2a164
+sat_pco G19 54 bfdc0608db5b41aa bfe123a4e507eeb4 bfc8e959f42c75ac
+sat_pco G20 54 bffab81116b03bfc bfe3bb4ae1644190 bfe4ead458e3b0bd
+sat_pco G22 54 bfc59dbd5604a15e bfe0455f3524723b bfe891951b9714c6
+sat_pco G23 54 bfe75fbface2658c 3ff4e1c700787c7c bff34ee482556bdf
+sat_pco G24 54 bff1360d1b3966c1 3fd9b2fe4a25378e bfea14878c04de7a
+sat_pco G10 55 bfd0c53a5ac66b91 3fed165e21346ba0 bff244ec29a85248
+sat_pco G12 55 bfe53a589e0e60d2 3fd0584dfe41c4c0 befb8310ef8b8500
+sat_pco G13 55 bffaaf767c997b94 3fec8b86cf1af5d2 bfc18a9119040d4e
+sat_pco G14 55 3fc0b07e299afda7 bff36458e836bfd1 bff828ef6f85a3e6
+sat_pco G15 55 bfe0407a5bb9f87c bf708ef0cf9ef555 bfd1562d2aae2c73
+sat_pco G17 55 bfc80a9638ee9bb0 bfe0d57896d57638 bfdc34e48829896e
+sat_pco G19 55 bfdbfadd7f1d37c6 bfe121184384aaa9 bfc93726d163c9e6
+sat_pco G20 55 bffabf0e49039d2e bfe3cc31072e8fe0 bfe4b6e199c89f10
+sat_pco G22 55 bfc546bf160017b4 bfe04da5f9f65643 bfe890d782fb2822
+sat_pco G23 55 bfe782641f20c9b0 3ff4e96702f9839a bff33c16fb693462
+sat_pco G24 55 bff136ebd7c0291c 3fd982cbb255f490 bfea1e0e3cc10da8
+sat_pco G10 56 bfd1048b704334e1 3fed24bfbeec7288 bff23b86182dd518
+sat_pco G12 56 bfe53ad9feb05bb8 3fd0557b66f4bd2f bf6441a807c72c86
+sat_pco G13 56 bffaaf4c7bea59bb 3fec82c5d3d0f60c bfc2780c3e0f82e8
+sat_pco G14 56 3fc15cbf2db92740 bff36d601f5800f6 bff81fc75a644675
+sat_pco G15 56 bfe047bb6a4f2196 bf730232e70fcab0 bfd13ab5aeea497b
+sat_pco G17 56 bfc7dc573eba788e bfe0ce3a5325b66a bfdc4fef98073784
+sat_pco G19 56 bfdbef9348e9ab6c bfe11e8293f7dacd bfc984d725463adc
+sat_pco G20 56 bffac5f96deec620 bfe3dcf6bf557756 bfe482d17f49b7ff
+sat_pco G22 56 bfc4efd4d1ce3c84 bfe055f653d238a4 bfe88ffc69227d46
+sat_pco G23 56 bfe7a4e163bba13e 3ff4f10703a662e5 bff3293067d177f8
+sat_pco G24 56 bff137cf86ebdf02 3fd9528aa2b9e66c bfea27719c3d3754
+sat_pco G10 57 bfd143b02c210d4e 3fed3328b039c1aa bff2320a3fff7dd5
+sat_pco G12 57 bfe53b4a984a4bcc 3fd0529d063a7025 bf74276c96912a54
+sat_pco G13 57 bffaaf0a5ca19d34 3fec79e34a1f0bfd bfc3654c558738b6
+sat_pco G14 57 3fc208a3414975cb bff3766c62593f95 bff816822b5c7424
+sat_pco G15 57 bfe04ef1d623abc8 bf7570f57a0afed4 bfd11f291bb48340
+sat_pco G17 57 bfc7ade433e7e476 bfe0c6f9a5ba2da6 bfdc6ad743f5ad5e
+sat_pco G19 57 bfdbe42a2c21fbd0 bfe11be3e95763a7 bfc9d26a918ad9ee
+sat_pco G20 57 bffaccd269c1e84b bfe3ed9c153d11fb bfe44ea448bdcfbb
+sat_pco G22 57 bfc498feff4ce253 bfe05e50369f679a bfe88f03d0611bd8
+sat_pco G23 57 bfe7c73757a8587f 3ff4f8a6e45606fe bff31630de4bbfbb
+sat_pco G24 57 bff138b82cdac559 3fd9223b535c21d0 bfea30b1a22afc88
+sat_pco G10 58 bfd182a846d0508f 3fed4198cf26cc5e bff22878ab2748bf
+sat_pco G12 58 bfe53baa715170d2 3fd04fb294f16062 bf7e2f43c3d46b24
+sat_pco G13 58 bffaaeb02ea9f621 3fec70df43468dbb bfc4524fbcb7984c
+sat_pco G14 58 3fc2b42996ae5730 bff37f7d9b1981f0 bff80d1feea89ebc
+sat_pco G15 58 bfe0561d902019cc bf77db3c2d8a0c88 bfd103879936f623
+sat_pco G17 58 bfc77f3d398f9fe0 bfe0bfb6a4f400d2 bfdc859b6dc4e0ac
+sat_pco G19 58 bfdbd8a21c6b37cc bfe1193c56a9c575 bfca1fe0b7f1559c
+sat_pco G20 58 bffad39920f06adf bfe3fe211429effd bfe41a5a3601fd2e
+sat_pco G22 58 bfc4423e140d618e bfe066b3961dd164 bfe88dedbb29b74a
+sat_pco G23 58 bfe7e965d843c2f0 3ff5004686e3e594 bff30318759b3d3f
+sat_pco G24 58 bff139a5cdc42336 3fd8f1ddf8cc0454 bfea39ce469ef218
+sat_pco G10 59 bfd1c173784de469 3fed500ff6a8b894 bff21ed16363f6b5
+sat_pco G12 59 bfe53bf9903c7164 3fd04cbbcc40f01f bf841c280f429267
+sat_pco G13 59 bffaae3e0250f9c6 3fec67b9d098016c bfc53f14db505504
+sat_pco G14 59 3fc35f51618851cf bff38893b36a27b8 bff803a0b09ce83b
+sat_pco G15 59 bfe05d3e8942c4bc bf7a410ab2d5733c bfd0e7d14fb96cb1
+sat_pco G17 59 bfc7506271482706 bfe0b8716727f70c bfdca03bf77ccae6
+sat_pco G19 59 bfdbccfb0db2c2c8 bfe1168bef00a435 bfca6d393a6706f6
+sat_pco G20 59 bffada4d77ff1eeb bfe40e85c7e8a071 bfe3e5f38737a54e
+sat_pco G22 59 bfc3eb9285429507 bfe06f2065e29ba8 bfe88cba2c10e43e
+sat_pco G23 59 bfe80b6cc34d116a 3ff507e5cd006a20 bff2efe744bed736
+sat_pco G24 59 bff13a986d9ae2d7 3fd8c172cb24bf60 bfea42c781549e6a
+sat_pco G10 60 bfd200117959d0ba 3fed5e8e0117f554 bff2151472b39f6e
+sat_pco G12 60 bfe53c37fb89455c 3fd049b8658b5268 bf892143f03559c6
+sat_pco G13 60 bffaadb3e835014e 3fec5e7303bd8a8b bfc62b9a20cdcc47
+sat_pco G14 60 3fc40a19d666b134 bff391ae94f42cca bff7fa047dbdde66
+sat_pco G15 60 bfe06454b2a29233 bf7ca264cb9fc1c6 bfd0cc0667971879
+sat_pco G17 60 bfc72153fd33ae26 bfe0b12a02a208a9 bfdcbab8c3517afa
+sat_pco G19 60 bfdbc134f42b07bc bfe113d2c57bf19c bfcaba73baf239aa
+sat_pco G20 60 bffae0ef53913961 bfe41eca3c5fac74 bfe3b1707cef4f08
+sat_pco G22 60 bfc394fcc7d6b61e bfe07796995980b4 bfe88b6925cb0f4a
+sat_pco G23 60 bfe82d4bf6eeffb8 3ff50f8498527e5b bff2dc9d62c9e42a
+sat_pco G24 60 bff13b90104b211b 3fd890fa0173667a bfea4b9d4a28e778
+sat_pco G10 61 bfd23e82032df495 3fed6d12c8934578 bff20b41e3309184
+sat_pco G12 61 bfe53c65b9bc8b26 3fd046a81a821496 bf8e26f0746b300e
+sat_pco G13 61 bffaad11f14891af 3fec550aee90f843 bfc717de0542294c
+sat_pco G14 61 3fc4b4822adda2c5 bff39ace293f2fc8 bff7f04b62badb40
+sat_pco G15 61 bfe06b5ffd6e813a bf7eff4e48f21284 bfd0b02709409da9
+sat_pco G17 61 bfc6f211fff910c6 bfe0a9e08da3b485 bfdcd511b3a7e798
+sat_pco G19 61 bfdbb54fc44c845c bfe11110ed48dc98 bfcb078fdbb7bf34
+sat_pco G20 61 bffae77e9865aac0 bfe42eee7dac0733 bfe37cd1581edcda
+sat_pco G22 61 bfc33e7d50591ec2 bfe0801623c5c18f bfe889faab2cce3a
+sat_pco G23 61 bfe84f0351b0e753 3ff51722ca6c8870 bff2c93ae6f558b4
+sat_pco G24 61 bff13c8cb9ab4f79 3fd86073d2c83426 bfea544f98fedcb0
+sat_pco G10 62 bfd27cc4cf71a7c6 3fed7b9e26fe33f4 bff20159bf12ef69
+sat_pco G12 62 bfe53c82d1623ac4 3fd0438aa532fad4 bf9196942fabe393
+sat_pco G13 62 bffaac582ed1eb71 3fec4b81a30f2008 bfc803df08d4bd6d
+sat_pco G14 62 3fc55e89958800b5 bff3a3f259b1b7d9 bff7e6756c6e10cc
+sat_pco G15 62 bfe072605aedd893 bf80abe58590d98f bfd094335d3ba760
+sat_pco G17 62 bfc6c29c9cd01620 bfe0a2951e65b445 bfdcef46ab0f007a
+sat_pco G19 62 bfdba94b72d5f498 bfe10e4679a198ef bfcb548d3efb40b0
+sat_pco G20 62 bffaedfb2b572946 bfe43ef29820d39e bfe348165a25bae6
+sat_pco G22 62 bfc2e81492fd523b bfe0889ef8424b0f bfe8886ebf2ace5e
+sat_pco G23 62 bfe87092b286dc70 3ff51ec044d07a5e bff2b5bfe8968094
+sat_pco G24 62 bff13d8e6d7bd2cc 3fd82fe07643452e bfea5cde65bd9290
+sat_pco G10 63 bfd2bad99847b4de 3fed8a2ff6039a4c bff1f75c10af01b7
+sat_pco G12 63 bfe53c8f490e62de 3fd0405fc0142ea2 bf9419f324a83b0e
+sat_pco G13 63 bffaab86b269c14a 3fec41d7334374c2 bfc8ef9bb42480e1
+sat_pco G14 63 3fc6082f4e091846 bff3ad1b0f917ae4 bff7dc82a7dc94d0
+sat_pco G15 63 bfe07955bc80549c bf81d5ef80e2d057 bfd0782b8c227ae0
+sat_pco G17 63 bfc692f3f76e33a6 bfe09b47cb14d8cb bfdd09578c4a444a
+sat_pco G19 63 bfdb9d27f4cc7dea bfe10b737dcd26e0 bfcba16b871f909e
+sat_pco G20 63 bffaf464f15e0084 bfe44ed6984b2604 bfe3133fc4c317f0
+sat_pco G22 63 bfc291c303a57fe1 bfe0913109c0b5e6 bfe886c564d9fdec
+sat_pco G23 63 bfe891f9f8c8effe 3ff5265ce8ee0b1e bff2a22c7f241b79
+sat_pco G24 63 bff13e952f669b2e 3fd7ff4023216a78 bfea6549a84e3340
+sat_pco G10 64 bfd2f8c0184abd0e 3fed98c80f156f14 bff1ed48e275b93e
+sat_pco G12 64 bfe53c8b275deecc 3fd03d27260fbcb3 bf969d925058cca8
+sat_pco G13 64 bffaaa9d8dfae85c 3fec380bb13db61e bfc9db1297a377ea
+sat_pco G14 64 3fc6b1728d0e6b69 bff3b6483403a492 bff7d27322366cc3
+sat_pco G15 64 bfe08040139e54ea bf82fdc715d5ed2b bfd05c0fbea3894d
+sat_pco G17 64 bfc663183412c7fe bfe093f8a9d3be88 bfdd23443a4acc96
+sat_pco G19 64 bfdb90e53f7bd9a4 bfe108980d1f1a9b bfcbee2a56a6fd12
+sat_pco G20 64 bffafabbcf8f3843 bfe45e9a8aefd962 bfe2de4dda20f78d
+sat_pco G22 64 bfc23b8915dbc48d bfe099cc4b09f9d3 bfe884fe9f6f6e02
+sat_pco G23 64 bfe8b3390435bbee 3ff52df89823978e bff28e80c234eeb2
+sat_pco G24 64 bff13fa102ffc47b 3fd7ce9310a3c5e2 bfea6d91589fe4a4
+sat_pco G10 65 bfd336780a92556b 3feda7664b6df5c8 bff1e3203ef41134
+sat_pco G12 65 bfe53c7672f7750c 3fd039e0928ea0e1 bf99216ed55cbec2
+sat_pco G13 65 bffaa99cd3c0a84a 3fec2e1f2efcd308 bfcac6424c218c84
+sat_pco G14 65 3fc75a528c516f2b bff3bf79b00d1e10 bff7c846e8d699a0
+sat_pco G15 65 bfe0871f51d893d6 bf84236e4b535891 bfd03fe01d82e3f2
+sat_pco G17 65 bfc6330977839b24 bfe08ca7d0ba1658 bfdd3d0c983120b6
+sat_pco G19 65 bfdb848348767eee bfe105b43af763bf bfcc3ac95033a226
+sat_pco G20 65 bffb00ffab1d85b6 bfe46e3e7d0d6a58 bfe2a940dcd1554c
+sat_pco G22 65 bfc1e5673cd6e822 bfe0a270aebdfcd3 bfe8831a72406c04
+sat_pco G23 65 bfe8d44fb4f2ab6e 3ff5359333be7b8b bff27abcc97fa53c
+sat_pco G24 65 bff140b1ebc5125b 3fd79dd97620b996 bfea75b56ea525f2
+sat_pco G10 66 bfd374012aa6c427 3fedb60a840e2da8 bff1d8e230d4bd63
+sat_pco G12 66 bfe53c51328c0b50 3fd0368bc18225b3 bf9ba585c2e5f2ac
+sat_pco G13 66 bffaa88496467c3e 3fec2411be666db1 bfcbb1297213fa47
+sat_pco G14 66 3fc802ce86a46624 bff3c8af6c936e66 bff7bdfe09427834
+sat_pco G15 66 bfe08df368da297c bf8546e730108e30 bfd0239cd1923dd8
+sat_pco G17 66 bfc602c7e70c81ae bfe0855555d46a6b bfdd56b0894d46ae
+sat_pco G19 66 bfdb78020596a316 bfe102c81ac24623 bfcc87481682a87c
+sat_pco G20 66 bffb07306959cb04 bfe47dc27bdcd920 bfe274190fceb914
+sat_pco G22 66 bfc18f5deb683561 bfe0ab1e275571d7 bfe88118e0c21846
+sat_pco G23 66 bfe8f53deb8a11fe 3ff53d2c9cfae3e5 bff266e0acdc09a6
+sat_pco G24 66 bff141c7ed1dfda0 3fd76d138b003316 bfea7db5e25476e4
+sat_pco G10 67 bfd3b15b348ed701 3fedc4b491c05b86 bff1ce8ec2de6c91
+sat_pco G12 67 bfe53c1b6cd81ee0 3fd033286f6e063c bf9e29d414d9a51e
+sat_pco G13 67 bffaa754e866d1ef 3fec19e37136fc55 bfcc9bc6b1b0951a
+sat_pco G14 67 3fc8aae5b7c78a4f bff3d1e9525aa40c bff7b398912c79b0
+sat_pco G15 67 bfe094bc4a65f55b bf866833da11f37a bfd0074603bbcbf2
+sat_pco G17 67 bfc5d253a87efecc bfe07e014f23e35e bfdd702ff11ed38e
+sat_pco G19 67 bfdb6b616cfb07d2 bfe0ffd3bff75be8 bfccd3a64c80ebac
+sat_pco G20 67 bffb0d4defb32e46 bfe48d2694d1a0a8 bfe23ed6b68048d5
+sat_pco G22 67 bfc1396d9411678b bfe0b3d4a71fade3 bfe87ef9ee89e02a
+sat_pco G23 67 bfe9160388f2061e 3ff544c4b505beaf bff252ec843eda26
+sat_pco G24 67 bff142e30a5ba530 3fd73c4186bc07a0 bfea8592aba859a4
+sat_pco G10 68 bfd3ee85e4d09716 3fedd3644d188d74 bff1c425fff3b6d1
+sat_pco G12 68 bfe53bd528a454ae 3fd02fb65970ea7e bfa0572b5a51ccf7
+sat_pco G13 68 bffaa60ddd49cf18 3fec0f9458f393b2 bfcd8618bae83e46
+sat_pco G14 68 3fc952975cb8aaad bff3db274a09c5c8 bff7a9168e6f8076
+sat_pco G15 68 bfe09b79e858a1cc bf87875666f514b4 bfcfd5b7b9f48d68
+sat_pco G17 68 bfc5a1ace22ea542 bfe076abd29d90b8 bfdd898ab356aa58
+sat_pco G19 68 bfdb5ea1750d02f4 bfe0fcd73e1ab664 bfcd1fe39527bcc8
+sat_pco G20 68 bffb135823b9447a bfe49c6ad59e72fc bfe2097a14ac3968
+sat_pco G22 68 bfc0e396a8ecd211 bfe0bc9420451dd4 bfe87cbd9f4ceb48
+sat_pco G23 68 bfe936a06e860b48 3ff54c5b5cfb7e91 bff23ee067bdaf9c
+sat_pco G24 68 bff1440346b8bdad 3fd70b63a0e06448 bfea8d4bc29f54fa
+sat_pco G10 69 bfd42b80f860d267 3fede2198e7250e4 bff1b9a7f31572b6
+sat_pco G12 69 bfe53b7e6cc66bbc 3fd02c353d4c7282 bfa199853cf06f79
+sat_pco G13 69 bffaa4af8864871f 3fec052486df55d8 bfce701e45135c04
+sat_pco G14 69 3fc9f9e2b366f806 bff3e4693c26f5a8 bff79e780f139f2e
+sat_pco G15 69 bfe0a22c34a8592d bf88a450fbd6bfc6 bfcf9cbd0cb4af26
+sat_pco G17 69 bfc570d3bafdb1ac bfe06f54f62c21ac bfdda2c0b3d04f5e
+sat_pco G19 69 bfdb51c2147ac1ee bfe0f9d2a8bb4a77 bfcd6bff93a0c270
+sat_pco G20 69 bffb194eeb19ada6 bfe4ab8f4c2f9254 bfe1d4036e90eb2a
+sat_pco G22 69 bfc08dd99bbd90d7 bfe0c55c84c5ae0c bfe87a63f6e07b94
+sat_pco G23 69 bfe957147e098a54 3ff553f075e8fc8a bff22abc6f8d855c
+sat_pco G24 69 bff14528a559816c 3fd6da7a110c336e bfea94e11f3bf920
+sat_pco G10 70 bfd4684c2cc2007c 3fedf0d42df60ed8 bff1af14a75e8584
+sat_pco G12 70 bfe53b174022226e 3fd028a4d96c962b bfa2dbf615868508
+sat_pco G13 70 bffaa339fd77d0fe 3febfa940bef2683 bfcf59d60ed993bd
+sat_pco G14 70 3fcaa0c6fae12843 bff3edaf111a1be6 bff793bd214b74ba
+sat_pco G15 70 bfe0a8d32164f091 bf89bf25c54d0c5c bfcf639c51f4454c
+sat_pco G17 70 bfc53fc85a493540 bfe067fccfacbe08 bfddbbd1d69c16b0
+sat_pco G19 70 bfdb44c3423acf24 bfe0f6c613737e22 bfcdb7f9eb31fd04
+sat_pco G20 70 bffb1f322ba37da0 bfe4ba9406b26d60 bfe19e7308ccb6c5
+sat_pco G22 70 bfc03836ddee89d1 bfe0ce2dc678eca8 bfe877ecf939ee78
+sat_pco G23 70 bfe9775f99a8135e 3ff55b83e0cbd27e bff21680b4029778
+sat_pco G24 70 bff14653294ba05c 3fd6a9850ef17fe8 bfea9c52b984e6f4
+sat_pco G10 71 bfd4a4e73fe6e6f7 3fedff940394aa2a bff1a46c28080391
+sat_pco G12 71 bfe53a9fa9aa2500 3fd02504eceea315 bfa41e7c3f02bf08
+sat_pco G13 71 bffaa1ad508f4b2d 3febefe2f8bf3dea bfd0219f6efccc33
+sat_pco G14 71 3fcb4743734bf7d2 bff3f6f8b12c9af0 bff788e5d374e426
+sat_pco G15 71 bfe0af6ea0b81218 bf8ad7d6f7614540 bfcf2a55dc119dfc
+sat_pco G17 71 bfc50e8ae7f5a69c bfe060a374f0bf28 bfddd4bdfff87216
+sat_pco G19 71 bfdb37a4f58b60b6 bfe0f3b191e8be1f bfce03d23f432efe
+sat_pco G20 71 bffb2501cb461ad0 bfe4c9791392e0ac bfe168c9286c6b4c
+sat_pco G22 71 bfbfc55dc0f56a8a bfe0d707d7108aae bfe87558aa6e086c
+sat_pco G23 71 bfe99781a3f37c44 3ff563157e922f2e bff2022d4d91a2d2
+sat_pco G24 71 bff14782d5862f9f 3fd67884d255d81a bfeaa3a08984d8c6
+sat_pco G10 72 bfd4e151f04489bc 3fee0e58e70aca70 bff199ae8066c456
+sat_pco G12 72 bfe53a17b060e156 3fd0215537a681fa bfa561160c9e55c8
+sat_pco G13 72 bffaa00995ffe1d5 3febe5115d86dbe6 bfd0962bbfa61b07
+sat_pco G14 72 3fcbed575de3c7ff bff4004604899c19 bff77df2341920be
+sat_pco G15 72 bfe0b5fea4e5669d bf8bee66cd89ad48 bfcef0e9fd8c1b5a
+sat_pco G17 72 bfc4dd1b8c6b4112 bfe05948fbbcf967 bfdded851453b148
+sat_pco G19 72 bfdb2a6725f36200 bfe0f09537cb796b bfce4f8833592a64
+sat_pco G20 72 bffb2abdb0129200 bfe4d83e817e2041 bfe1330612e499e7
+sat_pco G22 72 bfbf1a842833549a bfe0dfeaa813c967 bfe872a70eb24954
+sat_pco G23 72 bfe9b77a7fecaacc 3ff56aa5301d4c6e bff1edc254ca3c17
+sat_pco G24 72 bff148b7ace97707 3fd647799316e7de bfeaaaca874a23be
+sat_pco G10 73 bfd51d8bfcd2db88 3fee1d22afe15ba6 bff18edbbbeb5284
+sat_pco G12 73 bfe5397f5b598110 3fd01d957a24f86c bfa6a3c1c9f3bd04
+sat_pco G13 73 bffa9e4ee266ff91 3febda1f4a1063b8 bfd10a8f633595a2
+sat_pco G14 73 3fcc9301fd09283d bff40996f33ef6ba bff772e251ec01d2
+sat_pco G15 73 bfe0bc83204abefd bf8d02d78aa329b6 bfceb75909033e32
+sat_pco G17 73 bfc4ab7a70959eda bfe051ed79c9824a bfde0626f84c111a
+sat_pco G19 73 bfdb1d09cb3ff156 bfe0ed7118d64b53 bfce9b1b6b253eb4
+sat_pco G20 73 bffb3065c03a8efb bfe4e6e45f602a0d bfe0fd2a0e201da0
+sat_pco G22 73 bfbe6fe1d2004f7a bfe0e8d62ae622a8 bfe86fd82a5af694
+sat_pco G23 73 bfe9d74a10f4e1b0 3ff57232d63e1aa5 bff1d93fe2605a14
+sat_pco G24 73 bff149f1b23f65ac 3fd61663891a2684 bfeab1d0aae8ea34
+sat_pco G10 74 bfd559952500b90a 3fee2bf1356beedc bff183f3e623bdce
+sat_pco G12 74 bfe538d6b1b8cbf0 3fd019c575bc3f9f bfa7e67dbb6cba52
+sat_pco G13 74 bffa9c7d4aa96b27 3febcf0ccdb047d4 bfd17ec9c6c24550
+sat_pco G14 74 3fcd384294169e2b bff412eb653b1728 bff767b63bcef062
+sat_pco G15 74 bfe0c2fc05603cbe bf8e152b78eacb9a bfce7da35135ae48
+sat_pco G17 74 bfc479a7bde351e3 bfe04a9104c1771e bfde1ea390afca20
+sat_pco G19 74 bfdb0f8cdd863f2c bfe0ea4548ce2888 bfcee68b8a7b7182
+sat_pco G20 74 bffb35f9e212dcb6 bfe4f56abc697385 bfe0c735606eaada
+sat_pco G22 74 bfbdc5779e2fe720 bfe0f1ca50c183ac bfe86cec01dcd77c
+sat_pco G23 74 bfe9f6f03adce896 3ff579be51b94be0 bff1c4a60f22822c
+sat_pco G24 74 bff14b30e83aba0d 3fd5e542ec663b68 bfeab8b2ec77ee2c
+sat_pco G10 75 bfd5956d28bd3190 3fee3ac44ecaa2bc bff178f70aba5ad1
+sat_pco G12 75 bfe5381dbab61992 3fd015e4ec84949b bfa929481e84649e
+sat_pco G13 75 bffa9a94e3f1b28e 3febc3d9f73a9c18 bfd1f2da5aad33ce
+sat_pco G14 75 3fcddd1867aed2bd bff41c43425181da bff75c6e00cbe828
+sat_pco G15 75 bfe0c96946b87a3d bf8f2564e9f72ec8 bfce43c929003fac
+sat_pco G17 75 bfc447a39e457b78 bfe04333b242c399 bfde36fac27d1f50
+sat_pco G19 75 bfdb01f055275954 bfe0e711db82fe9c bfcf31d8353ed412
+sat_pco G20 75 bffb3b79fc13e175 bfe503d1a80ff8fc bfe091285084fdf8
+sat_pco G22 75 bfbd1b466bd05206 bfe0fac70ab8d063 bfe869e299cc7eb4
+sat_pco G23 75 bfea166ce1dcc200 3ff5814783459450 bff1aff4f3ff2f2e
+sat_pco G24 75 bff14c7551775221 3fd5b417f516e966 bfeabf7144124ca6
+sat_pco G10 76 bfd5d113c884e2b0 3fee499bd2ecc4f8 bff16de53573cf8e
+sat_pco G12 76 bfe537547d9c1470 3fd011f3a15f10ae bfaa6c1f2a6010ac
+sat_pco G13 76 bffa9895c3af5e3c 3febb886d4fd2eed bfd266c09273901c
+sat_pco G14 76 3fce8182bd718c6c bff4259e7236ee5c bff75109b01a9340
+sat_pco G15 76 bfe0cfcad700b22b bf9019c31b58dc11 bfce09cae35cf534
+sat_pco G17 76 bfc4156e3c2f628e bfe03bd597dde8d0 bfde4f2c72e26c4c
+sat_pco G19 76 bfdaf4342ac73f7e bfe0e3d6e4cd6205 bfcf7d010f93eeca
+sat_pco G20 76 bffb40e5f4d84590 bfe51219320bf09d bfe05b03258ee131
+sat_pco G22 76 bfbc714f1911fe08 bfe103cc49b93ff9 bfe866bbf6ddd2e8
+sat_pco G23 76 bfea35bfea960769 3ff588ce4b8c8cea bff19b2caa034b5c
+sat_pco G24 76 bff14dbef07a5fe7 3fd582e2db550ec0 bfeac60ba9d889b2
+sat_pco G10 77 bfd60c88c5495544 3fee5877988d0f24 bff162be7232d2c6
+sat_pco G12 77 bfe5367b01c9ba36 3fd00df157f9b017 bfabaf010fe42e5c
+sat_pco G13 77 bffa967fff959cf4 3febad1374b7b046 bfd2da7be49eba2f
+sat_pco G14 77 3fcf2580dc33c387 bff42efcdc849962 bff74589591cb1f9
+sat_pco G15 77 bfe0d620a90152d4 bf909fc8dfb0eff4 bfcdcfa8d35e19fc
+sat_pco G17 77 bfc3e307c2996631 bfe03476cb1641ba bfde6738873c9b3a
+sat_pco G19 77 bfdae65857570216 bfe0e0947890a4ac bfcfc805bdaa0514
+sat_pco G20 77 bffb463db31f05c7 bfe520416a5c8dec bfe024c627211864
+sat_pco G22 77 bfbbc7928367ae06 bfe10cd9fe88b985 bfe863781de49d26
+sat_pco G23 77 bfea54e93a1421cc 3ff590528b2b0fd0 bff1864d4a5a0c18
+sat_pco G24 77 bff14f0dc7b1f23f 3fd551a3d76385c8 bfeacc8215ef1a18
+sat_pco G10 78 bfd647cbe086ccae 3fee67577635b740 bff15782ccf4f706
+sat_pco G12 78 bfe535914eb33f46 3fd009ddd4d200f4 bfacf1ebfa09b0f4
+sat_pco G13 78 bffa9453ad9a37d0 3feba17fe395c8a6 bfd34e0bcaa505cc
+sat_pco G14 78 3fcfc9120bcad8cf bff4385e68b591c7 bff739ed0b61dee9
+sat_pco G15 78 bfe0dc6aaf9c72e5 bf9124c4f5aea200 bfcd95634c3cd3a4
+sat_pco G17 78 bfc3b0705cf31f63 bfe02d17615fd4df bfde7f1ee51d9602
+sat_pco G19 78 bfdad85cd40d9684 bfe0dd4aaab8eb9b bfd00972f1f1b635
+sat_pco G20 78 bffb4b811dcb41ed bfe52e4a614773d5 bfdfdce33a814518
+sat_pco G22 78 bfbb1e1187848c02 bfe115f019c5f974 bfe8601713d4894c
+sat_pco G23 78 bfea73e8b5ca72a3 3ff597d422b10e8e bff17156ee4e3ad8
+sat_pco G24 78 bff15061d975040e 3fd5205b219b6594 bfead2d4807efe5e
+sat_pco G10 79 bfd682dcdbde2198 3fee763b429acd28 bff14c3251b35ff0
+sat_pco G12 79 bfe534976be144de 3fd005b8dd40fb26 bfae34de0e155090
+sat_pco G13 79 bffa9210e3f8d095 3feb95cc2e081fe2 bfd3c16fc12af9ba
+sat_pco G14 79 3fd0361acabbcdba bff441c2fe32340d bff72e34d69ba726
+sat_pco G15 79 bfe0e2a8ddd053d1 bf91a8b89480ed44 bfcd5afaa142f19c
+sat_pco G17 79 bfc37da837366d90 bfe025b77021873e bfde96df7243ef6e
+sat_pco G19 79 bfdaca419a6c6bfc bfe0d9f98f3ad8be bfd02ed09363a4aa
+sat_pco G20 79 bffb50b01be36f5e bfe53c342774ee1c bfdf700ba08ff711
+sat_pco G22 79 bfba74cd012cee2e bfe11f0e8bea3b96 bfe85c98ddc0da80
+sat_pco G23 79 bfea92be439e818e 3ff59f52f29c88fc bff15c49af4d0724
+sat_pco G24 79 bff151bb27f24d81 3fd4ef08f39ec53a bfead902e1a64914
+sat_pco G10 80 bfd6bdbb7a79f30e 3fee8522d329c302 bff140cd0ce81dc7
+sat_pco G12 80 bfe5338d60f7bbe2 3fd0018237535edc bfaf77d56d23e2e0
+sat_pco G13 80 bffa8fb7b91e91d1 3feb89f8603d383b bfd434a746c22d7d
+sat_pco G14 80 3fd0877561928318 bff44b2a84308058 bff72260cabdab4c
+sat_pco G15 80 bfe0e8db26b6f91a bf922ba4f793e591 bfcd206f25cccac6
+sat_pco G17 80 bfc34aaf7ddc4aa9 bfe01e570cb50236 bfdeae7a149c8712
+sat_pco G19 80 bfdabc06a43c6d44 bfe0d6a13a172a7a bfd0541b957630d8
+sat_pco G20 80 bffb55ca949ae6fc bfe549fecd8d8ece bfdf0306125cddbc
+sat_pco G22 80 bfb9cbc5cb79730e bfe1283545497207 bfe858fd80db1fa0
+sat_pco G23 80 bfeab169c9d2e88b 3ff5a6cedb74378a bff14725a6cd398e
+sat_pco G24 80 bff15319b57496e9 3fd4bdad838f8d9a bfeadf0d31b7364e
+sat_pco G10 81 bfd6f8677f03a88c 3fee940dfe3578c8 bff135530ac46d3d
+sat_pco G12 81 bfe5327335ade638 3fcffa7354145512 bfb05d681920c75d
+sat_pco G13 81 bffa8d4843c5b0db 3feb7e048560599c bfd4a7b1dd87cfdc
+sat_pco G14 81 3fd0d89870291ace bff45494e1e11ddb bff71670f7d1afe8
+sat_pco G15 81 bfe0ef017d8461f4 bf92ad8b5d36a8e2 bfcce5c12d5d1bea
+sat_pco G17 81 bfc317865ddbb362 bfe016f64c63dc30 bfdec5eeb2483694
+sat_pco G19 81 bfdaadabeb90067e bfe0d341bf541919 bfd07953ca945480
+sat_pco G20 81 bffb5ad06f42cc20 bfe557aa64cc06fc bfde95d322657453
+sat_pco G22 81 bfb922fcc0b15348 bfe13164360eb492 bfe8554502767020
+sat_pco G23 81 bfeacfeb2f222ce8 3ff5ae47bd9f2208 bff131eaee7788f2
+sat_pco G24 81 bff1547d83fc2814 3fd48c490b3dd460 bfeae4f368d8bc74
+sat_pco G10 82 bfd732e0ad0bfbfc 3feea2fc99861662 bff129c457b564fb
+sat_pco G12 82 bfe53148f1d4bd88 3fcff1bdfa605732 bfb0fee63a46d00e
+sat_pco G13 82 bffa8ac29ae1b820 3feb71f0a8152122 bfd51a8f09cc5850
+sat_pco G14 82 3fd129839cb37fb3 bff45e01fe50db04 bff70a656e164ec6
+sat_pco G15 82 bfe0f51bd588a8bb bf932e6d078b006d bfccaaf10b879392
+sat_pco G17 82 bfc2e42d04abdfd4 bfe00f9544697355 bfdedd3d31970c80
+sat_pco G19 82 bfda9f316ac2ede4 bfe0cfdb3301992a bfd09e7905369243
+sat_pco G20 82 bffb5fc19356cc52 bfe56536fea21191 bfde28736403a096
+sat_pco G22 82 bfb87a72ba337bca bfe13a9b4e4156a2 bfe8516f680440d4
+sat_pco G23 82 bfeaee425aa7d8cc 3ff5b5bd797ecab4 bff11c99a00f5997
+sat_pco G24 82 bff155e69582d437 3fd45adbc3634ac6 bfeaeab57f46a4e8
+sat_pco G10 83 bfd76d26c89cfde0 3feeb1ee7ab23028 bff11e2100460bbd
+sat_pco G12 83 bfe5300e9d56c000 3fcfe8e3f2ce527a bfb1a0642347d627
+sat_pco G13 83 bffa8826d5a231db 3feb65bcd250fc44 bfd58d3e526b6f2e
+sat_pco G14 83 3fd17a368e0f16cc bff46771c07437a5 bff6fe3e3df2dfe7
+sat_pco G15 83 bfe0fb2a222f8c0b bf93ae4b3c423544 bfcc6fff13f5d0bc
+sat_pco G17 83 bfc2b0a3a0432718 bfe0083409f2317a bfdef46579098d80
+sat_pco G19 83 bfda90971c7b17fe bfe0cc6da9382f62 bfd0c38b17e5d90b
+sat_pco G20 83 bffb649de878d326 bfe572a4accc73b4 bfddbae76b7fdaba
+sat_pco G22 83 bfb7d22890a14c00 bfe143da7dc1b1ad bfe84d7cb716004a
+sat_pco G23 83 bfeb0c6f33f09482 3ff5bd2fef6bb160 bff10731d57128a6
+sat_pco G24 83 bff15754ebeb6ed9 3fd42965e4c50cf0 bfeaf0536d431446
+sat_pco G10 84 bfd7a739964b6d6e 3feec0e3772220d8 bff11269111cabf5
+sat_pco G12 84 bfe52ec44038457a 3fcfdfe4d04c1f96 bfb241e0db834a6e
+sat_pco G13 84 bffa85750b719359 3feb59690d58ae46 bfd5ffbf40ac6b56
+sat_pco G14 84 3fd1cab0eba33f46 bff470e40f241500 bff6f1fb77fc3122
+sat_pco G15 84 bfe1012c57009137 bf942d2744990841 bfcc34eb9a664dc8
+sat_pco G17 84 bfc27cea5f168bca bfe000d2b21b54c8 bfdf0b676f50c0ac
+sat_pco G19 84 bfda81dcfba5e8c4 bfe0c8f9361809d9 bfd0e889d54313c3
+sat_pco G20 84 bffb69655672a872 bfe57ff38156d6a8 bfdd4d2fcdfb4199
+sat_pco G22 84 bfb72a1f1ba4d46c bfe14d21b44c64c2 bfe8496cf55bbf6c
+sat_pco G23 84 bfeb2a71a2f23542 3ff5c49effb39cbd bff0f1b3a89826bf
+sat_pco G24 84 bff158c88900b569 3fd3f7e7a8514e91 bfeaf5cd2b13bb00
+sat_pco G10 85 bfd7e118db33381e 3feecfdb640fd94a bff1069c96fb7133
+sat_pco G12 85 bfe52d69e2982f12 3fcfd6c027714614 bfb2e35b6899167c
+sat_pco G13 85 bffa82ad53f46706 3feb4cf561bf1e58 bfd67211601ba354
+sat_pco G14 85 3fd21af25d6224bb bff47a58d11e0b17 bff6e59d2cf4a527
+sat_pco G15 85 bfe10722679f8bea bf94ab026d5c1023 bfcbf9b6f2a751d8
+sat_pco G17 85 bfc24901701cbe31 bfdff2e2a3e66c36 bfdf2242fb4cb7ce
+sat_pco G19 85 bfda7303037b3910 bfe0c57dedc9724e bfd10d750fffee06
+sat_pco G20 85 bffb6e17c537755c bfe58d238e9f86f6 bfdcdf4d21595b8a
+sat_pco G22 85 bfb68257323d4d2c bfe15670e1762bd5 bfe8454028a60652
+sat_pco G23 85 bfeb4849900fee12 3ff5cc0a8a9b00f2 bff0dc1f339b297a
+sat_pco G24 85 bff15a416e76413e 3fd3c66147025469 bfeafb22b104e394
+sat_pco G10 86 bfd81ac45cfc3fa0 3feeded616881966 bff0fabb9ebfae8d
+sat_pco G12 86 bfe52bff8cb11e82 3fcfcd758e81e4f4 bfb384d2ce4bd4ce
+sat_pco G13 86 bffa7fcfc707e8fc 3feb4061d7628422 bfd6e4343e7a4a59
+sat_pco G14 86 3fd26afa8be94346 bff483cfed086908 bff6d9236dc76f5a
+sat_pco G15 86 bfe10d0c47cb8c2a bf9527de06c9b95c bfcbbe6170a1bb88
+sat_pco G17 86 bfc214e902bfcd80 bfdfe41ffcee37c4 bfdf38f80412ad96
+sat_pco G19 86 bfda64092f7d7d84 bfe0c1fbe47c967d bfd1324c9adf064f
+sat_pco G20 86 bffb72b51ce25fb6 bfe59a34e753da9c bfdc713ffc6af374
+sat_pco G22 86 bfb5dad1aa63f7c2 bfe15fc7f4b0ffcf bfe840f656e39d5a
+sat_pco G23 86 bfeb65f6e4128f96 3ff5d372705b4cde bff0c67490b260f2
+sat_pco G24 86 bff15bbf9de7df3a 3fd394d2f9ef9260 bfeb0053f767edbe
+sat_pco G10 87 bfd8543be1caa9bc 3feeedd36368098c bff0eec63564999d
+sat_pco G12 87 bfe52a8546d9a4c0 3fcfc4049d68f292 bfb426460ee520ce
+sat_pco G13 87 bffa7cdc7cc10a94 3feb33ae756b859c bfd756276b9fac58
+sat_pco G14 87 3fd2bac9205cdd6a bff48d49496e4800 bff6cc8e4b8e3e7c
+sat_pco G15 87 bfe112e9eb603351 bf95a3bb64a7ce1c bfcb82eb684c0448
+sat_pco G17 87 bfc1e0a146f170f1 bfdfd55d992be978 bfdf4f8670e3f1f8
+sat_pco G19 87 bfda54ef7b76e2d6 bfe0be732e689d1c bfd1571048bb7259
+sat_pco G20 87 bffb773d45b81ce5 bfe5a7279e74038a bfdc0308f6d7bf3f
+sat_pco G22 87 bfb5338f59639026 bfe16926dd474963 bfe83c8f8623bf8c
+sat_pco G23 87 bfeb83798834999c 3ff5dad691266220 bff0b0b3da2e65be
+sat_pco G24 87 bff15d4318d9a263 3fd3633cfa49c351 bfeb0560f693e0a8
+sat_pco G10 88 bfd88d7f30581790 3feefcd31f621b1e bff0e2bc67ff1bcf
+sat_pco G12 88 bfe528fb1984de16 3fcfba6cedb5dbac bfb4c7b42b572998
+sat_pco G13 88 bffa79d38d6ad80b 3feb26db424a8dea bfd7c7ea7970f2fe
+sat_pco G14 88 3fd30a5dc4831f0e bff496c4ccc2f24e bff6bfddd78d3fb2
+sat_pco G15 88 bfe118bb46556c35 bf961e9bde364e6c bfcb47552dad157a
+sat_pco G17 88 bfc1ac2a6d1cbcf8 bfdfc69ba25c5598 bfdf65ee29340d20
+sat_pco G19 88 bfda45b5e37c6408 bfe0bae3dfcc1c08 bfd17bbfec818fd1
+sat_pco G20 88 bffb7bb028286b1c bfe5b3fbc756c419 bfdb94a8a907b70e
+sat_pco G22 88 bfb48c9113888fd3 bfe1728d8a606951 bfe8380bbc941308
+sat_pco G23 88 bfeba0d1661a7266 3ff5e236cd24e198 bff09add2a7deb50
+sat_pco G24 88 bff15ecbe0b7a82e 3fd3319f815f7f0b bfeb0a49a6e5396c
+sat_pco G10 89 bfd8c68e0fe7fb80 3fef0bd51efc5b50 bff0d69e43bfd63c
+sat_pco G12 89 bfe527610d43c34c 3fcfb0ae1a9eb400 bfb5691c2310b81a
+sat_pco G13 89 bffa76b5118542c4 3feb19e843b70af8 bfd8397cfbca5091
+sat_pco G14 89 3fd359b822afa0a4 bff4a0425d5fcabe bff6b312233672cf
+sat_pco G15 89 bfe11e804cbf89e4 bf969880ce2add8c bfcb0b9f14db26d8
+sat_pco G17 89 bfc17784a6291d78 bfdfb7da421bd60e bfdf7c2f14a74410
+sat_pco G19 89 bfda365c63edef9a bfe0b74e0cece073 bfd1a05b592f36d6
+sat_pco G20 89 bffb800dacccc754 bfe5c0b175a5fc26 bfdb261fac4dd13d
+sat_pco G22 89 bfb3e5d7ac4bfc95 bfe17bfbeafe66ec bfe8336b0081c2ce
+sat_pco G23 89 bfebbdfe67d48bda 3ff5e99304770e8e bff084f09c2c2081
+sat_pco G24 89 bff16059f6d6a48d 3fd2fffac88c9a45 bfeb0f0e00bf7f14
+sat_pco G10 90 bfd8ff68483c23d8 3fef1ad9368ec57a bff0ca6bd5f53c51
+sat_pco G12 90 bfe525b72ac4aa70 3fcfa6c7c0f526a4 bfb60a7cf494aae0
+sat_pco G13 90 bffa738121c464fe 3feb0cd57eb0a3d5 bfd8aade8859c924
+sat_pco G14 90 3fd3a8d7e5d3d6e0 bff4a9c1e1867d46 bff6a62b4027427a
+sat_pco G15 90 bfe12438f2cfc75f bf97116b92b44348 bfcacfc971f696ce
+sat_pco G17 90 bfc142b02379daeb bfdfa919a1e5de60 bfdf92491b12a39c
+sat_pco G19 90 bfda26e2f9747856 bfe0b3b1ca173cbd bfd1c4e261d8c624
+sat_pco G20 90 bffb8455bc6a3e36 bfe5cd48bd6335a0 bfdab76e9ac9ec03
+sat_pco G22 90 bfb33f63f63b79a0 bfe18571edff5e44 bfe82ead5858d9d2
+sat_pco G23 90 bfebdb0077df89d3 3ff5f0eb17352d4b bff06eee49e08658
+sat_pco G24 90 bff161ed5c72b871 3fd2ce4f09580042 bfeb13adfc8af8b0
+sat_pco G10 91 bfd9380da1b1bbaa 3fef29df3a48e352 bff0be252c0694ea
+sat_pco G12 91 bfe523fd7ad4f746 3fcf9cb97f2ab5d2 bfb6abd59d2003de
+sat_pco G13 91 bffa7037d70f244c 3feaffa2f77e948a bfd91c0eb690932d
+sat_pco G14 91 3fd3f7bcb97a638c bff4b3433f60be72 bff6992940296278
+sat_pco G15 91 bfe129e52cd2dd43 bf97895d8d54b370 bfca93d49938cf78
+sat_pco G17 91 bfc10dad16ed9e7a bfdf9a59eb148ffe bfdfa83c247c0b58
+sat_pco G19 91 bfda1749a10203c0 bfe0b00f2b9dcc23 bfd1e954d9a948b2
+sat_pco G20 91 bffb88883ff1ae4e bfe5d9c1b2e831aa bfda48960f6ef193
+sat_pco G22 91 bfb29936c323c84e bfe18eef821b25eb bfe829d2caa57f78
+sat_pco G23 91 bfebf7d781246752 3ff5f83ee56fe1a8 bff058d64e5ec69d
+sat_pco G24 91 bff1638612b07494 3fd29c9c7d5678ed bfeb182992b74ad2
+sat_pco G10 92 bfd9707de5259c42 3fef38e6fe2d3258 bff0b1ca5378e91c
+sat_pco G12 92 bfe522340660d0d0 3fcf9282f546ea1c bfb74d25191e4d94
+sat_pco G13 92 bffa6cd94a7e4a9a 3feaf250b1b0f86e bfd98d0d1f861987
+sat_pco G14 92 3fd4466649ccdcea bff4bcc65d01452c bff68c0c3532026e
+sat_pco G15 92 bfe12f84ef342a93 bf980058231e75e4 bfca57c0ded3011c
+sat_pco G17 92 bfc0d87bb2e18180 bfdf8b9b46e14a36 bfdfbe081918c616
+sat_pco G19 92 bfda079057d3d3ec bfe0ac6645d9b246 bfd20db293ddc70c
+sat_pco G20 92 bffb8ca520805a3e bfe5e61c6ae84216 bfd9d996a6019ce7
+sat_pco G22 92 bfb1f350e3ccb0ef bfe1987495e746ed bfe824db5e1205e8
+sat_pco G23 92 bfec14836ef899c5 3ff5ff8e4f308e24 bff042a8c4868973
+sat_pco G24 92 bff165241a9c26c8 3fd26ae35e3bcca9 bfeb1c80bbba4412
+sat_pco G10 93 bfd9a8b8dc01230a 3fef47f05613d506 bff0a55b59ecdf2e
+sat_pco G12 93 bfe5205ad674305e 3fcf8823c4e6a4be bfb7ee6a640eecb6
+sat_pco G13 93 bffa6965955aed27 3feae4deb020193b bfd9fdd95df17e8e
+sat_pco G14 93 3fd494d44389f0a4 bff4c64b2062edbc bff67ed431638d9e
+sat_pco G15 93 bfe135182e79a4b2 bf98765cbc551378 bfca1b8e97192bbc
+sat_pco G17 93 bfc0a31c2a225f4d bfdf7cddde60541a bfdfd3ace1535e16
+sat_pco G19 93 bfd9f7b71b7289b4 bfe0a8b72d2a62fb bfd231fb63c57a86
+sat_pco G20 93 bffb90ac4760c102 bfe5f258fa7262b6 bfd96a70fb0fcb74
+sat_pco G22 93 bfb14db3282e91f1 bfe1a20117d400ed bfe81fc719687a68
+sat_pco G23 93 bfec31042d1e333a 3ff606d93479b31b bff02c65c7534a97
+sat_pco G24 93 bff166c77529ee7f 3fd23923e5d6ca21 bfeb20b370106806
+sat_pco G10 94 bfd9e0be5046c370 3fef56fb15ad50ec bff098d84d1c7a38
+sat_pco G12 94 bfe51e71f43ae884 3fcf7d9b913476d8 bfb88fa478cb7eb4
+sat_pco G13 94 bffa65dcd11d0790 3fead74cf4eccb4e bfda6e730e1c2203
+sat_pco G14 94 3fd4e30654060856 bff4cfd16f691836 bff67181470dc15d
+sat_pco G15 94 bfe13a9edf48188d bf98eb6cc4c17b1e bfc9df3e1654b0c6
+sat_pco G17 94 bfc06d8eb0019903 bfdf6e21da865352 bfdfe92a65c2f488
+sat_pco G19 94 bfd9e7bde9af0fde bfe0a501f5f4adce bfd2562f1cc93652
+sat_pco G20 94 bffb949d9e0a1656 bfe5fe7776ef9179 bfd8fb25ac0c5c9a
+sat_pco G22 94 bfb0a85e5f399818 bfe1ab94f62fa72b bfe81a960390ecd2
+sat_pco G23 94 bfec4d59a7c5e322 3ff60e1f7547cf2b bff0160d71daaa18
+sat_pco G24 94 bff168702335a7a1 3fd2075e4e11a254 bfeb24c1a83d21aa
+sat_pco G10 95 bfda188e0c7aa7d8 3fef6607107ea4e4 bff08c413adf708b
+sat_pco G12 95 bfe51c79690194dc 3fcf72e9fee6c160 bfb930d25175dc3c
+sat_pco G13 95 bffa623f176c242a 3feac99b81879a00 bfdaded9cd9a0596
+sat_pco G14 95 3fd530fc29363312 bff4d9592fe141d2 bff6641388ac0374
+sat_pco G15 95 bfe14018f66043ad bf995f89ab6c02c2 bfc9a2cfb0e35c5e
+sat_pco G17 95 bfc037d378466b15 bfdf5f676423f72e bfdffe808f311a4c
+sat_pco G19 95 bfd9d7a4c0a6ed70 bfe0a146b4a37c29 bfd27a4d9261eee0
+sat_pco G20 95 bffb98790e227d46 bfe60a77f628ab07 bfd88bb55721a288
+sat_pco G22 95 bfb0035357161a16 bfe1b5301f22fc03 bfe8154823936eb2
+sat_pco G23 95 bfec6983cb87918c 3ff61560f18fb852 bfefff3fbea4a4b0
+sat_pco G24 95 bff16a1e2582adc5 3fd1d592d0f64912 bfeb28ab5ccab3c8
+sat_pco G10 96 bfda5027dbb35598 3fef751419e4c0e2 bff07f9631283902
+sat_pco G12 96 bfe51a713e358a6e 3fcf680eb4377642 bfb9d1f2e7bc2eb4
+sat_pco G13 96 bffa5e8c821b820e 3feabbca56a9c90c bfdb4f0d3b869a27
+sat_pco G14 96 3fd57eb571ab796c bff4e2e24782c89a bff6568b08e6497d
+sat_pco G15 96 bfe1458668a06c28 bf99d2b4e2b726b6 bfc96643bb261484
+sat_pco G17 96 bfc001eab730f524 bfdf50aea3e68a20 bfe009d7a34c329e
+sat_pco G19 96 bfd9c76b9ec016e4 bfe09d857da69cc0 bfd29e56982285ed
+sat_pco G20 96 bffb9c3e817ebe8e bfe6165a8e457707 bfd81c209b45a528
+sat_pco G22 96 bfaebd25b9edbd72 bfe1bed280b3ec38 bfe80fdd8096aeb0
+sat_pco G23 96 bfec8582856dc6b4 3ff61c9d894205ae bfefd23a560d66c3
+sat_pco G24 96 bff16bd17cbc4604 3fd1a3c1a8a21615 bfeb2c70864b4322
+sat_pco G10 97 bfda878b89964a68 3fef842205144d0c bff072d73e04bb9d
+sat_pco G12 97 bfe518597d65c1f2 3fcf5d0958e1e298 bfba730534c4beda
+sat_pco G13 97 bffa5ac52b2c1753 3feaadd974613238 bfdbbf0cf819a389
+sat_pco G14 97 3fd5cc31dc987f5c bff4ec6c9befea50 bff648e7da904344
+sat_pco G15 97 bfe14ae72b04189f bf9a44efe051d8fc bfc9299a8983acaa
+sat_pco G17 97 bfbf97a942f36e4e bfdf41f7c257892a bfe0145b3a923cbc
+sat_pco G19 97 bfd9b71282ad5040 bfe099be657384cb bfd2c24a01ae5dad
+sat_pco G20 97 bffb9fede22259e1 bfe6221f55cc898e bfd7ac681847171c
+sat_pco G22 97 bfad743b7a44eda6 bfe1c87c08c51b5f bfe80a5621e043b4
+sat_pco G23 97 bfeca155c2ee3d90 3ff623d51c4967cd bfefa50ae0c1cb68
+sat_pco G24 97 bff16d8a29750d64 3fd171eb0f52abb2 bfeb30111d583432
+sat_pco G10 98 bfdabeb8e254aacc 3fef9330a51971f0 bff066046f9f0964
+sat_pco G12 98 bfe516323042b218 3fcf51d99619f882 bfbb1408316fd274
+sat_pco G13 98 bffa56e92cc861a0 3fea9fc8da08e1c3 bfdc2ed8a4ec1a32
+sat_pco G14 98 3fd6197119c7be5e bff4f5f812b4eb35 bff63b2a10ab2c86
+sat_pco G15 98 bfe1503b32a4822f bf9ab63c1d396d3a bfc8ecd470639d10
+sat_pco G17 98 bfbf2b22d8a21a4c bfdf3342e7dc3b74 bfe01ecb0219094a
+sat_pco G19 98 bfd9a6996b69ebbe bfe095f180841852 bfd2e627a2c3195d
+sat_pco G20 98 bffba3871a40e12d bfe62dc663a6cd20 bfd73c8c6eb55bd8
+sat_pco G22 98 bfac2be985e329fc bfe1d22ca516139c bfe804b20ed4a21e
+sat_pco G23 98 bfecbcfd71edb5af 3ff62b078a8c0aa4 bfef77b195c6decc
+sat_pco G24 98 bff16f482c270e4f 3fd1400f3f61f9c7 bfeb338d1a92af6e
+sat_pco G10 99 bfdaf5afb2bb9fa2 3fefa23fccdb4e9e bff0591dd43a4ee5
+sat_pco G12 99 bfe513fb609f0f46 3fcf467f16890a2e bfbbb4fad64c3dac
+sat_pco G13 99 bffa52f8a1464b3a 3fea91988654d2bb bfdc9e6fe495a5c3
+sat_pco G14 99 3fd66672d99c16a0 bff4ff849148789d bff62d51be65e467
+sat_pco G15 99 bfe1558274b79809 bf9b269b159c7a68 bfc8aff1c4390252
+sat_pco G17 99 bfbebe429abd546a bfdf24903cb54aaa bfe02926eea78643
+sat_pco G19 99 bfd99600583e3b90 bfe0921ee3576e55 bfd309ef4f2f3c20
+sat_pco G20 99 bffba70a143e4470 bfe6394fcf201226 bfd6cc8e3fe5dac9
+sat_pco G22 99 bfaae431719ad142 bfe1dbe4434375b5 bfe7fef14ef710ca
+sat_pco G23 99 bfecd87980b8b79c 3ff63234b3e9f424 bfef4a2eac607f31
+sat_pco G24 99 bff1710b853380e2 3fd10e2e734aab18 bfeb36e476a3a3aa
+sat_pco G10 100 bfdb2c6fc81d48c0 3fefb14f4f1815f4 bff04c237a374e04
+sat_pco G12 100 bfe511b518702446 3fcf3af9864811a4 bfbc55dc1bab9966
+sat_pco G13 100 bffa4ef3a3244b0c 3fea8348774f1176 bfdd0dd25acdf617
+sat_pco G14 100 3fd6b336cd1b8131 bff50911fd0d4960 bff61f5ef71b3176
+sat_pco G15 100 bfe15abce69181de bf9b960e48f3ab4a bfc872f2d9711b12
+sat_pco G17 100 bfbe5108f58223cc bfdf15dfe8fe5ba4 bfe0336ef51d3635
+sat_pco G19 100 bfd9854748bb3e38 bfe08e46a27095e8 bfd32da0dadbde4a
+sat_pco G20 100 bffbaa76baaf613e bfe644bbafe85bbe bfd65c6e2df1da46
+sat_pco G22 100 bfa99d14d05bf532 bfe1e5a2d0c7297c bfe7f913e9e99e00
+sat_pco G23 100 bfecf3c9de107e5f 3ff6395c7840e604 bfef1c825bfb706f
+sat_pco G24 100 bff172d434e365eb 3fd0dc48e5977821 bfeb3a172a3ce8c2
+sat_pco G10 101 bfdb62f8f06122aa 3fefc05efe6880fa bff03f1570115498
+sat_pco G12 101 bfe50f5f61cdd5dc 3fcf2f4892d8263c bfbcf6aaf9cb33d6
+sat_pco G13 101 bffa4ada4d08a370 3fea74d8aa5ba868 bfdd7cffac54344e
+sat_pco G14 101 3fd6ffbca5ef7052 bff512a03b5282e6 bff61151ce51c820
+sat_pco G15 101 bfe15fea7da34a1d bf9c049739dce0c8 bfc835d804825f6e
+sat_pco G17 101 bfbde376561a21f0 bfdf073214ada798 bfe03da30a723466
+sat_pco G19 101 bfd9746e3cbf1fe8 bfe08a68d2575d6a bfd3513c19c357ee
+sat_pco G20 101 bffbadccf85acbfd bfe6500a1e15d762 bfd5ec2cdbacd87c
+sat_pco G22 101 bfa85695331b6ee0 bfe1ef683af935d8 bfe7f319e76cad44
+sat_pco G23 101 bfed0eee791e40f8 3ff6407eb7693ccc bfeeeeacdc429592
+sat_pco G24 101 bff174a23b663f6d 3fd0aa5ed100efc0 bfeb3d252e17ed60
+sat_pco G10 102 bfdb994af9a6d25c 3fefcf6ead98d37a bff031f3c43cb3ba
+sat_pco G12 102 bfe50cfa46f194d2 3fcf236beb35e38a bfbd976668b6f4e8
+sat_pco G13 102 bffa46acb9c665ea 3fea66491c1a6ad8 bfddebf77f0016eb
+sat_pco G14 102 3fd74c04166415ca bff51c2f3158bc6b bff6032a57b7f712
+sat_pco G15 102 bfe1650b2f7b78bb bf9c72376df32e8e bfc7f8a199e63764
+sat_pco G17 102 bfbd758b2a98a1f8 bfdef886e7926e34 bfe047c323b7d297
+sat_pco G19 102 bfd963753472a6d2 bfe0868587964322 bfd374c0dffb512c
+sat_pco G20 102 bffbb10cb835ff4d bfe65b3b3235c378 bfd57bcaeca5cf97
+sat_pco G22 102 bfa710b4290ef540 bfe1f9346f0d0286 bfe7ed034f60dbce
+sat_pco G23 102 bfed29e7417bbafe 3ff6479b513075da bfeec0ae6527e8db
+sat_pco G24 102 bff1767598c08dac 3fd07870718827a4 bfeb400e7af81e88
+sat_pco G10 103 bfdbcf65b3adbb2c 3fefde7e2e44599a bff024be85afadbd
+sat_pco G12 103 bfe50a85d23c2b30 3fcf17633f6fa0d0 bfbe380d61025fbc
+sat_pco G13 103 bffa426b0446dbab 3fea5799c8f753fa bfde5ab978f06e80
+sat_pco G14 103 3fd7980cd144f906 bff525bec43afd3e bff5f4e8a73c8990
+sat_pco G15 103 bfe16a1ef1c83f4d bf9cdef06eaa95d6 bfc7bb4fedfb0124
+sat_pco G17 103 bfbd0747e200b55a bfdee9de89592d2a bfe051cf361636d8
+sat_pco G19 103 bfd9525c30467b3a bfe0829cd6be83cc bfd3982f01a9e0db
+sat_pco G20 103 bffbb435e57158e2 bfe6664f0508a2de bfd50b490558e66a
+sat_pco G22 103 bfa5cb733f856adc bfe203075a16befc bfe7e6d029c33b82
+sat_pco G23 103 bfed44b4272ce681 3ff64eb225787b99 bfee92872e9091ad
+sat_pco G24 103 bff1784e4d1589eb 3fd0467dffa755f0 bfeb42d309a88d72
+sat_pco G10 104 bfdc0548edbba13c 3fefed8d52edb78a bff01775c314f933
+sat_pco G12 104 bfe508020e2e1af2 3fcf0b2e41379b2a bfbed89edabbde7e
+sat_pco G13 104 bffa3e1547a82ea1 3fea48caac589c91 bfdec94541b43568
+sat_pco G14 104 3fd7e3d68a1d60e8 bff52f4ed91386c4 bff5e68cd0e7d24a
+sat_pco G15 104 bfe16f25ba535583 bf9d4ac3c7de9926 bfc77de3553a2486
+sat_pco G17 104 bfbc98acec3218c8 bfdedb39218357de bfe05bc736d0a1a6
+sat_pco G19 104 bfd9412330fac2c2 bfe07eaed46236ab bfd3bb86530f32ad
+sat_pco G20 104 bffbb7486b68485a bfe67145afedd2ca bfd49aa7cac4ab06
+sat_pco G22 104 bfa486d401986fde bfe20ce0e907b05e bfe7e0807eb071a4
+sat_pco G23 104 bfed5f551aa87d14 3ff655c314095f18 bfee643770d334c4
+sat_pco G24 104 bff17a2c583764cd 3fd01487b7a2e3cb bfeb4572d2fdc39a
+sat_pco G10 105 bfdc3af4780385aa 3feffc9bed9a14b4 bff00a198b54af6a
+sat_pco G12 105 bfe5056f056cc2b2 3fcefecca376daa6 bfbf7919ce505a6e
+sat_pco G13 105 bffa39ab9f280ba8 3fea39dbc132970c bfdf379a815c3381
+sat_pco G14 105 3fd82f60f514b059 bff538df54e4ca6f bff5d816e8f476bc
+sat_pco G15 105 bfe1741f7f0530d6 bf9db5b308c50494 bfc7405c240de770
+sat_pco G17 105 bfbc29baba0ca8f6 bfdecc96d76f715c bfe065ab1b406638
+sat_pco G19 105 bfd92fca3797ddb6 bfe07abb951753b2 bfd3dec6a8841970
+sat_pco G20 105 bffbba4435aca052 bfe67c1f4c9d22ac bfd429e7e2b1cc4a
+sat_pco G22 105 bfa342d7f8c76aa9 bfe216c108adb3b6 bfe7da145664a1ae
+sat_pco G23 105 bfed79ca0ccc96db 3ff65ccdfcaf2fc6 bfee35bf646dab78
+sat_pco G24 105 bff17c0fb9f24ef2 3fcfc51ba92fe338 bfeb47edcfd66980
+sat_pco G10 106 bfdc7068234cbfe6 3ff005d4e815817d bfeff953dae40a0c
+sat_pco G12 106 bfe502ccc2c13648 3fcef23e1a606d22 bfc00cbe9a34f8bc
+sat_pco G13 106 bffa352e26274086 3fea2acd01e5f77e bfdfa5b8e0b2f61d
+sat_pco G14 106 3fd87aabc6edc092 bff542701c9e75cf bff5c98703cb2d0a
+sat_pco G15 106 bfe1790c35e486c2 bf9e1fbfc3ada414 bfc702baaed74ac6
+sat_pco G17 106 bfbbba71bd4150be bfdebdf7d251ab4c bfe06f7ad8d981c2
+sat_pco G19 106 bfd91e514573c044 bfe076c32d776fd7 bfd401efd6739963
+sat_pco G20 106 bffbbd293004a099 bfe686dbf53a9f90 bfd3b909f3963ed6
+sat_pco G22 106 bfa1ff80ac46137f bfe220a7a5b7b942 bfe7d38bb938bf24
+sat_pco G23 106 bfed9412eeea65ea 3ff663d2bf3574bc bfee071f42076166
+sat_pco G24 106 bff17df871f88cac 3fcf612123a4b5b4 bfeb4a43f91a47d6
+sat_pco G10 107 bfdca5a3c0f38daa 3ff00d5b662f83c1 bfefde4df1167ed4
+sat_pco G12 107 bfe5001b5118bdde 3fcee5825b6d35b8 bfc05ce402f3f82d
+sat_pco G13 107 bffa309cf828d60a 3fea1b9e6843e6e1 bfe009d004976e2c
+sat_pco G14 107 3fd8c5b6b502609e bff54c01151d3fc6 bff5badd3603c925
+sat_pco G15 107 bfe17debd5155ce2 bf9e88eb8de543d0 bfc6c4ff49f92efe
+sat_pco G17 107 bfbb4ad26866edd0 bfdeaf5c39366e64 bfe0793665289bf0
+sat_pco G19 107 bfd90cb85c2e8c0e bfe072c5b21ebb42 bfd42501b1622045
+sat_pco G20 107 bffbbff7466ae4fe bfe6917bc455bd10 bfd3480ea4a8ac32
+sat_pco G22 107 bfa0bccfa19024e4 bfe22a94acb15adb bfe7cce6afa57e46
+sat_pco G23 107 bfedae2fb2c0e8c5 3ff66ad13b6610f8 bfedd857427a5333
+sat_pco G24 107 bff17fe67fe3754f 3fcefd205566d9a4 bfeb4c7547bb8fc4
+sat_pco G10 108 bfdcdaa722e5da2e 3ff014e159e8b0b7 bfefc32177b4f588
+sat_pco G12 108 bfe4fd5abb84fe9c 3fced8991d560616 bfc0acfc9df5d9da
+sat_pco G13 108 bffa2bf830d22a22 3fea0c4fed94f434 bfe040a7d2679b9b
+sat_pco G14 108 3fd91081756667d5 bff55592232faa08 bff5ac19945e99d0
+sat_pco G15 108 bfe182be52da677b bf9ef137ffcb2fca bfc6872a49c68f0e
+sat_pco G17 108 bfbadadd2f0f9b16 bfdea0c43304df5e bfe082ddb5d11f80
+sat_pco G19 108 bfd8faff7db292ee bfe06ec337abc4bd bfd447fc0dedab23
+sat_pco G20 108 bffbc2ae650f8ae2 bfe69bfed4ec763a bfd2d6f69dc71f72
+sat_pco G22 108 bf9ef58cb820337c bfe234880a05b1ec bfe7c625424192cc
+sat_pco G23 108 bfedc8204a77d098 3ff671c951082f2e bfeda9679edc3c42
+sat_pco G24 108 bff181d9e333638a 3fce9919b563f56c bfeb4e81b4b70572
+sat_pco G10 109 bfdd0f721bb300bc 3ff01c66abfec5b6 bfefa7ce8d64cc3a
+sat_pco G12 109 bfe4fa8b0d3bbf14 3fcecb82180bddbe bfc0fd07e7fd2b5a
+sat_pco G13 109 bffa273febe8d369 3fe9fce18a99cab8 bfe07763af1614a2
+sat_pco G14 109 3fd95b0bbeb66dea bff55f232b903f1a bff59d3c33ce075c
+sat_pco G15 109 bfe18783a593c6da bf9f58a6b4acdd48 bfc6493c0291ce22
+sat_pco G17 109 bfba6a9285937492 bfde922fe677b1f4 bfe08c70c091c1be
+sat_pco G19 109 bfd8e926ac37ef56 bfe06abbd2c00959 bfd46adec0c6fac2
+sat_pco G20 109 bffbc54e78588262 bfe6a665426bba5e bfd265c2877b57ca
+sat_pco G22 109 bf9c72ccba634ac8 bfe23e81a9fee257 bfe7bf4779c2112a
+sat_pco G23 109 bfede1e4a8aba15e 3ff678badfe40be5 bfed7a509067f2b6
+sat_pco G24 109 bff183d29b4e83d5 3fce350dbae7fd1e bfeb506939138a98
+sat_pco G10 110 bfdd44047e7586ba 3ff023eb451da758 bfef8c5551061bf4
+sat_pco G12 110 bfe4f7ac5196fb72 3fcebe3d04b20194 bfc14d055e03fa54
+sat_pco G13 110 bffa227445531cf6 3fe9ed53379342db bfe0ae037026de20
+sat_pco G14 110 3fd9a555483ad8ec bff568b412ea561d bff58e45296ff264
+sat_pco G15 110 bfe18c3bc3c05c93 bf9fbf394ada8fc2 bfc60b34c89ae4da
+sat_pco G17 110 bfb9f9f2e14b1f56 bfde839f7a2487d6 bfe095ef7b3f6360
+sat_pco G19 110 bfd8d72dea3fd48e bfe066af97feab33 bfd48da99ebb0ca9
+sat_pco G20 110 bffbc7d76ce23fe8 bfe6b0af28b11ed6 bfd1f4730af018f3
+sat_pco G22 110 bf99f16248bd4c84 bfe2488178c64e57 bfe7b84d5efa62a4
+sat_pco G23 110 bfedfb7cc06358d8 3ff67fa5c7c06924 bfed4b1250900f79
+sat_pco G24 110 bff185d0a7820c6a 3fcdd0fcdd61eabc bfeb522bcde34cd6
+sat_pco G10 111 bfdd785e1ee2e508 3ff02b6f0de1214f bfef70b5e1ad37ba
+sat_pco G12 111 bfe4f4be9415897e 3fceb0c99d9b1748 bfc19cf47d30eb5b
+sat_pco G13 111 bffa1d955915e93e 3fe9dda4ec43329d bfe0e486eb5e59df
+sat_pco G14 111 3fd9ef5dc9e31c7d bff57244bdd9e4e9 bff57f348a8eae67
+sat_pco G15 111 bfe190e6a3fc8dcc bfa01278b1c18d60 bfc5cd14f01ebd32
+sat_pco G17 111 bfb988feb852cc92 bfde75131473cfd0 bfe09f59dbca2b3e
+sat_pco G19 111 bfd8c5153a995e2c bfe0629e9c0d45ff bfd4b05c7caa03ed
+sat_pco G20 111 bffbca492f7fb834 bfe6badca409fddc bfd18308d2044a71
+sat_pco G22 111 bf9771505df839ba bfe252876264cac0 bfe7b136fadc3974
+sat_pco G23 111 bfee14e8851091f8 3ff68689e862f3c8 bfed1bad18fea1aa
+sat_pco G24 111 bff187d407013a64 3fcd6ce7948e665c bfeb53c96c437cd8
+sat_pco G10 112 bfddac7ed14844ae 3ff032f1eed4cb41 bfef54f05ea43428
+sat_pco G12 112 bfe4f1c1e05a9a9c 3fcea3279e40998a bfc1ecd4c2ec5d96
+sat_pco G13 112 bffa18a343554242 3fe9cdd69ff4b1b2 bfe11aedf6ad6455
+sat_pco G14 112 3fda3924fc3c2e93 bff57bd510eab460 bff5700a6ca304e6
+sat_pco G15 112 bfe195843d034058 bfa044e8516067e8 bfc58edccd497fce
+sat_pco G17 112 bfb917b681bd8968 bfde668adba72ab4 bfe0a8afd8391ac9
+sat_pco G19 112 bfd8b2dca05e0658 bfe05e88f392e82a bfd4d2f72f8e4a2c
+sat_pco G20 112 bffbcca3ad3b6d8d bfe6c4edd13662e1 bfd111848731267b
+sat_pco G22 112 bf94f299f0a3ed52 bfe25c9352c37f5b bfe7aa04567708c4
+sat_pco G23 112 bfee2e27ea99a792 3ff68d67219387ec bfecec2123817c38
+sat_pco G24 112 bff189dcb8e63045 3fcd08ce584d752e bfeb55420d5d1374
+sat_pco G10 113 bfdde0666a874ca2 3ff03a73d073eeb8 bfef3904e76c7ca4
+sat_pco G12 113 bfe4eeb6422dc1e0 3fce9556c33d2f96 bfc23ca5ace4ff11
+sat_pco G13 113 bffa139e20523be7 3fe9bde8497cf6a6 bfe15138683a344a
+sat_pco G14 113 3fda82aa9870e0d5 bff58564f098d35c bff560c6e5544cec
+sat_pco G15 113 bfe19a1485addd75 bfa076ec57c86524 bfc5508cb4354ef0
+sat_pco G17 113 bfb8a61ab576188c bfde5806f5d52bd6 bfe0b1f166ac98ac
+sat_pco G19 113 bfd8a0841ef2df90 bfe05a6eb3381b84 bfd4f5798c7a6b76
+sat_pco G20 113 bffbcee6d357c12e bfe6cee2cd695bd4 bfd09fe6d58e31d4
+sat_pco G22 113 bf927541f38f8012 bfe266a535aa18ef bfe7a2b57af968d8
+sat_pco G23 113 bfee473ae54c3c78 3ff6943d5318b87c bfecbc6eaa23871d
+sat_pco G24 113 bff18beabc308c0a 3fcca4b1a0de1474 bfeb5695aa648bba
+sat_pco G10 114 bfde1414c0259be6 3ff041f49b2b46c8 bfef1cf39bb81b88
+sat_pco G12 114 bfe4eb9bc57b934c 3fce8756ca4a2928 bfc28c66b903eeec
+sat_pco G13 114 bffa0e860c6b97fd 3fe9add9df43c3da bfe18766164d0742
+sat_pco G14 114 3fdacbee5858b68a bff58ef44152e5fe bff5516a0a757e51
+sat_pco G15 114 bfe19e9774f3b961 bfa0a88599de486d bfc51224f8f161ea
+sat_pco G17 114 bfb8342bcc454542 bfde498788e9f09a bfe0bb1e7d5dd162
+sat_pco G19 114 bfd88e0bba076112 bfe0564fefa6649d bfd517e3689b8ca0
+sat_pco G20 114 bffbd1128f4f982e bfe6d8bbb64a8157 bfd02e3068c6233e
+sat_pco G22 114 bf8ff296aa879a0c bfe270bcf6c10072 bfe79b4a71af9e7c
+sat_pco G23 114 bfee602169ea9e0d 3ff69b0c5cbc05e4 bfec8c95e712843a
+sat_pco G24 114 bff18dfe0fc677b2 3fcc4091e6ab6060 bfeb57c43c9ab67c
+sat_pco G10 115 bfde4789a833314e 3ff049743756abad bfef00bc9b75492c
+sat_pco G12 115 bfe4e8727654da14 3fce792772361ab8 bfc2dc176586415d
+sat_pco G13 115 bffa095b241ba7ad 3fe99dab574447e0 bfe1bd76d75971b2
+sat_pco G14 115 3fdb14eff664acb3 bff59882e77820f5 bff541f3f2093ce0
+sat_pco G15 115 bfe1a30d01ea1c9c bfa0d9b4ede8c782 bfc4d3a5ef80d2b6
+sat_pco G17 115 bfb7c1ea3fd0b608 bfde3b0cbaa6c0ee bfe0c437129eb9d8
+sat_pco G19 115 bfd87b737599213a bfe0522cbd88d7dc bfd53a349932bd08
+sat_pco G20 115 bffbd326ced66390 bfe6e278a9f50442 bfcf78c3da5374fa
+sat_pco G22 115 bf8afd7200504578 bfe27ada8190e59f bfe793c3440406de
+sat_pco G23 115 bfee78db6da1bc8a 3ff6a1d41e475f5c bfec5c9714b2015c
+sat_pco G24 115 bff19016b2749977 3fcbdc6fa24ca67e bfeb58cdbd4cedcc
+sat_pco G10 116 bfde7ac4f968bad8 3ff050f28d444f69 bfeee46006c0fe6e
+sat_pco G12 116 bfe4e53a60ef6710 3fce6ac87ae39ef6 bfc32bb730eb2cec
+sat_pco G13 116 bffa041d83f96131 3fe98d5ca716a305 bfe1f36a81e81051
+sat_pco G14 116 3fdb5daf2db2cf7b bff5a210c75b3a12 bff53264b23de4ca
+sat_pco G15 116 bfe1a77523c52d4f bfa10a7b2b961beb bfc4950febccd4ff
+sat_pco G17 116 bfb74f568a99bd4a bfde2c96b0a1b016 bfe0cd3b1cda1216
+sat_pco G19 116 bfd868bb55f02f5c bfe04e05318b0ec4 bfd55c6cf39c0460
+sat_pco G20 116 bffbd5237fd936ce bfe6ec19c6faf79c bfce94f81f1bed02
+sat_pco G22 116 bf860b1bb4f8d620 bfe284fdc182f4b3 bfe78c1ffb7f0b5c
+sat_pco G23 116 bfee9168e6094614 3ff6a894778588c4 bfec2c726d9b04e3
+sat_pco G24 116 bff19234a2ecd2ca 3fcb784b4cb86c8e bfeb59b225d5268c
+sat_pco G10 117 bfdeadc68b0a6dd0 3ff0586f85320b24 bfeec7ddfdf44dd8
+sat_pco G12 117 bfe4e1f391a5371c 3fce5c39a54013b8 bfc37b459a0cf38f
+sat_pco G13 117 bff9fecd48b4c9d1 3fe97cedc3ecd6cc bfe22940ecae5d24
+sat_pco G14 117 3fdba62bb9fb1bc4 bff5ab9dc540665a bff522bc6171a30e
+sat_pco G15 117 bfe1abcfd1d6bfd0 bfa13ad92be9fa31 bfc4566341b440f9
+sat_pco G17 117 bfb6dc7127f47dfe bfde1e25904448ca bfe0d62a9293feff
+sat_pco G19 117 bfd855e35f9f102c bfe049d96058eb5e bfd57e8c4d4e88ce
+sat_pco G20 117 bffbd708907eac62 bfe6f59f2c63b52a bfcdb0fefacc92eb
+sat_pco G22 117 bf811b998c52e2d3 bfe28f26a1e1ba7f bfe78460a1c68faa
+sat_pco G23 117 bfeea9c9c92d6693 3ff6af4d484550b8 bfebfc282c880713
+sat_pco G24 117 bff19457dfc78b15 3fcb14255f091142 bfeb5a716f9a9486
+sat_pco G10 118 bfdee08e35061dd0 3ff05feb07509a33 bfeeab36a196d050
+sat_pco G12 118 bfe4de9e14f57a44 3fce4d7ab343c112 bfc3cac220093695
+sat_pco G13 118 bff9f96a8f19f058 3fe96c5ea2a142c6 bfe25ef9ee674298
+sat_pco G14 118 3fdbee6557a2e6b5 bff5b529c5604cc3 bff512fb162e74dc
+sat_pco G15 118 bfe1b01d038f8621 bfa16acfc9462a61 bfc417a044f9971a
+sat_pco G17 118 bfb6693a94255b0e bfde0fb97ecf0506 bfe0df056a67adf4
+sat_pco G19 118 bfd842eb97868902 bfe045a95e9f2fe0 bfd5a0927bd5ef64
+sat_pco G20 118 bffbd8d5ef27cc26 bfe6ff08f9ae6f12 bfccccd9c9544402
+sat_pco G22 118 bf785de284e47d6e bfe299550dd7522b bfe77c85409f71ae
+sat_pco G23 118 bfeec1fe0d84f092 3ff6b5fe70571ad4 bfebcbb88c680ec7
+sat_pco G24 118 bff196806782d425 3fcaaffe529eb464 bfeb5b0b9411d2b2
+sat_pco G10 119 bfdf131bcfd64980 3ff06764fbc0e913 bfee8e6a126c2470
+sat_pco G12 119 bfe4db39f7830374 3fce3e8b67e58e5c bfc41a2c4269653b
+sat_pco G13 119 bff9f3f5740dba4a 3fe95baf37b488f6 bfe294955de7da3d
+sat_pco G14 119 3fdc365bc3ae9863 bff5beb4abe6a5ae bff50320e72d432e
+sat_pco G15 119 bfe1b45cb07de53d bfa19a5fdf588208 bfc3d8c749529c1f
+sat_pco G17 119 bfb5f5b34c2a2128 bfde0152a1523a96 bfe0e7cb9b0b7bf6
+sat_pco G19 119 bfd82fd402d1e470 bfe04175410a713c bfd5c27f54d95ba6
+sat_pco G20 119 bffbda8b8a705ac0 bfe708574ed24d26 bfcbe889e7b0d7da
+sat_pco G22 119 bf6d14a22a94e296 bfe2a388f06fa408 bfe7748de1ebf452
+sat_pco G23 119 bfeeda05a9f1733e 3ff6bca7cf8d45b4 bfeb9b23c85e5997
+sat_pco G24 119 bff198ae38825462 3fca4bd6a11f3d4a bfeb5b808cbd489c
+sat_pcv G05 0 3f83dcafacf42e48
+sat_pcv G10 0 3f721897fe19d952
+sat_pcv G12 0 3f82623c3e4b793e
+sat_pcv G13 0 3f84db685a25d562
+sat_pcv G14 0 bf65b13e5c86d198
+sat_pcv G15 0 3f57b9098417729c
+sat_pcv G17 0 3f45321eaed97854
+sat_pcv G19 0 3f71872a13b471da
+sat_pcv G20 0 bf82ad60e9ea0e48
+sat_pcv G22 0 3f68d5df83580cca
+sat_pcv G23 0 3f512c695153f393
+sat_pcv G24 0 bf71340de89819a0
+sat_pcv G30 0 3f7353f135ef9488
+sat_pcv G05 1 3f83f79ac1775423
+sat_pcv G10 1 3f7208e2485510c5
+sat_pcv G12 1 3f823f66f9ca05c7
+sat_pcv G13 1 3f84b5c6462420f0
+sat_pcv G14 1 bf646224a3e554f2
+sat_pcv G15 1 3f5672171cb3b246
+sat_pcv G17 1 3f431d1dfde156e1
+sat_pcv G19 1 3f712aea98af3c2b
+sat_pcv G20 1 bf834279255d32b1
+sat_pcv G22 1 3f687a53812950ce
+sat_pcv G23 1 3f50c50a14e9cd70
+sat_pcv G24 1 bf715075de9261ef
+sat_pcv G30 1 3f736c4d7c438d7e
+sat_pcv G05 2 3f8411f08ee8916f
+sat_pcv G10 2 3f71f909432768b5
+sat_pcv G12 2 3f821bf7ca614ae7
+sat_pcv G13 2 3f848f8f2a4f9bb2
+sat_pcv G14 2 bf631478e8891a9c
+sat_pcv G15 2 3f5519b2a38e1a38
+sat_pcv G17 2 3f410cddee6630e8
+sat_pcv G19 2 3f70ce19e2f4b7af
+sat_pcv G20 2 bf83d742b6001206
+sat_pcv G22 2 3f681ec0b3fc2e8e
+sat_pcv G23 2 3f50618f985c892c
+sat_pcv G24 2 bf716cfa96b1c779
+sat_pcv G30 2 3f73844a7480634c
+sat_pcv G05 3 3f842bb19e1a5418
+sat_pcv G10 3 3f71e90ddea56bc4
+sat_pcv G12 3 3f81f7ee73596d5e
+sat_pcv G13 3 3f8468c2edfd2cde
+sat_pcv G14 3 bf61c83f34141f19
+sat_pcv G15 3 3f53b02bddd67caf
+sat_pcv G17 3 3f3e02ec104c1596
+sat_pcv G19 3 3f7070b98baae5c7
+sat_pcv G20 3 bf843255315d6118
+sat_pcv G22 3 3f67c3299df52b4e
+sat_pcv G23 3 3f5001ffbc9d99e8
+sat_pcv G24 3 bf71899bffc71ade
+sat_pcv G30 3 3f739be843049d33
+sat_pcv G05 4 3f8444de79727568
+sat_pcv G10 4 3f71d8f10c705a1a
+sat_pcv G12 4 3f81d34ab8ef4c11
+sat_pcv G13 4 3f844161797e5ced
+sat_pcv G14 4 bf607d7b7c4d1b5c
+sat_pcv G15 4 3f5235d4e527f4ea
+sat_pcv G17 4 3f39f5fb60259ec6
+sat_pcv G19 4 3f7012cb33d31558
+sat_pcv G20 4 bf848aa8d9e3d308
+sat_pcv G22 4 3f676790b6e115b6
+sat_pcv G23 4 3f4f4cc056bd9e6a
+sat_pcv G24 4 bf71a65a08580f16
+sat_pcv G30 4 3f73b3270c195a3c
+sat_pcv G05 5 3f845d77ace50914
+sat_pcv G10 5 3f71c8b3bfafc43d
+sat_pcv G12 5 3f81ae0c604ecf91
+sat_pcv G13 5 3f84196ab62f6678
+sat_pcv G14 5 bf5e686346b623e6
+sat_pcv G15 5 3f50ab01e15f788a
+sat_pcv G17 5 3f35f3184ce53222
+sat_pcv G19 5 3f6f68a108dafb3a
+sat_pcv G20 5 bf84e2cbd4f68eae
+sat_pcv G22 5 3f670bf86c62c418
+sat_pcv G23 5 3f4e9d6cacd7325e
+sat_pcv G24 5 bf71c3349e92fd60
+sat_pcv G30 5 3f73ca06f3fb9f1f
+sat_pcv G05 6 3f84757dc5f0d533
+sat_pcv G10 6 3f71b856ed0c1d6a
+sat_pcv G12 6 3f8188332f9e56b5
+sat_pcv G13 6 3f83f0de8e630e35
+sat_pcv G14 6 bf5bd8caf082f138
+sat_pcv G15 6 3f4e201186eb88b8
+sat_pcv G17 6 3f325cad3bfb24a1
+sat_pcv G19 6 3f6eaa965d082680
+sat_pcv G20 6 bf853abd8c8986e4
+sat_pcv G22 6 3f668e1ed42c2180
+sat_pcv G23 6 3f4df60eee5a5290
+sat_pcv G24 6 bf71e02bb04e02e1
+sat_pcv G30 6 3f73e0881edbbbb0
+sat_pcv G05 7 3f848cf1539578d7
+sat_pcv G10 7 3f71a7db8aa39651
+sat_pcv G12 7 3f8161beedf8f756
+sat_pcv G13 7 3f83c7bced811496
+sat_pcv G14 7 bf594c356db01f2e
+sat_pcv G15 7 3f4aca820558f5b8
+sat_pcv G17 7 3f2ea7dc02421402
+sat_pcv G19 7 3f6deb79d6444d3e
+sat_pcv G20 7 bf85927d6b69990a
+sat_pcv G22 7 3f660141616e2d4e
+sat_pcv G23 7 3f4d56b11c34d9e0
+sat_pcv G24 7 bf71fd3f2b11be66
+sat_pcv G30 7 3f73f6aab0d3fdc8
+sat_pcv G05 8 3f84a3d2e6534e19
+sat_pcv G10 8 3f719742900ae174
+sat_pcv G12 8 3f813aaf636ff29a
+sat_pcv G13 8 3f839e05bfe9a8fb
+sat_pcv G14 8 bf56c2aa100967cc
+sat_pcv G15 8 3f475606b70c0a50
+sat_pcv G17 8 3f28a6b76039dbc0
+sat_pcv G19 8 3f6d2b4ef6e32bbc
+sat_pcv G20 8 bf85ea0add538a38
+sat_pcv G22 8 3f65746fb792dfc6
+sat_pcv G23 8 3f4cbf5cc4715ef0
+sat_pcv G24 8 bf7205bc01a36e30
+sat_pcv G30 8 3f740c6ecdf182e3
+sat_pcv G05 9 3f84ba231024d0c6
+sat_pcv G10 9 3f71868cf63d487a
+sat_pcv G12 9 3f8113045911805f
+sat_pcv G13 9 3f8373b8f30ef842
+sat_pcv G14 9 bf543c30043f5a83
+sat_pcv G15 9 3f43c353217a5881
+sat_pcv G17 9 3f22b63263850ec0
+sat_pcv G19 9 3f6c6a19517d7f96
+sat_pcv G20 9 bf8641654edc3d5a
+sat_pcv G22 9 3f64e7ad559e20bc
+sat_pcv G23 9 3f4c301b011c08c2
+sat_pcv G24 9 bf7205bc01a36e30
+sat_pcv G30 9 3f7421d49a33b054
+sat_pcv G05 10 3f84cfe26479c656
+sat_pcv G10 10 3f7175bbb79e410f
+sat_pcv G12 10 3f80eabd98ed5682
+sat_pcv G13 10 3f8348d6755d2796
+sat_pcv G14 10 bf51b8ce5256f101
+sat_pcv G15 10 3f400f3f6c21e529
+sat_pcv G17 10 3f19ad24a62b7f00
+sat_pcv G19 10 3f6ba7dc8911c8da
+sat_pcv G20 10 bf86988c2d820a48
+sat_pcv G22 10 3f645afdaba326c7
+sat_pcv G23 10 3f4ba8f477700d2e
+sat_pcv G24 10 bf7205bc01a36e30
+sat_pcv G30 10 3f7436dc398358d1
+sat_pcv G05 11 3f84e5117833c4b0
+sat_pcv G10 11 3f7164cfcfea23cb
+sat_pcv G12 11 3f80c1daee0648e3
+sat_pcv G13 11 3f831d5e365a7822
+sat_pcv G14 11 bf4e7117bb857e0a
+sat_pcv G15 11 3f382589d1e6c114
+sat_pcv G17 11 3f0c206f8bce6d7e
+sat_pcv G19 11 3f6ae49c50f10fbc
+sat_pcv G20 11 bf86ef7ee7b25892
+sat_pcv G22 11 3f63ce641af99557
+sat_pcv G23 11 3f4b29f156e6f816
+sat_pcv G24 11 bf7205bc01a36e30
+sat_pcv G30 11 3f744b85cfbc8426
+sat_pcv G05 12 3f84f9b0e19d3754
+sat_pcv G10 12 3f7153ca3c32fadd
+sat_pcv G12 12 3f80985c2463d22e
+sat_pcv G13 12 3f82f1502688f784
+sat_pcv G14 12 bf4976decba53bd4
+sat_pcv G15 12 3f2fe356b35347ae
+sat_pcv G17 12 3ee4b13318bf7bff
+sat_pcv G19 12 3f6a205c6cf8980a
+sat_pcv G20 12 bf87463ceca10b16
+sat_pcv G22 12 3f6341e3f672bf43
+sat_pcv G23 12 3f4ab3195865df48
+sat_pcv G24 12 bf7205bc01a36e30
+sat_pcv G30 12 3f745fd180a7121b
+sat_pcv G05 13 3f850dc13868f87a
+sat_pcv G10 13 3f7142abfad785d6
+sat_pcv G12 13 3f806e410911626f
+sat_pcv G13 13 3f82c4ac377e850a
+sat_pcv G14 13 bf4482ff0cec8894
+sat_pcv G15 13 3f1e118f4b7cb25c
+sat_pcv G17 13 bf018110fec55281
+sat_pcv G19 13 3f695b20b1a4d580
+sat_pcv G20 13 bf879cc5ac829c4c
+sat_pcv G22 13 3f62b58082601f4b
+sat_pcv G23 13 3f4a4473bd56cab0
+sat_pcv G24 13 bf7205bc01a36e30
+sat_pcv G30 13 3f7473bf6ffc078a
+sat_pcv G05 14 3f85214315ac3498
+sat_pcv G10 14 3f7131760b7c5ae6
+sat_pcv G12 14 3f8043896a1a7706
+sat_pcv G13 14 3f8297725bda55df
+sat_pcv G14 14 bf3f2b0ae2a264f0
+sat_pcv G15 14 bef20cc81f03e0c0
+sat_pcv G17 14 bf13f34f1fba5b40
+sat_pcv G19 14 3f6894ed03fc19e0
+sat_pcv G20 14 bf87f3189863ab18
+sat_pcv G22 14 3f62293cf4f76d03
+sat_pcv G23 14 3f49de074f065bc2
+sat_pcv G24 14 bf7205bc01a36e30
+sat_pcv G30 14 3f74874fc161298c
+sat_pcv G05 15 3f85343713db0d14
+sat_pcv G10 15 3f7120296eff0a7a
+sat_pcv G12 15 3f801835168c21e2
+sat_pcv G13 15 3f8269a28748d723
+sat_pcv G14 15 bf355cfd4a1a1200
+sat_pcv G15 15 bf23f8cc85eb39f5
+sat_pcv G17 15 bf1f01a90d52a6fe
+sat_pcv G19 15 3f67cdc559c77d7e
+sat_pcv G20 15 bf884935222f2f4a
+sat_pcv G22 15 3f619d1c76590c92
+sat_pcv G23 15 3f497fda5dca3a5e
+sat_pcv G24 15 bf7205bc01a36e30
+sat_pcv G30 15 3f749a82986a2920
+sat_pcv G10 16 3f710ec72775c87e
+sat_pcv G12 16 3f7fd887bcfeaa32
+sat_pcv G13 16 3f823b3cae81a4ec
+sat_pcv G14 16 bf2737dc3c85a960
+sat_pcv G15 16 bf330ceb9d5a7482
+sat_pcv G17 16 bf24f589972c3560
+sat_pcv G19 16 3f6705adb9a46a5c
+sat_pcv G20 16 bf889f1abcc00970
+sat_pcv G22 16 3f61112220c54383
+sat_pcv G23 16 3f4929f2c085fdc2
+sat_pcv G24 16 bf7205bc01a36e30
+sat_pcv G30 16 3f74ad58189725e6
+sat_pcv G10 17 3f70fd50381eb749
+sat_pcv G12 17 3f7f7f6b2624229e
+sat_pcv G13 17 3f820c40c754f517
+sat_pcv G14 17 befe7f5a8dfe38fe
+sat_pcv G15 17 bf3c50e0ec88cd7a
+sat_pcv G17 17 bf2a5785e6caf83e
+sat_pcv G19 17 3f663caa3aecffd6
+sat_pcv G20 17 bf88f4c8dbca7dbc
+sat_pcv G22 17 3f60855100c7eec7
+sat_pcv G23 17 3f48dc55d3e5f250
+sat_pcv G24 17 bf7205bc01a36e30
+sat_pcv G30 17 3f74bfd065584004
+sat_pcv G10 18 3f70ebc5a55ce917
+sat_pcv G12 18 3f7f25140cd1ae7a
+sat_pcv G13 18 3f81dcaec896e439
+sat_pcv G14 18 3f1efb51583a9d82
+sat_pcv G15 18 bf42e366a73faf32
+sat_pcv G17 18 bf2fa689523de36e
+sat_pcv G19 18 3f6572bf05f01c60
+sat_pcv G20 18 bf894a3ef3f394f2
+sat_pcv G22 18 3f5ff3582ac84060
+sat_pcv G23 18 3f48970879d467b8
+sat_pcv G24 18 bf7205bc01a36e30
+sat_pcv G30 18 3f74d1eba2098e6e
+sat_pcv G10 19 3f70da2874a984e8
+sat_pcv G12 19 3f7ec9821772d858
+sat_pcv G13 19 3f81ac86aa364ed3
+sat_pcv G14 19 3f3158589eecc3d0
+sat_pcv G15 19 bf47b69d94f73540
+sat_pcv G17 19 bf32712a3977bcd1
+sat_pcv G19 19 3f64a7f054011407
+sat_pcv G20 19 bf899f7c7abada0c
+sat_pcv G22 19 3f5edc6ca07f2954
+sat_pcv G23 19 3f485a0f191316e0
+sat_pcv G24 19 bf7205bc01a36e30
+sat_pcv G30 19 3f74e3a9f1f30644
+sat_pcv G10 20 3f70c879ac92cd92
+sat_pcv G12 20 3f7e6cb4ee873aae
+sat_pcv G13 20 3f817bc8652e1db9
+sat_pcv G14 20 3f3ae48078a24f6e
+sat_pcv G15 20 bf4ca15c55226d64
+sat_pcv G17 20 bf35055452580130
+sat_pcv G19 20 3f63dc426f6b7870
+sat_pcv G20 20 bf89f480e691be3c
+sat_pcv G22 20 3f5dc5e52b9bebc4
+sat_pcv G23 20 3f48256d9ca5d860
+sat_pcv G24 20 bf7205bc01a36e30
+sat_pcv G30 20 3f74f50b784bda4a
+sat_pcv G10 21 3f70b6ba54aa8a58
+sat_pcv G12 21 3f7e0eac3ca58104
+sat_pcv G13 21 3f814a73f3966e3c
+sat_pcv G14 21 3f42319ad3fd4a71
+sat_pcv G15 21 bf50d1760aed08fb
+sat_pcv G17 21 bf378fa404d51ba8
+sat_pcv G19 21 3f630fb9b3813632
+sat_pcv G20 21 bf8a3a7310fc0bfe
+sat_pcv G22 21 3f5cafc77af7c8a2
+sat_pcv G23 21 3f47f927736f7978
+sat_pcv G24 21 bf7205bc01a36e30
+sat_pcv G30 21 3f7506105836afb0
+sat_pcv G10 22 3f70a4eb7581298d
+sat_pcv G12 22 3f7daf67ae91a8b8
+sat_pcv G13 22 3f811889509219dd
+sat_pcv G14 22 3f46ea313997d770
+sat_pcv G15 22 bf535d4c2754cb51
+sat_pcv G17 22 bf3a0ffac90ae400
+sat_pcv G19 22 3f62425a8cc31dbe
+sat_pcv G20 22 bf8a4ad11ed1ef3a
+sat_pcv G22 22 3f5b9a1923a131a4
+sat_pcv G23 22 3f47d53f8fe83d38
+sat_pcv G24 22 bf7205bc01a36e30
+sat_pcv G30 22 3f7516b8b4c2a0b2
+sat_pcv G10 23 3f70930e189bfdde
+sat_pcv G12 23 3f7d4ee6f32dd75a
+sat_pcv G13 23 3f80e6087859551c
+sat_pcv G14 23 3f4b9bf8ce98e2f8
+sat_pcv G15 23 bf55f3d776876b66
+sat_pcv G17 23 bf3c863a7f8ce506
+sat_pcv G19 23 3f61742978ee2ea3
+sat_pcv G20 23 bf8a5b23d0586e4c
+sat_pcv G22 23 3f5a84dfa17ae768
+sat_pcv G23 23 3f47b9b867b8be58
+sat_pcv G24 23 bf7205bc01a36e30
+sat_pcv G30 23 3f752704b0ea081a
+sat_pcv G10 24 3f7081234867be08
+sat_pcv G12 24 3f7ced29bb83f268
+sat_pcv G13 24 3f80b2f16841872e
+sat_pcv G14 24 3f50237399a8f971
+sat_pcv G15 24 bf5894c03cd16590
+sat_pcv G17 24 bf3ef2457488fdf0
+sat_pcv G19 24 3f60a52b06ec45cc
+sat_pcv G20 24 bf8a6b6b0ba3a086
+sat_pcv G22 24 3f597020570f2a1a
+sat_pcv G23 24 3f47a693f38668a0
+sat_pcv G24 24 bf7205bc01a36e30
+sat_pcv G10 25 3f706f2c1031edce
+sat_pcv G12 25 3f7c8a2fbac27d66
+sat_pcv G13 25 3f807f441eb457fc
+sat_pcv G14 25 3f527579229ce377
+sat_pcv G15 25 bf5b3fb01cc641ca
+sat_pcv G17 25 bf40a9ff31813404
+sat_pcv G19 25 3f5faac7adbecd52
+sat_pcv G20 25 bf8a7ba6b6f3dc5e
+sat_pcv G22 25 3f585be08e6534c8
+sat_pcv G23 25 3f479bd3aeb7ce98
+sat_pcv G24 25 bf7205bc01a36e30
+sat_pcv G10 26 3f705d297c1e8e42
+sat_pcv G12 26 3f7c25f8a653cbd0
+sat_pcv G13 26 3f804b009b33fd89
+sat_pcv G14 26 3f54d2eb50b60e9a
+sat_pcv G15 26 bf5df45225420548
+sat_pcv G17 26 bf41d5a43ae5a7e8
+sat_pcv G19 26 3f5e09b1348ffd50
+sat_pcv G20 26 bf8a8bd6b8b5e358
+sat_pcv G22 26 3f574825790ac2ee
+sat_pcv G23 26 3f47997897559e28
+sat_pcv G24 26 bf7205bc01a36e30
+sat_pcv G10 27 3f704b1c991a00c1
+sat_pcv G12 27 3f7bc08435cdef3c
+sat_pcv G13 27 3f801626de5c3f6b
+sat_pcv G14 27 3f573ce4dfe78eec
+sat_pcv G15 27 bf6059296f0caec2
+sat_pcv G17 27 bf42fc03a5d6788c
+sat_pcv G19 27 3f5c671c281e3876
+sat_pcv G20 27 bf8a9bfaf7864bc4
+sat_pcv G22 27 3f5634f430795d7e
+sat_pcv G23 27 3f479f832deb7228
+sat_pcv G24 27 bf7205bc01a36e30
+sat_pcv G10 28 3f70390674d31b51
+sat_pcv G12 28 3f7b59d222fcadb8
+sat_pcv G13 28 3f7fc16dd3c6fe34
+sat_pcv G14 28 3f59a32f1bfc6e9a
+sat_pcv G15 28 bf61bcb0285c4caf
+sat_pcv G17 28 bf441d0f7c912fb0
+sat_pcv G19 28 3f5ac31230e78c0e
+sat_pcv G20 28 bf8aac135a2e6e2c
+sat_pcv G22 28 3f552251b6689a08
+sat_pcv G23 28 3f47adf3757f6658
+sat_pcv G24 28 bf7205bc01a36e30
+sat_pcv G10 29 3f7026e81daa403a
+sat_pcv G12 29 3f7af1e229de080c
+sat_pcv G13 29 3f7f556181303128
+sat_pcv G14 29 3f5c05c52ce5144e
+sat_pcv G15 29 bf6324950897a64e
+sat_pcv G17 29 bf4538ba059411bc
+sat_pcv G19 29 3f591d9d1a25ea02
+sat_pcv G20 29 bf8abc1fc7a49686
+sat_pcv G22 29 3f541042f50d3e41
+sat_pcv G23 29 3f47c4c8f3955608
+sat_pcv G24 29 bf7205bc01a36e30
+sat_pcv G10 30 3f7014c2a2aeb9f5
+sat_pcv G12 30 3f7a88b408ba84f4
+sat_pcv G13 30 3f7ee828ccdfaa86
+sat_pcv G14 30 3f5e64a258d35dc4
+sat_pcv G15 30 bf6490b0a23237d5
+sat_pcv G17 30 bf464ef5c4904f08
+sat_pcv G19 30 3f5776c6d232a7c0
+sat_pcv G20 30 bf8acc20270e57e2
+sat_pcv G22 30 3f52feccbfa0fc37
+sat_pcv G23 30 3f47e402b03cb7e0
+sat_pcv G24 30 bf7205bc01a36e30
+sat_pcv G10 31 3f700297138c3929
+sat_pcv G12 31 3f7a1e4780140c9a
+sat_pcv G13 31 3f7e79c3c0df4170
+sat_pcv G14 31 3f605fe1022a09e6
+sat_pcv G15 31 bf6600dc51beb0da
+sat_pcv G17 31 bf475fb57c26683c
+sat_pcv G19 31 3f55ce996a22ce46
+sat_pcv G20 31 bf8adc145fc0b72c
+sat_pcv G22 31 3f51edf3d27b7ade
+sat_pcv G23 31 3f480b9f362c3dc8
+sat_pcv G24 31 bf7205bc01a36e30
+sat_pcv G10 32 3f6fe0cd01012316
+sat_pcv G12 32 3f79b29c52b054f4
+sat_pcv G13 32 3f7e0a326993517c
+sat_pcv G14 32 3f618b8fd8a6f9a3
+sat_pcv G15 32 bf6774f2401c3a1c
+sat_pcv G17 32 bf486aec2e87b524
+sat_pcv G19 32 3f54251f1643a923
+sat_pcv G20 32 bf8aebfc593e3880
+sat_pcv G22 32 3f50ddbcd3741902
+sat_pcv G23 32 3f483b9c92f37e20
+sat_pcv G24 32 bf71f7c647469613
+sat_pcv G10 33 3f6fbc63f4a50656
+sat_pcv G12 33 3f7945b2459c59ec
+sat_pcv G13 33 3f7d9974d581d8ba
+sat_pcv G14 33 3f62b55b7fb617a0
+sat_pcv G15 33 bf68eccd62e9e162
+sat_pcv G17 33 bf49708d1f390518
+sat_pcv G19 33 3f527a622dcf1ab3
+sat_pcv G20 33 bf8afbd7fb38229a
+sat_pcv G22 33 3f4f9c58a460abbe
+sat_pcv G23 33 3f4873f8572d1b18
+sat_pcv G24 33 bf71e10745f785cf
+sat_pcv G10 34 3f6f97f5248bda5a
+sat_pcv G12 34 3f78d78920288a54
+sat_pcv G13 34 3f7d28f4db9d1fa0
+sat_pcv G14 34 3f63dd41d554fc4c
+sat_pcv G15 34 bf6a68497cb99f72
+sat_pcv G17 34 bf4a708bd3c1b162
+sat_pcv G19 34 3f50ce6d2b0fa48f
+sat_pcv G20 34 bf8b0ba72d8d9fca
+sat_pcv G22 34 3f4d7e8d90bf786c
+sat_pcv G23 34 3f48b4af96c6a138
+sat_pcv G24 34 bf71ca35c1d6d62b
+sat_pcv G10 35 3f6f7382b4184518
+sat_pcv G12 35 3f786af805374976
+sat_pcv G13 35 3f7cb7c1fe056a1a
+sat_pcv G14 35 3f650340c6069510
+sat_pcv G15 35 bf6be7431d199312
+sat_pcv G17 35 bf4b6adc151c128a
+sat_pcv G19 35 3f4e42955691f49e
+sat_pcv G20 35 bf8b1b69d84f1a92
+sat_pcv G22 35 3f4b6221347de8cc
+sat_pcv G23 35 3f48fdbee94e1020
+sat_pcv G24 35 bf71b351cfeee05e
+sat_pcv G10 36 3f6f4f0ec7793c52
+sat_pcv G12 36 3f7801b33389dd62
+sat_pcv G13 36 3f7c456808087e26
+sat_pcv G14 36 3f6627564c429120
+sat_pcv G15 36 bf6d69979f03fd0c
+sat_pcv G17 36 bf4c5f71f0c6a6ee
+sat_pcv G19 36 3f4ae60ade22b2ba
+sat_pcv G20 36 bf8b2b1fe3ba3584
+sat_pcv G22 36 3f495f167368084c
+sat_pcv G23 36 3f494f226a613878
+sat_pcv G24 36 bf719c5b859aa059
+sat_pcv G10 37 3f6f2a9b83878aa4
+sat_pcv G12 37 3f779743a441a32c
+sat_pcv G13 37 3f7bd1e710f036fa
+sat_pcv G14 37 3f67498070a9f6fc
+sat_pcv G15 37 bf6eef25283e19a6
+sat_pcv G17 37 bf4d4e41b9d3408e
+sat_pcv G19 37 3f478750b3c0de02
+sat_pcv G20 37 bf8b3ac9383e31a6
+sat_pcv G22 37 3f477b4354f8d29a
+sat_pcv G23 37 3f49a8d5ba07bd20
+sat_pcv G24 37 bf718552f88b7ca0
+sat_pcv G10 38 3f6f062b0db67f8c
+sat_pcv G12 38 3f772ba92b2706f8
+sat_pcv G13 38 3f7b5d3f324643fe
+sat_pcv G14 38 3f6869bd495274d8
+sat_pcv G15 38 bf7023fe14add25c
+sat_pcv G17 38 bf4e37400a3f3826
+sat_pcv G19 38 3f44267ce50230a0
+sat_pcv G20 38 bf8b4a65be78f76a
+sat_pcv G22 38 3f4598c2ae1a9c3e
+sat_pcv G23 38 3f4a0ad3fd439782
+sat_pcv G24 38 bf716e383ecf2756
+sat_pcv G10 39 3f6ee1bf8bf0cbaa
+sat_pcv G12 39 3f76bee39e291820
+sat_pcv G13 39 3f7ae77087be6c7e
+sat_pcv G14 39 3f69880afa22040a
+sat_pcv G15 39 bf70ce32d05a1726
+sat_pcv G17 39 bf4f1a61c3b7659c
+sat_pcv G19 39 3f40c3a5c5705eb4
+sat_pcv G20 39 bf8b59f55f374c18
+sat_pcv G22 39 3f43b79bd0480028
+sat_pcv G23 39 3f4a7517de88e71a
+sat_pcv G24 39 bf71570b6ec62b31
+sat_pcv G10 40 3f6ebd5b248604b4
+sat_pcv G12 40 3f7650f2d584f77a
+sat_pcv G13 40 3f7a707b2f671368
+sat_pcv G14 40 3f6aa467b4559270
+sat_pcv G15 40 bf7179a0d127d14f
+sat_pcv G17 40 bf4ff79c10a9b7a8
+sat_pcv G19 40 3f3abdc3dd6f1ad0
+sat_pcv G20 40 bf8b69780378209e
+sat_pcv G22 40 3f41d7d5e87dccac
+sat_pcv G23 40 3f4ae79b8e57943e
+sat_pcv G24 40 bf713fcc9f3009fa
+sat_pcv G10 41 3f6e98fffe1091a6
+sat_pcv G12 41 3f75e1d6ab9da156
+sat_pcv G13 41 3f79f85f498c2a60
+sat_pcv G14 41 3f6bbed1b6694728
+sat_pcv G15 41 bf72263ada3a9275
+sat_pcv G17 41 bf50677232cc6514
+sat_pcv G19 41 3f33f09080b8ace4
+sat_pcv G20 41 bf8b5d8ad2b6cddc
+sat_pcv G22 41 3f3ff2f0007a66fe
+sat_pcv G23 41 3f4b6258c3d4a336
+sat_pcv G24 41 bf71287be72806e3
+sat_pcv G10 42 3f6e74b03f5662e6
+sat_pcv G12 42 3f75718efd14b6c8
+sat_pcv G13 42 3f797f1cf8c8e6b2
+sat_pcv G14 42 3f6cd7474bedafe2
+sat_pcv G15 42 bf72d3f40091220a
+sat_pcv G17 42 bf50d01840f0a006
+sat_pcv G19 42 3f2d3b00e6602fc2
+sat_pcv G20 42 bf8b34746ab75964
+sat_pcv G22 42 3f3c3911fb5798ec
+sat_pcv G23 42 3f4be548bd910456
+sat_pcv G24 42 bf7111195e21ea22
+sat_pcv G10 43 3f6e506e0f2e2d68
+sat_pcv G12 43 3f75001ba8e499b8
+sat_pcv G13 43 3f7904b461e93bc0
+sat_pcv G14 43 3f6dedc6cd4ada9a
+sat_pcv G15 43 bf7382bfa9f2aee3
+sat_pcv G17 43 bf5135bb3862b8c0
+sat_pcv G19 43 3f22b05751656ae0
+sat_pcv G20 43 bf8b0b815910eaa2
+sat_pcv G22 43 3f38821f4825d192
+sat_pcv G23 43 3f4c7064422d43e8
+sat_pcv G24 43 bf70f9a51bf4d121
+sat_pcv G10 44 3f6e2c3b946ba348
+sat_pcv G12 44 3f748d7c902f2c8c
+sat_pcv G13 44 3f788925ac248f18
+sat_pcv G14 44 3f6f024e9fe086b2
+sat_pcv G15 44 bf7432918b850cfe
+sat_pcv G17 44 bf519856453188e4
+sat_pcv G19 44 3f1041b7e2eb7ebf
+sat_pcv G20 44 bf8ae2b1d9187c48
+sat_pcv G22 44 3f34ce252977bdd4
+sat_pcv G23 44 3f4d03a3a127d576
+sat_pcv G24 44 bf70e21f38d683fb
+sat_pcv G10 45 3f6e081af5ba5b2c
+sat_pcv G12 45 3f7419b1967dab2a
+sat_pcv G13 45 3f780c7100de486c
+sat_pcv G14 45 3f700a6e9aad9a2e
+sat_pcv G15 45 bf74e35da817fec6
+sat_pcv G17 45 bf51f7e4ba515b83
+sat_pcv G19 45 bef39939d7076bff
+sat_pcv G20 45 bf8aba0625a305c0
+sat_pcv G22 45 3f311d309dda3919
+sat_pcv G23 45 3f4d9efeb3a64076
+sat_pcv G24 45 bf70ca87cd5e9db0
+sat_pcv G10 46 3f6de40e598bc6e2
+sat_pcv G12 46 3f73a4baa186e5d1
+sat_pcv G13 46 3f778e968be1273a
+sat_pcv G14 46 3f7092b8860624be
+sat_pcv G15 46 bf7595184ec0f00c
+sat_pcv G17 46 bf5254621215f101
+sat_pcv G19 46 bf1a16ceb8e7c7fe
+sat_pcv G20 46 bf8a917e78fcdd20
+sat_pcv G22 46 3f2ade9cc38b0ff0
+sat_pcv G23 46 3f4e426cdd737232
+sat_pcv G24 46 bf70b2def286a080
+sat_pcv G10 47 3f6dc017e5f18ba0
+sat_pcv G12 47 3f732e9799686dc8
+sat_pcv G13 47 3f770f967b48c130
+sat_pcv G14 47 3f711a04573bddac
+sat_pcv G15 47 bf7647b619619a5a
+sat_pcv G17 47 bf52adc9ee8b2394
+sat_pcv G19 47 bf27a798c8fdc920
+sat_pcv G20 47 bf8a691b0cf1633c
+sat_pcv G22 47 3f238915dfa26673
+sat_pcv G23 47 3f4eede50dcd51ee
+sat_pcv G24 47 bf709b24c1b1fc87
+sat_pcv G10 48 3f6d9c39c08ad742
+sat_pcv G12 48 3f72b74868931bcb
+sat_pcv G13 48 3f768f70ff723530
+sat_pcv G14 48 3f71a051599f2b49
+sat_pcv G15 48 bf76fb2beaebba58
+sat_pcv G17 48 bf5304181a06b364
+sat_pcv G19 48 bf3123b77f0d7551
+sat_pcv G20 48 bf8a40dc1aca8218
+sat_pcv G22 48 3f1873ca068f3940
+sat_pcv G23 48 3f4fa15dc058ced8
+sat_pcv G24 48 bf70835954a665d4
+sat_pcv G10 49 3f6d78760e5e25d8
+sat_pcv G12 49 3f723eccfbb6360d
+sat_pcv G13 49 3f760e264b0e880a
+sat_pcv G14 49 3f72259ede7afffa
+sat_pcv G15 49 bf77af6eedce2b72
+sat_pcv G17 49 bf53574887791851
+sat_pcv G19 49 bf36754e53d3cbf8
+sat_pcv G20 49 bf8a18c1db457aa8
+sat_pcv G22 49 3f03c4888ccc0e60
+sat_pcv G23 49 3f502e667f241078
+sat_pcv G24 49 bf706b7cc593fa98
+sat_pcv G10 50 3f6d54cef3c5fc90
+sat_pcv G12 50 3f71c52541f2815b
+sat_pcv G13 50 3f758bb6933eb452
+sat_pcv G14 50 3f72a9ec3d01310c
+sat_pcv G15 50 bf7864749252c360
+sat_pcv G17 50 bf53a75752ded30e
+sat_pcv G19 50 bf3bc869cdca4630
+sat_pcv G20 50 bf89f0cc86a7de0c
+sat_pcv G22 50 bef288da54cf9020
+sat_pcv G23 50 3f5090142fa2ff21
+sat_pcv G24 50 bf70538f2f140407
+sat_pcv G10 51 3f6d3146944c8ccc
+sat_pcv G12 51 3f714a512cc614a5
+sat_pcv G13 51 3f7508220f61c5ea
+sat_pcv G14 51 3f732d38d2370242
+sat_pcv G15 51 bf791a328cfa1bcc
+sat_pcv G17 51 bf53f440c18cffb0
+sat_pcv G19 51 bf408e713765c374
+sat_pcv G20 51 bf89c8fc54a1b716
+sat_pcv G22 51 bf131978962f0758
+sat_pcv G23 51 3f50f5b2854ca830
+sat_pcv G24 51 bf703b90ac315bdc
+sat_pcv G10 52 3f6d0ddf1290a91e
+sat_pcv G12 52 3f70ce50aff6c8ee
+sat_pcv G13 52 3f748368f9390cef
+sat_pcv G14 52 3f73af8400e1e110
+sat_pcv G15 52 bf79d09ed4caf264
+sat_pcv G17 52 bf543e0142afaac0
+sat_pcv G19 52 bf43394827d8f66b
+sat_pcv G20 52 bf89a1517c67ca7c
+sat_pcv G22 52 bf20c1aa5de82fc3
+sat_pcv G23 52 3f515f3bdc1d2a0d
+sat_pcv G24 52 bf7023815860e9f2
+sat_pcv G10 53 3f6cea9a9025c94a
+sat_pcv G12 53 3f705123c1c6b210
+sat_pcv G13 53 3f73fd8b8ce155dc
+sat_pcv G14 53 3f7430cd316bc605
+sat_pcv G15 53 bf7a87afa1df4ad6
+sat_pcv G17 53 bf5484956f92ba3a
+sat_pcv G19 53 bf45e4a5906c3764
+sat_pcv G20 53 bf8979cc34a872a2
+sat_pcv G22 53 bf27efcf7c1092e4
+sat_pcv G23 53 3f51ccaa591cb30b
+sat_pcv G24 53 bf700b614f88972c
+sat_pcv G10 54 3f6cc77b2d7ac812
+sat_pcv G12 54 3f6fa594b5be828a
+sat_pcv G13 54 3f73768a08ddc253
+sat_pcv G14 54 3f74b113d1f2caa9
+sat_pcv G15 54 bf7b3f5b6b6e0f8e
+sat_pcv G17 54 bf54c7fa0beabf58
+sat_pcv G19 54 bf489075155394a8
+sat_pcv G20 54 bf89526cb385f4b6
+sat_pcv G22 54 bf2f171612e4ace4
+sat_pcv G23 54 3f523df7eac23275
+sat_pcv G24 54 bf6fd75d85dc5de6
+sat_pcv G10 55 3f6ca48309bba70a
+sat_pcv G12 55 3f6ea688ec75ef80
+sat_pcv G13 55 3f72ee64adf582f8
+sat_pcv G14 55 3f7530575602c03e
+sat_pcv G15 55 bf7bf798e68eb96a
+sat_pcv G17 55 bf55082c064350b0
+sat_pcv G19 55 bf4b3ca227425544
+sat_pcv G20 55 bf892b332e9e0820
+sat_pcv G22 55 bf331bb4838ec8d2
+sat_pcv G23 55 3f52b31e49e53c75
+sat_pcv G24 55 bf6f6ca56b0ea9ee
+sat_pcv G10 56 3f6c81b442ae7dae
+sat_pcv G12 56 3f6da52422c7e286
+sat_pcv G13 56 3f72651bbf74c4e0
+sat_pcv G14 56 3f75ae9736a54e70
+sat_pcv G15 56 bf7cb05f043dcda8
+sat_pcv G17 56 bf55452878396992
+sat_pcv G19 56 bf4de91803053f48
+sat_pcv G20 56 bf89041fdb0960f6
+sat_pcv G22 56 bf36a859d7e85c2e
+sat_pcv G23 56 3f532c16fa1a0410
+sat_pcv G24 56 bf6f01a549b492f0
+sat_pcv G10 57 3f6c5f10f49725c0
+sat_pcv G12 57 3f6ca16658665578
+sat_pcv G13 57 3f71daaf82e5e067
+sat_pcv G14 57 3f762bd2f23eb972
+sat_pcv G15 57 bf7d69a4f01e3edc
+sat_pcv G17 57 bf557eeca6cd96fa
+sat_pcv G19 57 bf504ae0d97511bd
+sat_pcv G20 57 bf88dd32ed537846
+sat_pcv G22 57 bf3a3170eaa2bc3a
+sat_pcv G23 57 3f53a8db4a78e1dc
+sat_pcv G24 57 bf6e965da4d02a00
+sat_pcv G10 58 3f6c3c9b3a161c0a
+sat_pcv G12 58 3f6b9b4f9231195c
+sat_pcv G13 58 3f714f20405c56eb
+sat_pcv G14 58 3f76a80a0c9d2ba8
+sat_pcv G15 58 bf7e23620eb991ae
+sat_pcv G17 58 bf55b5760299ef66
+sat_pcv G19 58 bf51a1450732b862
+sat_pcv G20 58 bf88b66c998206aa
+sat_pcv G22 58 bf3db6efd85df816
+sat_pcv G23 58 3f54302407880a91
+sat_pcv G24 58 bf6e2acf01753ac0
+sat_pcv G10 59 3f6c1a552c104c76
+sat_pcv G12 59 3f6a92dfd9c389da
+sat_pcv G13 59 3f70c26e42362586
+sat_pcv G14 59 3f77233c0eb4ac96
+sat_pcv G15 59 bf7ece75a24d0c4a
+sat_pcv G17 59 bf55e8c22829ca7e
+sat_pcv G19 59 bf52f7addd5079b0
+sat_pcv G20 59 bf888fcd131200c4
+sat_pcv G22 59 bf409c667a593fbd
+sat_pcv G23 59 3f54bb60f64e1c4c
+sat_pcv G24 59 bf6dbef9e6ead094
+sat_pcv G10 60 3f6bf840e188ee74
+sat_pcv G12 60 3f6988173dc06c6a
+sat_pcv G13 60 3f703499d54bd97b
+sat_pcv G14 60 3f779d6886aeff38
+sat_pcv G15 60 bf7f3d64fd8e6aa6
+sat_pcv G17 60 bf5618cee026ba26
+sat_pcv G19 60 bf544e109571a714
+sat_pcv G20 60 bf8869548cf73f38
+sat_pcv G22 60 bf425b7f64b34215
+sat_pcv G23 60 3f554a8643796e18
+sat_pcv G24 60 bf6d52dedecd87b8
+sat_pcv G10 61 3f6bd6606f82157a
+sat_pcv G12 61 3f687af5d1c7566c
+sat_pcv G13 61 3f6f4b4691865074
+sat_pcv G14 61 3f78168f07d1b0e8
+sat_pcv G15 61 bf7fac8ca057a664
+sat_pcv G17 61 bf56459a1f9709fe
+sat_pcv G19 61 bf55a462507eb704
+sat_pcv G20 61 bf884303399c2322
+sat_pcv G22 61 bf4418be0b0e34b5
+sat_pcv G23 61 3f55dd8c0e5eccb0
+sat_pcv G24 61 bf6ce67e74f1c71a
+sat_pcv G10 62 3f6bb4b5e8e3e732
+sat_pcv G12 62 3f676b7bae7b4a1a
+sat_pcv G13 62 3f6e2b15dca649aa
+sat_pcv G14 62 3f788eaf2a6cd0e2
+sat_pcv G15 62 bf800df3f57ef736
+sat_pcv G17 62 bf566f22080580de
+sat_pcv G19 62 bf56fa9816dec972
+sat_pcv G20 62 bf8811ad6022729c
+sat_pcv G22 62 bf45d41de7c5b468
+sat_pcv G23 62 3f56746a42fb1e38
+sat_pcv G24 62 bf6c79d937870e8e
+sat_pcv G10 63 3f6b93435e55f38c
+sat_pcv G12 63 3f6659a8f1896986
+sat_pcv G13 63 3f6d08a233f33e30
+sat_pcv G14 63 3f7905c88bc9d11c
+sat_pcv G15 63 bf8045b92da81d49
+sat_pcv G17 63 bf569564e7c20964
+sat_pcv G19 63 bf5850a6d8b4b15e
+sat_pcv G20 63 bf87ccc91f435e22
+sat_pcv G22 63 bf478d9a8f227ed8
+sat_pcv G23 63 3f570f189a9c4594
+sat_pcv G24 63 bf6c0cefb73c517c
+sat_pcv G10 64 3f6b720ade219776
+sat_pcv G12 64 3f65457dbdaf95ae
+sat_pcv G13 64 3f6be3ec44a7074e
+sat_pcv G14 64 3f797bdace1a890a
+sat_pcv G15 64 bf807d93c5e25884
+sat_pcv G17 64 bf56b86139ffcf7c
+sat_pcv G19 64 bf59a6836e1ecdbc
+sat_pcv G20 64 bf87882cf6a51502
+sat_pcv G22 64 bf49452faf17d3d4
+sat_pcv G23 64 3f57ad8e9cbd617c
+sat_pcv G24 64 bf6b9fc28723a532
+sat_pcv G10 65 3f6b510e740fb596
+sat_pcv G12 65 3f642efa3ad5b233
+sat_pcv G13 65 3f6abcf4c067b26a
+sat_pcv G14 65 3f79f0e5986880a8
+sat_pcv G15 65 bf80b5819951df4b
+sat_pcv G17 65 bf56d815a6fde652
+sat_pcv G19 65 bf5afc22977a6092
+sat_pcv G20 65 bf8743d93dbddbf4
+sat_pcv G22 65 bf4afad90ec720a0
+sat_pcv G23 65 3f584fc39fdd5086
+sat_pcv G24 65 bf6b32523cdf1a46
+sat_pcv G10 66 3f6b3050294f0d1c
+sat_pcv G12 66 3f63161e95dc9929
+sat_pcv G13 66 3f6993bc5e0d6ac0
+sat_pcv G14 66 3f7a64e8968c0378
+sat_pcv G15 66 bf80ed8090aeaa6e
+sat_pcv G17 66 bf56f48104282058
+sat_pcv G19 66 bf5c5178fd934422
+sat_pcv G20 66 bf86ffce4b07f1e2
+sat_pcv G22 66 bf4cae928e79b53e
+sat_pcv G23 66 3f58f5aeca4e545e
+sat_pcv G24 66 bf6ac49f70aa2160
+sat_pcv G10 67 3f6b0fd2044d5602
+sat_pcv G12 67 3f61faeb00dc238e
+sat_pcv G13 67 3f686843d958731c
+sat_pcv G14 67 3f7ad7e378fcda14
+sat_pcv G15 67 bf81258ea1cc6b08
+sat_pcv G17 67 bf570da254336886
+sat_pcv G19 67 bf5da67b3248e9f0
+sat_pcv G20 67 bf86bc0c7405947c
+sat_pcv G22 67 bf4e605826cf58e0
+sat_pcv G23 67 3f599f4713346ab2
+sat_pcv G24 67 bf6a56aabd6aeaa8
+sat_pcv G10 68 3f6aef960896d964
+sat_pcv G12 68 3f60dd5fb31752e7
+sat_pcv G13 68 3f673a8bf2cc4ec2
+sat_pcv G14 68 3f7b49d5f4f80382
+sat_pcv G15 68 bf815da9cf4a4bcc
+sat_pcv G17 68 bf572378c7366cf4
+sat_pcv G19 68 bf5efb1db03c7442
+sat_pcv G20 68 bf8678940d2e6e6c
+sat_pcv G22 68 bf500812f46b9915
+sat_pcv G23 68 3f5a4c834346411a
+sat_pcv G24 68 bf69e874c0c4a6f8
+sat_pcv G10 69 3f6acf9e36be8254
+sat_pcv G12 69 3f5f7af9d20607e6
+sat_pcv G13 69 3f660a956fee6d72
+sat_pcv G14 69 3f7bbabfc439d28e
+sat_pcv G15 69 bf8195d02832a6d6
+sat_pcv G17 69 bf573603bab70d2e
+sat_pcv G19 69 bf6027aa6de0483f
+sat_pcv G20 69 bf8635656a0ebcc4
+sat_pcv G22 69 bf50ae7f5f73c3a4
+sat_pcv G23 69 3f5afd59f5bc39ac
+sat_pcv G24 69 bf6979fe1b2aa516
+sat_pcv G10 70 3f6aafec8c2e4768
+sat_pcv G12 70 3f5d3685c898ca42
+sat_pcv G13 70 3f64d8611b35e248
+sat_pcv G14 70 3f7c2aa0a50cbd1c
+sat_pcv G15 70 bf81cdffc7a0fb0a
+sat_pcv G17 70 bf574542b9c0e218
+sat_pcv G19 70 bf60d18a81698d3c
+sat_pcv G20 70 bf85f280dd274dc8
+sat_pcv G22 70 bf513138a0c582a0
+sat_pcv G23 70 3f5bb1c19937a290
+sat_pcv G24 70 bf690b476ff45d60
+sat_pcv G10 71 3f6a9083031568ca
+sat_pcv G12 71 3f5aed63d7e66c4c
+sat_pcv G13 71 3f63a3efc4232d00
+sat_pcv G14 71 3f7c99785a31f56c
+sat_pcv G15 71 bf820636d46a7710
+sat_pcv G17 71 bf5751357ce8973e
+sat_pcv G19 71 bf617b292ec5c1c9
+sat_pcv G20 71 bf85afe6b7ff1b0a
+sat_pcv G22 71 bf51b3547f0bd5f4
+sat_pcv G23 71 3f5c69b070a0a6cc
+sat_pcv G24 71 bf689c5165727976
+sat_pcv G10 72 3f6a7163923f38d0
+sat_pcv G12 72 3f589f94982bb368
+sat_pcv G13 72 3f626d423f05f192
+sat_pcv G14 72 3f7d0746aad1d7f0
+sat_pcv G15 72 bf823e7380c8f321
+sat_pcv G17 72 bf5759dbea51f26a
+sat_pcv G19 72 bf622480873011a8
+sat_pcv G20 72 bf856d974b19f604
+sat_pcv G22 72 bf5234d1e2fdabaa
+sat_pcv G23 72 3f5d251c94449846
+sat_pcv G24 72 bf682d1ca50c57c8
+sat_pcv G10 73 3f6a52902cf26122
+sat_pcv G12 73 3f564d18ac642ff4
+sat_pcv G13 73 3f613459653d9705
+sat_pcv G14 73 3f7d740b6273b964
+sat_pcv G15 73 bf8276b40a087fe3
+sat_pcv G17 73 bf575f3615af9450
+sat_pcv G19 73 bf62cd8a91649345
+sat_pcv G20 73 bf852b92e609d46e
+sat_pcv G22 73 bf52b5afbc659ca1
+sat_pcv G23 73 3f5de3fbf26ea460
+sat_pcv G24 73 bf67bda9db39919a
+sat_pcv G10 74 3f6a340ac2d654a2
+sat_pcv G12 74 3f53f5f0c2307c1a
+sat_pcv G13 74 3f5ff26c2a7a565a
+sat_pcv G14 74 3f7de16890f539ce
+sat_pcv G15 74 bf82aef6b837505f
+sat_pcv G17 74 bf576144403dff1e
+sat_pcv G19 74 bf63764149bb23de
+sat_pcv G20 74 bf84e9d9d75849e8
+sat_pcv G22 74 bf5335ed01b19da2
+sat_pcv G23 74 3f5ea64450b0eeac
+sat_pcv G24 74 bf674df9b7c6d076
+sat_pcv G10 75 3f6a15d53fce3a2c
+sat_pcv G12 75 3f519a1d920c0e0f
+sat_pcv G13 75 3f5d77b2649f5baa
+sat_pcv G14 75 3f7e4de0c17a238c
+sat_pcv G15 75 bf82e739ddd81c1b
+sat_pcv G17 75 bf576006d8b99bb2
+sat_pcv G19 75 bf641e9ea22e1551
+sat_pcv G20 75 bf84a86c6c8669b1
+sat_pcv G22 75 bf53b588affc754f
+sat_pcv G23 75 3f5f6beb4ca666ce
+sat_pcv G24 75 bf66d925f0cae7e8
+sat_pcv G10 76 3f69f7f18bd23c10
+sat_pcv G12 76 3f4e733fbdc2a24a
+sat_pcv G13 76 3f5af88749b3e356
+sat_pcv G14 76 3f7eb94a65862954
+sat_pcv G15 76 bf831f7bd796da4e
+sat_pcv G17 76 bf575b7e7b507dfc
+sat_pcv G19 76 bf64c69c82ffd584
+sat_pcv G20 76 bf84674af22251e8
+sat_pcv G22 76 bf543481cb05a64c
+sat_pcv G23 76 3f601a732e7aba06
+sat_pcv G24 76 bf664a6678986276
+sat_pcv G10 77 3f69da618adac4f0
+sat_pcv G12 77 3f49a8f0ed1dc800
+sat_pcv G13 77 3f5874ecb49228fa
+sat_pcv G14 77 3f7f23a558d0644e
+sat_pcv G15 77 bf8357bb0c038b8e
+sat_pcv G17 77 bf5753abf18f7680
+sat_pcv G19 77 bf656e34ca76dc48
+sat_pcv G20 77 bf842675b3b553a5
+sat_pcv G22 77 bf54b2d75cff1af3
+sat_pcv G23 77 3f6080956923d71b
+sat_pcv G24 77 bf65bb5ba4a2d48c
+sat_pcv G10 78 3f69bd271cb5c36c
+sat_pcv G12 78 3f44d55063ebca56
+sat_pcv G13 78 3f55ece48a565356
+sat_pcv G14 78 3f7f8cf17b19253a
+sat_pcv G15 78 bf838ff5eb3c9000
+sat_pcv G17 78 bf5748903247f7f6
+sat_pcv G19 78 bf6615614d70bb08
+sat_pcv G20 78 bf83e5ecfbcc6345
+sat_pcv G22 78 bf55308876751d9c
+sat_pcv G23 78 3f60e856ec1adab2
+sat_pcv G24 78 bf652c06667cd06a
+sat_pcv G10 79 3f69a0441cefbf02
+sat_pcv G12 79 3f3ff0bfd18838a2
+sat_pcv G13 79 3f536413996977db
+sat_pcv G14 79 3f7ff52eb04cc162
+sat_pcv G15 79 bf83c82aeec470ee
+sat_pcv G17 79 bf573a2c6176701c
+sat_pcv G19 79 bf66bc1bd770a2e0
+sat_pcv G20 79 bf83a5b113e6a493
+sat_pcv G22 79 bf55ad942e4f7a98
+sat_pcv G23 79 3f6151b23b3cd98c
+sat_pcv G24 79 bf649c67b48f6026
+sat_pcv G10 80 3f6983ba62a599f8
+sat_pcv G12 80 3f362442b2de6a28
+sat_pcv G13 80 3f50f40dfbfb1ae0
+sat_pcv G14 80 3f802e2e7021dcb1
+sat_pcv G15 80 bf83e7125129c360
+sat_pcv G17 80 bf572881d01f0312
+sat_pcv G19 80 bf67625e2adcfea2
+sat_pcv G20 80 bf8365c2448f091a
+sat_pcv G22 80 bf5629f9a1a8e6fe
+sat_pcv G23 80 3f61bca1c8c56011
+sat_pcv G24 80 bf640c808a4437e2
+sat_pcv G10 81 3f69678bc0736cba
+sat_pcv G12 81 3f2be95db44afc40
+sat_pcv G13 81 3f4cffb22d9d3f6e
+sat_pcv G14 81 3f80613dfb6ba2b3
+sat_pcv G15 81 bf83f662303ca637
+sat_pcv G17 81 bf571391fc28240e
+sat_pcv G19 81 bf68082201603606
+sat_pcv G20 81 bf832620d54f1955
+sat_pcv G22 81 bf56a5b7f39ef9ba
+sat_pcv G23 81 3f62291ff605709f
+sat_pcv G24 81 bf637c51e8323507
+sat_pcv G10 82 3f694bba0444c892
+sat_pcv G12 82 3f191e70f33b3140
+sat_pcv G13 82 3f480eedbaf857f8
+sat_pcv G14 82 3f8093c5f1d8701f
+sat_pcv G15 82 bf8405af455c5576
+sat_pcv G17 82 bf56fb5e902fb18c
+sat_pcv G19 82 bf68ad610c08f398
+sat_pcv G20 82 bf82e6cd0ca22987
+sat_pcv G22 82 bf5720ce4d6cfb2a
+sat_pcv G23 82 3f62972713a9ee80
+sat_pcv G24 82 bf62ebdcd455e2eb
+sat_pcv G10 83 3f693046f7419524
+sat_pcv G12 83 bef73ca8a9f82200
+sat_pcv G13 83 3f4315d299f8b9d0
+sat_pcv G14 83 3f80c5c64d35d98b
+sat_pcv G15 83 bf8414f92f86c11e
+sat_pcv G17 83 bf56dfe9635c0f1e
+sat_pcv G19 83 bf695214f38de6f8
+sat_pcv G20 83 bf82a7c7300ea39e
+sat_pcv G22 83 bf579b3bde2bc974
+sat_pcv G23 83 3f6306b1626df5bc
+sat_pcv G24 83 bf625b225a1c81b5
+sat_pcv G10 84 3f6915345da648c4
+sat_pcv G12 84 bf227b04256dab1f
+sat_pcv G13 84 3f3c28c9af59a65e
+sat_pcv G14 84 3f80f73f092ef599
+sat_pcv G15 84 bf84243f8ff0aed6
+sat_pcv G17 84 bf56c13479283be0
+sat_pcv G19 84 bf69f63758b4ab90
+sat_pcv G20 84 bf82690f8419191f
+sat_pcv G22 84 bf5814ffdae46e56
+sat_pcv G23 84 3f6377b9137e35b3
+sat_pcv G24 84 bf61ca238adbbdc2
+sat_pcv G10 85 3f68fa83f6a5aac0
+sat_pcv G12 85 bf311586d07eb8a1
+sat_pcv G13 85 3f32155129ebbb21
+sat_pcv G14 85 3f8128302345cc63
+sat_pcv G15 85 bf84338209f76664
+sat_pcv G17 85 bf569f42012e1ea4
+sat_pcv G19 85 bf6a99c1d478a800
+sat_pcv G20 85 bf8222a0154a885d
+sat_pcv G22 85 bf588e197e41069a
+sat_pcv G23 85 3f63ea3849087746
+sat_pcv G24 85 bf6138e17dc57141
+sat_pcv G10 86 3f68e0377c471bb6
+sat_pcv G12 86 bf38fbd5142cf7b8
+sat_pcv G13 86 3f1fc51031fbcefe
+sat_pcv G14 86 3f8158999ae026a0
+sat_pcv G15 86 bf8442c0430ecf88
+sat_pcv G17 86 bf567a1456e09e3c
+sat_pcv G19 86 bf6b3cadf8556cb4
+sat_pcv G20 86 bf81c46636a1719c
+sat_pcv G22 86 bf59068808b7f478
+sat_pcv G23 86 3f645e29169dc044
+sat_pcv G24 86 bf60a75d50489e32
+sat_pcv G10 87 3f68c650a34dd8b2
+sat_pcv G12 87 bf407834860d9008
+sat_pcv G13 87 bf021aa8c1d51eff
+sat_pcv G14 87 3f81887b7129e8fa
+sat_pcv G15 87 bf8451f9e2b626d8
+sat_pcv G17 87 bf5651ae0158274e
+sat_pcv G19 87 bf6bdef54eb39770
+sat_pcv G20 87 bf8166a428a3328d
+sat_pcv G22 87 bf597e4ac035cc7a
+sat_pcv G23 87 3f64d38581e12fe2
+sat_pcv G24 87 bf60159826458568
+sat_pcv G10 88 3f68acd11b0eceee
+sat_pcv G12 88 bf44799f6254d304
+sat_pcv G13 88 bf2910e319eca5a0
+sat_pcv G14 88 3f81b7d5a91e97e3
+sat_pcv G15 88 bf84612e926918b1
+sat_pcv G17 88 bf562611b3048322
+sat_pcv G19 88 bf6c80915b16b176
+sat_pcv G20 88 bf81095a4d148db7
+sat_pcv G22 88 bf59f560f04079fa
+sat_pcv G23 88 3f654a4782ea96d4
+sat_pcv G24 88 bf5f072654b1947c
+sat_pcv G10 89 3f6893ba8d5698ca
+sat_pcv G12 89 bf488229122da028
+sat_pcv G13 89 bf36de0873bf7620
+sat_pcv G14 89 3f81e6a8477601f2
+sat_pcv G15 89 bf84705dfd925828
+sat_pcv G17 89 bf55f74249657aca
+sat_pcv G19 89 bf6d217b9a6e3292
+sat_pcv G20 89 bf80ac8904457c70
+sat_pcv G22 89 bf5a6bc9e9c23a92
+sat_pcv G23 89 3f65c26904cf21d6
+sat_pcv G24 89 bf5de29f1bf333ae
+sat_pcv G10 90 3f687689ee114c3e
+sat_pcv G12 90 bf4c91cf78c7aa50
+sat_pcv G13 90 bf40a2086340b8af
+sat_pcv G14 90 3f8214f352a74095
+sat_pcv G15 90 bf847f87d17fa963
+sat_pcv G17 90 bf55c542ccbd0148
+sat_pcv G19 90 bf6dc1ad837deace
+sat_pcv G20 90 bf805030acf821cb
+sat_pcv G22 90 bf5ae1850304de36
+sat_pcv G23 90 3f663be3e6227bf2
+sat_pcv G24 90 bf5cbd9d140e4b3e
+sat_pcv G10 91 3f6859cca95b2d36
+sat_pcv G12 91 bf505448331cf74d
+sat_pcv G13 91 bf45dd40abcec8f4
+sat_pcv G14 91 3f8242b6d2df14a5
+sat_pcv G15 91 bf848eabbd514b8a
+sat_pcv G17 91 bf5590166fbd419c
+sat_pcv G19 91 bf6e612087331b7e
+sat_pcv G20 91 bf7fe8a348ce3dd8
+sat_pcv G22 91 bf5b5691977e28fa
+sat_pcv G23 91 3f66b6b1f97796ba
+sat_pcv G24 91 bf5b9822bda42d24
+sat_pcv G10 92 3f683d919122fd8a
+sat_pcv G12 92 bf526334cccb8fb8
+sat_pcv G13 92 bf4b20a8688ff806
+sat_pcv G14 92 3f826ff2d1fc7ae7
+sat_pcv G15 92 bf849dc971f5ef3d
+sat_pcv G17 92 bf5557c08f366bd0
+sat_pcv G19 92 bf6effce10e680dc
+sat_pcv G20 92 bf7f31d88c8b49a2
+sat_pcv G22 92 bf5bcaef07ead4e0
+sat_pcv G23 92 3f6732cd05e19e16
+sat_pcv G24 92 bf5a7232a92bab02
+sat_pcv G10 93 3f6821da8269ab9e
+sat_pcv G12 93 bf5475ac5fbf4258
+sat_pcv G13 93 bf50361d6d8341fa
+sat_pcv G14 93 3f829ca75b8445f8
+sat_pcv G15 93 bf84ace0a213e439
+sat_pcv G17 93 bf551c44b1adab16
+sat_pcv G19 93 bf6f9daf86b64aa6
+sat_pcv G20 93 bf7e7c01d9730a10
+sat_pcv G22 93 bf5c3e9cba13b3de
+sat_pcv G23 93 3f67b02ec774406c
+sat_pcv G24 93 bf594bcf778c546a
+sat_pcv G10 94 3f6806a952e62432
+sat_pcv G12 94 bf568badb990d466
+sat_pcv G13 94 bf52dff998c19da6
+sat_pcv G14 94 3f82c8d47c9b04df
+sat_pcv G15 94 bf84bbf10208dc08
+sat_pcv G17 94 bf54dda6871590ae
+sat_pcv G19 94 bf701d5f2500d997
+sat_pcv G20 94 bf7dc71fe0e71dd8
+sat_pcv G22 94 bf5cb19a18e0ded4
+sat_pcv G23 94 3f682ed0efcc7238
+sat_pcv G24 94 bf5824fbdad7e530
+sat_pcv G10 95 3f67ebffd0ed0ea6
+sat_pcv G12 95 bf58a5379e8b0758
+sat_pcv G13 95 bf558de6424e66f6
+sat_pcv G14 95 3f82f47a4404ca68
+sat_pcv G15 95 bf84cafa47d6e834
+sat_pcv G17 95 bf549be9e85da4dc
+sat_pcv G19 95 bf706b79dbce98cb
+sat_pcv G20 95 bf7d13335116b3d4
+sat_pcv G22 95 bf5d23e694183294
+sat_pcv G23 95 3f68aead266e5314
+sat_pcv G24 95 bf56fdba9722e838
+sat_pcv G10 96 3f67d1dfc3464da0
+sat_pcv G12 96 bf5ac248ca2f5124
+sat_pcv G13 96 bf583fe0ed8709ec
+sat_pcv G14 96 3f831f98c21c0869
+sat_pcv G15 96 bf84d9fc2b1de884
+sat_pcv G17 96 bf545712d7107a77
+sat_pcv G19 96 bf70b924942e6b3f
+sat_pcv G20 96 bf7c603cd5239e86
+sat_pcv G22 96 bf5d9581a0693bdc
+sat_pcv G23 96 3f692fbd0977399c
+sat_pcv G24 96 bf55fe56849f274a
+sat_pcv G10 97 3f67b84ae90c601a
+sat_pcv G12 97 bf5ce2dfee9ce92e
+sat_pcv G13 97 bf5af5e712b02036
+sat_pcv G14 97 3f834a3008ce507e
+sat_pcv G15 97 bf84e8f665104e34
+sat_pcv G17 97 bf540f257cea8b22
+sat_pcv G19 97 bf70f78f5224916b
+sat_pcv G20 97 bf7bae3d153a811e
+sat_pcv G22 97 bf5e066ab752c738
+sat_pcv G23 97 3f69b1fa2dfad44c
+sat_pcv G24 97 bf55008e89c81266
+sat_pcv G10 98 3f679f42f98bd190
+sat_pcv G12 98 bf5f06fbb5177532
+sat_pcv G13 98 bf5daff62117acb0
+sat_pcv G14 98 3f8374402b909644
+sat_pcv G15 98 bf84f7e8b06a34c2
+sat_pcv G17 98 bf53c4262b6d6ca4
+sat_pcv G19 98 bf71311fdd40ada4
+sat_pcv G20 98 bf7afd34b66f654c
+sat_pcv G22 98 bf5e76a157106908
+sat_pcv G23 98 3f6a355e20929cb8
+sat_pcv G24 98 bf540270120f64c3
+sat_pcv G10 99 3f6786c9a41ad5c2
+sat_pcv G12 99 bf60974d5ec880b0
+sat_pcv G13 99 bf603705be89806d
+sat_pcv G14 99 3f839dc93f597191
+sat_pcv G15 99 bf8506d2c964d1bc
+sat_pcv G17 99 bf5376195b6f7433
+sat_pcv G19 99 bf716a54e5b034ff
+sat_pcv G20 99 bf7a4d245aca4fc4
+sat_pcv G22 99 bf5ee62502884d58
+sat_pcv G23 99 3f6ab9e265b87d7e
+sat_pcv G24 99 bf5303fdc1569289
+sat_pcv G10 100 3f676ee0900204c2
+sat_pcv G12 100 bf61acddcf4fab56
+sat_pcv G13 100 bf619812409e47e8
+sat_pcv G14 100 3f83c6cb5aa0daf1
+sat_pcv G15 100 bf8515b46db1313a
+sat_pcv G17 100 bf532503aca82feb
+sat_pcv G19 100 bf71a32be81da85c
+sat_pcv G20 100 bf799e0ca14802a4
+sat_pcv G22 100 bf5f54f541393b22
+sat_pcv G23 100 3f6b3f807a8125b4
+sat_pcv G24 100 bf52053a4ea68a0d
+sat_pcv G10 101 3f6757895c54d390
+sat_pcv G12 101 bf62c42e72ddf7e6
+sat_pcv G13 101 bf62fb1f3f2071e4
+sat_pcv G14 101 3f83ef46955a300c
+sat_pcv G15 101 bf8507a6ea38054c
+sat_pcv G17 101 bf52d0e9e5394ca3
+sat_pcv G19 101 bf71dba26065aa0d
+sat_pcv G20 101 bf78efee25cf12f6
+sat_pcv G22 101 bf5fc3119f302f38
+sat_pcv G23 101 3f6bc631d4dadf4e
+sat_pcv G24 101 bf510628859b80dc
+sat_pcv G10 102 3f6740c59fd2f4ca
+sat_pcv G12 102 bf63dd3e8b9dbe6f
+sat_pcv G13 102 bf64602b5d259c98
+sat_pcv G14 102 3f84173b08e65e19
+sat_pcv G15 102 bf84f3e6f2ac0192
+sat_pcv G17 102 bf5279d0f1344ab9
+sat_pcv G19 102 bf7213b5c9cbbcba
+sat_pcv G20 102 bf7842c9815f18ce
+sat_pcv G22 102 bf60183cd66cc900
+sat_pcv G23 102 3f6c4defe422f8de
+sat_pcv G24 102 bf5006cb4704955a
+sat_pcv G10 103 3f672a96e8c88978
+sat_pcv G12 103 bf64f80d56fcf0fc
+sat_pcv G13 103 bf65c73538de4d02
+sat_pcv G14 103 3f843ea8d018fbe4
+sat_pcv G15 103 bf84e0333f6403f2
+sat_pcv G17 103 bf521fbde21d48a5
+sat_pcv G19 103 bf724b639f243772
+sat_pcv G20 103 bf77969f49c0725a
+sat_pcv G22 103 bf604e967f8e0012
+sat_pcv G23 103 3f6cd6b411bc2738
+sat_pcv G24 103 bf4e0e4b13f558dc
+sat_pcv G10 104 3f6714febceed1b6
+sat_pcv G12 104 bf66149a0da7be22
+sat_pcv G13 104 bf67303b6b4bcfaa
+sat_pcv G14 104 3f84659007280431
+sat_pcv G15 104 bf84cc8c21758cc8
+sat_pcv G17 104 bf51c2b5ee64377f
+sat_pcv G19 104 bf7282a95af40eda
+sat_pcv G20 104 bf76eb7011d627ae
+sat_pcv G22 104 bf6084959798864f
+sat_pcv G23 104 3f6d6077c15aef6e
+sat_pcv G24 104 bf4c0e74bae0d7cc
+sat_pcv G10 105 3f66fffe994d7afc
+sat_pcv G12 105 bf6732e3e3a98fe0
+sat_pcv G13 105 bf689b3c883c945c
+sat_pcv G14 105 3f848bf0cbb0cc4e
+sat_pcv G15 105 bf84b8f1e83a301a
+sat_pcv G17 105 bf5162be70fa97aa
+sat_pcv G19 105 bf72b98477ab7b74
+sat_pcv G20 105 bf76413c6970a1be
+sat_pcv G22 105 bf60ba39ed3f8aaf
+sat_pcv G23 105 3f6deb34517e14e8
+sat_pcv G24 105 bf4a0e19d1d00394
+sat_pcv G10 106 3f66eb97f21c6c70
+sat_pcv G12 106 bf6852ea0868c14c
+sat_pcv G13 106 bf6a08371e793cfe
+sat_pcv G14 106 3f84b1cb3caaa7d8
+sat_pcv G15 106 bf84a564e159b326
+sat_pcv G17 106 bf50ffdce8a826ef
+sat_pcv G19 106 bf72eff26fc3bf92
+sat_pcv G20 106 bf759804dd4f0a3e
+sat_pcv G22 106 bf60ef83515d7a04
+sat_pcv G23 106 3f6e76e31c1469f0
+sat_pcv G24 106 bf480d40dc9fea6a
+sat_pcv G10 107 3f66d7cc32a63bda
+sat_pcv G12 107 bf6974aba67bbd64
+sat_pcv G13 107 bf6b7729b7c2271c
+sat_pcv G14 107 3f84d71f7a5f2982
+sat_pcv G15 107 bf8491e558d7bbf6
+sat_pcv G17 107 bf509a16f7939f3d
+sat_pcv G19 107 bf7325f0bdf7a429
+sat_pcv G20 107 bf74efc9f7424bec
+sat_pcv G22 107 bf61247196d2c022
+sat_pcv G23 107 3f6f037d76d864f8
+sat_pcv G24 107 bf460bf09610a578
+sat_pcv G10 108 3f66c49cbd2c6744
+sat_pcv G12 108 bf6a9827e3a39e14
+sat_pcv G13 108 bf6ce812d8830012
+sat_pcv G14 108 3f84fbeda6762cb4
+sat_pcv G15 108 bf847e7399180f31
+sat_pcv G17 108 bf50317262cc9a4a
+sat_pcv G19 108 bf735b7cdd71744b
+sat_pcv G20 108 bf74488c3e0c2852
+sat_pcv G22 108 bf613404ea4a8c16
+sat_pcv G23 108 3f6f90fcb3a99292
+sat_pcv G24 108 bf440a2ff2d03e73
+sat_pcv G10 109 3f66b20aeac5f766
+sat_pcv G12 109 bf6bbd5de0ee162a
+sat_pcv G13 109 bf6e5af100318e80
+sat_pcv G14 109 3f852035e3d79ba0
+sat_pcv G15 109 bf846b0feaece9b6
+sat_pcv G17 109 bf4f8bea231b0d90
+sat_pcv G19 109 bf73909449ef3bde
+sat_pcv G20 109 bf73a24c356bdbd7
+sat_pcv G22 109 bf613404ea4a8c16
+sat_pcv G23 109 3f700fad10a18f35
+sat_pcv G24 109 bf420806258a15af
+sat_pcv G10 110 3f66a0180b4b63be
+sat_pcv G12 110 bf6ce44cbab12bda
+sat_pcv G13 110 bf6fcfc2a8e7feda
+sat_pcv G14 110 3f8543f856b7a25a
+sat_pcv G15 110 bf8457ba959aad47
+sat_pcv G17 110 bf4eaf4a19c6393e
+sat_pcv G19 110 bf73c5348000ca74
+sat_pcv G20 110 bf72fd0a5e1467f5
+sat_pcv G22 110 bf613404ea4a8c16
+sat_pcv G23 110 3f70574785bb6d24
+sat_pcv G24 110 bf40057aa1757c2e
+sat_pcv G10 111 3f668ec565366474
+sat_pcv G12 111 bf6e0cf3884b9dac
+sat_pcv G13 111 bf70a34323e255de
+sat_pcv G14 111 3f856735248ec65c
+sat_pcv G15 111 bf844473dee5a008
+sat_pcv G17 111 bf4dcd10fdc06a62
+sat_pcv G19 111 bf73f95afd2a0615
+sat_pcv G20 111 bf7252554a801be9
+sat_pcv G22 111 bf613404ea4a8c16
+sat_pcv G23 111 3f709f4a5dcfa2e3
+sat_pcv G24 111 bf3c052a3d7f33fe
+sat_pcv G10 112 3f667e143588d134
+sat_pcv G12 112 bf6f37515c5ab458
+sat_pcv G13 112 bf715f9d2641b586
+sat_pcv G14 112 3f8589ec740ffb5e
+sat_pcv G15 112 bf84313c0b165896
+sat_pcv G17 112 bf4ce54b64781262
+sat_pcv G19 112 bf742d05401eb86a
+sat_pcv G20 112 bf717ed47b0cb81b
+sat_pcv G22 112 bf613404ea4a8c16
+sat_pcv G23 112 3f70e7b23ca5193e
+sat_pcv G24 112 bf37febb3bca3ad4
+sat_pcv G10 113 3f666e05afb40560
+sat_pcv G12 113 bf7031b2a25b1091
+sat_pcv G13 113 bf721cee90ef1a4d
+sat_pcv G14 113 3f85ac1e6d23bb68
+sat_pcv G15 113 bf841e135d01cf42
+sat_pcv G17 113 bf4bf806233beb5a
+sat_pcv G19 113 bf746030c8f0ff2f
+sat_pcv G20 113 bf70ac9ed4300c4e
+sat_pcv G22 113 bf613404ea4a8c16
+sat_pcv G23 113 3f71307bc52ded9b
+sat_pcv G24 113 bf33f7b8d9e6ec23
+sat_pcv G10 114 3f665e9afd7b979c
+sat_pcv G12 114 bf70c89725179814
+sat_pcv G13 114 bf72c270a1ef3cda
+sat_pcv G14 114 3f85cdcb38e9d322
+sat_pcv G15 114 bf840afa1613b55f
+sat_pcv G17 114 bf4b054e4e172d92
+sat_pcv G19 114 bf7492db19474d5b
+sat_pcv G20 114 bf6fb769da46f266
+sat_pcv G22 114 bf613404ea4a8c16
+sat_pcv G23 114 3f7179a399e569ee
+sat_pcv G24 114 bf2fe068ad7ab4e2
+sat_pcv G10 115 3f664fd53ee475ea
+sat_pcv G12 115 bf713b0aa1fa0b7b
+sat_pcv G13 115 bf735610a1625f95
+sat_pcv G14 115 3f85eef301ab4c46
+sat_pcv G15 115 bf83f7f07655fdb8
+sat_pcv G17 115 bf4a0d31369c8836
+sat_pcv G19 115 bf74c501b48596a6
+sat_pcv G20 115 bf6e182eb2c2058c
+sat_pcv G22 115 bf613404ea4a8c16
+sat_pcv G23 115 3f71c3265ce9b057
+sat_pcv G24 115 bf2736e65030f6d8
+sat_pcv G10 116 3f6641b58a1529ac
+sat_pcv G12 116 bf71ad7cbc906dad
+sat_pcv G13 116 bf73ea6dba7656d9
+sat_pcv G14 116 3f860f95f2de7250
+sat_pcv G15 116 bf83e4f6bc745b47
+sat_pcv G17 116 bf490fbc6aac5938
+sat_pcv G19 116 bf74f6a2200b9786
+sat_pcv G20 116 bf6c7b8d50db8d50
+sat_pcv G22 116 bf613404ea4a8c16
+sat_pcv G23 116 3f720d00b03176b7
+sat_pcv G24 116 bf1a443130bc116e
+sat_pcv G10 117 3f66343ceb46e9ac
+sat_pcv G12 117 bf722091a114e647
+sat_pcv G13 117 bf747f8748bdd25f
+sat_pcv G14 117 3f862fb4391924b4
+sat_pcv G15 117 bf83d20d25c869ce
+sat_pcv G17 117 bf480cfdb326f9f4
+sat_pcv G19 117 bf7527b9e369514c
+sat_pcv G20 117 bf6ae186cc26bf1a
+sat_pcv G22 117 bf613404ea4a8c16
+sat_pcv G23 117 3f72572f35dedd63
+sat_pcv G24 117 bef8648bcd53df00
+sat_pcv G10 118 3f66276c64a7fcc6
+sat_pcv G12 118 bf729448eb6e482e
+sat_pcv G13 118 bf75155ca59147b0
+sat_pcv G14 118 3f864f4e0214ac6a
+sat_pcv G15 118 bf83bf33ee5b7da3
+sat_pcv G17 118 bf47050312f29394
+sat_pcv G19 118 bf755846888a7df0
+sat_pcv G20 118 bf694a1c347171fa
+sat_pcv G22 118 bf613404ea4a8c16
+sat_pcv G23 118 3f72a1ae9056b1cc
+sat_pcv G24 118 3f0c25f1ffe422e2
+sat_pcv G10 119 3f661b44ee4dcdfa
+sat_pcv G12 119 bf7308a235c5b62b
+sat_pcv G13 119 bf75abed2852d0b8
+sat_pcv G14 119 3f866e637ca27bb4
+sat_pcv G15 119 bf83ac6b50f2555a
+sat_pcv G17 119 bf45f7dac53ef490
+sat_pcv G19 119 bf7588459bf66080
+sat_pcv G20 119 bf67b54e91e44680
+sat_pcv G22 119 bf613404ea4a8c16
+sat_pcv G23 119 3f72ec7b62740680
+sat_pcv G24 119 3f211fdc9e1e6b1f
