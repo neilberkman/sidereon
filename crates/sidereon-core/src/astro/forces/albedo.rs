@@ -6,19 +6,27 @@
 //! consisting of a nadir cap, six first-ring segments, and twelve outer-ring
 //! segments. Each element contributes reflected shortwave radiation when sunlit
 //! plus emitted longwave radiation.
+//!
+//! Each surface element's geocentric latitude for the Knocke zonal albedo and
+//! emissivity model is measured from Earth's celestial intermediate pole
+//! expressed in GCRS (the third row of the GCRS-to-true-of-date rotation
+//! `N * P * B`, evaluated at the state epoch's TT and TDB), rather than the
+//! fixed GCRS z axis. Polar motion is outside this model's inputs, so the
+//! polar-motion offset between the celestial intermediate pole and the ITRS
+//! pole (below about 1e-5 rad of latitude) is omitted.
 
-use crate::astro::bodies::sun_moon::sun_moon_eci;
+use crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds;
 use crate::astro::constants::astro::AU_KM;
 use crate::astro::constants::earth::WGS84_A_KM;
-use crate::astro::constants::time::{
-    DAYS_PER_JULIAN_CENTURY, DAYS_PER_JULIAN_YEAR, J2000_JD, SECONDS_PER_DAY,
-};
+use crate::astro::constants::time::{DAYS_PER_JULIAN_YEAR, J2000_JD, SECONDS_PER_DAY};
 use crate::astro::constants::units::M_PER_KM;
 use crate::astro::error::PropagationError;
 use crate::astro::events::eclipse::moon_shadow_fraction;
 use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::frames::transforms::celestial_pole_gcrs_unchecked;
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
+use crate::astro::time::scales::tt_seconds_from_tdb_seconds;
 use nalgebra::Vector3;
 
 const KNOCKE_ELEMENT_COUNT: usize = 19;
@@ -68,8 +76,8 @@ impl EarthRadiationPressure {
     /// Off by default so existing Earth-only albedo results stay bit-identical.
     /// When enabled, each sunlit Earth surface element attenuates its reflected
     /// shortwave albedo flux by `1.0 - moon_shadow_fraction` using the Moon
-    /// position from [`sun_moon_eci`], while emitted thermal infrared remains
-    /// unchanged.
+    /// position from [`sun_moon_gcrs_at_tdb_seconds`], while emitted thermal
+    /// infrared remains unchanged.
     pub fn with_moon_eclipse(mut self, enabled: bool) -> Self {
         self.include_moon_eclipse = enabled;
         self
@@ -119,6 +127,12 @@ impl EarthRadiationPressure {
     /// Evaluate Earth albedo and infrared radiation pressure acceleration
     /// (km/s^2) using explicit inertial Sun and Moon positions (km).
     ///
+    /// Surface-element geocentric latitudes are measured from Earth's celestial
+    /// intermediate pole expressed in GCRS at `state.epoch_tdb_seconds` (the
+    /// third row of the GCRS-to-true-of-date rotation `N * P * B`, evaluated at
+    /// the epoch's TT and TDB); polar motion is outside this model's inputs
+    /// (below about 1e-5 rad of latitude).
+    ///
     /// When [`Self::moon_eclipse_enabled`] is `true`, each sunlit surface
     /// element scales its reflected shortwave contribution by the unocculted
     /// solar fraction past the Moon. When `false`, `moon_pos_km` is still
@@ -163,8 +177,7 @@ fn sun_position_km(epoch_tdb_seconds: f64) -> Result<Vector3<f64>, PropagationEr
 fn sun_moon_positions_km(
     epoch_tdb_seconds: f64,
 ) -> Result<(Vector3<f64>, Vector3<f64>), PropagationError> {
-    let t_tt_centuries = epoch_tdb_seconds / (DAYS_PER_JULIAN_CENTURY * SECONDS_PER_DAY);
-    let bodies = sun_moon_eci(t_tt_centuries)
+    let bodies = sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
         .map_err(|error| PropagationError::ForceModelFailure(format!("Sun/Moon: {error}")))?;
     Ok((
         Vector3::new(
@@ -188,10 +201,42 @@ fn earth_radiation_acceleration_with_sun(
     earth_radiation_acceleration_with_bodies(state, sun_pos_km, None, model)
 }
 
+fn celestial_pole_gcrs(epoch_tdb_seconds: f64) -> Result<Vector3<f64>, PropagationError> {
+    let jd_tdb = J2000_JD + epoch_tdb_seconds / SECONDS_PER_DAY;
+    let jd_tt = J2000_JD + tt_seconds_from_tdb_seconds(epoch_tdb_seconds) / SECONDS_PER_DAY;
+    let pole = celestial_pole_gcrs_unchecked(jd_tt, jd_tdb);
+    if !pole.iter().all(|v| v.is_finite()) {
+        return Err(PropagationError::NumericalFailure(
+            "Non-finite celestial pole".to_string(),
+        ));
+    }
+    Ok(Vector3::new(pole[0], pole[1], pole[2]))
+}
+
+fn element_latitude_rad(normal_gcrs: Vector3<f64>, pole_gcrs: Vector3<f64>) -> f64 {
+    libm::asin(pole_gcrs.dot(&normal_gcrs).clamp(-1.0, 1.0))
+}
+
 fn earth_radiation_acceleration_with_bodies(
     state: &CartesianState,
     sun_pos_km: Vector3<f64>,
     moon_pos_km: Option<Vector3<f64>>,
+    model: EarthRadiationPressure,
+) -> Result<Vector3<f64>, PropagationError> {
+    validate_state(state)?;
+    validate_vector(sun_pos_km, "sun_pos_km")?;
+    if let Some(moon) = moon_pos_km {
+        validate_vector(moon, "moon_pos_km")?;
+    }
+    let pole_gcrs = celestial_pole_gcrs(state.epoch_tdb_seconds)?;
+    earth_radiation_acceleration_with_pole(state, sun_pos_km, moon_pos_km, pole_gcrs, model)
+}
+
+fn earth_radiation_acceleration_with_pole(
+    state: &CartesianState,
+    sun_pos_km: Vector3<f64>,
+    moon_pos_km: Option<Vector3<f64>>,
+    pole_gcrs: Vector3<f64>,
     model: EarthRadiationPressure,
 ) -> Result<Vector3<f64>, PropagationError> {
     validate_state(state)?;
@@ -251,6 +296,7 @@ fn earth_radiation_acceleration_with_bodies(
             accel_m_s2 += element_acceleration(
                 state.epoch_tdb_seconds,
                 sample,
+                pole_gcrs,
                 sun_pos_km,
                 moon_pos_km,
                 sun_hat,
@@ -282,6 +328,7 @@ fn earth_radiation_acceleration_with_bodies(
                 accel_m_s2 += element_acceleration(
                     state.epoch_tdb_seconds,
                     sample,
+                    pole_gcrs,
                     sun_pos_km,
                     moon_pos_km,
                     sun_hat,
@@ -339,6 +386,7 @@ fn surface_sample_from_ray(
 fn element_acceleration(
     epoch_tdb_seconds: f64,
     sample: SurfaceElementSample,
+    pole_gcrs: Vector3<f64>,
     sun_pos_km: Vector3<f64>,
     moon_pos_km: Option<Vector3<f64>>,
     sun_hat: Vector3<f64>,
@@ -346,7 +394,7 @@ fn element_acceleration(
     apparent_weight: f64,
     model: EarthRadiationPressure,
 ) -> Result<Vector3<f64>, PropagationError> {
-    let latitude_rad = libm::asin(sample.normal.z.clamp(-1.0, 1.0));
+    let latitude_rad = element_latitude_rad(sample.normal, pole_gcrs);
     let (albedo, emissivity) = knocke_albedo_emissivity(epoch_tdb_seconds, latitude_rad);
     let cos_solar_zenith = sample.normal.dot(&sun_hat);
     let reflected = if cos_solar_zenith > 0.0 {
@@ -506,14 +554,29 @@ mod tests {
         let accel = earth_radiation_acceleration_with_sun(&state, sun, model)
             .expect("Earth radiation acceleration");
 
-        assert_eq!(accel.x.to_bits(), 0x3db4_ea69_7dee_a111);
-        assert!(accel.y.abs() <= accel.norm() * f64::EPSILON);
-        let independent_z = f64::from_bits(0xbd50_e131_737f_badd);
-        assert!(accel.z.to_bits().abs_diff(independent_z.to_bits()) <= 1);
+        assert_eq!(accel.x.to_bits(), 0x3db4_ea61_e56c_a437);
+        let expected_y = f64::from_bits(0x3c5e_f8d9_aeb4_3958);
+        assert!(accel.y.to_bits().abs_diff(expected_y.to_bits()) <= 1);
+        let expected_z = f64::from_bits(0xbd50_e026_e4f3_e1e3);
+        assert!(accel.z.to_bits().abs_diff(expected_z.to_bits()) <= 1);
 
         let magnitude_m_s2 = accel.norm() * M_PER_KM;
         assert!((1.0e-8..1.0e-7).contains(&magnitude_m_s2));
-        assert_eq!(magnitude_m_s2.to_bits(), 0x3e54_6d55_70d2_55ce);
+        assert_eq!(magnitude_m_s2.to_bits(), 0x3e54_6d4d_f8e9_70eb);
+
+        // With the pole fixed to the GCRS z axis, the 19-element KRT summation
+        // retains its original axis-aligned golden values.
+        let axis_aligned =
+            earth_radiation_acceleration_with_pole(&state, sun, None, Vector3::z(), model)
+                .expect("axis-aligned Earth radiation acceleration");
+        assert_eq!(axis_aligned.x.to_bits(), 0x3db4_ea69_7dee_a111);
+        assert!(axis_aligned.y.abs() <= axis_aligned.norm() * f64::EPSILON);
+        let independent_z = f64::from_bits(0xbd50_e131_737f_badd);
+        assert!(axis_aligned.z.to_bits().abs_diff(independent_z.to_bits()) <= 1);
+        assert_eq!(
+            (axis_aligned.norm() * M_PER_KM).to_bits(),
+            0x3e54_6d55_70d2_55ce
+        );
     }
 
     #[test]
@@ -618,5 +681,206 @@ mod tests {
                 .is_err(),
             "nightside must also reject overflowing moon position"
         );
+    }
+
+    /// TDB epochs from 1990 to 2050, one at the 2024-04-08 solar eclipse.
+    fn epochs_1990_to_2050() -> [f64; 4] {
+        use crate::astro::time::civil::j2000_seconds;
+        [
+            j2000_seconds(1990, 2, 1, 0, 0, 0.0),
+            j2000_seconds(2024, 4, 8, 18, 17, 0.0),
+            j2000_seconds(2026, 11, 23, 0, 0, 0.0),
+            j2000_seconds(2050, 6, 30, 12, 0, 0.0),
+        ]
+    }
+
+    fn gcrs_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
+        let bodies =
+            crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
+                .expect("GCRS Sun/Moon");
+        let km = |v: [f64; 3]| Vector3::new(v[0] / M_PER_KM, v[1] / M_PER_KM, v[2] / M_PER_KM);
+        (km(bodies.sun), km(bodies.moon))
+    }
+
+    fn mean_of_date_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
+        let t = crate::astro::time::scales::tt_seconds_from_tdb_seconds(epoch_tdb_seconds)
+            / (36_525.0 * 86_400.0);
+        let bodies = crate::astro::bodies::sun_moon::sun_moon_eci(t).expect("mean of date");
+        let km = |v: [f64; 3]| Vector3::new(v[0] / M_PER_KM, v[1] / M_PER_KM, v[2] / M_PER_KM);
+        (km(bodies.sun), km(bodies.moon))
+    }
+
+    #[test]
+    fn acceleration_equals_the_caller_vector_path_with_the_gcrs_sun_and_moon() {
+        let ctx = PropagationContext::default();
+        let base = EarthRadiationPressure::new(1.2, 0.011).expect("valid model");
+        for epoch in epochs_1990_to_2050() {
+            let (sun, moon) = gcrs_sun_moon_km(epoch);
+            let s_hat = sun.normalize();
+            let across = s_hat.cross(&Vector3::z()).normalize();
+            let r = WGS84_A_KM + 700.0;
+            // Subsolar, terminator and night side LEO.
+            let positions = [s_hat * r, across * r, -s_hat * r];
+            for position in positions {
+                let state = CartesianState::new(epoch, position.into(), [0.0, 7.5, 0.0]);
+                for model in [base, base.with_moon_eclipse(true)] {
+                    let from_state = model.acceleration(&state, &ctx).expect("acceleration");
+                    let from_vectors = model
+                        .acceleration_with_sun_moon(&state, sun, moon)
+                        .expect("caller vectors");
+                    assert_eq!(
+                        from_state, from_vectors,
+                        "epoch {epoch} position {position:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn acceleration_no_longer_uses_the_mean_of_date_sun() {
+        let epoch = crate::astro::time::civil::j2000_seconds(2026, 11, 23, 0, 0, 0.0);
+        let (sun, _moon) = gcrs_sun_moon_km(epoch);
+        let (mean_sun, mean_moon) = mean_of_date_sun_moon_km(epoch);
+        let model = EarthRadiationPressure::new(1.2, 0.011).expect("valid model");
+        // Near the terminator, where the sunlit elements depend most on the Sun
+        // direction.
+        let across = sun.normalize().cross(&Vector3::z()).normalize();
+        let position = (across + sun.normalize() * 0.2).normalize() * (WGS84_A_KM + 700.0);
+        let state = CartesianState::new(epoch, position.into(), [0.0, 7.5, 0.0]);
+        let used = model
+            .acceleration(&state, &PropagationContext::default())
+            .expect("acceleration");
+        let with_mean = model
+            .acceleration_with_sun_moon(&state, mean_sun, mean_moon)
+            .expect("mean of date Sun");
+        assert!((used - with_mean).norm() > 1.0e-6 * used.norm());
+    }
+
+    #[test]
+    fn element_latitude_matches_itrs_rotation_from_1990_to_2050() {
+        use crate::astro::frames::transforms::{
+            gcrs_to_itrs_matrix, mat3_vec3_mul, with_ut1_validity,
+        };
+        use crate::astro::time::{TimeScales, ValidityMode};
+
+        let epochs = [
+            (1990, 2, 1, 0, 0, 0.0),
+            (2000, 1, 1, 12, 0, 0.0),
+            (2012, 9, 15, 6, 30, 0.0),
+            (2024, 4, 8, 18, 17, 0.0),
+            (2026, 11, 23, 0, 0, 0.0),
+            (2050, 6, 30, 12, 0, 0.0),
+        ];
+        let normals = [
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(1.0, 0.0, 1.0).normalize(),
+            Vector3::new(0.0, 1.0, -1.0).normalize(),
+            Vector3::new(-0.6, 0.3, 0.741_619_848_709_566_3).normalize(),
+            Vector3::new(0.1, -0.2, 0.974_679_434_480_896_3).normalize(),
+            Vector3::new(-0.3, -0.4, -0.866_025_403_784_438_6).normalize(),
+        ];
+
+        for (year, month, day, hour, minute, second) in epochs {
+            let ts = TimeScales::from_utc(year, month, day, hour, minute, second).expect("UTC");
+            let r_itrs = with_ut1_validity(&ts, ValidityMode::Permissive, gcrs_to_itrs_matrix)
+                .expect("GCRS->ITRS")
+                .value;
+            let epoch_tdb_seconds = (ts.jd_tdb - J2000_JD) * SECONDS_PER_DAY;
+            let pole_gcrs = celestial_pole_gcrs(epoch_tdb_seconds).expect("celestial pole");
+
+            if year == 2026 {
+                let tilt_deg = libm::acos(pole_gcrs.z.clamp(-1.0, 1.0)).to_degrees();
+                assert!(
+                    (0.14..0.16).contains(&tilt_deg),
+                    "expected ~0.15 deg pole tilt at 2026, got {tilt_deg} deg"
+                );
+            }
+
+            for normal in normals {
+                let lat_used = element_latitude_rad(normal, pole_gcrs);
+                let normal_itrs =
+                    mat3_vec3_mul(&r_itrs, &[normal.x, normal.y, normal.z]).expect("rotate normal");
+                let lat_itrs = libm::asin(normal_itrs[2].clamp(-1.0, 1.0));
+                assert!(
+                    (lat_used - lat_itrs).abs() <= 1.0e-14,
+                    "epoch {year}-{month:02}-{day:02} normal {normal:?}: used={lat_used}, itrs={lat_itrs}, diff={}",
+                    (lat_used - lat_itrs).abs()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn acceleration_at_2026_changes_by_expected_amount_from_gcrs_z() {
+        let epoch = crate::astro::time::civil::j2000_seconds(2026, 11, 23, 0, 0, 0.0);
+        let model = EarthRadiationPressure::new(1.2, 0.011).expect("valid model");
+        let pole_gcrs = celestial_pole_gcrs(epoch).expect("celestial pole");
+        // Mid-latitude LEO state in the GCRS x-z plane where the ~0.15 deg pole
+        // tilt toward +x directly shifts element latitudes along the Knocke P2
+        // gradient.
+        let r = WGS84_A_KM + 700.0;
+        let radial_hat = Vector3::new(1.0, 0.0, 1.0).normalize();
+        let state = CartesianState::new(epoch, (radial_hat * r).into(), [0.0, 7.5, 0.0]);
+        let sun = radial_hat * AU_KM;
+
+        let accel_pole = earth_radiation_acceleration_with_sun(&state, sun, model)
+            .expect("celestial-pole acceleration");
+        let accel_gcrs_z =
+            earth_radiation_acceleration_with_pole(&state, sun, None, Vector3::z(), model)
+                .expect("GCRS-z acceleration");
+
+        let lat_pole = element_latitude_rad(radial_hat, pole_gcrs);
+        let lat_z = libm::asin(radial_hat.z);
+        assert!(
+            ((lat_pole - lat_z).to_degrees().abs() - 0.15).abs() < 0.02,
+            "unexpected sub-satellite latitude shift: {} deg",
+            (lat_pole - lat_z).to_degrees()
+        );
+
+        let (a_pole, e_pole) = model
+            .albedo_emissivity(epoch, lat_pole)
+            .expect("pole coeffs");
+        let (a_z, e_z) = model.albedo_emissivity(epoch, lat_z).expect("z coeffs");
+        let expected_rel = ((a_pole + 0.25 * e_pole) - (a_z + 0.25 * e_z)) / (a_z + 0.25 * e_z);
+        let actual_rel = (accel_pole.dot(&radial_hat) - accel_gcrs_z.dot(&radial_hat))
+            / accel_gcrs_z.dot(&radial_hat);
+
+        assert!(expected_rel > 0.0 && actual_rel > 0.0);
+        assert!(
+            (actual_rel - expected_rel).abs() < 0.25 * expected_rel,
+            "actual_rel={actual_rel}, expected_rel={expected_rel}"
+        );
+    }
+
+    #[test]
+    fn public_albedo_emissivity_stays_bit_identical_to_legendre_closed_form() {
+        let model = EarthRadiationPressure::new(1.2, 0.011).expect("valid model");
+        let epoch_2026 = crate::astro::time::civil::j2000_seconds(2026, 11, 23, 0, 0, 0.0);
+        let cases = [
+            (reference_epoch_seconds(), 0.0),
+            (epoch_2026, 0.0),
+            (epoch_2026, std::f64::consts::FRAC_PI_4),
+            (epoch_2026, -std::f64::consts::FRAC_PI_6),
+            (epoch_2026, std::f64::consts::FRAC_PI_2),
+        ];
+
+        for (epoch, lat) in cases {
+            let (albedo, emissivity) = model.albedo_emissivity(epoch, lat).expect("coeffs");
+            let jd = J2000_JD + epoch / SECONDS_PER_DAY;
+            let phase = std::f64::consts::TAU * (jd - KNOCKE_REFERENCE_JD) / DAYS_PER_JULIAN_YEAR;
+            let (phase_sin, phase_cos) = libm::sincos(phase);
+            let p1 = libm::sin(lat);
+            let p2 = 0.5 * (3.0 * p1 * p1 - 1.0);
+            let expected_a = ALBEDO_A0
+                + (ALBEDO_C0 + ALBEDO_C1 * phase_cos + ALBEDO_C2 * phase_sin) * p1
+                + ALBEDO_A2 * p2;
+            let expected_e = EMISSIVITY_E0
+                + (EMISSIVITY_K0 + EMISSIVITY_K1 * phase_cos + EMISSIVITY_K2 * phase_sin) * p1
+                + EMISSIVITY_E2 * p2;
+            assert_eq!(albedo.to_bits(), expected_a.to_bits());
+            assert_eq!(emissivity.to_bits(), expected_e.to_bits());
+        }
     }
 }

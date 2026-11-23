@@ -105,6 +105,27 @@ fuzz_target!(|data: &[u8]| {
         "transforms::mean_of_date_to_itrs_matrix",
         transforms::mean_of_date_to_itrs_matrix(&ts),
     );
+    let to_mod = transforms::gcrs_to_mean_of_date_matrix(&ts);
+    let to_gcrs = transforms::mean_of_date_to_gcrs_matrix(&ts);
+    if let (Ok(to_mod), Ok(to_gcrs)) = (to_mod, to_gcrs) {
+        for i in 0..3 {
+            for j in 0..3 {
+                assert_eq!(
+                    to_gcrs[i][j].to_bits(),
+                    to_mod[j][i].to_bits(),
+                    "mean_of_date_to_gcrs_matrix is not the transpose"
+                );
+            }
+        }
+    }
+    assert_ok_finite_or_err(
+        "transforms::gcrs_to_mean_of_date_matrix",
+        transforms::gcrs_to_mean_of_date_matrix(&ts),
+    );
+    assert_ok_finite_or_err(
+        "transforms::mean_of_date_to_gcrs_matrix",
+        transforms::mean_of_date_to_gcrs_matrix(&ts),
+    );
     assert_ok_finite_or_err(
         "transforms::gcrs_to_itrs_compute",
         transforms::gcrs_to_itrs_compute(input.p[0], input.p[1], input.p[2], &ts, input.compat),

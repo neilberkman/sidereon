@@ -17,7 +17,9 @@
 //! an almanac-grade reduction.
 
 use crate::astro::angles::{phase_angle, AngleError};
-use crate::astro::bodies::sun_moon::{sun_moon_ecef, sun_moon_eci_at, SunMoonError};
+use crate::astro::bodies::sun_moon::{
+    sun_moon_ecef, sun_moon_eci_at, sun_moon_mean_to_ecef, sun_moon_mean_to_gcrs, SunMoonError,
+};
 use crate::astro::constants::astro::GM_SUN_KM3_S2;
 use crate::astro::constants::earth::OMEGA_E_DOT_RAD_S;
 use crate::astro::constants::physics::SPEED_OF_LIGHT_M_S;
@@ -124,10 +126,14 @@ pub struct Ecliptic {
 pub struct Observation {
     /// Astrometric place, light-time only, on ICRS axes for full-chain targets.
     ///
-    /// Reduced Sun/Moon analytic variants carry mean-of-date RA/Dec here, not an
-    /// ICRS astrometric place. See [`Observation::reduced`].
+    /// Reduced Sun/Moon analytic variants carry the geometric analytic series
+    /// rotated to GCRS here ([`crate::astro::bodies::sun_moon::sun_moon_gcrs_at`]),
+    /// with no light time. See [`Observation::reduced`].
     pub astrometric: Equatorial,
     /// Apparent place on ICRF axes before the true-of-date rotation.
+    ///
+    /// Reduced Sun/Moon analytic variants apply no aberration or deflection, so
+    /// this equals [`Observation::astrometric`] for them.
     pub apparent_icrs: Equatorial,
     /// Apparent place, true equator and equinox of date.
     pub apparent: Equatorial,
@@ -622,12 +628,12 @@ fn observe_reduced_sun_moon(
     validate_refraction(options.refraction)?;
 
     let eci = sun_moon_eci_at(ts)?;
-    let mean_m = match body {
-        ReducedBody::Sun => eci.sun,
-        ReducedBody::Moon => eci.moon,
+    let gcrs = sun_moon_mean_to_gcrs(eci, ts)?;
+    let (mean_m, gcrs_m) = match body {
+        ReducedBody::Sun => (eci.sun, gcrs.sun),
+        ReducedBody::Moon => (eci.moon, gcrs.moon),
     };
-    let mean_km = scale_m_to_km(mean_m);
-    let astrometric = equatorial_from_vector(mean_km)?;
+    let astrometric = equatorial_from_vector(scale_m_to_km(gcrs_m))?;
     let apparent_icrs = astrometric;
 
     let nutation = nutation_matrix(ts)?;
@@ -636,7 +642,7 @@ fn observe_reduced_sun_moon(
     let u_tod = unit_checked(true_km)?;
     let apparent = equatorial_from_unit(u_tod, norm_checked(true_km)?);
 
-    let ecef = sun_moon_ecef(ts)?;
+    let ecef = sun_moon_mean_to_ecef(eci, ts)?;
     let body_ecef_km = match body {
         ReducedBody::Sun => scale_m_to_km(ecef.sun),
         ReducedBody::Moon => scale_m_to_km(ecef.moon),
@@ -1291,5 +1297,116 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, ObserveError::DegenerateGeometry));
+    }
+
+    #[test]
+    fn reduced_sun_moon_single_series_evaluation_matches_separate_frame_calls_bit_for_bit() {
+        use crate::astro::bodies::sun_moon::sun_moon_gcrs_at;
+
+        fn assert_equatorial_bits(lhs: Equatorial, rhs: Equatorial) {
+            assert_eq!(
+                lhs.right_ascension_deg.to_bits(),
+                rhs.right_ascension_deg.to_bits()
+            );
+            assert_eq!(
+                lhs.right_ascension_hours.to_bits(),
+                rhs.right_ascension_hours.to_bits()
+            );
+            assert_eq!(lhs.declination_deg.to_bits(), rhs.declination_deg.to_bits());
+            assert_eq!(lhs.distance_km.to_bits(), rhs.distance_km.to_bits());
+        }
+
+        let station = greenwich();
+        let epochs = [
+            (1990, 2, 1, 6, 30, 0),
+            (2000, 1, 1, 12, 0, 0),
+            (2024, 4, 8, 18, 17, 0),
+            (2026, 11, 23, 0, 0, 0),
+            (2050, 6, 30, 12, 0, 0),
+        ];
+        let option_sets = [
+            ObserveOptions::default(),
+            ObserveOptions {
+                refraction: Some(Refraction {
+                    pressure_mbar: 1013.25,
+                    temperature_c: 15.0,
+                }),
+                ..ObserveOptions::default()
+            },
+        ];
+
+        for (year, month, day, hour, minute, second) in epochs {
+            let mut ts =
+                TimeScales::from_utc(year, month, day, hour, minute, second as f64).expect("UTC");
+            ts.ut1_degraded = None;
+            for options in option_sets {
+                for (target, body) in [
+                    (Target::Sun, ReducedBody::Sun),
+                    (Target::Moon, ReducedBody::Moon),
+                ] {
+                    let obs = observe_with_time_scales(&station, &ts, target, options)
+                        .expect("reduced observation");
+
+                    // Direct reference calling the three public ephemeris entry points.
+                    let eci = sun_moon_eci_at(&ts).expect("eci");
+                    let gcrs = sun_moon_gcrs_at(&ts).expect("gcrs");
+                    let ecef = sun_moon_ecef(&ts).expect("ecef");
+                    let (mean_m, gcrs_m, ecef_m) = match body {
+                        ReducedBody::Sun => (eci.sun, gcrs.sun, ecef.sun),
+                        ReducedBody::Moon => (eci.moon, gcrs.moon, ecef.moon),
+                    };
+                    let ref_astrometric =
+                        equatorial_from_vector(scale_m_to_km(gcrs_m)).expect("astrometric");
+                    let nutation = nutation_matrix(&ts).expect("nutation");
+                    let true_km = scale_m_to_km(mat3_vec3_mul_unchecked(&nutation, &mean_m));
+                    let u_tod = unit_checked(true_km).expect("u_tod");
+                    let ref_apparent =
+                        equatorial_from_unit(u_tod, norm_checked(true_km).expect("norm"));
+                    let (az, el, range) =
+                        itrs_to_topocentric(scale_m_to_km(ecef_m), &station).expect("topo");
+                    let ref_horizontal = Horizontal {
+                        azimuth_deg: az,
+                        elevation_deg: apply_refraction(el, options.refraction).expect("refract"),
+                        range_km: range,
+                    };
+                    let (ref_ha_deg, ref_ha_hours) =
+                        hour_angle(&station, &ts, ref_apparent).expect("hour angle");
+                    let ref_ecliptic =
+                        ecliptic_from_true_equatorial(&ts, u_tod, ref_apparent.distance_km)
+                            .expect("ecliptic");
+
+                    assert_equatorial_bits(obs.astrometric, ref_astrometric);
+                    assert_equatorial_bits(obs.apparent_icrs, ref_astrometric);
+                    assert_equatorial_bits(obs.apparent, ref_apparent);
+                    assert_eq!(
+                        obs.horizontal.azimuth_deg.to_bits(),
+                        ref_horizontal.azimuth_deg.to_bits()
+                    );
+                    assert_eq!(
+                        obs.horizontal.elevation_deg.to_bits(),
+                        ref_horizontal.elevation_deg.to_bits()
+                    );
+                    assert_eq!(
+                        obs.horizontal.range_km.to_bits(),
+                        ref_horizontal.range_km.to_bits()
+                    );
+                    assert_eq!(obs.hour_angle_deg.to_bits(), ref_ha_deg.to_bits());
+                    assert_eq!(obs.hour_angle_hours.to_bits(), ref_ha_hours.to_bits());
+                    assert_eq!(
+                        obs.ecliptic.longitude_deg.to_bits(),
+                        ref_ecliptic.longitude_deg.to_bits()
+                    );
+                    assert_eq!(
+                        obs.ecliptic.latitude_deg.to_bits(),
+                        ref_ecliptic.latitude_deg.to_bits()
+                    );
+                    assert_eq!(
+                        obs.ecliptic.distance_km.to_bits(),
+                        ref_ecliptic.distance_km.to_bits()
+                    );
+                    assert!(obs.reduced);
+                }
+            }
+        }
     }
 }

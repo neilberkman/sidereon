@@ -40,13 +40,18 @@ use sidereon_core::{GnssSatelliteId, GnssSystem, TdbEarthOrientationProvider};
 
 const IGS_FINAL_SP3: &[u8] = include_bytes!("fixtures/sp3/IGS0OPSFIN_20261330000_03H_15M_ORB.SP3");
 const PINNED_ARC_START_TDB_J2000_S: f64 = 831_902_451.185_288_4;
-// Re-pinned after replacing host libm calls in the SP3 frame/force path with
-// portable Rust libm kernels. These are the highest observed values from the
-// local arm64 run and the linux/amd64 verification run; the fixed headroom
-// below remains unchanged.
-const ACHIEVED_PHASE_A_RMS_3D_M: f64 = 2.548_765_228_991_772;
-const ACHIEVED_PHASE_A_FINALS2000A_RMS_3D_M: f64 = 1.195_163_590_675_985_7;
-const ACHIEVED_PHASE_A_WITH_TIDES_FINALS2000A_RMS_3D_M: f64 = 1.193_929_637_581_742_8;
+// Re-pinned when the third-body and solar radiation pressure models moved to
+// the GCRS Sun and Moon (they had used the mean-of-date series, 0.37 deg off
+// at 2026). These values, from a Linux arm64 run, rose by 0.11 m (from
+// 2.548_765_228_991_772, 1.195_163_590_675_985_7 and 1.193_929_637_581_742_8):
+// Phase A has zonal gravity only; the tesseral terms it leaves out (about
+// 2.4e-7 m/s^2 at GPS altitude) exceed the third-body change (about
+// 5e-8 m/s^2), so this arc's RMS measures the model, not the Sun and Moon,
+// which tests/sun_moon_gcrs_orekit_oracle.rs checks against DE440. The fixed
+// headroom below remains unchanged.
+const ACHIEVED_PHASE_A_RMS_3D_M: f64 = 2.658_231_996_839_049;
+const ACHIEVED_PHASE_A_FINALS2000A_RMS_3D_M: f64 = 1.310_592_678_547_503_7;
+const ACHIEVED_PHASE_A_WITH_TIDES_FINALS2000A_RMS_3D_M: f64 = 1.308_974_009_886_976_6;
 // 0.051 mm headroom keeps the regression bound boundary-sensitive while
 // allowing ordinary floating-point and solver-path variation.
 const REAL_SP3_RMS_HEADROOM_M: f64 = 5.1e-5;

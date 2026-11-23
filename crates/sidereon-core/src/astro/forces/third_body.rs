@@ -4,11 +4,12 @@
 //! `mu_b * ((r_b - r) / |r_b - r|^3 - r_b / |r_b|^3)`, as given by
 //! Montenbruck & Gill, "Satellite Orbits", section 3.2, and Vallado,
 //! "Fundamentals of Astrodynamics and Applications", section 8.6. Body
-//! positions come from the crate's analytic Sun/Moon series at the state epoch.
+//! positions come from the crate's analytic Sun/Moon series at the state epoch,
+//! in GCRS ([`sun_moon_gcrs_at_tdb_seconds`]), the frame of the propagation
+//! state.
 
-use crate::astro::bodies::sun_moon::sun_moon_eci;
+use crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds;
 use crate::astro::constants::astro::{GM_MOON_KM3_S2, GM_SUN_KM3_S2};
-use crate::astro::constants::time::{DAYS_PER_JULIAN_CENTURY, SECONDS_PER_DAY};
 use crate::astro::constants::units::M_PER_KM;
 use crate::astro::error::PropagationError;
 use crate::astro::forces::r#trait::ForceModel;
@@ -124,8 +125,7 @@ struct SunMoonKm {
 }
 
 fn sun_moon_positions_km(epoch_tdb_seconds: f64) -> Result<SunMoonKm, PropagationError> {
-    let t_tt_centuries = epoch_tdb_seconds / (DAYS_PER_JULIAN_CENTURY * SECONDS_PER_DAY);
-    let bodies = sun_moon_eci(t_tt_centuries)
+    let bodies = sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
         .map_err(|error| PropagationError::ForceModelFailure(format!("Sun/Moon: {error}")))?;
     Ok(SunMoonKm {
         sun_km: meters_to_km(bodies.sun),
@@ -248,5 +248,91 @@ mod tests {
             (1.0e-7..2.0e-6).contains(&moon),
             "moon perturbation magnitude {moon} m/s^2"
         );
+    }
+
+    /// TDB epochs from 1990 to 2050, one at the 2024-04-08 solar eclipse.
+    fn epochs_1990_to_2050() -> [f64; 4] {
+        use crate::astro::time::civil::j2000_seconds;
+        [
+            j2000_seconds(1990, 2, 1, 0, 0, 0.0),
+            j2000_seconds(2024, 4, 8, 18, 17, 0.0),
+            j2000_seconds(2026, 11, 23, 0, 0, 0.0),
+            j2000_seconds(2050, 6, 30, 12, 0, 0.0),
+        ]
+    }
+
+    fn gcrs_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
+        let bodies =
+            crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
+                .expect("GCRS Sun/Moon");
+        let km = |v: [f64; 3]| Vector3::new(v[0] / M_PER_KM, v[1] / M_PER_KM, v[2] / M_PER_KM);
+        (km(bodies.sun), km(bodies.moon))
+    }
+
+    fn mean_of_date_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
+        let t = crate::astro::time::scales::tt_seconds_from_tdb_seconds(epoch_tdb_seconds)
+            / (36_525.0 * 86_400.0);
+        let bodies = crate::astro::bodies::sun_moon::sun_moon_eci(t).expect("mean of date");
+        let km = |v: [f64; 3]| Vector3::new(v[0] / M_PER_KM, v[1] / M_PER_KM, v[2] / M_PER_KM);
+        (km(bodies.sun), km(bodies.moon))
+    }
+
+    #[test]
+    fn acceleration_equals_the_point_mass_terms_of_the_gcrs_sun_and_moon() {
+        let ctx = PropagationContext::default();
+        for epoch in epochs_1990_to_2050() {
+            let (sun, moon) = gcrs_sun_moon_km(epoch);
+            for position in [
+                Vector3::new(7_000.0, -1_210.0, 1_300.0),
+                Vector3::new(26_560.0, 1_200.0, -3_400.0),
+                Vector3::new(-42_164.0, 0.0, 0.0),
+            ] {
+                let state = CartesianState::new(epoch, position.into(), [0.0, 7.5, 0.0]);
+                let sun_term =
+                    third_body_acceleration(position, sun, GM_SUN_KM3_S2).expect("Sun term");
+                let moon_term =
+                    third_body_acceleration(position, moon, GM_MOON_KM3_S2).expect("Moon term");
+                let both = ThirdBodyGravity::default()
+                    .acceleration(&state, &ctx)
+                    .expect("Sun and Moon");
+                let mut expected = Vector3::zeros();
+                expected += sun_term;
+                expected += moon_term;
+                assert_eq!(both, expected, "epoch {epoch}");
+                let mut sun_only = Vector3::zeros();
+                sun_only += sun_term;
+                assert_eq!(
+                    ThirdBodyGravity::sun()
+                        .acceleration(&state, &ctx)
+                        .expect("Sun"),
+                    sun_only
+                );
+                let mut moon_only = Vector3::zeros();
+                moon_only += moon_term;
+                assert_eq!(
+                    ThirdBodyGravity::moon()
+                        .acceleration(&state, &ctx)
+                        .expect("Moon"),
+                    moon_only
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn acceleration_no_longer_uses_the_mean_of_date_bodies() {
+        let epoch = crate::astro::time::civil::j2000_seconds(2026, 11, 23, 0, 0, 0.0);
+        let (mean_sun, mean_moon) = mean_of_date_sun_moon_km(epoch);
+        let position = Vector3::new(26_560.0, 1_200.0, -3_400.0);
+        let state = CartesianState::new(epoch, position.into(), [0.0, 7.5, 0.0]);
+        let used = ThirdBodyGravity::default()
+            .acceleration(&state, &PropagationContext::default())
+            .expect("Sun and Moon");
+        let with_mean = third_body_acceleration(position, mean_sun, GM_SUN_KM3_S2)
+            .expect("Sun term")
+            + third_body_acceleration(position, mean_moon, GM_MOON_KM3_S2).expect("Moon term");
+        // Turning the bodies by 0.37 deg (0.0065 rad) changes the tidal
+        // acceleration by a fraction of that order.
+        assert!((used - with_mean).norm() > 1.0e-3 * used.norm());
     }
 }

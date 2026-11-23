@@ -722,16 +722,27 @@ pub fn gcrs_to_true_of_date_matrix(ts: &TimeScales) -> Result<Mat3, FrameTransfo
     validate_mat3("gcrs_to_true_of_date_matrix", matrix)
 }
 
-fn gcrs_to_true_of_date_matrix_parts_unchecked(ts: &TimeScales) -> (Mat3, f64) {
-    let (dpsi, deps) = skyfield_iau2000a_radians_unchecked(ts.jd_tt);
-    let mean_ob = skyfield_mean_obliquity_radians_unchecked(ts.jd_tdb);
+fn gcrs_to_true_of_date_matrix_parts_at_jd_unchecked(jd_tt: f64, jd_tdb: f64) -> (Mat3, f64) {
+    let (dpsi, deps) = skyfield_iau2000a_radians_unchecked(jd_tt);
+    let mean_ob = skyfield_mean_obliquity_radians_unchecked(jd_tdb);
     let true_ob = mean_ob + deps;
 
     let n = build_skyfield_nutation_matrix_unchecked(mean_ob, true_ob, dpsi);
-    let p = compute_skyfield_precession_matrix_unchecked(ts.jd_tdb);
+    let p = compute_skyfield_precession_matrix_unchecked(jd_tdb);
     let b = build_icrs_to_j2000();
 
     (inline_mxmxm(&n, &p, &b), dpsi)
+}
+
+fn gcrs_to_true_of_date_matrix_parts_unchecked(ts: &TimeScales) -> (Mat3, f64) {
+    gcrs_to_true_of_date_matrix_parts_at_jd_unchecked(ts.jd_tt, ts.jd_tdb)
+}
+
+/// Third row of `N * P * B` ([`gcrs_to_true_of_date_matrix`]) at `(jd_tt, jd_tdb)`:
+/// the celestial intermediate pole unit vector expressed in GCRS.
+pub(crate) fn celestial_pole_gcrs_unchecked(jd_tt: f64, jd_tdb: f64) -> [f64; 3] {
+    let (matrix, _dpsi) = gcrs_to_true_of_date_matrix_parts_at_jd_unchecked(jd_tt, jd_tdb);
+    matrix[2]
 }
 
 /// Build the historical GCRS->ITRS rotation matrix for a given time.
@@ -827,6 +838,97 @@ fn mean_of_date_to_itrs_matrix_with_polar_motion_unchecked(
     pole: PolarMotion,
 ) -> Mat3 {
     apply_polar_motion_to_itrs_matrix(mean_of_date_to_itrs_matrix_unchecked(ts), pole)
+}
+
+/// Rotation from GCRS to the **mean equator and equinox of date**, `P * B`.
+///
+/// `B` is the ICRS-to-J2000 frame bias ([`build_icrs_to_j2000`], IAU 2006) and
+/// `P` the IAU 2006 precession (Capitaine, Wallace & Chapront 2003, P03;
+/// Wallace & Capitaine 2006) in the four-rotation form
+/// `R3(chi_A) R1(-omega_A) R3(-psi_A) R1(eps_0)`
+/// ([`crate::astro::frames::precession::compute_skyfield_precession_matrix`]),
+/// evaluated at `ts.jd_tdb`. These are the same two factors
+/// [`gcrs_to_true_of_date_matrix`] applies before nutation, so
+/// `gcrs_to_true_of_date_matrix(ts)` is the nutation matrix times this one, to
+/// rounding.
+///
+/// Against Orekit 13.1.10's `FramesFactory.getMOD(IERSConventions.IERS_2010)`
+/// the rotation agrees to 6e-15 from 1990 to 2050, apart from a constant
+/// 6.8e-13 rad about the GCRS y axis: the bias here uses the published rounded
+/// `xi_0 = -16.6170 mas`, where Orekit (like SOFA) forms
+/// `xi_0 = d_psi_B sin(eps_0) = -16.61714 mas`
+/// (`tests/sun_moon_gcrs_orekit_oracle.rs`).
+///
+/// Mean of date is the frame of the low-precision analytic Sun and Moon series
+/// ([`crate::astro::bodies::sun_moon`], Montenbruck & Gill, "Satellite Orbits",
+/// 3.3.2 and 3.3.3). [`mean_of_date_to_gcrs_matrix`] is the inverse
+/// (transposed) rotation.
+///
+/// Only `ts.jd_tdb` is read, so time scales whose UT1 lies outside the UT1 table
+/// are accepted. The IAU 2006 angles are defined on TT (IERS Conventions 2010,
+/// equations 5.39 and 5.40); taking them at TDB, as the rest of this module
+/// does, moves the rotation by at most 1.4e-14 rad (TDB - TT stays under
+/// 1.71 ms).
+///
+/// Returns [`FrameTransformError::InvalidInput`] with field `"jd_tdb"` for a
+/// non-finite `ts.jd_tdb`, or field `"gcrs_to_mean_of_date_matrix"` if a
+/// component is not finite.
+///
+/// ```
+/// use sidereon_core::astro::frames::transforms::{
+///     gcrs_to_mean_of_date_matrix, mean_of_date_to_gcrs_matrix,
+/// };
+/// use sidereon_core::astro::time::TimeScales;
+///
+/// let ts = TimeScales::from_utc(2026, 1, 1, 0, 0, 0.0).unwrap();
+/// let to_mod = gcrs_to_mean_of_date_matrix(&ts).unwrap();
+/// let to_gcrs = mean_of_date_to_gcrs_matrix(&ts).unwrap();
+/// for i in 0..3 {
+///     for j in 0..3 {
+///         assert_eq!(to_gcrs[i][j], to_mod[j][i]);
+///     }
+/// }
+/// // Accumulated precession plus frame bias: about 0.36 deg at 2026.0.
+/// let trace = to_mod[0][0] + to_mod[1][1] + to_mod[2][2];
+/// let angle_deg = libm::acos((trace - 1.0) / 2.0).to_degrees();
+/// assert!((0.35..0.37).contains(&angle_deg));
+/// ```
+pub fn gcrs_to_mean_of_date_matrix(ts: &TimeScales) -> Result<Mat3, FrameTransformError> {
+    validate_finite("jd_tdb", ts.jd_tdb)?;
+    validate_mat3(
+        "gcrs_to_mean_of_date_matrix",
+        gcrs_to_mean_of_date_matrix_unchecked(ts.jd_tdb),
+    )
+}
+
+/// Rotation from the **mean equator and equinox of date** to GCRS,
+/// `(P * B)^T`, the transpose of [`gcrs_to_mean_of_date_matrix`].
+///
+/// Use it to bring vectors referred to the mean equator and equinox of date
+/// into GCRS, for example the analytic Sun and Moon series
+/// ([`crate::astro::bodies::sun_moon::sun_moon_eci`]) before they meet GCRF
+/// states; [`crate::astro::bodies::sun_moon::sun_moon_gcrs`] does exactly
+/// that. Reads only `ts.jd_tdb`; see [`gcrs_to_mean_of_date_matrix`] for the
+/// factors, the time argument and the errors (field
+/// `"mean_of_date_to_gcrs_matrix"` for a non-finite component).
+pub fn mean_of_date_to_gcrs_matrix(ts: &TimeScales) -> Result<Mat3, FrameTransformError> {
+    validate_finite("jd_tdb", ts.jd_tdb)?;
+    validate_mat3(
+        "mean_of_date_to_gcrs_matrix",
+        mean_of_date_to_gcrs_matrix_unchecked(ts.jd_tdb),
+    )
+}
+
+fn gcrs_to_mean_of_date_matrix_unchecked(jd_tdb: f64) -> Mat3 {
+    let p = compute_skyfield_precession_matrix_unchecked(jd_tdb);
+    let b = build_icrs_to_j2000();
+    inline_rxr(&p, &b)
+}
+
+/// `(P * B)^T` at a TDB Julian date; the unvalidated core of
+/// [`mean_of_date_to_gcrs_matrix`].
+pub(crate) fn mean_of_date_to_gcrs_matrix_unchecked(jd_tdb: f64) -> Mat3 {
+    inline_tr(&gcrs_to_mean_of_date_matrix_unchecked(jd_tdb))
 }
 
 /// Core GCRS->ITRS transform. Returns (x, y, z) in km.
@@ -1520,6 +1622,8 @@ mod tests {
         // second of UT1 error, so a long-term UT1 does not change it.
         let ts = outside_ut1_table();
         assert!(gcrs_to_true_of_date_matrix(&ts).is_ok());
+        assert!(gcrs_to_mean_of_date_matrix(&ts).is_ok());
+        assert!(mean_of_date_to_gcrs_matrix(&ts).is_ok());
         let teme = TemeStateKm {
             position_km: [7000.0, 0.0, 0.0],
             velocity_km_s: [0.0, 7.5, 0.0],
@@ -1765,6 +1869,77 @@ mod tests {
         assert!(greenwich_mean_sidereal_time_radians(&ts).is_err());
         assert!(gcrs_to_itrs_matrix(&ts).is_err());
         assert!(itrs_to_gcrs_compute(1.0, 2.0, 3.0, &ts).is_err());
+    }
+
+    #[test]
+    fn mean_of_date_matrices_are_the_iau2006_precession_times_the_frame_bias() {
+        use crate::astro::frames::precession::compute_skyfield_precession_matrix;
+        // Capitaine et al. (2003) P03 precession and the IAU 2006 frame bias,
+        // the factors gcrs_to_true_of_date_matrix applies before nutation.
+        for (year, month, day) in [(1990, 1, 1), (2000, 1, 1), (2026, 11, 23), (2050, 12, 31)] {
+            let ts = TimeScales::from_utc(year, month, day, 6, 30, 0.0).expect("valid UTC");
+            let p = compute_skyfield_precession_matrix(ts.jd_tdb).expect("precession");
+            let expected = inline_rxr(&p, &build_icrs_to_j2000());
+            let to_mod = gcrs_to_mean_of_date_matrix(&ts).expect("GCRS to mean of date");
+            assert_mat3_bits_eq(&to_mod, &expected);
+            let to_gcrs = mean_of_date_to_gcrs_matrix(&ts).expect("mean of date to GCRS");
+            assert_mat3_bits_eq(&to_gcrs, &inline_tr(&expected));
+
+            // Nutation times this rotation is the GCRS to true-of-date rotation;
+            // the two products round differently (compensated triple product
+            // there), so they agree to a few units of rounding.
+            let (dpsi, deps) = skyfield_iau2000a_radians_unchecked(ts.jd_tt);
+            let mean_ob = skyfield_mean_obliquity_radians_unchecked(ts.jd_tdb);
+            let n = build_skyfield_nutation_matrix_unchecked(mean_ob, mean_ob + deps, dpsi);
+            let tod = gcrs_to_true_of_date_matrix(&ts).expect("true of date");
+            let composed = inline_rxr(&n, &to_mod);
+            for i in 0..3 {
+                for j in 0..3 {
+                    assert!(
+                        (composed[i][j] - tod[i][j]).abs() <= 4.0 * f64::EPSILON,
+                        "N * P * B [{i}][{j}] {} vs {}",
+                        composed[i][j],
+                        tod[i][j]
+                    );
+                }
+            }
+
+            // A rotation: orthonormal to the second-order products of the bias
+            // angles its second-order bias matrix leaves out (largest
+            // |xi_0 * da_0| = 5.7e-15) and rounding.
+            let identity = inline_rxr(&to_gcrs, &to_mod);
+            for i in 0..3 {
+                for j in 0..3 {
+                    let expected = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (identity[i][j] - expected).abs() <= 1.0e-14,
+                        "(P B)^T (P B) [{i}][{j}] = {}",
+                        identity[i][j]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mean_of_date_matrices_reject_non_finite_tdb_only() {
+        let mut ts = TimeScales::from_utc(2020, 6, 24, 12, 34, 56.0).expect("valid UTC instant");
+        let reference = gcrs_to_mean_of_date_matrix(&ts).expect("valid");
+        // Fields the rotation does not read do not refuse it.
+        ts.jd_tt = f64::NAN;
+        ts.jd_ut1 = f64::NAN;
+        ts.ut1_fraction = f64::NAN;
+        assert_mat3_bits_eq(
+            &gcrs_to_mean_of_date_matrix(&ts).expect("reads jd_tdb only"),
+            &reference,
+        );
+        ts.jd_tdb = f64::INFINITY;
+        let refused = Err(FrameTransformError::InvalidInput {
+            field: "jd_tdb",
+            reason: "must be finite",
+        });
+        assert_eq!(gcrs_to_mean_of_date_matrix(&ts), refused);
+        assert_eq!(mean_of_date_to_gcrs_matrix(&ts), refused);
     }
 
     #[test]

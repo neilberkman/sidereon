@@ -13,6 +13,8 @@
 //! implicit in the of-date series, so the full GCRS->ITRS transform is NOT used
 //! here, which would otherwise double-count precession; this mirrors the
 //! GMST/GAST + nutation rotation those references consume the series with.
+//! For use with GCRF states, [`sun_moon::sun_moon_gcrs`] and its siblings rotate
+//! the series from mean of date to GCRS (IAU 2006 precession and frame bias).
 //!
 //! Precision is at the few-centimetre / sub-degree level, sufficient for the
 //! tidal and antenna-geometry corrections that consume these positions.
@@ -37,8 +39,8 @@ pub use rise_set::{
     MoonTransitKind, SunElevationCrossing, SunElevationCrossingKind, SunElevationOptions,
 };
 pub use sun_moon::{
-    sun_moon_ecef, sun_moon_ecef_with_polar_motion, sun_moon_eci, sun_moon_eci_at, SunMoon,
-    SunMoonError,
+    sun_moon_ecef, sun_moon_ecef_with_polar_motion, sun_moon_eci, sun_moon_eci_at, sun_moon_gcrs,
+    sun_moon_gcrs_at, sun_moon_gcrs_at_tdb_seconds, SunMoon, SunMoonError,
 };
 
 #[cfg(all(test, sidereon_repo_tests))]
