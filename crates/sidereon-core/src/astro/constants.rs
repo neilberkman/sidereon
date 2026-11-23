@@ -141,9 +141,13 @@ pub mod astro {
     pub const SOLAR_RADIATION_PRESSURE_N_M2: f64 = 4.56e-6;
     /// AU value used by the Montenbruck-Gill analytic Sun/Moon series.
     pub const MONTENBRUCK_AU_M: f64 = 149_597_870_691.0;
-    /// Solar photosphere radius (km), used by conical eclipse-shadow geometry.
+    /// Solar photosphere radius (km), used by the legacy linear conical
+    /// shadow functions and almanac eclipse geometry.
     pub const SOLAR_RADIUS_KM: f64 = 696_340.0;
-    /// Mean lunar radius (km), used by almanac eclipse geometry.
+    /// Nominal solar radius (km), IAU 2015 Resolution B3 (`6.957e8` m), used
+    /// by apparent-disc eclipse geometry.
+    pub const IAU_2015_SOLAR_RADIUS_KM: f64 = 695_700.0;
+    /// Mean lunar radius (km), used by almanac and lunar eclipse geometry.
     pub const MOON_RADIUS_KM: f64 = 1_737.4;
 }
 
