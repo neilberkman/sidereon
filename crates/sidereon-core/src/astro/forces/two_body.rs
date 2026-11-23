@@ -1,9 +1,12 @@
 use crate::astro::constants::MU_EARTH;
 use crate::astro::error::PropagationError;
-use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::forces::r#trait::{
+    expect_parameter_count, finite_partials, outer, validate_finite_state, AccelerationPartials,
+    ForceModel,
+};
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
-use nalgebra::Vector3;
+use nalgebra::{Matrix3, Vector3};
 
 /// Central point-mass gravity model for Cartesian propagation.
 ///
@@ -11,6 +14,9 @@ use nalgebra::Vector3;
 /// in the propagator's inertial frame. [`Default::default`] uses
 /// [`MU_EARTH`], and an exact zero position norm is reported as
 /// [`PropagationError::NumericalFailure`].
+/// [`ForceModel::acceleration_partials`] is the closed form
+/// `-mu / r³ * (I - 3 r̂ r̂ᵀ)` (Montenbruck & Gill, "Satellite Orbits",
+/// section 7.3).
 pub struct TwoBodyGravity {
     /// Gravitational parameter in km³/s² used to scale the central point-mass
     /// acceleration.
@@ -42,6 +48,36 @@ impl ForceModel for TwoBodyGravity {
         let r_mag = r_mag2.sqrt();
         Ok(state.position_km * (-self.mu / (r_mag2 * r_mag)))
     }
+
+    fn acceleration_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        _ctx: &PropagationContext,
+    ) -> Result<AccelerationPartials, PropagationError> {
+        expect_parameter_count(parameters, 0)?;
+        validate_finite_state(state)?;
+        point_mass_gradient(state.position_km, self.mu)
+            .map(|gradient| AccelerationPartials::position_only(-gradient))
+            .and_then(finite_partials)
+    }
+}
+
+/// `mu / d³ * (I - 3 d̂ d̂ᵀ)` for a separation vector `d`: the negated position
+/// gradient of the point-mass acceleration `-mu d / d³`.
+pub(crate) fn point_mass_gradient(
+    separation_km: Vector3<f64>,
+    mu_km3_s2: f64,
+) -> Result<Matrix3<f64>, PropagationError> {
+    let d2 = separation_km.norm_squared();
+    if d2 == 0.0 {
+        return Err(PropagationError::NumericalFailure(
+            "Zero position magnitude".to_string(),
+        ));
+    }
+    let d = d2.sqrt();
+    let unit = separation_km / d;
+    Ok((Matrix3::identity() - outer(&unit, &unit) * 3.0) * (mu_km3_s2 / (d2 * d)))
 }
 
 #[cfg(test)]

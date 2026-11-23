@@ -41,6 +41,12 @@ pub use crate::orbit_determination::{
     OrbitFitError, OrbitFitOptions, OrbitFitReport, OrbitFitSolution, OrbitResidualLedger,
     OrbitResidualStats, OrientedPreciseEphemerisStateSample, Ut1ProviderRole,
 };
+pub use crate::orbit_determination::{
+    fit_inertial_orbit_parameters, fit_inertial_orbit_parameters_with_validity,
+    fit_sp3_ecef_orbit_parameters, fit_sp3_ecef_orbit_parameters_with_validity,
+    EstimatedForceParameter, InertialPositionSample, OrbitParameterCovariance, OrbitParameterFit,
+    OrbitParameterFitError, OrbitParameterFitOptions, OrbitRtnResidual, STATE_PARAMETER_NAMES,
+};
 pub use crate::rinex_nav::{
     cnav_ura_ned_m, cnav_ura_nominal_m, is_beidou_geo, BroadcastGroupDelayTerm,
     BroadcastGroupDelays, BroadcastIssue, BroadcastRecord, CnavParameters, CnavSignal,

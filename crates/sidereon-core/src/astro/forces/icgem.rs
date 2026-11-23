@@ -1700,7 +1700,7 @@ mod tests {
     use crate::astro::forces::ForceModel;
     use crate::astro::propagator::PropagationContext;
     use crate::astro::state::CartesianState;
-    use crate::astro::time::scales::tt_seconds_from_tdb_seconds;
+    use crate::astro::time::scales::tt_from_tdb_j2000_seconds;
 
     const SYNTHETIC_ICGEM2: &str =
         include_str!("../../../tests/fixtures/icgem/synthetic_icgem2.gfc");
@@ -1714,7 +1714,7 @@ mod tests {
         assert!(gravity.is_time_variable());
         let position = [6900.0, -1300.0, 2100.0];
         for tdb in [1.2e8, 3.5e8, 6.1e8] {
-            let tt = tt_seconds_from_tdb_seconds(tdb);
+            let tt = tt_from_tdb_j2000_seconds(tdb);
             // TDB - TT stays within 1.7 ms.
             assert!((tdb - tt).abs() < 2.0e-3, "{tdb} {tt}");
             let state = CartesianState::new(tdb, position, [0.0, 7.5, 0.0]);
@@ -1793,6 +1793,50 @@ mod tests {
             "+0000101",
         ] {
             assert_eq!(parse_epoch(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn time_variable_force_model_uses_exact_round_trip_tdb_to_tt_inverse() {
+        use crate::astro::time::scales::{tdb_from_tt_j2000_seconds, tt_from_tdb_j2000_seconds};
+
+        // Synthetic icgem2.0 field with a linear trend anchored at J2000.0
+        // (20000101.1200) so sub-picosecond TT differences near J2000 show up
+        // directly in the evaluated acceleration.
+        let gfc = "\
+product_type               gravity_field
+modelname                  j2000_trend
+earth_gravity_constant     3.986004415e+14
+radius                     6.378136460e+06
+max_degree                 2
+errors                     no
+tide_system                tide_free
+norm                       fully_normalized
+format                     icgem2.0
+end_of_head
+gfc    0    0  1.000000000000e+00  0.000000000000e+00
+gfct   2    0  0.000000000000e+00  0.000000000000e+00  20000101.1200  20100101.0000
+trnd   2    0  1.000000000000e+10  0.000000000000e+00  20000101.1200  20100101.0000
+gfc    2    1  0.000000000000e+00  0.000000000000e+00
+gfc    2    2  0.000000000000e+00  0.000000000000e+00
+";
+        let field = IcgemGravityField::parse(gfc).expect("field");
+        let gravity = field.gravity(2, 0).expect("gravity");
+        let position = [6900.0, -1300.0, 2100.0];
+        let ctx = PropagationContext::default();
+        let tt_round_trip = 0.000_123_456_789_f64;
+        for tdb in [0.0, 10_001.0, tdb_from_tt_j2000_seconds(tt_round_trip)] {
+            let tt = tt_from_tdb_j2000_seconds(tdb);
+            let state = CartesianState::new(tdb, position, [0.0, 7.5, 0.0]);
+            let actual = gravity.acceleration(&state, &ctx).expect("acceleration");
+            let expected = gravity
+                .body_fixed_acceleration_at_km_s2(position, tt)
+                .expect("at TT");
+            assert_eq!(
+                [actual.x, actual.y, actual.z],
+                expected,
+                "tdb {tdb} must use tt_from_tdb_j2000_seconds ({tt})"
+            );
         }
     }
 }

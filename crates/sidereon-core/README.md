@@ -35,6 +35,12 @@ suite requires the repository.
 - GNSS satellite attitude (`astro::attitude::gnss`): nominal yaw steering, the published
   noon/midnight turn and shadow laws of GPS IIA/IIR/IIF/III, GLONASS-M, Galileo IOV/FOC and
   BeiDou-2/-3, orbit-normal mode, and the Sun-fixed DYB frame, checked against Orekit.
+- Batch orbit determination from SP3 or inertial positions (`orbit_determination`): the
+  initial state with force-model parameters (cannonball SRP `C_R`, constant and
+  once-per-revolution RTN empirical accelerations, or any parameter a force model lists),
+  partials from variational equations (SRP with the gradient of its Earth or Earth and
+  Moon shadow), covariance scaled by the variance factor, and RTN residuals, checked
+  against Orekit's batch least-squares estimator.
 - EGM96/EGM2008 geoid grids, including the public PROJ EGM96 GTX loader with
   explicit fused or separately rounded PROJ 9.3 interpolation.
 

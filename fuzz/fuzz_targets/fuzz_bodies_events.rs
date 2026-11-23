@@ -114,23 +114,68 @@ fuzz_target!(|data: &[u8]| {
             eclipse::shadow_fraction_with_model_and_moon(input.sat, input.sun, input.r1, model);
         if let Ok(fraction) = moon_res {
             assert!(
-                fraction.is_finite() && (0.0..=1.0).contains(&fraction),
-                "shadow_fraction_with_model_and_moon out of [0, 1]: {fraction}"
+                fraction.is_finite(),
+                "shadow_fraction_with_model_and_moon non-finite: {fraction}"
             );
         }
         let _ = eclipse::status_with_model_and_moon(input.sat, input.sun, input.r1, model);
+
+        // Each gradient function produces a finite shadow fraction and finite
+        // gradient, reports numerical failure when field evaluation produces
+        // non-finite derivatives, or refuses the same positions as the value
+        // function.
+        let check_gradient =
+            |api: &str,
+             value: Result<f64, eclipse::EclipseError>,
+             with_gradient: Result<(f64, [f64; 3]), eclipse::ShadowGradientError>| {
+                match (value, with_gradient) {
+                    (Ok(_), Ok((same, gradient))) => {
+                        assert!(same.is_finite(), "{api}: non-finite fraction: {same}");
+                        assert!(
+                            gradient.iter().all(|g| g.is_finite()),
+                            "{api}: {gradient:?}"
+                        );
+                    }
+                    (Ok(_), Err(error)) => assert!(
+                        matches!(error, eclipse::ShadowGradientError::NumericalFailure),
+                        "{api}: {error:?}"
+                    ),
+                    (Err(error), Err(eclipse::ShadowGradientError::Eclipse(same))) => {
+                        assert_eq!(error, same, "{api}: refusal");
+                    }
+                    (Err(error), other) => panic!("{api}: value refused ({error:?}) but {other:?}"),
+                }
+            };
+        check_gradient(
+            "events::eclipse::shadow_fraction_with_model_and_gradient",
+            eclipse::shadow_fraction_with_model(input.sat, input.sun, model),
+            eclipse::shadow_fraction_with_model_and_gradient(input.sat, input.sun, model),
+        );
+        check_gradient(
+            "events::eclipse::shadow_fraction_with_model_moon_and_gradient",
+            eclipse::shadow_fraction_with_model_and_moon(input.sat, input.sun, input.r1, model),
+            eclipse::shadow_fraction_with_model_moon_and_gradient(
+                input.sat, input.sun, input.r1, model,
+            ),
+        );
     }
     let moon_only = eclipse::moon_shadow_fraction(input.sat, input.sun, input.r1);
     if let Ok(fraction) = moon_only {
         assert!(
-            fraction.is_finite() && (0.0..=1.0).contains(&fraction),
-            "moon_shadow_fraction out of [0, 1]: {fraction}"
+            fraction.is_finite(),
+            "moon_shadow_fraction non-finite: {fraction}"
         );
     }
     let _ = eclipse::status_with_moon(input.sat, input.sun, input.r1);
 
     if let Ok(srp) = SolarRadiationPressure::new(1.2, 0.02) {
-        let srp = srp.with_moon_eclipse(input.bytes[3] & 1 == 1);
+        let srp = srp
+            .with_moon_eclipse(input.bytes[3] & 1 == 1)
+            .with_earth_shadow_model(if input.bytes[3] & 4 == 4 {
+                eclipse::EarthShadowModel::Wgs84Oblate
+            } else {
+                eclipse::EarthShadowModel::Spherical
+            });
         assert_ok_finite_or_err(
             "forces::SolarRadiationPressure::acceleration_with_sun_moon",
             srp.acceleration_with_sun_moon(input.sat.into(), input.sun.into(), input.r1.into())

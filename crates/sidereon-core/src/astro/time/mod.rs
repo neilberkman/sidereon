@@ -46,7 +46,8 @@ pub use model::{
 };
 pub use scales::{
     find_leap_seconds, gps_utc_offset_s, leap_second_table, tai_utc_offset_s, tcb_to_tdb_jd,
-    tcg_to_tt_jd, tdb_to_tcb_jd, timescale_offset_at_s, timescale_offset_s, tt_to_tcg_jd,
+    tcg_to_tt_jd, tdb_from_tt_j2000_seconds, tdb_minus_tt_seconds, tdb_to_tcb_jd,
+    timescale_offset_at_s, timescale_offset_s, tt_from_tdb_j2000_seconds, tt_to_tcg_jd,
     LeapSecondEntry, TimeOffsetError, TimeOffsetErrorCode, TimeScales, TimeTables,
     GLONASST_MINUS_UTC_S, TCG_TCB_REFERENCE_JD, TDB_TCB_OFFSET_TDB0_S, TDB_TCB_RATE_L_B,
     TT_TCG_RATE_L_G,

@@ -3,6 +3,7 @@ pub mod albedo;
 /// components in insertion order and returns the first component error.
 pub mod composite;
 pub mod drag;
+pub mod empirical;
 pub mod geopotential;
 pub mod icgem;
 /// Provides [`J2Gravity`], a degree-2 zonal-harmonic perturbation model built
@@ -14,7 +15,9 @@ pub mod third_body;
 pub mod tides;
 /// Defines the thread-safe [`ForceModel`] acceleration interface used by
 /// numerical propagation. Its [`ForceModel::acceleration`] method returns an
-/// acceleration in km/s² or [`crate::astro::error::PropagationError`].
+/// acceleration in km/s² or [`crate::astro::error::PropagationError`]; the
+/// partial-derivative and estimable-parameter methods serve the variational
+/// equations and orbit determination.
 pub mod r#trait;
 /// Provides [`TwoBodyGravity`], which returns central point-mass acceleration
 /// and reports an exact zero position norm as
@@ -25,6 +28,7 @@ pub mod zonal;
 pub use albedo::EarthRadiationPressure;
 pub use composite::CompositeForceModel;
 pub use drag::{DragForce, DragParameters, SourcedDragForce, SpaceWeather, SpaceWeatherSource};
+pub use empirical::{EmpiricalHarmonic, EmpiricalRtnAcceleration, RtnAxis};
 pub use geopotential::{
     SphericalHarmonicCoefficient, SphericalHarmonicGravity, SphericalHarmonicGravityConfig,
     TideSystem, EGM96_DEGREE_ORDER_36, EGM96_EMBEDDED_MAX_DEGREE, EGM96_EMBEDDED_MAX_ORDER,
@@ -35,7 +39,10 @@ pub use icgem::{
     IcgemSigmas, IcgemTermKind, IcgemTimeVariableTerm,
 };
 pub use j2::J2Gravity;
-pub use r#trait::ForceModel;
+pub use r#trait::{
+    difference_quotient_partials, expect_parameter_count, AccelerationPartials, ForceModel,
+    ForceParameter,
+};
 pub use relativity::SchwarzschildRelativity;
 pub use srp::SolarRadiationPressure;
 pub use third_body::{ThirdBodyBodies, ThirdBodyGravity};
@@ -50,3 +57,44 @@ pub use tides::{
 };
 pub use two_body::TwoBodyGravity;
 pub use zonal::{ZonalCoefficients, ZonalDegrees, ZonalGravity};
+
+#[cfg(test)]
+mod partials_tests;
+
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use crate::astro::bodies::sun_moon::sun_moon_eci;
+    use crate::astro::constants::time::{DAYS_PER_JULIAN_CENTURY, SECONDS_PER_DAY};
+    use crate::astro::constants::units::M_PER_KM;
+    use crate::astro::forces::third_body::sun_moon_positions_km;
+    use crate::astro::time::civil::j2000_seconds;
+    use crate::astro::time::scales::tt_from_tdb_j2000_seconds;
+    use nalgebra::Vector3;
+
+    /// TDB epochs from 1990 to 2050, one at the 2024-04-08 solar eclipse.
+    pub(crate) fn epochs_1990_to_2050() -> [f64; 4] {
+        [
+            j2000_seconds(1990, 2, 1, 0, 0, 0.0),
+            j2000_seconds(2024, 4, 8, 18, 17, 0.0),
+            j2000_seconds(2026, 11, 23, 0, 0, 0.0),
+            j2000_seconds(2050, 6, 30, 12, 0, 0.0),
+        ]
+    }
+
+    /// Geocentric GCRS Sun and Moon positions (km) via the force-model
+    /// production path.
+    pub(crate) fn gcrs_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
+        let bodies = sun_moon_positions_km(epoch_tdb_seconds).expect("GCRS Sun/Moon");
+        (bodies.sun_km, bodies.moon_km)
+    }
+
+    /// Geocentric mean-of-date Sun and Moon positions (km) at the TT of
+    /// `epoch_tdb_seconds`.
+    pub(crate) fn mean_of_date_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
+        let t = tt_from_tdb_j2000_seconds(epoch_tdb_seconds)
+            / (DAYS_PER_JULIAN_CENTURY * SECONDS_PER_DAY);
+        let bodies = sun_moon_eci(t).expect("mean of date");
+        let km = |v: [f64; 3]| Vector3::new(v[0] / M_PER_KM, v[1] / M_PER_KM, v[2] / M_PER_KM);
+        (km(bodies.sun), km(bodies.moon))
+    }
+}

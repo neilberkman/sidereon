@@ -3,15 +3,20 @@
 //! The acceleration is the single central-body term
 //! `GM/(c^2 r^3) * [ (4 GM/r - v^2) r + 4 (r . v) v ]`, as given by
 //! Montenbruck & Gill, "Satellite Orbits", equation 3.146. Position is in km,
-//! velocity is in km/s, and the returned acceleration is km/s^2.
+//! velocity is in km/s, and the returned acceleration is km/s^2. The term
+//! depends on both position and velocity; both partial-derivative blocks are
+//! the closed-form derivatives of that expression.
 
 use crate::astro::constants::physics::SPEED_OF_LIGHT_KM_S;
 use crate::astro::constants::MU_EARTH;
 use crate::astro::error::PropagationError;
-use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::forces::r#trait::{
+    expect_parameter_count, finite_partials, outer, validate_finite_state, AccelerationPartials,
+    ForceModel,
+};
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
-use nalgebra::Vector3;
+use nalgebra::{Matrix3, Vector3};
 
 /// Schwarzschild correction for a single central body.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,6 +73,55 @@ impl ForceModel for SchwarzschildRelativity {
             + state.velocity_km_s * (4.0 * r_dot_v);
 
         Ok(bracket * factor)
+    }
+
+    fn acceleration_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        _ctx: &PropagationContext,
+    ) -> Result<AccelerationPartials, PropagationError> {
+        expect_parameter_count(parameters, 0)?;
+        validate_finite_state(state)?;
+        if self.c_km_s.is_infinite() && self.c_km_s.is_sign_positive() {
+            return Ok(AccelerationPartials::zeros());
+        }
+        if !self.c_km_s.is_finite() || self.c_km_s <= 0.0 {
+            return Err(PropagationError::InvalidInput(
+                "c_km_s must be finite and positive".to_string(),
+            ));
+        }
+
+        let position = state.position_km;
+        let velocity = state.velocity_km_s;
+        let r2 = position.norm_squared();
+        if r2 == 0.0 {
+            return Err(PropagationError::NumericalFailure(
+                "Zero position magnitude".to_string(),
+            ));
+        }
+        // a = k [4 mu r / r⁴ - v² r / r³ + 4 (r . v) v / r³], k = mu / c².
+        let r = r2.sqrt();
+        let r3 = r2 * r;
+        let r4 = r2 * r2;
+        let r5 = r3 * r2;
+        let r6 = r3 * r3;
+        let v2 = velocity.norm_squared();
+        let r_dot_v = position.dot(&velocity);
+        let k = self.mu_km3_s2 / (self.c_km_s * self.c_km_s);
+        let identity = Matrix3::identity();
+        let rr = outer(&position, &position);
+        let wrt_position = (identity / r4 - rr * (4.0 / r6)) * (4.0 * self.mu_km3_s2)
+            - (identity / r3 - rr * (3.0 / r5)) * v2
+            + outer(&velocity, &velocity) * (4.0 / r3)
+            - outer(&velocity, &position) * (12.0 * r_dot_v / r5);
+        let wrt_velocity = (outer(&velocity, &position) * 4.0 - outer(&position, &velocity) * 2.0
+            + identity * (4.0 * r_dot_v))
+            / r3;
+        finite_partials(AccelerationPartials {
+            wrt_position: wrt_position * k,
+            wrt_velocity: wrt_velocity * k,
+        })
     }
 }
 

@@ -1,34 +1,60 @@
 //! Cannonball solar radiation pressure.
 //!
-//! The acceleration follows the Montenbruck & Gill cannonball SRP model,
-//! `-P_sr * (AU / |r_sun|)^2 * C_R * (A/m) * nu * s_hat`, where `s_hat`
-//! points from the satellite to the Sun. SI pressure and area-to-mass units are
-//! used internally, then converted from m/s^2 to km/s^2 for the propagation
-//! state.
+//! The acceleration follows Orekit 13.1.10's `SolarRadiationPressure` and
+//! `IsotropicRadiationSingleCoefficient` evaluation order:
+//! `k_ref = P_sr * d_ref^2`, `sun_sat = r_sat - r_sun` (in metres),
+//! `r2 = |sun_sat|^2`, `raw_p = nu * k_ref / r2`,
+//! `flux = (raw_p / sqrt(r2)) * sun_sat`,
+//! `a_m = (1 * (A/m) * C_R / 1) * flux`, converted from m/s^2 to km/s^2 for
+//! the propagation state.
 //!
-//! By default, the shadow fraction `1 - nu` uses the Earth-only conical shadow
-//! model ([`shadow_fraction`]). Callers can opt into lunar occultation via
-//! [`SolarRadiationPressure::with_moon_eclipse`], which evaluates combined
+//! [`ForceModel::acceleration`], [`ForceModel::acceleration_with_parameters`],
+//! [`ForceModel::acceleration_partials`] and
+//! [`ForceModel::parameter_partials`] take the Sun and Moon positions from
+//! the analytic series in GCRS
+//! ([`sun_moon_gcrs_at_tdb_seconds`](crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds)),
+//! the frame of the propagation state, with the series evaluated at the TT of
+//! the state's TDB epoch and rotated to GCRS at TDB;
+//! [`SolarRadiationPressure::acceleration_with_sun_moon`] takes caller
+//! positions in the state's frame.
+//!
+//! `nu` is the unshadowed lighting ratio (`1 - shadow`). By default the shadow
+//! is the Earth-only conical model
+//! ([`shadow_fraction`](crate::astro::events::eclipse::shadow_fraction)).
+//! [`SolarRadiationPressure::with_earth_shadow_model`] selects the WGS84
+//! oblate Earth ([`shadow_fraction_with_model`]), and
+//! [`SolarRadiationPressure::with_moon_eclipse`] replaces it with the combined
 //! Earth and Moon apparent-disc occultation
-//! ([`shadow_fraction_with_model_and_moon`]).
+//! ([`shadow_fraction_with_model_and_moon`]) under the selected Earth figure.
 //!
-//! [`ForceModel::acceleration`] takes the Sun and Moon positions from the
-//! analytic series in GCRS ([`sun_moon_gcrs_at_tdb_seconds`]), the frame of the
-//! propagation state; [`SolarRadiationPressure::acceleration_with_sun_moon`]
-//! takes caller positions in the state's frame.
-
-use crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds;
+//! `C_R` is the model's one estimable parameter
+//! ([`SolarRadiationPressure::CR_PARAMETER`]). The acceleration is linear in
+//! it, so its partial is the acceleration at `C_R = 1` under the same shadow
+//! model. The position partials are computed by forward-mode automatic
+//! differentiation in Hipparchus 4.0.3 `Gradient` arithmetic following Orekit
+//! 13.1.10's `FieldSpacecraftState` `acceleration` and
+//! `IsotropicRadiationSingleCoefficient` order. Where Orekit's evaluation
+//! produces a `NaN` or an infinity in any acceleration value or partial (for
+//! example, on the exact shadow axis in an annular eclipse, when a near-axis
+//! cross-product norm underflows to zero, or when intermediates such as
+//! `k_ref` or `factor` overflow even in umbra), the acceleration and position
+//! partials return [`PropagationError::NumericalFailure`].
 use crate::astro::constants::astro::{AU_KM, SOLAR_RADIATION_PRESSURE_N_M2};
 use crate::astro::constants::units::M_PER_KM;
 use crate::astro::error::PropagationError;
 use crate::astro::events::eclipse::{
-    shadow_fraction, shadow_fraction_with_model, shadow_fraction_with_model_and_moon,
-    EarthShadowModel,
+    ad::{FieldVec3, Grad, Vec3},
+    conical_shadow_field, earth_moon_lighting_ratio_double, earth_moon_lighting_ratio_field,
+    fast_math, shadow_fraction_with_model, EarthShadowModel,
 };
-use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::forces::r#trait::{
+    expect_parameter_count, finite_acceleration, finite_partials, validate_finite_state,
+    AccelerationPartials, ForceModel, ForceParameter,
+};
+use crate::astro::forces::third_body::sun_moon_positions_km;
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
-use nalgebra::Vector3;
+use nalgebra::{Matrix3, RowVector3, Vector3};
 
 /// Cannonball solar radiation pressure parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,6 +68,10 @@ pub struct SolarRadiationPressure {
 }
 
 impl SolarRadiationPressure {
+    /// Name of the estimable reflectivity coefficient `C_R` in
+    /// [`ForceModel::parameters`].
+    pub const CR_PARAMETER: &'static str = "srp.cr";
+
     /// Build from reflectivity coefficient `C_R` and area-to-mass `A/m` in m^2/kg.
     pub fn new(cr: f64, area_to_mass_m2_kg: f64) -> Result<Self, PropagationError> {
         Self::with_pressure(cr, area_to_mass_m2_kg, SOLAR_RADIATION_PRESSURE_N_M2, AU_KM)
@@ -70,10 +100,12 @@ impl SolarRadiationPressure {
 
     /// Enable or disable lunar occultation in the shadow factor.
     ///
-    /// Off by default so existing Earth-only propagation results stay
-    /// bit-identical. When enabled, [`ForceModel::acceleration`] combines
-    /// Earth and Moon apparent-disc occultation using the Moon position from
-    /// [`sun_moon_gcrs_at_tdb_seconds`].
+    /// Off by default, which keeps the Earth-only conical shadow. When
+    /// enabled, every evaluation (the acceleration, the acceleration at
+    /// estimated parameter values and both kinds of partials) uses the
+    /// combined Earth and Moon apparent-disc occultation, with the Moon
+    /// position from
+    /// [`sun_moon_gcrs_at_tdb_seconds`](crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds).
     pub fn with_moon_eclipse(mut self, enabled: bool) -> Self {
         self.include_moon_eclipse = enabled;
         self
@@ -84,7 +116,8 @@ impl SolarRadiationPressure {
         self.include_moon_eclipse
     }
 
-    /// Select the Earth figure model used for shadow evaluation.
+    /// Select the Earth figure model used for shadow evaluation, in the
+    /// conical shadow and in the apparent-disc occultation alike.
     ///
     /// Defaults to [`EarthShadowModel::Spherical`].
     pub fn with_earth_shadow_model(mut self, model: EarthShadowModel) -> Self {
@@ -135,6 +168,28 @@ impl SolarRadiationPressure {
         validate_vector("moon_pos_km", moon_pos_km)?;
         srp_acceleration_with_bodies(sat_pos_km, sun_pos_km, Some(moon_pos_km), *self)
     }
+
+    fn with_estimated_cr(&self, parameters: &[f64]) -> Result<Self, PropagationError> {
+        expect_parameter_count(parameters, 1)?;
+        let cr = parameters[0];
+        if !cr.is_finite() {
+            return Err(PropagationError::InvalidInput(
+                "cr must be finite".to_string(),
+            ));
+        }
+        Ok(Self { cr, ..*self })
+    }
+
+    /// The Sun position at a TDB epoch, and the Moon's when the shadow
+    /// function uses it.
+    fn bodies_km(
+        &self,
+        epoch_tdb_seconds: f64,
+    ) -> Result<(Vector3<f64>, Option<Vector3<f64>>), PropagationError> {
+        let bodies = sun_moon_positions_km(epoch_tdb_seconds)?;
+        let moon = self.include_moon_eclipse.then_some(bodies.moon_km);
+        Ok((bodies.sun_km, moon))
+    }
 }
 
 impl ForceModel for SolarRadiationPressure {
@@ -143,45 +198,197 @@ impl ForceModel for SolarRadiationPressure {
         state: &CartesianState,
         _ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        if !self.include_moon_eclipse && self.earth_shadow_model == EarthShadowModel::Spherical {
-            let sun_pos_km = sun_position_km(state.epoch_tdb_seconds)?;
-            return srp_acceleration_with_sun(state.position_km, sun_pos_km, *self);
-        }
-        let (sun_pos_km, moon_pos_km) = sun_moon_positions_km(state.epoch_tdb_seconds)?;
-        srp_acceleration_with_bodies(state.position_km, sun_pos_km, Some(moon_pos_km), *self)
+        let (sun_pos_km, moon_pos_km) = self.bodies_km(state.epoch_tdb_seconds)?;
+        srp_acceleration_with_bodies(state.position_km, sun_pos_km, moon_pos_km, *self)
+    }
+
+    fn parameters(&self) -> Vec<ForceParameter> {
+        vec![ForceParameter::new(Self::CR_PARAMETER, self.cr)]
+    }
+
+    fn parameter_count(&self) -> usize {
+        1
+    }
+
+    /// The acceleration with `C_R` replaced by `parameters[0]`. An estimated
+    /// `C_R` is a free scale: any finite value is accepted here, also zero or
+    /// a negative one, which [`SolarRadiationPressure::new`] refuses.
+    fn acceleration_with_parameters(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        _ctx: &PropagationContext,
+    ) -> Result<Vector3<f64>, PropagationError> {
+        let model = self.with_estimated_cr(parameters)?;
+        let (sun_pos_km, moon_pos_km) = model.bodies_km(state.epoch_tdb_seconds)?;
+        srp_acceleration_with_bodies(state.position_km, sun_pos_km, moon_pos_km, model)
+    }
+
+    /// The position partials via forward-mode automatic differentiation in
+    /// Hipparchus `Gradient` arithmetic following Orekit's field `acceleration`.
+    fn acceleration_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        _ctx: &PropagationContext,
+    ) -> Result<AccelerationPartials, PropagationError> {
+        let model = self.with_estimated_cr(parameters)?;
+        validate_finite_state(state)?;
+        let (sun_pos_km, moon_pos_km) = model.bodies_km(state.epoch_tdb_seconds)?;
+        srp_position_partials_with_bodies(state.position_km, sun_pos_km, moon_pos_km, model)
+            .map(AccelerationPartials::position_only)
+            .and_then(finite_partials)
+    }
+
+    fn parameter_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        _ctx: &PropagationContext,
+    ) -> Result<Vec<Vector3<f64>>, PropagationError> {
+        self.with_estimated_cr(parameters)?;
+        let (sun_pos_km, moon_pos_km) = self.bodies_km(state.epoch_tdb_seconds)?;
+        let per_unit_cr = Self { cr: 1.0, ..*self };
+        Ok(vec![srp_acceleration_with_bodies(
+            state.position_km,
+            sun_pos_km,
+            moon_pos_km,
+            per_unit_cr,
+        )?])
     }
 }
 
-fn sun_position_km(epoch_tdb_seconds: f64) -> Result<Vector3<f64>, PropagationError> {
-    let (sun, _moon) = sun_moon_positions_km(epoch_tdb_seconds)?;
-    Ok(sun)
-}
-
-fn sun_moon_positions_km(
-    epoch_tdb_seconds: f64,
-) -> Result<(Vector3<f64>, Vector3<f64>), PropagationError> {
-    let bodies = sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
-        .map_err(|error| PropagationError::ForceModelFailure(format!("Sun/Moon: {error}")))?;
-    Ok((
-        Vector3::new(
-            bodies.sun[0] / M_PER_KM,
-            bodies.sun[1] / M_PER_KM,
-            bodies.sun[2] / M_PER_KM,
-        ),
-        Vector3::new(
-            bodies.moon[0] / M_PER_KM,
-            bodies.moon[1] / M_PER_KM,
-            bodies.moon[2] / M_PER_KM,
-        ),
-    ))
-}
-
-fn srp_acceleration_with_sun(
+/// Refuse a satellite at the Sun's position, a Sun at the geocenter, and
+/// finite positions whose distance from each other overflows, as numerical
+/// failures. Non-finite positions are left to the shadow function, which
+/// refuses them.
+fn validate_sun_position(
     sat_pos_km: Vector3<f64>,
     sun_pos_km: Vector3<f64>,
+) -> Result<(), PropagationError> {
+    let sat_to_sun = sun_pos_km - sat_pos_km;
+    if sat_to_sun.norm_squared() == 0.0 {
+        return Err(PropagationError::NumericalFailure(
+            "Satellite coincident with Sun".to_string(),
+        ));
+    }
+    if sun_pos_km.norm_squared() == 0.0 {
+        return Err(PropagationError::NumericalFailure(
+            "Zero Sun position magnitude".to_string(),
+        ));
+    }
+    let finite_positions = sat_pos_km
+        .iter()
+        .chain(sun_pos_km.iter())
+        .all(|value| value.is_finite());
+    if finite_positions && !sat_to_sun.norm().is_finite() {
+        return Err(distance_overflow());
+    }
+    Ok(())
+}
+
+fn distance_overflow() -> PropagationError {
+    PropagationError::NumericalFailure("satellite-Sun distance overflows".to_string())
+}
+
+fn as_array(vector: Vector3<f64>) -> [f64; 3] {
+    [vector.x, vector.y, vector.z]
+}
+
+fn missing_moon() -> PropagationError {
+    PropagationError::ForceModelFailure("eclipse: missing Moon position".to_string())
+}
+
+fn eclipse_failure(error: impl std::fmt::Display) -> PropagationError {
+    PropagationError::ForceModelFailure(format!("eclipse: {error}"))
+}
+
+/// Lighting ratio `nu = 1 - shadow` in `double`, without round-tripping through
+/// `1 - shadow` when Orekit's apparent-disc model is active.
+fn lighting_ratio_of(
     model: SolarRadiationPressure,
-) -> Result<Vector3<f64>, PropagationError> {
-    srp_acceleration_with_bodies(sat_pos_km, sun_pos_km, None, model)
+    sat_pos_km: Vector3<f64>,
+    sun_pos_km: Vector3<f64>,
+    moon_pos_km: Option<Vector3<f64>>,
+) -> Result<f64, PropagationError> {
+    let (sat, sun) = (as_array(sat_pos_km), as_array(sun_pos_km));
+    if model.include_moon_eclipse {
+        let moon = moon_pos_km.ok_or_else(missing_moon)?;
+        earth_moon_lighting_ratio_double(sat, sun, as_array(moon), model.earth_shadow_model)
+            .map_err(eclipse_failure)
+    } else {
+        shadow_fraction_with_model(sat, sun, model.earth_shadow_model)
+            .map(|shadow| 1.0 - shadow)
+            .map_err(eclipse_failure)
+    }
+}
+
+/// Forward-mode lighting ratio `nu` with partials in `1/m` (`d(nu)/d(pos_m)`).
+fn lighting_ratio_field_of(
+    model: SolarRadiationPressure,
+    sat_pos_km: Vector3<f64>,
+    sun_pos_km: Vector3<f64>,
+    moon_pos_km: Option<Vector3<f64>>,
+) -> Result<Grad, PropagationError> {
+    let (sat, sun) = (as_array(sat_pos_km), as_array(sun_pos_km));
+    let ratio = if model.include_moon_eclipse {
+        let moon = moon_pos_km.ok_or_else(missing_moon)?;
+        earth_moon_lighting_ratio_field(sat, sun, as_array(moon), model.earth_shadow_model)
+            .map_err(eclipse_failure)?
+    } else {
+        let shadow_km =
+            conical_shadow_field(sat, sun, model.earth_shadow_model).map_err(eclipse_failure)?;
+        Grad {
+            value: 1.0 - shadow_km.value,
+            grad: [
+                -shadow_km.grad[0] / M_PER_KM,
+                -shadow_km.grad[1] / M_PER_KM,
+                -shadow_km.grad[2] / M_PER_KM,
+            ],
+        }
+    };
+    if !ratio.is_all_finite() {
+        return Err(PropagationError::NumericalFailure(
+            "eclipse: shadow fraction gradient is not finite".to_string(),
+        ));
+    }
+    Ok(ratio)
+}
+
+/// Evaluate Orekit `SolarRadiationPressure.acceleration` +
+/// `IsotropicRadiationSingleCoefficient.radiationPressureAcceleration` in m/s^2.
+fn srp_acceleration_m_s2(
+    sat_pos_km: Vector3<f64>,
+    sun_pos_km: Vector3<f64>,
+    ratio: f64,
+    model: SolarRadiationPressure,
+) -> Result<Vec3, PropagationError> {
+    let d_ref = model.au_km * M_PER_KM;
+    let k_ref = model.pressure_n_m2 * d_ref * d_ref;
+    let position = Vec3::new(
+        sat_pos_km.x * M_PER_KM,
+        sat_pos_km.y * M_PER_KM,
+        sat_pos_km.z * M_PER_KM,
+    );
+    let sun_position = Vec3::new(
+        sun_pos_km.x * M_PER_KM,
+        sun_pos_km.y * M_PER_KM,
+        sun_pos_km.z * M_PER_KM,
+    );
+    let sun_sat_vector = position.sub(sun_position);
+    let r2 = sun_sat_vector.norm_sq();
+    if !r2.is_finite() {
+        return Err(distance_overflow());
+    }
+    if r2 == 0.0 {
+        return Err(PropagationError::NumericalFailure(
+            "Satellite coincident with Sun".to_string(),
+        ));
+    }
+    let factor = 1.0 * model.area_to_mass_m2_kg * model.cr / 1.0;
+    let raw_p = ratio * k_ref / r2;
+    let flux = Vec3::from_scaled(raw_p / fast_math::sqrt(r2), sun_sat_vector);
+    Ok(Vec3::from_scaled(factor, flux))
 }
 
 fn srp_acceleration_with_bodies(
@@ -190,63 +397,77 @@ fn srp_acceleration_with_bodies(
     moon_pos_km: Option<Vector3<f64>>,
     model: SolarRadiationPressure,
 ) -> Result<Vector3<f64>, PropagationError> {
-    let sat_to_sun = sun_pos_km - sat_pos_km;
-    let sat_to_sun_r2 = sat_to_sun.norm_squared();
-    if sat_to_sun_r2 == 0.0 {
+    validate_sun_position(sat_pos_km, sun_pos_km)?;
+    let ratio = lighting_ratio_of(model, sat_pos_km, sun_pos_km, moon_pos_km)?;
+    let accel_m = srp_acceleration_m_s2(sat_pos_km, sun_pos_km, ratio, model)?;
+    finite_acceleration(Vector3::new(
+        accel_m.x / M_PER_KM,
+        accel_m.y / M_PER_KM,
+        accel_m.z / M_PER_KM,
+    ))
+}
+
+/// Evaluate Orekit `Field<Gradient>` `SolarRadiationPressure.acceleration` +
+/// `IsotropicRadiationSingleCoefficient.radiationPressureAcceleration` in m/s^2,
+/// with partials in `1/s^2`.
+fn srp_acceleration_field_m_s2(
+    sat_pos_km: Vector3<f64>,
+    sun_pos_km: Vector3<f64>,
+    ratio: Grad,
+    model: SolarRadiationPressure,
+) -> Result<FieldVec3, PropagationError> {
+    let d_ref = model.au_km * M_PER_KM;
+    let k_ref = model.pressure_n_m2 * d_ref * d_ref;
+    let position = FieldVec3::new(
+        Grad::variable(0, sat_pos_km.x * M_PER_KM),
+        Grad::variable(1, sat_pos_km.y * M_PER_KM),
+        Grad::variable(2, sat_pos_km.z * M_PER_KM),
+    );
+    let sun_position = FieldVec3::constant(Vec3::new(
+        sun_pos_km.x * M_PER_KM,
+        sun_pos_km.y * M_PER_KM,
+        sun_pos_km.z * M_PER_KM,
+    ));
+    let sun_sat_vector = position.sub(sun_position);
+    let r2 = sun_sat_vector.norm_sq();
+    if !r2.value.is_finite() {
+        return Err(distance_overflow());
+    }
+    if r2.value == 0.0 {
         return Err(PropagationError::NumericalFailure(
             "Satellite coincident with Sun".to_string(),
         ));
     }
-    let sun_r2 = sun_pos_km.norm_squared();
-    if sun_r2 == 0.0 {
-        return Err(PropagationError::NumericalFailure(
-            "Zero Sun position magnitude".to_string(),
-        ));
-    }
+    let factor = Grad::ONE
+        .reciprocal()
+        .mul(Grad::ONE)
+        .mul_f64(model.area_to_mass_m2_kg)
+        .mul(Grad::constant(model.cr));
+    let raw_p = ratio.mul_f64(k_ref).div(r2);
+    let flux = FieldVec3::from_scaled(raw_p.div(r2.sqrt()), sun_sat_vector);
+    Ok(FieldVec3::from_scaled(factor, flux))
+}
 
-    let sat_arr = [sat_pos_km.x, sat_pos_km.y, sat_pos_km.z];
-    let sun_arr = [sun_pos_km.x, sun_pos_km.y, sun_pos_km.z];
-    let shadow = if model.include_moon_eclipse {
-        let moon = moon_pos_km.ok_or_else(|| {
-            PropagationError::ForceModelFailure("eclipse: missing Moon position".to_string())
-        })?;
-        shadow_fraction_with_model_and_moon(
-            sat_arr,
-            sun_arr,
-            [moon.x, moon.y, moon.z],
-            model.earth_shadow_model,
-        )
-    } else if model.earth_shadow_model == EarthShadowModel::Spherical {
-        shadow_fraction(sat_arr, sun_arr)
-    } else {
-        shadow_fraction_with_model(sat_arr, sun_arr, model.earth_shadow_model)
-    }
-    .map_err(|error| PropagationError::ForceModelFailure(format!("eclipse: {error}")))?;
-    if !sat_to_sun_r2.is_finite() {
+/// Position partials of [`srp_acceleration_with_bodies`], in 1/s^2.
+fn srp_position_partials_with_bodies(
+    sat_pos_km: Vector3<f64>,
+    sun_pos_km: Vector3<f64>,
+    moon_pos_km: Option<Vector3<f64>>,
+    model: SolarRadiationPressure,
+) -> Result<Matrix3<f64>, PropagationError> {
+    validate_sun_position(sat_pos_km, sun_pos_km)?;
+    let ratio = lighting_ratio_field_of(model, sat_pos_km, sun_pos_km, moon_pos_km)?;
+    let accel = srp_acceleration_field_m_s2(sat_pos_km, sun_pos_km, ratio, model)?;
+    if !(accel.x.is_all_finite() && accel.y.is_all_finite() && accel.z.is_all_finite()) {
         return Err(PropagationError::NumericalFailure(
-            "Non-finite satellite-to-Sun distance".to_string(),
+            "SRP acceleration or position partial is not finite".to_string(),
         ));
     }
-    if !sun_r2.is_finite() {
-        return Err(PropagationError::NumericalFailure(
-            "Non-finite Sun position magnitude".to_string(),
-        ));
-    }
-    let illumination = 1.0 - shadow;
-    if illumination == 0.0 {
-        return Ok(Vector3::zeros());
-    }
-
-    let s_hat = sat_to_sun / sat_to_sun_r2.sqrt();
-    let pressure_scale = model.pressure_n_m2 * (model.au_km * model.au_km / sun_r2);
-    let accel_m_s2 = -pressure_scale * model.cr * model.area_to_mass_m2_kg * illumination * s_hat;
-    let accel_km_s2 = accel_m_s2 / M_PER_KM;
-    if !accel_km_s2.iter().all(|v| v.is_finite()) {
-        return Err(PropagationError::NumericalFailure(
-            "Non-finite SRP acceleration".to_string(),
-        ));
-    }
-    Ok(accel_km_s2)
+    Ok(Matrix3::from_rows(&[
+        RowVector3::from(accel.x.grad),
+        RowVector3::from(accel.y.grad),
+        RowVector3::from(accel.z.grad),
+    ]))
 }
 
 fn validate_positive(field: &'static str, value: f64) -> Result<(), PropagationError> {
@@ -268,209 +489,5 @@ fn validate_vector(field: &'static str, vector: Vector3<f64>) -> Result<(), Prop
 }
 
 #[cfg(test)]
-mod tests {
-    //! Clean-room validation anchors:
-    //!
-    //! The expected 1 AU acceleration magnitude is the published cannonball SRP
-    //! pressure `4.56e-6 N/m^2` multiplied by `C_R * A/m` and converted from
-    //! m/s^2 to km/s^2. The shadow tests use fixed conical geometry and the
-    //! existing eclipse helper, whose return value is geometric shadow fraction.
-
-    use super::*;
-    use crate::astro::constants::astro::AU_KM;
-
-    #[test]
-    fn one_au_magnitude_matches_pressure_area_mass_scale() {
-        let model = SolarRadiationPressure::new(1.2, 0.02).expect("valid SRP");
-        let sat = Vector3::new(7000.0, 0.0, 0.0);
-        let sun = Vector3::new(AU_KM, 0.0, 0.0);
-        let accel = srp_acceleration_with_sun(sat, sun, model).expect("SRP acceleration");
-
-        let expected_km_s2 = 4.56e-6 * 1.2 * 0.02 / M_PER_KM;
-        assert!((accel.norm() - expected_km_s2).abs() < 1.0e-24);
-    }
-
-    #[test]
-    fn acceleration_is_zero_in_deep_umbra() {
-        let model = SolarRadiationPressure::new(1.2, 0.02).expect("valid SRP");
-        let sat = Vector3::new(-7000.0, 0.0, 0.0);
-        let sun = Vector3::new(AU_KM, 0.0, 0.0);
-        let accel = srp_acceleration_with_sun(sat, sun, model).expect("SRP acceleration");
-
-        assert_eq!(accel, Vector3::zeros());
-    }
-
-    #[test]
-    fn direction_is_away_from_sun() {
-        let model = SolarRadiationPressure::new(1.0, 0.01).expect("valid SRP");
-        let sat = Vector3::new(7000.0, 0.0, 0.0);
-        let sun = Vector3::new(AU_KM, 0.0, 0.0);
-        let accel = srp_acceleration_with_sun(sat, sun, model).expect("SRP acceleration");
-
-        assert!(accel.x < 0.0);
-        assert_eq!(accel.y, 0.0);
-        assert_eq!(accel.z, 0.0);
-    }
-
-    #[test]
-    fn moon_eclipse_is_opt_in_and_attenuates_srp() {
-        let default_model = SolarRadiationPressure::new(1.2, 0.02).expect("valid SRP");
-        assert!(!default_model.moon_eclipse_enabled());
-        assert_eq!(
-            default_model.earth_shadow_model(),
-            EarthShadowModel::Spherical
-        );
-
-        let moon_model = default_model.with_moon_eclipse(true);
-        assert!(moon_model.moon_eclipse_enabled());
-
-        let sat = Vector3::new(7_000.0, 0.0, 0.0);
-        let sun = Vector3::new(AU_KM, 0.0, 0.0);
-        let moon_clear = Vector3::new(0.0, 384_400.0, 0.0);
-        let moon_total = Vector3::new(7_000.0 + 356_000.0, 0.0, 0.0);
-        let moon_annular = Vector3::new(7_000.0 + 405_000.0, 0.0, 0.0);
-
-        // Clear Moon matches default bit-for-bit in full sunlight.
-        let accel_default = default_model
-            .acceleration_with_sun_moon(sat, sun, moon_clear)
-            .expect("default SRP");
-        let accel_clear = moon_model
-            .acceleration_with_sun_moon(sat, sun, moon_clear)
-            .expect("moon-enabled clear SRP");
-        for i in 0..3 {
-            assert_eq!(accel_clear[i].to_bits(), accel_default[i].to_bits());
-        }
-
-        // Default ignores lunar umbra; opt-in zeroes acceleration.
-        let accel_default_total = default_model
-            .acceleration_with_sun_moon(sat, sun, moon_total)
-            .expect("default ignores moon");
-        for i in 0..3 {
-            assert_eq!(accel_default_total[i].to_bits(), accel_default[i].to_bits());
-        }
-        let accel_total = moon_model
-            .acceleration_with_sun_moon(sat, sun, moon_total)
-            .expect("lunar total SRP");
-        assert_eq!(accel_total, Vector3::zeros());
-
-        // Annular lunar eclipse reduces SRP without zeroing it.
-        let accel_annular = moon_model
-            .acceleration_with_sun_moon(sat, sun, moon_annular)
-            .expect("lunar annular SRP");
-        assert!(accel_annular.x < 0.0);
-        assert!(accel_annular.norm() < 0.25 * accel_clear.norm());
-        assert!(accel_annular.norm() > 0.1 * accel_clear.norm());
-
-        // Non-finite Moon position returns a typed error.
-        let err = moon_model
-            .acceleration_with_sun_moon(sat, sun, Vector3::new(f64::NAN, 0.0, 0.0))
-            .expect_err("non-finite moon rejected");
-        assert!(matches!(err, PropagationError::InvalidInput(_)));
-    }
-
-    #[test]
-    fn non_finite_state_position_preserves_force_model_error_variant() {
-        let model = SolarRadiationPressure::new(1.2, 0.02).expect("valid SRP");
-        let state = CartesianState::new(0.0, [f64::NAN, 0.0, 0.0], [0.0, 7.5, 0.0]);
-        let ctx = PropagationContext::default();
-        let err = model
-            .acceleration(&state, &ctx)
-            .expect_err("non-finite state position must fail");
-        assert!(
-            matches!(err, PropagationError::ForceModelFailure(_)),
-            "expected ForceModelFailure, got {err:?}"
-        );
-    }
-
-    /// TDB epochs from 1990 to 2050, one at the 2024-04-08 solar eclipse.
-    fn epochs_1990_to_2050() -> [f64; 4] {
-        use crate::astro::time::civil::j2000_seconds;
-        [
-            j2000_seconds(1990, 2, 1, 0, 0, 0.0),
-            j2000_seconds(2024, 4, 8, 18, 17, 0.0),
-            j2000_seconds(2026, 11, 23, 0, 0, 0.0),
-            j2000_seconds(2050, 6, 30, 12, 0, 0.0),
-        ]
-    }
-
-    fn gcrs_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
-        let bodies =
-            crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
-                .expect("GCRS Sun/Moon");
-        let km = |v: [f64; 3]| Vector3::new(v[0] / M_PER_KM, v[1] / M_PER_KM, v[2] / M_PER_KM);
-        (km(bodies.sun), km(bodies.moon))
-    }
-
-    fn mean_of_date_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
-        let t = crate::astro::time::scales::tt_seconds_from_tdb_seconds(epoch_tdb_seconds)
-            / (36_525.0 * 86_400.0);
-        let bodies = crate::astro::bodies::sun_moon::sun_moon_eci(t).expect("mean of date");
-        let km = |v: [f64; 3]| Vector3::new(v[0] / M_PER_KM, v[1] / M_PER_KM, v[2] / M_PER_KM);
-        (km(bodies.sun), km(bodies.moon))
-    }
-
-    #[test]
-    fn acceleration_equals_the_caller_vector_path_with_the_gcrs_sun_and_moon() {
-        let ctx = PropagationContext::default();
-        let base = SolarRadiationPressure::new(1.3, 0.02).expect("valid SRP");
-        let models = [
-            base,
-            base.with_moon_eclipse(true),
-            base.with_earth_shadow_model(EarthShadowModel::Wgs84Oblate),
-            base.with_moon_eclipse(true)
-                .with_earth_shadow_model(EarthShadowModel::Wgs84Oblate),
-        ];
-        for epoch in epochs_1990_to_2050() {
-            let (sun, moon) = gcrs_sun_moon_km(epoch);
-            let s_hat = sun.normalize();
-            let across = s_hat.cross(&Vector3::z()).normalize();
-            // Sunlit, Earth penumbra, GEO behind the Earth, and a GNSS orbit.
-            let positions = [
-                s_hat * 7_000.0,
-                -s_hat * 7_000.0 + across * 6_365.0,
-                -s_hat * 42_164.0 + across * 1_000.0,
-                Vector3::new(26_560.0, 1_200.0, -3_400.0),
-            ];
-            for position in positions {
-                let state = CartesianState::new(epoch, position.into(), [0.0, 7.5, 0.0]);
-                for model in models {
-                    let from_state = model.acceleration(&state, &ctx).expect("acceleration");
-                    let from_vectors = model
-                        .acceleration_with_sun_moon(position, sun, moon)
-                        .expect("caller vectors");
-                    assert_eq!(
-                        from_state, from_vectors,
-                        "epoch {epoch} position {position:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn acceleration_turns_away_from_the_mean_of_date_sun_by_the_precession() {
-        // Read as GCRS, the mean of date Sun is off by the precession since
-        // J2000.0 plus the frame bias, 0.376 deg at 2026-11-23; SRP on a sunlit
-        // satellite turns by that angle between the two.
-        let epoch = crate::astro::time::civil::j2000_seconds(2026, 11, 23, 0, 0, 0.0);
-        let (sun, moon) = gcrs_sun_moon_km(epoch);
-        let (mean_sun, mean_moon) = mean_of_date_sun_moon_km(epoch);
-        let model = SolarRadiationPressure::new(1.3, 0.02).expect("valid SRP");
-        let position = sun.normalize() * 7_000.0;
-        let state = CartesianState::new(epoch, position.into(), [0.0, 7.5, 0.0]);
-        let used = model
-            .acceleration(&state, &PropagationContext::default())
-            .expect("acceleration");
-        let with_mean = model
-            .acceleration_with_sun_moon(position, mean_sun, mean_moon)
-            .expect("mean of date Sun");
-        let angle_deg = used.angle(&with_mean).to_degrees();
-        assert!((0.37..0.38).contains(&angle_deg), "{angle_deg} deg");
-        assert_eq!(
-            used,
-            model
-                .acceleration_with_sun_moon(position, sun, moon)
-                .expect("GCRS")
-        );
-    }
-}
+#[path = "srp_tests.rs"]
+mod tests;

@@ -12,7 +12,7 @@ use crate::astro::frames::transforms::{
     PolarMotion, Ut1Gate,
 };
 use crate::astro::math::mat3::{inline_rxr, inline_tr, Mat3};
-use crate::astro::time::civil::{civil_from_j2000_seconds, j2000_seconds_from_split};
+use crate::astro::time::civil::{civil_fields_from_j2000_seconds, j2000_seconds_from_split};
 use crate::astro::time::model::{Instant, InstantRepr, TimeScale};
 use crate::astro::time::scales::TimeScales;
 use crate::astro::time::{DegradeReason, Validated, ValidityMode};
@@ -523,25 +523,11 @@ fn time_scales_from_scale_j2000_seconds(
     if !epoch_j2000_s.is_finite() {
         return Err(invalid_input("epoch_j2000_s", "must be finite"));
     }
-    let whole = epoch_j2000_s.floor();
-    if whole < i64::MIN as f64 || whole > i64::MAX as f64 {
-        return Err(invalid_input(
-            "epoch_j2000_s",
-            "whole seconds are out of range",
-        ));
-    }
-    let fraction = epoch_j2000_s - whole;
-    let (year, month, day, hour, minute, second) = civil_from_j2000_seconds(whole as i64);
-    TimeScales::from_scale(
-        scale,
-        year as i32,
-        month as i32,
-        day as i32,
-        hour as i32,
-        minute as i32,
-        second as f64 + fraction,
-    )
-    .map_err(|_| invalid_input("epoch_j2000_s", "time-scale conversion failed"))
+    let (year, month, day, hour, minute, second) =
+        civil_fields_from_j2000_seconds(epoch_j2000_s)
+            .ok_or_else(|| invalid_input("epoch_j2000_s", "outside the calendar range"))?;
+    TimeScales::from_scale(scale, year, month, day, hour, minute, second)
+        .map_err(|_| invalid_input("epoch_j2000_s", "time-scale conversion failed"))
 }
 
 fn invalid_input(field: &'static str, reason: &'static str) -> FrameTransformError {
@@ -658,5 +644,25 @@ mod tests {
         .expect("series provider");
         assert!(provider.polar_motion_at_tdb_seconds(-1.0).is_err());
         assert!(provider.polar_motion_at_tdb_seconds(11.0).is_err());
+    }
+
+    #[test]
+    fn an_epoch_outside_the_calendar_is_invalid_input() {
+        // i64::MAX seconds overflow the civil date's noon offset; 2^32
+        // Gregorian years past J2000 wrap into 0..=9999 when the year is
+        // narrowed to 32 bits.
+        let provider = TdbEarthOrientationProvider::new();
+        for epoch in [
+            i64::MAX as f64,
+            i64::MIN as f64,
+            1.355_371_402_117_12e17,
+            -1.355_371_402_117_12e17,
+        ] {
+            let result = provider.orientation_at_tdb_seconds(epoch);
+            assert!(
+                matches!(result, Err(FrameTransformError::InvalidInput { .. })),
+                "{epoch:e}: {result:?}"
+            );
+        }
     }
 }

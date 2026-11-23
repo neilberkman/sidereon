@@ -5,7 +5,96 @@
 //! ITRS/ECEF meters at scale-tagged epochs. They are transformed to GCRS
 //! kilometers with the shared frame pipeline before the numerical propagator is
 //! evaluated. Reported residuals are projected into the propagated state's RTN
-//! frame and accumulated per satellite and per constellation.
+//! frame and accumulated per satellite and per constellation, labelled with
+//! the samples' own time scale. The trajectory is propagated as described in
+//! "Time argument" below; the fitted initial state, and a caller-supplied
+//! seed, carry the TDB epoch of the first sample.
+//!
+//! # Force-parameter estimation
+//!
+//! [`fit_sp3_ecef_orbit_parameters`] and [`fit_inertial_orbit_parameters`]
+//! estimate the initial Cartesian state of one satellite together with
+//! selected dynamic parameters of its force models from the positions of an
+//! arc: the cannonball solar radiation pressure coefficient
+//! ([`SolarRadiationPressure::CR_PARAMETER`]), empirical accelerations in the
+//! radial, along-track and cross-track frame ([`EmpiricalRtnAcceleration`]),
+//! or any parameter a [`ForceModel`] lists through
+//! [`ForceModel::parameters`]. The estimator reads parameters only through
+//! that interface, so a force model added later plugs in by implementing it.
+//!
+//! ## Method
+//!
+//! Weighted batch least squares, iterated by Gauss-Newton (Montenbruck &
+//! Gill, "Satellite Orbits", section 8.1). The partial derivatives of the
+//! modelled positions with respect to the initial state and the force
+//! parameters are the state transition and sensitivity matrices integrated
+//! with the trajectory from the variational equations
+//! ([`propagate_variational`], section 7.2); no perturbed trajectory is
+//! propagated. Each iteration scales the columns of the weighted design
+//! matrix to unit length and solves it by singular value decomposition
+//! (section 8.2), which also gives the condition number of the normal
+//! equations. A step whose predicted decrease of the weighted sum of squared
+//! residuals is large enough for the sum to resolve, and which raises the sum
+//! instead, is halved, at most eight times; smaller steps are taken whole,
+//! because the sum carries the integration error of the trajectory and cannot
+//! rank them. The iteration has converged when a whole step `dx` is shorter
+//! than [`OrbitParameterFitOptions::convergence_threshold`] formal standard
+//! deviations: `sqrt(dx^T N dx)`, with `N` the normal matrix of the a-priori
+//! weights. That length bounds the move of every parameter by the same
+//! fraction of its formal standard deviation and, unlike the parameters'
+//! moves taken one at a time, also bounds the move along well-determined
+//! combinations of strongly correlated parameters. The result is linearized
+//! at the last estimate.
+//!
+//! ## Weights, variance factor and covariance
+//!
+//! Every position component carries the weight `1 / sigma^2` with `sigma` =
+//! [`OrbitParameterFitOptions::observation_sigma_m`]. With `m` residual
+//! components (three per observation) and `n` estimated parameters, the
+//! a-posteriori variance factor is `s0^2 = sum((o - c)^2 / sigma^2) / (m - n)`
+//! and the reported covariance is `s0^2 (H^T W H)^-1` (section 8.1): the
+//! formal covariance scaled by the variance factor, so it does not depend on
+//! `sigma`. An arc with `m <= n` has no residual degrees of freedom and
+//! reports [`OrbitParameterCovariance::Unbounded`].
+//!
+//! ## Time argument
+//!
+//! Both fits, the state-only fit above included, convert every sample epoch
+//! from its own time scale to TT and to TDB through the crate's time scales
+//! and propagate with [`propagate_variational`] or the same integration
+//! without the matrices. The equations of motion of an Earth satellite are
+//! integrated with Terrestrial Time as the time argument (IERS Conventions
+//! 2010, chapter 10), so the time between two samples is the difference of
+//! their TT, exact SI seconds, which a difference of TDB is not (it departs
+//! by up to 3.4e-10 of itself). The force models receive TDB, as
+//! [`ForceModel::acceleration`] specifies: each sample's own TDB at its epoch
+//! and, between samples, TDB that never leaves the span of the two, so a
+//! body-fixed frame provider covering the samples' TDB covers every
+//! evaluation. The analytic Sun and Moon series, defined in TT, are evaluated
+//! at the TT of that TDB. The fitted initial state and the residual epochs
+//! are TDB; [`OrbitRtnResidual::variational_epoch`] gives the epochs that
+//! reproduce the fitted trajectory with [`propagate_variational`].
+//! [`StatePropagator`] integrates with TDB as its time argument, and a state
+//! propagated with it departs from the fitted trajectory by that rate times
+//! the elapsed time, up to 0.12 m a day at GNSS altitude.
+//!
+//! ## Validation
+//!
+//! `tests/orbit_parameter_fit_orekit.rs` compares the estimates, the
+//! covariance, the variance factor and the post-fit residuals with Orekit's
+//! `BatchLSEstimator`, with `ParameterDriver`s selected on the same force
+//! models, run on the same observations from the same initial guess: GPS G03
+//! of the CODE MGEX final orbit of 2020-06-25
+//! (`tests/fixtures/sp3/COD0MGXFIN_20201770000_01D_05M_ORB.SP3`), fitted for
+//! the state with C_R, with C_R and constant RTN accelerations, and with the
+//! nine RTN terms.
+//!
+//! [`SolarRadiationPressure::CR_PARAMETER`]: crate::astro::forces::SolarRadiationPressure::CR_PARAMETER
+//! [`EmpiricalRtnAcceleration`]: crate::astro::forces::EmpiricalRtnAcceleration
+//! [`ForceModel`]: crate::astro::forces::ForceModel
+//! [`ForceModel::parameters`]: crate::astro::forces::ForceModel::parameters
+//! [`ForceModel::acceleration`]: crate::astro::forces::ForceModel::acceleration
+//! [`propagate_variational`]: crate::astro::propagator::propagate_variational
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -25,18 +114,29 @@ use crate::astro::math::least_squares::{
     SolveOptions, Status, TrustRegionSolve,
 };
 use crate::astro::math::portable;
+use crate::astro::propagator::variational::propagate_trajectory;
 use crate::astro::propagator::{
     ForceModelKind, IntegratorKind, IntegratorOptions, PropagationContext, StatePropagator,
+    VariationalEpoch, VariationalEquations,
 };
 use crate::astro::state::CartesianState;
-use crate::astro::time::civil::{civil_from_j2000_seconds, j2000_seconds_from_split};
-use crate::astro::time::model::{Instant, TimeScale};
+use crate::astro::time::civil::{civil_fields_from_j2000_seconds, j2000_seconds_from_split};
+use crate::astro::time::model::{Instant, InstantRepr, TimeScale};
 use crate::astro::time::scales::TimeScales;
 use crate::astro::time::{Validated, ValidityMode};
 use crate::constants::{M_PER_KM, SECONDS_PER_DAY};
 use crate::geometry_quality::{classify, GeometryQuality, GeometryQualityThresholds};
 use crate::sp3::{sp3_ecef_state_to_eci, PreciseEphemerisSample, PreciseEphemerisStateSample, Sp3};
 use crate::{GnssSatelliteId, GnssSystem};
+
+mod parameters;
+
+pub use parameters::{
+    fit_inertial_orbit_parameters, fit_inertial_orbit_parameters_with_validity,
+    fit_sp3_ecef_orbit_parameters, fit_sp3_ecef_orbit_parameters_with_validity,
+    EstimatedForceParameter, InertialPositionSample, OrbitParameterCovariance, OrbitParameterFit,
+    OrbitParameterFitError, OrbitParameterFitOptions, OrbitRtnResidual, STATE_PARAMETER_NAMES,
+};
 
 const STATE_PARAM_COUNT: usize = 6;
 const MIN_SEED_SAMPLES: usize = 2;
@@ -117,7 +217,8 @@ pub enum OrbitFitCovariance {
 pub struct OrbitFitSolution {
     /// Satellite fitted by this solution.
     pub satellite: GnssSatelliteId,
-    /// Estimated inertial initial state.
+    /// Estimated inertial initial state at the first sample, its epoch the
+    /// TDB of that sample.
     pub initial_state: CartesianState,
     /// Fitted state covariance, or an unbounded marker for short arcs.
     pub covariance: OrbitFitCovariance,
@@ -369,7 +470,8 @@ fn fit_sp3_precise_orbit_gated(
 }
 
 /// Fit one satellite from a parsed SP3 product with a caller-supplied arc-start
-/// initial-state seed.
+/// initial-state seed. The seed's epoch is the TDB of the first sample,
+/// seconds past J2000.
 pub fn fit_sp3_precise_orbit_with_initial_state(
     product: &Sp3,
     satellite: GnssSatelliteId,
@@ -736,7 +838,8 @@ fn fit_precise_ephemeris_sample_orbit_gated(
 }
 
 /// Fit one satellite from precise ephemeris samples with a caller-supplied
-/// arc-start initial-state seed.
+/// arc-start initial-state seed. The seed's epoch is the TDB of the first
+/// sample, seconds past J2000.
 pub fn fit_precise_ephemeris_sample_orbit_with_initial_state(
     samples: &[PreciseEphemerisSample],
     satellite: GnssSatelliteId,
@@ -1186,7 +1289,7 @@ fn fit_one_observation_arc(
     let covariance = fit_covariance(satellite, &physical_jacobian, report.cost)?;
     let final_params = unscale_params(report.x.as_slice(), &param_scales);
     let initial_state = CartesianState::new(
-        observations[0].epoch_j2000_s,
+        observations[0].epoch_tdb_j2000_s,
         [final_params[0], final_params[1], final_params[2]],
         [final_params[3], final_params[4], final_params[5]],
     );
@@ -1224,7 +1327,15 @@ fn fit_covariance(
 
 #[derive(Debug, Clone)]
 struct OrbitObservation {
-    epoch_j2000_s: f64,
+    /// The sample's epoch in `time_scale`, seconds past J2000: the residual
+    /// ledger's label.
+    label_j2000_s: f64,
+    /// TDB of the same instant, seconds past J2000: the epoch of the
+    /// propagated state and of the force models.
+    epoch_tdb_j2000_s: f64,
+    /// TT of the same instant, seconds past J2000: the time argument of the
+    /// propagation.
+    epoch_tt_j2000_s: f64,
     time_scale: TimeScale,
     time_scales: TimeScales,
     orientation: Option<EarthOrientation>,
@@ -1241,8 +1352,9 @@ fn collect_observations(
     let mut observations = Vec::new();
     for sample in samples.iter().filter(|sample| sample.sat == satellite) {
         validate_position(sample.position_ecef_m, satellite)?;
-        let epoch_j2000_s = instant_j2000_seconds(sample.epoch, satellite)?;
-        let ts = time_scales_from_instant(sample.epoch, epoch_j2000_s, satellite)?;
+        let label_j2000_s = instant_j2000_seconds(sample.epoch, satellite)?;
+        let ts = time_scales_from_instant(sample.epoch, label_j2000_s, satellite)?;
+        let (epoch_tdb_j2000_s, epoch_tt_j2000_s) = dynamical_seconds(&ts, satellite)?;
         let ts = gate
             .admit(ts)
             .map_err(|source| OrbitFitError::Frame { satellite, source })?;
@@ -1250,7 +1362,9 @@ fn collect_observations(
         let (x, y, z) = itrs_to_gcrs_compute(x_m / M_PER_KM, y_m / M_PER_KM, z_m / M_PER_KM, &ts)
             .map_err(|source| OrbitFitError::Frame { satellite, source })?;
         observations.push(OrbitObservation {
-            epoch_j2000_s,
+            label_j2000_s,
+            epoch_tdb_j2000_s,
+            epoch_tt_j2000_s,
             time_scale: sample.epoch.scale,
             time_scales: ts,
             orientation: None,
@@ -1279,8 +1393,13 @@ fn collect_state_observations(
         let inertial = sp3_ecef_state_to_eci(&oriented.sample, &oriented.orientation)
             .map_err(|source| OrbitFitError::Frame { satellite, source })?;
         let [x_m, y_m, z_m] = oriented.sample.position_ecef_m;
+        let label_j2000_s = instant_j2000_seconds(oriented.sample.epoch, satellite)?;
+        let (epoch_tdb_j2000_s, epoch_tt_j2000_s) =
+            dynamical_seconds(&oriented.orientation.time_scales(), satellite)?;
         observations.push(OrbitObservation {
-            epoch_j2000_s: inertial.epoch_tdb_seconds,
+            label_j2000_s,
+            epoch_tdb_j2000_s,
+            epoch_tt_j2000_s,
             time_scale: oriented.sample.epoch.scale,
             time_scales: oriented.orientation.time_scales(),
             orientation: Some(oriented.orientation),
@@ -1302,7 +1421,8 @@ fn collect_provider_sp3_observations(
     let mut observations = Vec::new();
     for sample in samples.iter().filter(|sample| sample.sat == satellite) {
         validate_position(sample.position_ecef_m, satellite)?;
-        let epoch_tdb_s = tdb_seconds_from_instant(sample.epoch, satellite)?;
+        let (epoch_tdb_s, epoch_tt_j2000_s) =
+            dynamical_seconds_from_instant(sample.epoch, satellite)?;
         let orientation = orientation_provider
             .orientation_at_tdb_seconds(epoch_tdb_s)
             .map_err(|source| OrbitFitError::Frame { satellite, source })?;
@@ -1330,7 +1450,9 @@ fn collect_provider_sp3_observations(
                 Ok(Some(inertial.velocity_array()))
             })?;
         observations.push(OrbitObservation {
-            epoch_j2000_s: epoch_tdb_s,
+            label_j2000_s: epoch_tdb_s,
+            epoch_tdb_j2000_s: epoch_tdb_s,
+            epoch_tt_j2000_s,
             time_scale: TimeScale::Tdb,
             time_scales: orientation.time_scales(),
             orientation: Some(orientation),
@@ -1355,7 +1477,8 @@ fn validate_observations(
     satellite: GnssSatelliteId,
     mut observations: Vec<OrbitObservation>,
 ) -> Result<Vec<OrbitObservation>, OrbitFitError> {
-    observations.sort_by(|a, b| a.epoch_j2000_s.total_cmp(&b.epoch_j2000_s));
+    // The propagation's time argument orders the arc.
+    observations.sort_by(|a, b| a.epoch_tt_j2000_s.total_cmp(&b.epoch_tt_j2000_s));
     if observations.len() < MIN_SEED_SAMPLES {
         return Err(OrbitFitError::TooFewSamples {
             satellite,
@@ -1365,7 +1488,7 @@ fn validate_observations(
     }
     if observations
         .windows(2)
-        .any(|window| window[1].epoch_j2000_s <= window[0].epoch_j2000_s)
+        .any(|window| window[1].epoch_tt_j2000_s <= window[0].epoch_tt_j2000_s)
     {
         return Err(OrbitFitError::NonMonotonicEpochs { satellite });
     }
@@ -1410,13 +1533,16 @@ fn instant_j2000_seconds(
     instant: Instant,
     satellite: GnssSatelliteId,
 ) -> Result<f64, OrbitFitError> {
-    let jd = instant
-        .julian_date()
-        .ok_or_else(|| OrbitFitError::InvalidEpoch {
-            satellite,
-            reason: "epoch is not a split Julian date".to_string(),
-        })?;
-    let seconds = j2000_seconds_from_split(jd.jd_whole, jd.fraction);
+    let seconds = match instant.repr {
+        InstantRepr::JulianDate(jd) => j2000_seconds_from_split(jd.jd_whole, jd.fraction),
+        // Whole and fractional seconds are converted apart so the fraction
+        // keeps its nanoseconds.
+        InstantRepr::Nanos(nanos) => {
+            const NANOS_PER_SECOND: i128 = 1_000_000_000;
+            nanos.div_euclid(NANOS_PER_SECOND) as f64
+                + nanos.rem_euclid(NANOS_PER_SECOND) as f64 / NANOS_PER_SECOND as f64
+        }
+    };
     if seconds.is_finite() {
         Ok(seconds)
     } else {
@@ -1432,44 +1558,53 @@ fn time_scales_from_instant(
     epoch_j2000_s: f64,
     satellite: GnssSatelliteId,
 ) -> Result<TimeScales, OrbitFitError> {
-    let whole = epoch_j2000_s.floor();
-    if whole < i64::MIN as f64 || whole > i64::MAX as f64 {
-        return Err(OrbitFitError::InvalidEpoch {
-            satellite,
-            reason: "J2000 seconds are outside calendar range".to_string(),
-        });
-    }
-    let fraction = epoch_j2000_s - whole;
-    let (year, month, day, hour, minute, second) = civil_from_j2000_seconds(whole as i64);
-    TimeScales::from_scale(
-        instant.scale,
-        year as i32,
-        month as i32,
-        day as i32,
-        hour as i32,
-        minute as i32,
-        second as f64 + fraction,
-    )
-    .map_err(|error| OrbitFitError::InvalidEpoch {
+    let (year, month, day, hour, minute, second) = civil_fields_from_j2000_seconds(epoch_j2000_s)
+        .ok_or_else(|| OrbitFitError::InvalidEpoch {
         satellite,
-        reason: error.to_string(),
+        reason: "J2000 seconds are outside calendar range".to_string(),
+    })?;
+    TimeScales::from_scale(instant.scale, year, month, day, hour, minute, second).map_err(|error| {
+        OrbitFitError::InvalidEpoch {
+            satellite,
+            reason: error.to_string(),
+        }
     })
 }
 
-fn tdb_seconds_from_instant(
+/// TDB and TT seconds past J2000 of one instant.
+fn dynamical_seconds_from_instant(
     instant: Instant,
     satellite: GnssSatelliteId,
-) -> Result<f64, OrbitFitError> {
+) -> Result<(f64, f64), OrbitFitError> {
     let epoch_j2000_s = instant_j2000_seconds(instant, satellite)?;
     let ts = time_scales_from_instant(instant, epoch_j2000_s, satellite)?;
+    dynamical_seconds(&ts, satellite)
+}
+
+/// TDB and TT seconds past J2000 of resolved time scales.
+fn dynamical_seconds(
+    ts: &TimeScales,
+    satellite: GnssSatelliteId,
+) -> Result<(f64, f64), OrbitFitError> {
     let tdb_seconds = j2000_seconds_from_split(ts.jd_whole, ts.tdb_fraction);
-    if tdb_seconds.is_finite() {
-        Ok(tdb_seconds)
+    let tt_seconds = j2000_seconds_from_split(ts.jd_whole, ts.tt_fraction);
+    if tdb_seconds.is_finite() && tt_seconds.is_finite() {
+        Ok((tdb_seconds, tt_seconds))
     } else {
         Err(OrbitFitError::InvalidEpoch {
             satellite,
-            reason: "TDB J2000 seconds are not finite".to_string(),
+            reason: "TDB or TT J2000 seconds are not finite".to_string(),
         })
+    }
+}
+
+impl OrbitObservation {
+    /// This epoch as a propagation epoch from `from`.
+    fn propagation_epoch(&self, from: &OrbitObservation) -> VariationalEpoch {
+        VariationalEpoch {
+            tdb_j2000_s: self.epoch_tdb_j2000_s,
+            elapsed_tt_s: self.epoch_tt_j2000_s - from.epoch_tt_j2000_s,
+        }
     }
 }
 
@@ -1480,7 +1615,7 @@ fn seed_initial_state(
 ) -> Result<CartesianState, OrbitFitError> {
     if let Some(velocity) = observations[0].observed_gcrs_velocity_km_s {
         return Ok(CartesianState::new(
-            observations[0].epoch_j2000_s,
+            observations[0].epoch_tdb_j2000_s,
             observations[0].observed_gcrs_km,
             velocity,
         ));
@@ -1490,23 +1625,25 @@ fn seed_initial_state(
         let r1 = observations[0].observed_gcrs_km;
         let r2 = observations[1].observed_gcrs_km;
         let r3 = observations[2].observed_gcrs_km;
-        let jd1 = observations[0].epoch_j2000_s / SECONDS_PER_DAY;
-        let jd2 = observations[1].epoch_j2000_s / SECONDS_PER_DAY;
-        let jd3 = observations[2].epoch_j2000_s / SECONDS_PER_DAY;
+        let jd1 = observations[0].epoch_tt_j2000_s / SECONDS_PER_DAY;
+        let jd2 = observations[1].epoch_tt_j2000_s / SECONDS_PER_DAY;
+        let jd3 = observations[2].epoch_tt_j2000_s / SECONDS_PER_DAY;
         if let Ok((v2, _, _, _)) = iod::hgibbs(&r1, &r2, &r3, jd1, jd2, jd3) {
-            let midpoint = CartesianState::new(observations[1].epoch_j2000_s, r2, v2);
-            if let Ok(result) = build_propagator(midpoint, options).propagate_to_with_context(
-                observations[0].epoch_j2000_s,
-                &options.propagation_context,
+            let midpoint = CartesianState::new(observations[1].epoch_tdb_j2000_s, r2, v2);
+            if let Ok(states) = propagate_states(
+                satellite,
+                midpoint,
+                &[observations[0].propagation_epoch(&observations[1])],
+                options,
             ) {
-                return Ok(result.final_state);
+                return Ok(states[0]);
             }
         }
     }
 
     let first = &observations[0];
     let second = &observations[1];
-    let dt = second.epoch_j2000_s - first.epoch_j2000_s;
+    let dt = second.epoch_tt_j2000_s - first.epoch_tt_j2000_s;
     if !dt.is_finite() || dt <= 0.0 {
         return Err(OrbitFitError::NonMonotonicEpochs { satellite });
     }
@@ -1516,7 +1653,7 @@ fn seed_initial_state(
         (second.observed_gcrs_km[2] - first.observed_gcrs_km[2]) / dt,
     ];
     Ok(CartesianState::new(
-        first.epoch_j2000_s,
+        first.epoch_tdb_j2000_s,
         first.observed_gcrs_km,
         velocity,
     ))
@@ -1527,7 +1664,7 @@ fn validate_initial_seed(
     seed: CartesianState,
     observations: &[OrbitObservation],
 ) -> Result<CartesianState, OrbitFitError> {
-    if seed.epoch_tdb_seconds != observations[0].epoch_j2000_s {
+    if seed.epoch_tdb_seconds != observations[0].epoch_tdb_j2000_s {
         return Err(OrbitFitError::InvalidEpoch {
             satellite,
             reason: "initial-state seed epoch must match the first sample".to_string(),
@@ -1629,7 +1766,7 @@ fn residual_vector_for_params(
         });
     }
     let initial = CartesianState::new(
-        observations[0].epoch_j2000_s,
+        observations[0].epoch_tdb_j2000_s,
         [params[0], params[1], params[2]],
         [params[3], params[4], params[5]],
     );
@@ -1645,19 +1782,47 @@ fn residual_vector_for_params(
     Ok(residual)
 }
 
+/// The trajectory from `initial`, at the first observation's epoch, to every
+/// observation.
 fn propagate_to_observations(
     satellite: GnssSatelliteId,
     initial: CartesianState,
     observations: &[OrbitObservation],
     options: &OrbitFitOptions,
 ) -> Result<Vec<CartesianState>, OrbitFitError> {
-    let epochs: Vec<f64> = observations
+    let epochs: Vec<VariationalEpoch> = observations
         .iter()
-        .map(|observation| observation.epoch_j2000_s)
+        .map(|observation| observation.propagation_epoch(&observations[0]))
         .collect();
-    build_propagator(initial, options)
-        .ephemeris_with_context(&epochs, &options.propagation_context)
-        .map_err(|source| OrbitFitError::Propagation { satellite, source })
+    propagate_states(satellite, initial, &epochs, options)
+}
+
+/// The trajectory from `initial` to `epochs` with TT as the time argument and
+/// TDB handed to the force models, as the force-parameter fit propagates it.
+fn propagate_states(
+    satellite: GnssSatelliteId,
+    initial: CartesianState,
+    epochs: &[VariationalEpoch],
+    options: &OrbitFitOptions,
+) -> Result<Vec<CartesianState>, OrbitFitError> {
+    let propagation = |source| OrbitFitError::Propagation { satellite, source };
+    let force = build_propagator(initial, options)
+        .build_force()
+        .map_err(propagation)?;
+    let parameters: Vec<f64> = force.parameters().iter().map(|p| p.value).collect();
+    propagate_trajectory(
+        initial,
+        epochs,
+        &VariationalEquations {
+            force: force.as_ref(),
+            parameters: &parameters,
+            sensitivity_parameters: &[],
+        },
+        options.integrator,
+        &options.integrator_options,
+        &options.propagation_context,
+    )
+    .map_err(propagation)
 }
 
 fn build_propagator(initial: CartesianState, options: &OrbitFitOptions) -> StatePropagator {
@@ -1767,7 +1932,7 @@ fn rtn_residuals_for_state(
         residuals.push(RtnResidual {
             satellite,
             time_scale: observation.time_scale,
-            epoch_j2000_s: observation.epoch_j2000_s,
+            epoch_j2000_s: observation.label_j2000_s,
             radial_m: radial_km * M_PER_KM,
             along_m: along_km * M_PER_KM,
             cross_m: cross_km * M_PER_KM,

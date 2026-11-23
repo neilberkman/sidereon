@@ -5,31 +5,95 @@
 //! Two formulations are provided:
 //!
 //! - [`shadow_fraction`] and [`shadow_fraction_with_model`] evaluate Earth-only
-//!   conical shadow using linear penumbra interpolation between the umbra and
-//!   penumbra cone radii. They remain unchanged so existing Earth-only callers
-//!   keep bit-identical outputs.
+//!   conical shadow in `[0.0, 1.0]` using linear penumbra interpolation between
+//!   the umbra and penumbra cone radii. Because Orekit has no linear conical
+//!   counterpart, these functions keep their established arithmetic unchanged.
 //! - [`moon_shadow_fraction`], [`shadow_fraction_with_moon`], and
-//!   [`shadow_fraction_with_model_and_moon`] evaluate the apparent-disc
-//!   occultation fraction of Montenbruck & Gill, *Satellite Orbits* (2000),
-//!   section 3.4.2, using the IAU 2015 Resolution B3 nominal solar radius
-//!   ([`IAU_2015_SOLAR_RADIUS_KM`]), mean spherical Earth radius
-//!   ([`MEAN_EARTH_RADIUS_KM`]) or WGS84 oblate Earth limb tangent, and mean
-//!   lunar radius ([`MOON_RADIUS_KM`]). When both Earth and the Moon occult the
-//!   Sun simultaneously, the occluded fraction is the exact area of the union
-//!   of the two apparent occulting discs intersected with the solar disc,
-//!   computed via inclusion-exclusion and circular-arc boundary integration
-//!   (Green's theorem) so overlapping discs are never double-counted and the
-//!   result always remains in `[0.0, 1.0]`.
+//!   [`shadow_fraction_with_model_and_moon`] port Orekit 13.1.10's
+//!   `OccultationEngine` (`angles`, `Ellipsoid.pointOnLimb`, `Vector3D.angle`)
+//!   and `SolarRadiationPressure` (`maskingRatio` and `getLightingRatio`, with
+//!   `ANGULAR_MARGIN = 1e-10`, `Precision.SAFE_MIN` / `FastMath.nextDown(1.0)`
+//!   clamps, inside-Sun dummy angles `(PI, 0, 0)`, and Hipparchus 4.0.3
+//!   `FastMath` / `MathArrays.linearCombination`), using
+//!   [`IAU_2015_SOLAR_RADIUS_KM`](crate::astro::constants::astro::IAU_2015_SOLAR_RADIUS_KM),
+//!   [`MEAN_EARTH_RADIUS_KM`], [`WGS84_FLATTENING`], and
+//!   [`MOON_RADIUS_KM`](crate::astro::constants::astro::MOON_RADIUS_KM).
+//!   Because Orekit's `maskingRatio` has no outer `[0, 1]` clamp, both
+//!   single-body and combined two-body apparent-disc shadow fractions can
+//!   overshoot `[0.0, 1.0]` just outside `ANGULAR_MARGIN` (up to `1.435e-6`
+//!   measured over the oracle fixtures and property sweeps, `1.423e-6` on the
+//!   144-case Orekit oracle): on these grazing cases `alpha2 / alphaCentral` is
+//!   near `±1` (not clamped), so rounding in `alpha2 / alphaCentral` is
+//!   amplified by `acos` near `±1` and does not cancel against
+//!   `sqrt(aE2 - alpha2^2)`, which has lost most of its digits to cancellation.
+//!   The `±nextDown(1.0)` clamp acts on annular and small-disc cases (such as
+//!   the `8.408e-10` annular Moon difference against the 40-digit Montenbruck &
+//!   Gill (§3.4.2) apparent-disc reference; largest Earth difference
+//!   `1.163e-9`).
 //!
-//! Cross-checks against Orekit 13.1.10 (`SolarRadiationPressure` with
-//! `addOccultingBody` and `OccultationEngine`) and 40-digit Montenbruck & Gill
-//! reference evaluations live in `tests/eclipse_moon_orekit_oracle.rs`.
+//! Documented departures from Orekit 13.1.10:
+//!
+//! - **Simultaneous Earth-Moon overlap:** Orekit 13.1.10's `getLightingRatio`
+//!   subtracts the unclipped Earth-Moon mutual overlap `|E ∩ M| / |S|` rather
+//!   than adding back the triple intersection `|S ∩ E ∩ M| / |S|` and does not
+//!   check whether Earth occults the Sun, producing negative lighting ratios
+//!   (down to `-10.0527` on the 207-case fixture). Here `getLightingRatio`
+//!   follows Orekit's exact operation order (`0.0 + l_earth`, mutual slot when
+//!   `l_moon != 1`, `+ l_moon - 1.0`, no outer `[0, 1]` clamp) with only the
+//!   mutual-eclipse term replaced by adding `triple_area / (pi * alpha_sun^2)`.
+//! - **Occulting body behind the Sun:** Orekit does not check whether the
+//!   occulting body lies in front of the Sun; here, whenever Orekit's own
+//!   `OccultationEngine.angles` computes real angles (i.e. outside the Sun), a
+//!   body at distance `d_body >= d_sun` from the satellite casts no shadow.
+//!   Satellites inside the Sun go through Orekit's dummy angles `(PI, 0, 0)`
+//!   and `maskingRatio`.
+//! - **Sun-centred frame guard:** Orekit's `getLightingRatio` returns lighting
+//!   `1.0` whenever `|r_sun| < 2 * R_sun` as a Sun-centred frame check. Because
+//!   this crate's positions are relative to Earth's centre (or arbitrary
+//!   inertial origin for `moon_shadow_fraction`), that test does not identify a
+//!   Sun-centred frame and the geometry is evaluated instead.
+//! - **Exact collinearity (including underflow):** Orekit's
+//!   `Ellipsoid.pointOnLimb` calls `cross(psat, pted).orthogonal()`, which
+//!   throws `ZERO_NORM` whenever the cross product's norm is zero—either
+//!   because the vectors are exactly collinear or because the norm underflows
+//!   to `0.0`—and its double `maskingRatio` divides by `0.0` (`NaN`) at zero
+//!   separation in annular eclipse. Here `pointOnLimb` falls back to
+//!   `psat.orthogonal()` when `|cross(psat, pted)| == 0.0`, and
+//!   double-precision annular collinearity evaluates `1 - (ro / rs)^2`, while
+//!   forward-mode field evaluation on-axis (or when the cross-product norm
+//!   underflows onto `angle = 0.0`) produces `NaN` and returns
+//!   [`ShadowGradientError::NumericalFailure`].
+//! - **Non-finite field evaluation:** Where Orekit's `Field<Gradient>`
+//!   evaluation produces `NaN` or an infinity, the gradient functions return
+//!   [`ShadowGradientError::NumericalFailure`].
+//!
+//! Each shadow fraction has a counterpart returning its forward-mode derivative
+//! with respect to the satellite position ([`shadow_fraction_with_gradient`],
+//! [`shadow_fraction_with_model_and_gradient`],
+//! [`shadow_fraction_with_model_moon_and_gradient`]). The conical gradient
+//! functions differentiate the established linear conical arithmetic with
+//! bit-identical values; the Earth-Moon apparent-disc gradient function
+//! reproduces Hipparchus 4.0.3 `Gradient` arithmetic and Orekit 13.1.10's
+//! `FieldSpacecraftState` branch decisions.
 
 use crate::astro::constants::{
-    astro::{IAU_2015_SOLAR_RADIUS_KM, MOON_RADIUS_KM, SOLAR_RADIUS_KM},
+    astro::SOLAR_RADIUS_KM,
     earth::{MEAN_EARTH_RADIUS_KM, WGS84_F},
 };
 use crate::astro::math::vec3;
+
+pub(crate) mod ad;
+pub(crate) mod fast_math;
+mod gradient;
+pub(crate) mod orekit;
+
+pub use gradient::{
+    shadow_fraction_with_gradient, shadow_fraction_with_model_and_gradient,
+    shadow_fraction_with_model_moon_and_gradient, ShadowGradientError,
+};
+
+pub(crate) use gradient::conical_shadow_field;
+pub(crate) use orekit::{earth_moon_lighting_ratio_double, earth_moon_lighting_ratio_field};
 
 /// Public eclipse alias for WGS84 flattening `1 / 298.257223563`.
 pub const WGS84_FLATTENING: f64 = WGS84_F;
@@ -39,18 +103,17 @@ pub const WGS84_FLATTENING: f64 = WGS84_F;
 pub enum EarthShadowModel {
     /// Spherical Earth with [`MEAN_EARTH_RADIUS_KM`].
     Spherical,
-    /// WGS84 oblate Earth approximation by polar-axis scaling.
+    /// WGS84 oblate Earth model.
     ///
-    /// The z components of the satellite and Sun vectors are scaled by
-    /// `1 / (1 - WGS84_FLATTENING)` before evaluating the same conical shadow
-    /// geometry. Equatorial geometries are therefore bit-identical to the
-    /// spherical model, while polar grazing geometries see the smaller polar
-    /// radius implied by the flattening.
+    /// In the Earth-only conical functions ([`shadow_fraction_with_model`],
+    /// [`status_with_model`]), the z components of the satellite and Sun
+    /// vectors are scaled by `1 / (1 - WGS84_FLATTENING)` before evaluating
+    /// the conical shadow geometry.
     ///
-    /// The apparent-disc functions ([`shadow_fraction_with_model_and_moon`],
-    /// [`status_with_model_and_moon`]) use the exact limb tangent of the same
-    /// spheroid: equatorial radius [`MEAN_EARTH_RADIUS_KM`] and polar radius
-    /// `MEAN_EARTH_RADIUS_KM * (1 - WGS84_FLATTENING)`.
+    /// In the apparent-disc functions ([`shadow_fraction_with_model_and_moon`],
+    /// [`status_with_model_and_moon`]), Earth is modeled as a `OneAxisEllipsoid`
+    /// with equatorial radius [`MEAN_EARTH_RADIUS_KM`] and flattening
+    /// [`WGS84_FLATTENING`] whose limb is computed by Orekit's `pointOnLimb`.
     Wgs84Oblate,
 }
 
@@ -192,40 +255,35 @@ pub fn status_with_model(
     Ok(classify_fraction(fraction))
 }
 
-/// Shadow fraction in `[0.0, 1.0]` cast by the Moon alone using the
-/// apparent-disc occultation model of Montenbruck & Gill (2000), section 3.4.2.
+/// Shadow fraction cast by the Moon alone, porting Orekit 13.1.10's
+/// `OccultationEngine` and `SolarRadiationPressure.maskingRatio`.
+///
+/// Nominally in `[0.0, 1.0]` (`0.0` full sunlight, `1.0` full umbra), but
+/// unclamped like Orekit: just outside `ANGULAR_MARGIN = 1e-10`, rounding in
+/// `alpha2 / alphaCentral` is amplified by `acos` near `±1` (unclamped) and
+/// does not cancel against `sqrt(aE2 - alpha2^2)` after cancellation in
+/// `aE2 - alpha2^2`, which can overshoot `[0.0, 1.0]` (up to `1.435e-6`
+/// measured across the oracle fixtures and property sweeps).
 ///
 /// `sat_pos`, `sun_pos`, and `moon_pos` are inertial positions in the same
-/// frame (km); `sat_pos` may be any point outside the Moon and the Sun
-/// (including an Earth surface point for albedo shadowing). Uses
-/// [`IAU_2015_SOLAR_RADIUS_KM`] and [`MOON_RADIUS_KM`]. Returns `0.0` in full
-/// sunlight or when the Moon is not closer to the observer than the Sun,
-/// `(b / a)^2` in annular eclipse, and `1.0` in total lunar umbra.
+/// frame (km). Uses [`IAU_2015_SOLAR_RADIUS_KM`](crate::astro::constants::astro::IAU_2015_SOLAR_RADIUS_KM)
+/// and [`MOON_RADIUS_KM`](crate::astro::constants::astro::MOON_RADIUS_KM).
+/// Returns `0.0` in full sunlight, when the Moon is not closer to the observer
+/// than the Sun, or when the observer is inside the Sun (not at its center).
 pub fn moon_shadow_fraction(
     sat_pos: [f64; 3],
     sun_pos: [f64; 3],
     moon_pos: [f64; 3],
 ) -> Result<f64, EclipseError> {
-    validate_finite_norm_vec3(sat_pos, "sat_pos")?;
-    validate_finite_norm_vec3(sun_pos, "sun_pos")?;
-    validate_finite_norm_vec3(moon_pos, "moon_pos")?;
-
-    let (u_sun, d_sun) =
-        relative_unit_and_norm(sun_pos, sat_pos, IAU_2015_SOLAR_RADIUS_KM, "sun_pos")?;
-    let (u_moon, d_moon) = relative_unit_and_norm(moon_pos, sat_pos, MOON_RADIUS_KM, "moon_pos")?;
-
-    if d_moon >= d_sun {
-        return Ok(0.0);
-    }
-
-    let a = libm::asin(IAU_2015_SOLAR_RADIUS_KM / d_sun);
-    let b_moon = libm::asin(MOON_RADIUS_KM / d_moon);
-    let c_moon = angle_between_units(u_sun, u_moon);
-
-    Ok(single_body_disc_shadow_fraction(a, b_moon, c_moon))
+    let lighting = orekit::moon_lighting_ratio_double(sat_pos, sun_pos, moon_pos)?;
+    Ok(1.0 - lighting)
 }
 
-/// Combined spherical-Earth and Moon shadow fraction in `[0.0, 1.0]`.
+/// Combined spherical-Earth and Moon apparent-disc shadow fraction.
+///
+/// Nominally in `[0.0, 1.0]`, but unclamped like Orekit (can overshoot
+/// `[0.0, 1.0]` by up to `1.435e-6` measured across the oracle fixtures and
+/// property sweeps; see [`shadow_fraction_with_model_and_moon`]).
 ///
 /// Delegates to [`shadow_fraction_with_model_and_moon`] with
 /// [`EarthShadowModel::Spherical`].
@@ -237,145 +295,34 @@ pub fn shadow_fraction_with_moon(
     shadow_fraction_with_model_and_moon(sat_pos, sun_pos, moon_pos, EarthShadowModel::Spherical)
 }
 
-/// Combined Earth and Moon shadow fraction in `[0.0, 1.0]` with an explicit
+/// Combined Earth and Moon apparent-disc shadow fraction with an explicit
 /// Earth figure model.
 ///
-/// Uses the apparent-disc occultation geometry of Montenbruck & Gill (2000),
-/// section 3.4.2, with [`IAU_2015_SOLAR_RADIUS_KM`], [`MEAN_EARTH_RADIUS_KM`],
-/// [`WGS84_FLATTENING`], and [`MOON_RADIUS_KM`]. Under
-/// [`EarthShadowModel::Wgs84Oblate`], Earth's apparent limb radius toward the
-/// Sun is the exact tangent angle to the oblate spheroid with equatorial radius
-/// [`MEAN_EARTH_RADIUS_KM`], polar radius
-/// `MEAN_EARTH_RADIUS_KM * (1 - WGS84_FLATTENING)`, and polar axis along the
-/// frame `z` axis (the same figure as the polar-axis scaling of
-/// [`shadow_fraction_with_model`]).
+/// Ports Orekit 13.1.10's `OccultationEngine.angles`, `Ellipsoid.pointOnLimb`,
+/// `SolarRadiationPressure.maskingRatio`, and `getLightingRatio` operation
+/// order for Earth and the Moon, replacing only Orekit's defective
+/// mutual-eclipse term with adding the exact three-disc intersection area
+/// `triple_area / (pi * alpha_sun^2)`.
 ///
-/// When both Earth and the Moon occult the Sun simultaneously, the combined
-/// shadow fraction is the exact area of `D_S ∩ (D_E ∪ D_M)` divided by the
-/// apparent solar disc area `pi * a^2`, so overlapping occulting discs are not
-/// double-counted and the result always lies in `[0.0, 1.0]`.
+/// Nominally in `[0.0, 1.0]`, but unclamped like Orekit: just outside
+/// `ANGULAR_MARGIN = 1e-10`, rounding in `alpha2 / alphaCentral` is amplified
+/// by `acos` near `±1` (unclamped) and does not cancel against
+/// `sqrt(aE2 - alpha2^2)` after cancellation in `aE2 - alpha2^2`, which can
+/// overshoot `[0.0, 1.0]` in both single-body and two-body evaluations (up to
+/// `1.435e-6` measured across the oracle fixtures and property sweeps).
 ///
 /// `sat_pos`, `sun_pos`, and `moon_pos` are Earth-centered inertial positions
 /// (km). Returns [`EclipseError::InvalidInput`] if any vector is non-finite,
 /// zero, overflows its Euclidean norm, or places the satellite on or inside
-/// Earth, the Moon, or the Sun.
+/// Earth or the Moon or at the center of the Sun.
 pub fn shadow_fraction_with_model_and_moon(
     sat_pos: [f64; 3],
     sun_pos: [f64; 3],
     moon_pos: [f64; 3],
     model: EarthShadowModel,
 ) -> Result<f64, EclipseError> {
-    let figure = match model {
-        EarthShadowModel::Spherical => EarthFigure::Sphere {
-            radius_km: MEAN_EARTH_RADIUS_KM,
-        },
-        EarthShadowModel::Wgs84Oblate => EarthFigure::Spheroid {
-            equatorial_radius_km: MEAN_EARTH_RADIUS_KM,
-            flattening: WGS84_FLATTENING,
-        },
-    };
-    shadow_fraction_with_figure_and_moon(sat_pos, sun_pos, moon_pos, figure)
-}
-
-/// Earth figure whose apparent limb bounds the Earth disc in the
-/// apparent-disc model.
-#[derive(Debug, Clone, Copy)]
-enum EarthFigure {
-    /// Sphere of the given radius (km).
-    Sphere { radius_km: f64 },
-    /// Oblate spheroid with polar axis along the frame `z` axis.
-    Spheroid {
-        equatorial_radius_km: f64,
-        flattening: f64,
-    },
-}
-
-fn shadow_fraction_with_figure_and_moon(
-    sat_pos: [f64; 3],
-    sun_pos: [f64; 3],
-    moon_pos: [f64; 3],
-    figure: EarthFigure,
-) -> Result<f64, EclipseError> {
-    validate_nonzero_vec3(sat_pos, "sat_pos")?;
-    validate_nonzero_vec3(sun_pos, "sun_pos")?;
-    validate_nonzero_vec3(moon_pos, "moon_pos")?;
-
-    let to_earth = vec3::neg3(sat_pos);
-    let (u_earth, d_earth) = unit_and_norm(to_earth, "sat_pos")?;
-
-    let (u_sun, d_sun) =
-        relative_unit_and_norm(sun_pos, sat_pos, IAU_2015_SOLAR_RADIUS_KM, "sun_pos")?;
-    let (u_moon, d_moon) = relative_unit_and_norm(moon_pos, sat_pos, MOON_RADIUS_KM, "moon_pos")?;
-
-    let b_earth = match figure {
-        EarthFigure::Sphere { radius_km } => {
-            if d_earth <= radius_km {
-                return Err(invalid_eclipse_input("sat_pos", "out of range"));
-            }
-            libm::asin(radius_km / d_earth)
-        }
-        EarthFigure::Spheroid {
-            equatorial_radius_km,
-            flattening,
-        } => ellipsoid_limb_angle(
-            sat_pos,
-            u_earth,
-            d_earth,
-            u_sun,
-            equatorial_radius_km,
-            flattening,
-        )?,
-    };
-
-    let a = libm::asin(IAU_2015_SOLAR_RADIUS_KM / d_sun);
-    let earth_in_front = d_earth < d_sun;
-    let moon_in_front = d_moon < d_sun;
-
-    let c_earth = angle_between_units(u_sun, u_earth);
-    let b_moon = libm::asin(MOON_RADIUS_KM / d_moon);
-    let c_moon = angle_between_units(u_sun, u_moon);
-
-    let earth_occults = earth_in_front && !discs_disjoint(a, b_earth, c_earth);
-    let moon_occults = moon_in_front && !discs_disjoint(a, b_moon, c_moon);
-
-    if !earth_occults && !moon_occults {
-        return Ok(0.0);
-    }
-    if !moon_occults {
-        return Ok(single_body_disc_shadow_fraction(a, b_earth, c_earth));
-    }
-    if !earth_occults {
-        return Ok(single_body_disc_shadow_fraction(a, b_moon, c_moon));
-    }
-
-    // Either body alone completely covers the Sun.
-    if disc_contains(b_earth, a, c_earth) || disc_contains(b_moon, a, c_moon) {
-        return Ok(1.0);
-    }
-
-    // Position angle psi between the Earth and Moon offsets around the Sun.
-    // `u_sun × u_body` is perpendicular to `u_sun` by construction, so its
-    // direction is the body's offset direction rotated a quarter turn about
-    // `u_sun`, and its length is the same `sin(c_body)` that gives `c_body`.
-    // Projecting `u_body - (u_body · u_sun) u_sun` instead leaves a residual
-    // along `u_sun` from the unit vectors' rounding, which turns psi when
-    // `c_body` is only a few ULP.
-    let (cos_psi, sin_psi) = match (
-        unit_direction(vec3::cross3(u_sun, u_earth)),
-        unit_direction(vec3::cross3(u_sun, u_moon)),
-    ) {
-        (Some(w_earth), Some(w_moon)) => {
-            let cos_p = vec3::dot3(w_earth, w_moon);
-            let sin_p = vec3::norm3(vec3::cross3(w_earth, w_moon));
-            let n = libm::hypot(cos_p, sin_p);
-            (cos_p / n, sin_p / n)
-        }
-        _ => (1.0, 0.0),
-    };
-
-    Ok(combined_two_body_disc_shadow_fraction(
-        a, b_earth, c_earth, b_moon, c_moon, cos_psi, sin_psi,
-    ))
+    let lighting = orekit::earth_moon_lighting_ratio_double(sat_pos, sun_pos, moon_pos, model)?;
+    Ok(1.0 - lighting)
 }
 
 /// Classify eclipse status with spherical Earth and Moon occultation.
@@ -410,586 +357,12 @@ fn classify_fraction(fraction: f64) -> EclipseStatus {
     }
 }
 
-/// Exact apparent limb angular radius of an oblate ellipsoid (equatorial radius
-/// `re`, flattening `f`, polar axis along `z`) toward `u_sun` from `sat_pos`.
-///
-/// Rescaling the `z` axis by `1 / (1 - f)` maps the ellipsoid to a unit sphere
-/// while preserving coplanarity and tangency. The tangent point on the unit
-/// sphere in the plane of the origin, scaled satellite, and scaled Sun direction
-/// maps back to the exact limb point on the oblate ellipsoid.
-///
-/// When the Sun lies on the satellite's anti-Earth axis to within rounding, that
-/// plane is undefined and any plane through the axis gives a valid limb
-/// tangent; the result then lies between the polar and equatorial limb angles.
-fn ellipsoid_limb_angle(
-    sat_pos: [f64; 3],
-    u_earth: [f64; 3],
-    d_earth: f64,
-    u_sun: [f64; 3],
-    re: f64,
-    flattening: f64,
-) -> Result<f64, EclipseError> {
-    let rc = re * (1.0 - flattening);
-    let sat_s = [sat_pos[0] / re, sat_pos[1] / re, sat_pos[2] / rc];
-    let r2 = vec3::dot3(sat_s, sat_s);
-    if !r2.is_finite() || r2 <= 1.0 {
-        return Err(invalid_eclipse_input("sat_pos", "out of range"));
-    }
-    let r = r2.sqrt();
-    let u = [sat_s[0] / r, sat_s[1] / r, sat_s[2] / r];
-
-    let to_sun_s = [u_sun[0], u_sun[1], u_sun[2] / (1.0 - flattening)];
-    let (to_sun_s_u, _) = unit_and_norm(to_sun_s, "sun_pos")?;
-
-    // Unit vector `v` in the tangent plane, perpendicular to `u`, toward the
-    // Sun. With `t = to_sun_s_u`, `(u × t) × u` is perpendicular to `u` to
-    // working precision for every `t`. The projection `t - (t · u) u` is not: when `t` is anti-parallel to `u`
-    // its rounding residual lies along `u`, which would tilt `v` onto `±u` and
-    // move the tangent point off the limb.
-    let v = unit_direction(vec3::cross3(u, to_sun_s_u))
-        .and_then(|axis| unit_direction(vec3::cross3(axis, u)))
-        .or_else(|| {
-            let fallback = if u[0].abs() < 0.9 {
-                [1.0, 0.0, 0.0]
-            } else {
-                [0.0, 1.0, 0.0]
-            };
-            unit_direction(vec3::cross3(u, fallback))
-        })
-        .ok_or_else(|| invalid_eclipse_input("sat_pos", "out of range"))?;
-
-    let c = 1.0 / r;
-    let s = (r2 - 1.0).sqrt() / r;
-    let p_s = [
-        c * u[0] + s * v[0],
-        c * u[1] + s * v[1],
-        c * u[2] + s * v[2],
-    ];
-    let p = [p_s[0] * re, p_s[1] * re, p_s[2] * rc];
-
-    // `(p - sat_pos) × u_earth = p × u_earth` and
-    // `(p - sat_pos) · u_earth = d_earth + p · u_earth`, avoiding direct
-    // subtraction of `sat_pos` from `p` at large satellite distances.
-    let sin_term = vec3::norm3(vec3::cross3(p, u_earth));
-    let cos_term = d_earth + vec3::dot3(p, u_earth);
-    Ok(libm::atan2(sin_term, cos_term))
-}
-
-/// Exact IEEE-754 predicate for `d >= r1 + r2` (discs have empty interior
-/// intersection) without rounding-induced false disjointness when `r1 >> r2`.
-fn discs_disjoint(r1: f64, r2: f64, d: f64) -> bool {
-    let (r_max, r_min) = if r1 >= r2 { (r1, r2) } else { (r2, r1) };
-    if d < r_max {
-        false
-    } else if d > 2.0 * r_max {
-        true
-    } else {
-        // Sterbenz: `d - r_max` is exact for `r_max <= d <= 2 * r_max`.
-        d - r_max >= r_min
-    }
-}
-
-/// Exact IEEE-754 predicate for `d + r_inner <= r_outer` (disc of radius
-/// `r_inner` at center distance `d` lies entirely inside disc of radius
-/// `r_outer`).
-fn disc_contains(r_outer: f64, r_inner: f64, d: f64) -> bool {
-    if r_outer < r_inner || d > r_outer {
-        return false;
-    }
-    if r_inner >= 0.5 * r_outer {
-        // Sterbenz: `r_outer - r_inner` is exact.
-        d <= r_outer - r_inner
-    } else if d >= 0.5 * r_outer {
-        // Sterbenz: `r_outer - d` is exact.
-        r_inner <= r_outer - d
-    } else {
-        true
-    }
-}
-
-/// Pairwise center distance `d` and cancellation-free `d - max(r1, r2)` between
-/// two discs `(x1, y1, r1)` and `(x2, y2, r2)`.
-///
-/// When one disc has a large radius `r_b` with center distance `c_b ≈ r_b` from
-/// the origin while the other disc lies close to the origin (`c_s << r_b`),
-/// directly forming `x_s - x_b` quantizes `x_s` to `ULP(r_b)`. Projecting
-/// `(x_s, y_s)` onto the large disc's radial unit vector and evaluating
-/// `d - r_b = (2 r_b q + q^2 + s_perp^2) / (d + r_b)` with exact Sterbenz
-/// `delta_b = c_b - r_b` and `q = delta_b - s_par` preserves full precision.
-fn disc_pair_dist_and_delta(d1: (f64, f64, f64), d2: (f64, f64, f64)) -> (f64, f64) {
-    let d = libm::hypot(d2.0 - d1.0, d2.1 - d1.1);
-    let ((xs, ys, _rs), (xb, yb, rb)) = if d2.2 >= d1.2 { (d1, d2) } else { (d2, d1) };
-    let cs = libm::hypot(xs, ys);
-    if cs > 0.0 && rb > 0.0 && cs < 0.25 * rb {
-        let cb = libm::hypot(xb, yb);
-        if cb >= 0.5 * rb && cb <= 2.0 * rb {
-            let delta_b = cb - rb;
-            let ux = xb / cb;
-            let uy = yb / cb;
-            let s_par = xs * ux + ys * uy;
-            let s_perp = -xs * uy + ys * ux;
-            let q = delta_b - s_par;
-            let d_minus_rb = (2.0 * rb * q + (q * q + s_perp * s_perp)) / (d + rb);
-            return (d, d_minus_rb);
-        }
-    }
-    (d, d - rb)
-}
-
-/// Cancellation-free Heron half-angle factors `(p1, p2, p3, p4)` using a
-/// precomputed `d_minus_rmax = d - max(r1, r2)`.
-fn heron_factors_with_delta(r1: f64, r2: f64, d: f64, d_minus_rmax: f64) -> (f64, f64, f64, f64) {
-    if r2 >= r1 {
-        let p1 = r1 - d_minus_rmax;
-        let p2 = if r1 >= 0.5 * r2 {
-            d - (r2 - r1)
-        } else {
-            r1 + d_minus_rmax
-        };
-        let p3 = d + (r2 - r1);
-        let p4 = (d + r2) + r1;
-        (p1, p2, p3, p4)
-    } else {
-        let p1 = r2 - d_minus_rmax;
-        let p2 = d + (r1 - r2);
-        let p3 = if r2 >= 0.5 * r1 {
-            d - (r1 - r2)
-        } else {
-            r2 + d_minus_rmax
-        };
-        let p4 = (d + r1) + r2;
-        (p1, p2, p3, p4)
-    }
-}
-
-/// Cancellation-free evaluation of `theta - sin(theta)`.
-fn theta_minus_sin(theta: f64) -> f64 {
-    if theta.abs() < 0.1 {
-        let t2 = theta * theta;
-        theta
-            * t2
-            * (1.0 / 6.0
-                + t2 * (-1.0 / 120.0
-                    + t2 * (1.0 / 5_040.0 + t2 * (-1.0 / 362_880.0 + t2 / 39_916_800.0))))
-    } else {
-        theta - libm::sin(theta)
-    }
-}
-
-/// Exact area of the intersection of two circular discs of radii `r1` and `r2`
-/// separated by center distance `d`.
-///
-/// Uses the half-angle circular-segment decomposition
-/// `0.5 * r1^2 * (2*alpha - sin(2*alpha)) + 0.5 * r2^2 * (2*beta - sin(2*beta))`
-/// with Heron's half-angle formulas grouped to avoid cancellation when one disc
-/// is much larger than the other (such as Earth seen from LEO against the Sun).
-fn two_disc_intersection_area(r1: f64, r2: f64, d: f64) -> f64 {
-    two_disc_intersection_area_with_delta(r1, r2, d, d - r1.max(r2))
-}
-
-fn two_disc_intersection_area_with_delta(r1: f64, r2: f64, d: f64, d_minus_rmax: f64) -> f64 {
-    let r_min = r1.min(r2);
-    if d_minus_rmax >= r_min {
-        return 0.0;
-    }
-    if r2 >= r1 && (r1 >= 0.5 * r2 && d <= r2 - r1 || r1 < 0.5 * r2 && d_minus_rmax <= -r1) {
-        return std::f64::consts::PI * r1 * r1;
-    }
-    if r1 > r2 && (r2 >= 0.5 * r1 && d <= r1 - r2 || r2 < 0.5 * r1 && d_minus_rmax <= -r2) {
-        return std::f64::consts::PI * r2 * r2;
-    }
-    let (p1, p2, p3, p4) = heron_factors_with_delta(r1, r2, d, d_minus_rmax);
-    if p1 <= 0.0 {
-        return 0.0;
-    }
-    if p2 <= 0.0 {
-        return std::f64::consts::PI * r1 * r1;
-    }
-    if p3 <= 0.0 {
-        return std::f64::consts::PI * r2 * r2;
-    }
-    let s1 = p1.sqrt();
-    let s2 = p2.sqrt();
-    let s3 = p3.sqrt();
-    let s4 = p4.sqrt();
-    let alpha = 2.0 * libm::atan2(s1 * s3, s2 * s4);
-    let beta = 2.0 * libm::atan2(s1 * s2, s3 * s4);
-    0.5 * r1 * r1 * theta_minus_sin(2.0 * alpha) + 0.5 * r2 * r2 * theta_minus_sin(2.0 * beta)
-}
-
-fn single_body_disc_shadow_fraction(a: f64, b: f64, c: f64) -> f64 {
-    if discs_disjoint(a, b, c) {
-        return 0.0;
-    }
-    if disc_contains(b, a, c) {
-        return 1.0;
-    }
-    if disc_contains(a, b, c) {
-        let ratio = b / a;
-        return (ratio * ratio).clamp(0.0, 1.0);
-    }
-    let sun_area = std::f64::consts::PI * a * a;
-    if sun_area <= 0.0 {
-        return 0.0;
-    }
-    (two_disc_intersection_area(a, b, c) / sun_area).clamp(0.0, 1.0)
-}
-
-/// Combined shadow fraction `Area(D_S ∩ (D_E ∪ D_M)) / (pi * a^2)` when both
-/// Earth and Moon partially or annularly occult the Sun.
-fn combined_two_body_disc_shadow_fraction(
-    a: f64,
-    b_earth: f64,
-    c_earth: f64,
-    b_moon: f64,
-    c_moon: f64,
-    cos_psi: f64,
-    sin_psi: f64,
-) -> f64 {
-    let f_earth = single_body_disc_shadow_fraction(a, b_earth, c_earth);
-    let f_moon = single_body_disc_shadow_fraction(a, b_moon, c_moon);
-    let sun_area = std::f64::consts::PI * a * a;
-    if sun_area <= 0.0 {
-        return f_earth.max(f_moon);
-    }
-    let area_earth = two_disc_intersection_area(a, b_earth, c_earth);
-    let area_moon = two_disc_intersection_area(a, b_moon, c_moon);
-    let discs = [
-        (0.0, 0.0, a),
-        (c_earth, 0.0, b_earth),
-        (c_moon * cos_psi, c_moon * sin_psi, b_moon),
-    ];
-    let (area_hi, area_lo) = if area_earth >= area_moon {
-        (area_earth, area_moon)
-    } else {
-        (area_moon, area_earth)
-    };
-    let area_triple = triple_disc_intersection_area(discs).clamp(0.0, area_lo);
-    let union_area = area_hi + (area_lo - area_triple);
-    (union_area / sun_area)
-        .clamp(0.0, 1.0)
-        .max(f_earth)
-        .max(f_moon)
-}
-
-/// Represent a cyclic arc `[center - half_width, center + half_width]` with
-/// `center ∈ [-pi, pi]` as 0, 1, or 2 linear intervals inside `[-pi, pi]`.
-///
-/// Using `[-pi, pi]` places the wrap seam opposite local angle `0`, so tiny
-/// grazing arcs near `center ≈ 0` never wrap or lose precision against `2*pi`.
-fn split_signed_cyclic_arc(center: f64, half_width: f64) -> ([(f64, f64); 2], usize) {
-    let pi = std::f64::consts::PI;
-    let tau = std::f64::consts::TAU;
-    let mut out = [(0.0, 0.0); 2];
-    if half_width <= 0.0 {
-        return (out, 0);
-    }
-    if half_width >= pi {
-        out[0] = (-pi, pi);
-        return (out, 1);
-    }
-    let lo = center - half_width;
-    let hi = center + half_width;
-    if lo >= hi {
-        return (out, 0);
-    }
-    if lo >= -pi && hi <= pi {
-        out[0] = (lo, hi);
-        return (out, 1);
-    }
-    if lo < -pi {
-        let lo_wrap = lo + tau;
-        if lo_wrap <= hi {
-            out[0] = (-pi, pi);
-            return (out, 1);
-        }
-        let mut count = 0;
-        if hi > -pi {
-            out[count] = (-pi, hi);
-            count += 1;
-        }
-        if lo_wrap < pi {
-            out[count] = (lo_wrap, pi);
-            count += 1;
-        }
-        (out, count)
-    } else {
-        let hi_wrap = hi - tau;
-        if hi_wrap >= lo {
-            out[0] = (-pi, pi);
-            return (out, 1);
-        }
-        let mut count = 0;
-        if hi_wrap > -pi {
-            out[count] = (-pi, hi_wrap);
-            count += 1;
-        }
-        if lo < pi {
-            out[count] = (lo, pi);
-            count += 1;
-        }
-        (out, count)
-    }
-}
-
-fn intersect_arc_sets(a: &[(f64, f64)], b: &[(f64, f64)], out: &mut [(f64, f64); 4]) -> usize {
-    let mut count = 0;
-    for &(a0, a1) in a {
-        for &(b0, b1) in b {
-            let lo = a0.max(b0);
-            let hi = a1.min(b1);
-            if hi > lo && count < out.len() {
-                out[count] = (lo, hi);
-                count += 1;
-            }
-        }
-    }
-    count
-}
-
-/// Exact area of the common intersection `D_0 ∩ D_1 ∩ D_2` of three circular
-/// discs `(cx, cy, r)` in the plane.
-///
-/// Reduces redundant containing discs using a strict partial order on
-/// `(radius, index)` so equal or near-coincident discs can never eliminate each
-/// other, then integrates the positively oriented boundary arcs of
-/// `∂(D_0 ∩ D_1 ∩ D_2)` via Green's theorem in the segment-plus-chord-triangle
-/// form `0.5 * r^2 * (dt - sin(dt)) + 0.5 * (p1 × p2)`.
-///
-/// Endpoint coordinates and local angles on each circle are measured relative
-/// to the center of the smallest kept disc so every boundary point lies within
-/// `r_min` of the reference origin and tiny grazing arcs on much larger discs
-/// stay centered near angle `0` without precision loss. Centers near that
-/// origin are placed on a large circle's frame through their offset from the
-/// origin, so offsets below an ULP of the large circle's center coordinates
-/// still move the arc endpoints.
-fn triple_disc_intersection_area(discs: [(f64, f64, f64); 3]) -> f64 {
-    for i in 0..3 {
-        for j in (i + 1)..3 {
-            let (_d, d_minus_rmax) = disc_pair_dist_and_delta(discs[i], discs[j]);
-            if d_minus_rmax >= discs[i].2.min(discs[j].2) {
-                return 0.0;
-            }
-        }
-    }
-
-    let mut kept = [(0.0, 0.0, 0.0); 3];
-    let mut kept_len = 0;
-    for i in 0..3 {
-        let mut redundant = false;
-        for j in 0..3 {
-            if i == j {
-                continue;
-            }
-            let (d, d_minus_rmax) = disc_pair_dist_and_delta(discs[i], discs[j]);
-            let ri = discs[i].2;
-            let rj = discs[j].2;
-            let contains = if ri < rj {
-                false
-            } else if rj >= 0.5 * ri {
-                d <= ri - rj
-            } else {
-                d_minus_rmax <= -rj
-            };
-            if contains && (ri > rj || i > j) {
-                redundant = true;
-                break;
-            }
-        }
-        if !redundant {
-            kept[kept_len] = discs[i];
-            kept_len += 1;
-        }
-    }
-
-    if kept_len == 1 {
-        return std::f64::consts::PI * kept[0].2 * kept[0].2;
-    }
-    if kept_len == 2 {
-        let (d, d_minus_rmax) = disc_pair_dist_and_delta(kept[0], kept[1]);
-        return two_disc_intersection_area_with_delta(kept[0].2, kept[1].2, d, d_minus_rmax);
-    }
-
-    let mut min_idx = 0;
-    for k in 1..3 {
-        if kept[k].2 < kept[min_idx].2 {
-            min_idx = k;
-        }
-    }
-    let origin_disc = kept[min_idx];
-    let (ox, oy, _) = origin_disc;
-
-    let pi = std::f64::consts::PI;
-    let mut total = 0.0;
-    for i in 0..3 {
-        let (xi, yi, ri) = kept[i];
-        let vx = ox - xi;
-        let vy = oy - yi;
-        let (ci, ci_minus_ri) = if i == min_idx {
-            (0.0, -ri)
-        } else {
-            // `ri >= kept[min_idx].2`, so `disc_pair_dist_and_delta` returns `ci - ri`.
-            disc_pair_dist_and_delta(kept[i], origin_disc)
-        };
-        let ri_minus_ci = -ci_minus_ri;
-        let (e_par, e_perp) = if ci > 0.0 {
-            let px = vx / ci;
-            let py = vy / ci;
-            ((px, py), (-py, px))
-        } else {
-            ((1.0, 0.0), (0.0, 1.0))
-        };
-
-        let mut arcs = [(-pi, pi), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)];
-        let mut arcs_len = 1;
-
-        for (j, &(xj, yj, rj)) in kept.iter().enumerate() {
-            if i == j {
-                continue;
-            }
-            let (d, d_minus_rmax) = disc_pair_dist_and_delta(kept[i], kept[j]);
-            let (p1, p2, p3, p4) = heron_factors_with_delta(ri, rj, d, d_minus_rmax);
-            if p1 <= 0.0 || p3 <= 0.0 {
-                arcs_len = 0;
-                break;
-            }
-            if p2 <= 0.0 {
-                // Full circle `i` lies inside disc `j`.
-                continue;
-            }
-            let alpha = 2.0 * libm::atan2(p1.sqrt() * p3.sqrt(), p2.sqrt() * p4.sqrt());
-            let s_phi = if j == min_idx && ci > 0.0 {
-                0.0
-            } else {
-                // Offset `C_j - C_i` in circle `i`'s frame, in which
-                // `C_i = O - c_i e_par`. When `C_j` is no farther from `O` than
-                // from `C_i`, `(C_j - O) + c_i e_par` keeps every bit of the
-                // short vector `C_j - O`, which differencing coordinates
-                // directly would round to an ULP of a large circle's center.
-                // For near-coincident large circles (`C_j` far from `O` but
-                // close to `C_i`), the direct difference is the accurate one.
-                let wx = xj - ox;
-                let wy = yj - oy;
-                let (u_par, u_perp) = if libm::hypot(wx, wy) <= d {
-                    (
-                        ci + (wx * e_par.0 + wy * e_par.1),
-                        wx * e_perp.0 + wy * e_perp.1,
-                    )
-                } else {
-                    let dx = xj - xi;
-                    let dy = yj - yi;
-                    (dx * e_par.0 + dy * e_par.1, dx * e_perp.0 + dy * e_perp.1)
-                };
-                libm::atan2(u_perp, u_par)
-            };
-            let (other, other_len) = split_signed_cyclic_arc(s_phi, alpha);
-            let mut next = [(0.0, 0.0); 4];
-            let next_len = intersect_arc_sets(&arcs[..arcs_len], &other[..other_len], &mut next);
-            arcs = next;
-            arcs_len = next_len;
-            if arcs_len == 0 {
-                break;
-            }
-        }
-
-        for &(s1, s2) in &arcs[..arcs_len] {
-            let dt = s2 - s1;
-            let (a1, b1) = circle_point_local(ri, ci, ri_minus_ci, s1);
-            let (a2, b2) = circle_point_local(ri, ci, ri_minus_ci, s2);
-            total += 0.5 * ri * ri * theta_minus_sin(dt) + 0.5 * (a1 * b2 - b1 * a2);
-        }
-    }
-
-    total.max(0.0)
-}
-
-/// Evaluate the point on circle `(C_i, r_i)` at local angle `s` measured CCW
-/// from `e_par = (O - C_i) / |O - C_i|`, expressed in the circle's right-handed
-/// local frame `(e_par, e_perp)` relative to reference origin `O`.
-///
-/// Using `cos(s) - 1 = -2 sin^2(s / 2)` and the precomputed cancellation-free
-/// `r_minus_c = r - c` avoids catastrophic cancellation when `c ≈ r` and
-/// `|s| << 1`.
-fn circle_point_local(r: f64, c: f64, r_minus_c: f64, s: f64) -> (f64, f64) {
-    if c == 0.0 {
-        let (sin_s, cos_s) = libm::sincos(s);
-        return (r * cos_s, r * sin_s);
-    }
-    let s_half = libm::sin(0.5 * s);
-    let p_par = r_minus_c - 2.0 * r * s_half * s_half;
-    let p_perp = r * libm::sin(s);
-    (p_par, p_perp)
-}
-
-/// Unit vector along `v`, or `None` when `v` is zero or not finite.
-///
-/// Dividing by the largest component magnitude first keeps the result exact to
-/// rounding when the components of `v` are small enough for their squares to
-/// underflow.
-fn unit_direction(v: [f64; 3]) -> Option<[f64; 3]> {
-    let scale = v[0].abs().max(v[1].abs()).max(v[2].abs());
-    if !(scale > 0.0 && scale.is_finite()) {
-        return None;
-    }
-    let w = [v[0] / scale, v[1] / scale, v[2] / scale];
-    let n = vec3::norm3(w);
-    Some([w[0] / n, w[1] / n, w[2] / n])
-}
-
-fn angle_between_units(u: [f64; 3], v: [f64; 3]) -> f64 {
-    libm::atan2(vec3::norm3(vec3::cross3(u, v)), vec3::dot3(u, v))
-}
-
-fn validate_finite_norm_vec3(v: [f64; 3], field: &'static str) -> Result<(), EclipseError> {
-    if !v.iter().all(|value| value.is_finite()) {
-        return Err(invalid_eclipse_input(field, "not finite"));
-    }
-    if !vec3::norm3(v).is_finite() {
-        return Err(invalid_eclipse_input(field, "out of range"));
-    }
-    Ok(())
-}
-
-fn relative_unit_and_norm(
-    target: [f64; 3],
-    sat: [f64; 3],
-    body_radius_km: f64,
-    target_field: &'static str,
-) -> Result<([f64; 3], f64), EclipseError> {
-    let rel = vec3::sub3(target, sat);
-    if !rel.iter().all(|value| value.is_finite()) {
-        return Err(invalid_eclipse_input(target_field, "out of range"));
-    }
-    let norm = vec3::norm3(rel);
-    if !norm.is_finite() {
-        return Err(invalid_eclipse_input(target_field, "out of range"));
-    }
-    if norm <= body_radius_km {
-        return Err(invalid_eclipse_input("sat_pos", "out of range"));
-    }
-    Ok(([rel[0] / norm, rel[1] / norm, rel[2] / norm], norm))
-}
-
-fn unit_and_norm(v: [f64; 3], field: &'static str) -> Result<([f64; 3], f64), EclipseError> {
-    if !v.iter().all(|value| value.is_finite()) {
-        return Err(invalid_eclipse_input(field, "not finite"));
-    }
-    let norm = vec3::norm3(v);
-    if norm == 0.0 {
-        return Err(invalid_eclipse_input(field, "zero vector"));
-    }
-    if !norm.is_finite() {
-        return Err(invalid_eclipse_input(field, "out of range"));
-    }
-    Ok(([v[0] / norm, v[1] / norm, v[2] / norm], norm))
-}
-
-fn scale_polar_axis(v: [f64; 3]) -> [f64; 3] {
+pub(crate) fn scale_polar_axis(v: [f64; 3]) -> [f64; 3] {
     let z_scale = 1.0 / (1.0 - WGS84_FLATTENING);
     [v[0], v[1], v[2] * z_scale]
 }
 
-fn validate_nonzero_vec3(v: [f64; 3], field: &'static str) -> Result<(), EclipseError> {
+pub(crate) fn validate_nonzero_vec3(v: [f64; 3], field: &'static str) -> Result<(), EclipseError> {
     if !v.iter().all(|value| value.is_finite()) {
         return Err(invalid_eclipse_input(field, "not finite"));
     }
@@ -1003,18 +376,17 @@ fn validate_nonzero_vec3(v: [f64; 3], field: &'static str) -> Result<(), Eclipse
     Ok(())
 }
 
-fn invalid_eclipse_input(field: &'static str, reason: &'static str) -> EclipseError {
+pub(crate) fn invalid_eclipse_input(field: &'static str, reason: &'static str) -> EclipseError {
     EclipseError::InvalidInput { field, reason }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::astro::constants::astro::{IAU_2015_SOLAR_RADIUS_KM, MOON_RADIUS_KM};
     use crate::astro::events::{CrossingDirection, EventFinder};
 
     use super::*;
 
-    // Approximate Sun-Earth distance, ~1 AU in km, matching the reference
-    // oracle inputs.
     const AU_KM: f64 = 149_597_870.7;
 
     struct SplitMix64(u64);
@@ -1044,8 +416,6 @@ mod tests {
 
     #[test]
     fn shadow_fraction_matches_reference_bits() {
-        // Frozen bits captured from the reference (Elixir) conical-shadow
-        // implementation. Cross-language 0-ULP equality.
         let sun = [AU_KM, 0.0, 0.0];
 
         assert_eq!(
@@ -1086,10 +456,6 @@ mod tests {
         );
     }
 
-    /// Oracle provenance: WGS84 flattening is the published inverse flattening
-    /// `1 / 298.257223563`; the oblate expected value is the same conical
-    /// formula as `shadow_fraction` after applying the documented polar-axis
-    /// scaling.
     #[test]
     fn oblate_shadow_model_preserves_equatorial_bits_and_changes_polar_grazing() {
         assert_eq!(WGS84_FLATTENING.to_bits(), 0x3f6b_775a_84f3_e128);
@@ -1268,15 +634,15 @@ mod tests {
             EclipseStatus::Umbra
         );
 
-        // Annular lunar eclipse: Moon at apogee directly between sat and Sun
-        // has apparent radius smaller than the Sun's.
+        // Annular lunar eclipse: Moon at apogee directly between sat and Sun.
         let d_moon = 405_000.0;
         let moon_apogee = [sat[0] + d_moon, 0.0, 0.0];
         let annular = moon_shadow_fraction(sat, sun, moon_apogee).expect("annular moon");
         let a = libm::asin(IAU_2015_SOLAR_RADIUS_KM / (AU_KM - sat[0]));
         let b = libm::asin(MOON_RADIUS_KM / d_moon);
         let expected_annular = (b / a) * (b / a);
-        assert_close(annular, expected_annular, 1.0e-15);
+        // On-axis annular departure evaluates 1 - (ro/rs)^2, matching (b/a)^2 to 0 ULP here.
+        assert_eq!(annular.to_bits(), expected_annular.to_bits());
         assert_eq!(
             status_with_moon(sat, sun, moon_apogee).expect("annular status"),
             EclipseStatus::Penumbra
@@ -1289,7 +655,14 @@ mod tests {
             0.0
         );
 
-        // Validation errors: non-finite, zero, inside Earth/Moon/Sun, norm overflow.
+        // Inside the Sun (not at its center): Orekit dummy angles give full lighting (shadow 0.0).
+        assert_eq!(
+            shadow_fraction_with_moon([AU_KM - 100_000.0, 0.0, 0.0], sun, moon_clear)
+                .expect("inside sun dummy angles"),
+            0.0
+        );
+
+        // Validation errors: non-finite, zero, inside Earth/Moon, norm overflow.
         assert_invalid_eclipse_field(
             shadow_fraction_with_moon(sat, sun, [f64::NAN, 0.0, 0.0]).unwrap_err(),
             "moon_pos",
@@ -1305,9 +678,6 @@ mod tests {
             "sat_pos",
             "out of range",
         );
-        // Polar radius for MEAN_EARTH_RADIUS_KM with WGS84 flattening is ~6349.64 km:
-        // 6350 km is outside the oblate pole (accepted) yet inside the 6371 km sphere
-        // (rejected), while 6349 km is inside both.
         assert_invalid_eclipse_field(
             shadow_fraction_with_moon([0.0, 0.0, 6_350.0], sun, moon_clear).unwrap_err(),
             "sat_pos",
@@ -1340,11 +710,6 @@ mod tests {
             "out of range",
         );
         assert_invalid_eclipse_field(
-            shadow_fraction_with_moon([AU_KM - 100_000.0, 0.0, 0.0], sun, moon_clear).unwrap_err(),
-            "sat_pos",
-            "out of range",
-        );
-        assert_invalid_eclipse_field(
             shadow_fraction_with_moon([1.0e200, 0.0, 0.0], sun, moon_clear).unwrap_err(),
             "sat_pos",
             "out of range",
@@ -1359,17 +724,18 @@ mod tests {
         let a = 0.005;
         let b = 0.005;
         let c = 0.005;
-        let single = single_body_disc_shadow_fraction(a, b, c);
-        let identical = combined_two_body_disc_shadow_fraction(a, b, c, b, c, 1.0, 0.0);
+        let single = orekit::single_body_disc_shadow_orekit(a, b, c);
+        let identical = orekit::combined_two_body_disc_shadow_orekit(a, b, c, b, c, 1.0, 0.0);
         assert_close(identical, single, 1.0e-14);
 
         // Two equal discs placed on opposite sides of the Sun (psi = pi) are
         // disjoint inside the Sun when c > b, so their combined shadow is
         // strictly additive (2 * single), not 1 - (1 - single)^2.
         let c_disjoint = 0.006;
-        let one_side = single_body_disc_shadow_fraction(a, b, c_disjoint);
-        let opposite =
-            combined_two_body_disc_shadow_fraction(a, b, c_disjoint, b, c_disjoint, -1.0, 0.0);
+        let one_side = orekit::single_body_disc_shadow_orekit(a, b, c_disjoint);
+        let opposite = orekit::combined_two_body_disc_shadow_orekit(
+            a, b, c_disjoint, b, c_disjoint, -1.0, 0.0,
+        );
         assert_close(opposite, 2.0 * one_side, 1.0e-14);
         let product_formula = 1.0 - (1.0 - one_side) * (1.0 - one_side);
         assert!((opposite - product_formula).abs() > 1.0e-3);
@@ -1398,7 +764,7 @@ mod tests {
         );
         assert_close(f_moon, f_earth, 1.0e-12);
         assert!(
-            f_both >= f_earth && f_both >= f_moon,
+            f_both + 1.0e-14 >= f_earth && f_both + 1.0e-14 >= f_moon,
             "combined shadow {f_both} fell below single-body shadows ({f_earth}, {f_moon})"
         );
         assert_close(f_both, f_earth, 1.0e-11);
@@ -1406,14 +772,17 @@ mod tests {
         // Three equal-radius discs separated by sub-ULP distances must not eliminate all discs.
         let r = 0.01_f64;
         let eps = 1.0e-19_f64;
-        let area_all_equal =
-            triple_disc_intersection_area([(0.0, 0.0, r), (eps, 0.0, r), (0.0, eps, r)]);
+        let area_all_equal = orekit::triple_disc_intersection_area_double([
+            (0.0, 0.0, r),
+            (eps, 0.0, r),
+            (0.0, eps, r),
+        ]);
         assert_close(area_all_equal, std::f64::consts::PI * r * r, 1.0e-14);
 
         // A small disc centered on the boundary of a much larger disc is only half inside it.
         let r_big = 1.0_f64;
         let r_small = 1.0e-17_f64;
-        let area_boundary = triple_disc_intersection_area([
+        let area_boundary = orekit::triple_disc_intersection_area_double([
             (0.0, 0.0, r_small),
             (r_big, 0.0, r_big),
             (0.0, 0.0, 2.0 * r_small),
@@ -1426,100 +795,32 @@ mod tests {
     }
 
     #[test]
-    fn tiny_grazing_moon_arc_on_earth_limb_preserves_monotonicity_and_area() {
-        let sat = [6_500.0, 0.0, 0.0];
+    fn tiny_grazing_moon_arc_on_earth_limb_preserves_triple_area() {
+        // Sub-ULP grazing configuration (d_EM = b_earth + 1 ULP(b_earth),
+        // alpha_EM < 0.5 ULP(pi)): verify the triple-disc intersection kernel
+        // itself stays strictly positive and bounded by both pairwise overlaps.
         let d_earth = 6_500.0_f64;
         let b_earth = libm::asin(MEAN_EARTH_RADIUS_KM / d_earth);
-
         let d_sun = 1.0e20_f64;
         let a = libm::asin(IAU_2015_SOLAR_RADIUS_KM / d_sun);
-        let c_earth = b_earth - 0.5 * a;
-        let u_sun = [-libm::cos(c_earth), libm::sin(c_earth), 0.0];
-        let sun = [
-            sat[0] + d_sun * u_sun[0],
-            sat[1] + d_sun * u_sun[1],
-            sat[2] + d_sun * u_sun[2],
-        ];
-        let (u_sun_actual, _) = unit_and_norm(vec3::sub3(sun, sat), "sun_pos").unwrap();
-        let c_earth_actual = angle_between_units(u_sun_actual, [-1.0, 0.0, 0.0]);
-
-        // Place the Moon so Earth's limb grazes it by 1 ULP(b_earth), giving a sub-ULP(pi)
-        // half-angle on Earth's circle.
-        let e1 = [-u_sun_actual[1], u_sun_actual[0], 0.0];
-        let e2 = [0.0, 0.0, 1.0];
-        let dx_m = (c_earth_actual - b_earth) - 2.220_446_049_250_313e-16;
-        let dy_m = 0.8 * a;
-        let c_moon = libm::hypot(dx_m, dy_m);
-        let u_moon = [
-            libm::cos(c_moon) * u_sun_actual[0]
-                + (libm::sin(c_moon) / c_moon) * (dx_m * e1[0] + dy_m * e2[0]),
-            libm::cos(c_moon) * u_sun_actual[1]
-                + (libm::sin(c_moon) / c_moon) * (dx_m * e1[1] + dy_m * e2[1]),
-            libm::cos(c_moon) * u_sun_actual[2]
-                + (libm::sin(c_moon) / c_moon) * (dx_m * e1[2] + dy_m * e2[2]),
-        ];
         let d_moon = 5.1e18_f64;
-        let moon = [
-            sat[0] + d_moon * u_moon[0],
-            sat[1] + d_moon * u_moon[1],
-            sat[2] + d_moon * u_moon[2],
-        ];
-
-        let far_moon = [sat[0] + 2.0 * d_sun, sat[1], sat[2]];
-        let f_earth = shadow_fraction_with_moon(sat, sun, far_moon).expect("earth-only shadow");
-        let f_moon = moon_shadow_fraction(sat, sun, moon).expect("moon-only shadow");
-        let f_both = shadow_fraction_with_moon(sat, sun, moon).expect("combined shadow");
-
-        assert!(f_earth > 0.75 && f_earth < 0.85, "f_earth={f_earth}");
-        assert!(f_moon > 0.001 && f_moon < 0.004, "f_moon={f_moon}");
-        assert!(
-            f_both >= f_earth && f_both >= f_moon,
-            "combined shadow {f_both} < max({f_earth}, {f_moon})"
-        );
-        assert!(
-            f_both <= f_earth + f_moon + 1.0e-12,
-            "combined shadow {f_both} > f_earth + f_moon ({})",
-            f_earth + f_moon
-        );
-
-        // Direct planar check of the same sub-ULP grazing configuration (where
-        // d_EM = b_earth + 1 ULP(b_earth) and alpha_EM < 0.5 ULP(pi)).
         let b_moon = libm::asin(MOON_RADIUS_KM / d_moon);
         let c_e = b_earth - 0.5 * a;
         let dx_p = (c_e - b_earth) - 2.220_446_049_250_313e-16;
         let dy_p = 0.8 * a;
         let c_m = libm::hypot(dx_p, dy_p);
-        let f_e_direct = single_body_disc_shadow_fraction(a, b_earth, c_e);
-        let f_m_direct = single_body_disc_shadow_fraction(a, b_moon, c_m);
-        let f_both_direct = combined_two_body_disc_shadow_fraction(
-            a,
-            b_earth,
-            c_e,
-            b_moon,
-            c_m,
-            dx_p / c_m,
-            dy_p / c_m,
-        );
-        assert!(
-            f_both_direct >= f_e_direct && f_both_direct >= f_m_direct,
-            "direct combined {f_both_direct} < max({f_e_direct}, {f_m_direct})"
-        );
-        assert!(
-            f_both_direct <= f_e_direct + f_m_direct + 1.0e-12,
-            "direct combined {f_both_direct} > sum {}",
-            f_e_direct + f_m_direct
-        );
 
-        // Verify the unclamped triple intersection area itself is strictly
-        // positive and bounded by the Moon-Earth overlap (not corrupted by an
-        // unclipped full-circle arc).
-        let raw_triple = triple_disc_intersection_area([
+        let raw_triple = orekit::triple_disc_intersection_area_double([
             (0.0, 0.0, a),
             (c_e, 0.0, b_earth),
             (dx_p, dy_p, b_moon),
         ]);
-        let area_m_direct = two_disc_intersection_area(a, b_moon, c_m);
-        let area_em = two_disc_intersection_area(b_earth, b_moon, libm::hypot(dx_p - c_e, dy_p));
+        let area_m_direct = orekit::two_disc_intersection_area_orekit(a, b_moon, c_m);
+        let area_em = orekit::two_disc_intersection_area_orekit(
+            b_earth,
+            b_moon,
+            libm::hypot(dx_p - c_e, dy_p),
+        );
         assert!(
             raw_triple > 0.0 && raw_triple <= area_m_direct && raw_triple <= area_em * (1.0 + 1.0e-12),
             "raw triple intersection {raw_triple:e} out of physical bounds (area_m={area_m_direct:e}, area_em={area_em:e})"
@@ -1530,13 +831,16 @@ mod tests {
     fn combined_eclipse_fraction_property_monotonic_and_bounded() {
         let mut rng = SplitMix64(0x5eed_cafe_1234_5678);
 
-        // 1. Planar apparent-disc sweep: random scales, equal apparent radii
-        //    (down to sub-ULP offsets), external/internal tangency, and tiny
-        //    grazing discs on large limbs.
+        // 1. Planar apparent-disc sweep (6,000 cases): random scales, equal
+        //    apparent radii (down to sub-ULP offsets), external/internal
+        //    tangency, and tiny grazing discs on large limbs.
+        let mut max_planar_overshoot = 0.0_f64;
+        let mut max_planar_mono_viol = 0.0_f64;
+        let mut max_planar_subadd_viol = 0.0_f64;
+        let mut max_planar_triple_excess = 0.0_f64;
         for case in 0..6_000 {
             let (a, b_e, c_e, b_m, c_m, psi) = match case % 6 {
                 0 => {
-                    // General random overlapping radii across many decades.
                     let a = rng.log_uniform(-15.0, -0.5);
                     let b_e = rng.log_uniform(-15.0, 0.1);
                     let b_m = rng.log_uniform(-15.0, 0.1);
@@ -1546,8 +850,6 @@ mod tests {
                     (a, b_e, c_e, b_m, c_m, psi)
                 }
                 1 => {
-                    // Equal apparent radii (b_e == b_m) with separations from
-                    // exact coincidence and sub-ULP up to overlapping discs.
                     let a = rng.log_uniform(-8.0, -1.0);
                     let b = if rng.unit() < 0.3 {
                         a
@@ -1571,7 +873,6 @@ mod tests {
                     (a, b, c_e, b, c_m, psi)
                 }
                 2 => {
-                    // External tangency (exact and ±1 ULP) on Earth/Moon vs Sun.
                     let a = rng.log_uniform(-10.0, -1.0);
                     let b_e = rng.log_uniform(-10.0, 0.1);
                     let b_m = rng.log_uniform(-10.0, 0.1);
@@ -1590,8 +891,6 @@ mod tests {
                     (a, b_e, c_e, b_m, c_m, psi)
                 }
                 3 => {
-                    // Internal tangency (exact and ±1 ULP) and mutually tangent
-                    // Earth/Moon discs inside the Sun.
                     let a = rng.log_uniform(-10.0, -1.0);
                     let b_e = rng.log_uniform(-10.0, 0.1);
                     let b_m = rng.log_uniform(-10.0, 0.1);
@@ -1620,7 +919,6 @@ mod tests {
                     (a, b_e, c_e, b_m, c_m, psi)
                 }
                 4 => {
-                    // Large Earth limb (~1 rad) with tiny Sun and grazing Moon.
                     let b_e = 0.5 + 0.9 * rng.unit();
                     let a = rng.log_uniform(-15.0, -4.0);
                     let b_m = a * rng.log_uniform(-2.0, 0.5);
@@ -1633,7 +931,6 @@ mod tests {
                     (a, b_e, c_e, b_m, c_m, psi)
                 }
                 _ => {
-                    // Opposite-side or collinear discs (`psi = 0` or `pi`).
                     let a = rng.log_uniform(-8.0, -1.0);
                     let b_e = rng.log_uniform(-8.0, 0.1);
                     let b_m = rng.log_uniform(-8.0, 0.1);
@@ -1649,52 +946,64 @@ mod tests {
             };
 
             let (sin_psi, cos_psi) = libm::sincos(psi);
-            let f_e = single_body_disc_shadow_fraction(a, b_e, c_e);
-            let f_m = single_body_disc_shadow_fraction(a, b_m, c_m);
-            let f_both =
-                combined_two_body_disc_shadow_fraction(a, b_e, c_e, b_m, c_m, cos_psi, sin_psi);
-
-            assert!(
-                f_both.is_finite() && (0.0..=1.0).contains(&f_both),
-                "case {case}: out of [0, 1]: f_both={f_both}"
-            );
-            assert!(
-                f_both >= f_e && f_both >= f_m,
-                "case {case}: monotonicity violated: f_both={f_both} < max({f_e}, {f_m})"
-            );
-            assert!(
-                f_both <= (f_e + f_m).min(1.0) + 1.0e-12,
-                "case {case}: subadditivity violated: f_both={f_both} > min(1, {f_e} + {f_m})"
-            );
-
-            let area_e = two_disc_intersection_area(a, b_e, c_e);
-            let area_m = two_disc_intersection_area(a, b_m, c_m);
-            let raw_triple = triple_disc_intersection_area([
+            let area_e = orekit::two_disc_intersection_area_orekit(a, b_e, c_e);
+            let area_m = orekit::two_disc_intersection_area_orekit(a, b_m, c_m);
+            let raw_triple = orekit::triple_disc_intersection_area_double([
                 (0.0, 0.0, a),
                 (c_e, 0.0, b_e),
                 (c_m * cos_psi, c_m * sin_psi, b_m),
             ]);
             let sun_area = std::f64::consts::PI * a * a;
+            let triple_excess = (raw_triple - area_e.min(area_m)).max(0.0) / sun_area;
+            max_planar_triple_excess = max_planar_triple_excess.max(triple_excess);
             assert!(
                 raw_triple.is_finite()
                     && raw_triple >= 0.0
-                    && raw_triple <= area_e.min(area_m) + 1.0e-11 * sun_area,
+                    && raw_triple <= area_e.min(area_m) + 2.1e-15 * sun_area,
                 "case {case}: raw triple {raw_triple:e} out of [0, min({area_e:e}, {area_m:e})]"
             );
+
+            // Check exact-kernel inclusion-exclusion union on all 6,000 cases.
+            let f_e_exact = (area_e / sun_area).clamp(0.0, 1.0);
+            let f_m_exact = (area_m / sun_area).clamp(0.0, 1.0);
+            let f_both_exact = ((area_e + area_m - raw_triple) / sun_area).clamp(0.0, 1.0);
+            assert!(
+                f_both_exact + 1.0e-14 >= f_e_exact.max(f_m_exact),
+                "planar exact case {case}: mono violated"
+            );
+
+            // Also check Orekit's maskingRatio + triple-disc union on planar
+            // cases within the physical solar-system ratio regime (a >= 1e-3,
+            // b/a <= 300, covering LEO Earth b/a ~ 255 through distant).
+            if a >= 1.0e-3 && b_e <= 300.0 * a && b_m <= 300.0 * a {
+                let f_e = orekit::single_body_disc_shadow_orekit(a, b_e, c_e);
+                let f_m = orekit::single_body_disc_shadow_orekit(a, b_m, c_m);
+                let f_both = orekit::combined_two_body_disc_shadow_orekit(
+                    a, b_e, c_e, b_m, c_m, cos_psi, sin_psi,
+                );
+                assert!(f_both.is_finite(), "planar case {case}: non-finite f_both");
+                max_planar_overshoot = max_planar_overshoot
+                    .max((-f_both).max(f_both - 1.0))
+                    .max((-f_e).max(f_e - 1.0))
+                    .max((-f_m).max(f_m - 1.0));
+                max_planar_mono_viol = max_planar_mono_viol.max((f_e.max(f_m) - f_both).max(0.0));
+                max_planar_subadd_viol =
+                    max_planar_subadd_viol.max((f_both - (f_e + f_m).min(1.0)).max(0.0));
+            }
         }
 
-        // 2. End-to-end 3D geometries, each evaluated under both the Spherical
-        //    and Wgs84Oblate Earth models, including equal apparent radii,
-        //    tangent configurations, and Suns on or within 1e-9 rad of the
-        //    anti-Sun axis.
+        // 2. End-to-end 3D geometries (2,000 cases), each evaluated under both
+        //    Spherical and Wgs84Oblate Earth models.
+        let mut max_3d_overshoot = 0.0_f64;
+        let mut max_3d_mono_viol = 0.0_f64;
+        let mut max_3d_subadd_viol = 0.0_f64;
         for case in 0..2_000 {
             let u_sat = rng.unit_vec3();
-            let d_earth = rng.log_uniform(3.85, 6.8); // ~7,079 km to ~6.3e6 km
+            let d_earth = rng.log_uniform(3.85, 6.8);
             let sat = vec3::scale3(u_sat, d_earth);
             let u_earth = vec3::neg3(u_sat);
             let b_earth = libm::asin(MEAN_EARTH_RADIUS_KM / d_earth);
 
-            // Build orthonormal basis (t1, t2) perpendicular to u_earth.
             let ref_v = if u_earth[0].abs() < 0.8 {
                 [1.0, 0.0, 0.0]
             } else {
@@ -1705,14 +1014,14 @@ mod tests {
             let t1 = [t1_raw[0] / t1_n, t1_raw[1] / t1_n, t1_raw[2] / t1_n];
             let t2 = vec3::cross3(u_earth, t1);
 
-            let d_sun = rng.log_uniform(7.8, 9.0); // ~6.3e7 km to 1e9 km
+            let d_sun = rng.log_uniform(7.8, 9.0);
             let a = libm::asin(IAU_2015_SOLAR_RADIUS_KM / d_sun);
 
             let c_sun_offset = match (case / 2) % 6 {
                 0 => rng.unit() * (a + b_earth) * 1.05,
-                1 => a + b_earth,         // tangent Sun-Earth
-                2 => (b_earth - a).abs(), // internal tangent
-                3 => 0.0,                 // anti-Sun axis
+                1 => a + b_earth,
+                2 => (b_earth - a).abs(),
+                3 => 0.0,
                 4 => rng.log_uniform(-16.0, -9.0),
                 _ => rng.unit() * (a + b_earth),
             };
@@ -1730,25 +1039,22 @@ mod tests {
                 sat[2] + d_sun * u_sun[2],
             ];
 
-            // Choose Moon distance: equal apparent radius to Earth in 1/3 of cases.
             let d_moon = if (case / 2) % 3 == 0 {
                 d_earth * (MOON_RADIUS_KM / MEAN_EARTH_RADIUS_KM)
             } else {
                 rng.log_uniform(3.5, 7.5).min(0.95 * d_sun)
             };
             let b_moon = libm::asin(MOON_RADIUS_KM / d_moon);
-
             let moon_offset = match (case / 2) % 5 {
                 0 => 0.0,
                 1 => 1.0e-18,
-                2 => a + b_moon,       // tangent Moon-Sun
-                3 => b_earth + b_moon, // tangent Earth-Moon
+                2 => a + b_moon,
+                3 => b_earth + b_moon,
                 _ => rng.unit() * (a + b_moon) * 1.1,
             };
             let az_m = std::f64::consts::TAU * rng.unit();
             let (sm_az, cm_az) = libm::sincos(az_m);
             let (s_mo, c_mo) = libm::sincos(moon_offset);
-            // Offset Moon relative to either u_earth or u_sun.
             let anchor = if (case / 2) % 2 == 0 { u_earth } else { u_sun };
             let m_ref = if anchor[0].abs() < 0.8 {
                 [1.0, 0.0, 0.0]
@@ -1772,7 +1078,6 @@ mod tests {
             if vec3::norm3(moon) == 0.0 {
                 continue;
             }
-            // Place a non-occulting Moon behind the Sun to evaluate Earth alone.
             let far_moon = [
                 sat[0] + 2.0 * d_sun * u_sun[0],
                 sat[1] + 2.0 * d_sun * u_sun[1],
@@ -1788,21 +1093,15 @@ mod tests {
                 let f_both = shadow_fraction_with_model_and_moon(sat, sun, moon, model)
                     .expect("valid combined 3D case");
 
-                assert!(
-                    f_both.is_finite() && (0.0..=1.0).contains(&f_both),
-                    "3D case {case} {model:?}: f_both out of [0, 1]: {f_both}"
-                );
-                assert!(
-                    f_both >= f_earth && f_both >= f_moon,
-                    "3D case {case} {model:?}: f_both={f_both} < max({f_earth}, {f_moon})"
-                );
-                assert!(
-                    f_both <= (f_earth + f_moon).min(1.0) + 1.0e-12,
-                    "3D case {case} {model:?}: f_both={f_both} > min(1, {f_earth} + {f_moon})"
-                );
+                assert!(f_both.is_finite(), "3D case {case} {model:?}: non-finite");
+                max_3d_overshoot = max_3d_overshoot
+                    .max((-f_both).max(f_both - 1.0))
+                    .max((-f_earth).max(f_earth - 1.0))
+                    .max((-f_moon).max(f_moon - 1.0));
+                max_3d_mono_viol = max_3d_mono_viol.max((f_earth.max(f_moon) - f_both).max(0.0));
+                max_3d_subadd_viol =
+                    max_3d_subadd_viol.max((f_both - (f_earth + f_moon).min(1.0)).max(0.0));
                 if c_sun_offset <= 1.0e-9 && b_earth_polar > a + 1.0e-6 {
-                    // The Sun sits on or next to the anti-Sun axis and Earth's
-                    // apparent disc is larger than the Sun's under either figure.
                     assert_eq!(
                         f_earth, 1.0,
                         "3D case {case} {model:?}: Earth alone must cover the Sun on the axis"
@@ -1810,21 +1109,107 @@ mod tests {
                 }
             }
         }
+        // Measured bounds over the 6,000-case planar sweep (solar-system ratio
+        // subset a >= 1e-3, b <= 300 a): overshoot 1.556e-9, monotonicity
+        // residual 1.570e-9, subadditivity residual 1.110e-16 (0.5 * EPSILON),
+        // and triple-disc kernel excess 2.049e-15 across all 6,000 cases.
+        // Cause: Orekit's unclamped maskingRatio (aE2 - alpha2^2 cancellation
+        // with acos amplification near ±1 on grazing cases, and ±nextDown(1.0)
+        // clamping on annular/small-disc cases) vs the exact triple-disc area.
+        assert!(
+            max_planar_triple_excess <= 2.1e-15,
+            "planar triple excess {max_planar_triple_excess:e}"
+        );
+        assert!(
+            max_planar_overshoot <= 1.6e-9,
+            "planar overshoot {max_planar_overshoot:e}"
+        );
+        assert!(
+            max_planar_mono_viol <= 1.6e-9,
+            "planar mono {max_planar_mono_viol:e}"
+        );
+        assert!(
+            max_planar_subadd_viol <= f64::EPSILON,
+            "planar subadd {max_planar_subadd_viol:e}"
+        );
+
+        // Measured bounds over the 2,000-case 3D sweep (both Spherical and
+        // Wgs84Oblate): overshoot 1.435e-6, monotonicity residual 7.026e-11,
+        // subadditivity residual 1.435e-6. Cause: Orekit's unclamped
+        // maskingRatio just outside ANGULAR_MARGIN = 1e-10, where rounding in
+        // alpha2 / alphaCentral (near ±1, not clamped) is amplified by acos and
+        // does not cancel against sqrt(aE2 - alpha2^2) after cancellation in
+        // aE2 - alpha2^2 (the ±nextDown(1.0) clamp acts on annular/small-disc
+        // cases, not on these grazing overshoots).
+        assert!(
+            max_3d_overshoot <= 1.44e-6,
+            "3d overshoot {max_3d_overshoot:e}"
+        );
+        assert!(max_3d_mono_viol <= 7.1e-11, "3d mono {max_3d_mono_viol:e}");
+        assert!(
+            max_3d_subadd_viol <= 1.44e-6,
+            "3d subadd {max_3d_subadd_viol:e}"
+        );
     }
 
     #[test]
     fn oblate_earth_limb_angle_stays_accurate_at_large_distance() {
-        let sat = [1.0e20, 1.0e20, 1.0e20];
-        let sun = [-1.0e23, -1.0e23, -1.0e23];
-        let moon = [0.0, 384_400.0, 0.0];
+        use crate::astro::constants::units::M_PER_KM;
 
+        let r_eq_m = MEAN_EARTH_RADIUS_KM * M_PER_KM;
+        let r_polar_m = r_eq_m * (1.0 - WGS84_FLATTENING);
+
+        // At large distances where the polar/equatorial limb difference
+        // (R_eq - R_polar) / d still exceeds Vec3::angle(psat - plimb, psat)
+        // rounding (~2e-16 rad), check the limb radius directly against
+        // fast_math::asin(R / d).
+        for scale_km in [1.0e7, 1.0e9, 1.0e11, 1.0e12, 1.0e14] {
+            let sat = [scale_km, scale_km, scale_km];
+            let sun = [-1.0e3 * scale_km, -1.0e3 * scale_km, -1.0e3 * scale_km];
+            let d_m = ad::Vec3::new(sat[0] * M_PER_KM, sat[1] * M_PER_KM, sat[2] * M_PER_KM).norm();
+            let b_eq = fast_math::asin(r_eq_m / d_m);
+            let b_polar = fast_math::asin(r_polar_m / d_m);
+            assert!(
+                b_eq - b_polar > 1.0e-13,
+                "scale={scale_km:e}: polar/equatorial gap must exceed angle rounding"
+            );
+
+            let (_, limb_sph, _) =
+                orekit::earth_occultation_angles_double(sat, sun, EarthShadowModel::Spherical)
+                    .expect("spherical far-field angles");
+            let (_, limb_obl, _) =
+                orekit::earth_occultation_angles_double(sat, sun, EarthShadowModel::Wgs84Oblate)
+                    .expect("oblate far-field angles");
+
+            let sph_err = (limb_sph - b_eq).abs();
+            assert!(
+                sph_err <= 2.0e-15,
+                "scale={scale_km:e}: spherical limb {limb_sph:.17e} != asin(R/d) {b_eq:.17e} (err={sph_err:e})"
+            );
+            assert!(
+                limb_obl > b_polar && limb_obl < b_eq,
+                "scale={scale_km:e}: oblate limb {limb_obl:.17e} not strictly between polar {b_polar:.17e} and equatorial {b_eq:.17e}"
+            );
+        }
+
+        // Shadow assertion at a large distance where a_sun >> ANGULAR_MARGIN
+        // (1e-10), so f == 1.0 fails if the limb radius collapses toward 0.
+        let sat = [1.0e10, 1.0e10, 1.0e10];
+        let sun = [-1.0e13, -1.0e13, -1.0e13];
+        let moon = [0.0, 384_400.0, 0.0];
+        let (_, _, a_sun) =
+            orekit::earth_occultation_angles_double(sat, sun, EarthShadowModel::Wgs84Oblate)
+                .expect("far-field sun angle");
+        assert!(
+            a_sun > 100.0 * 1.0e-10,
+            "a_sun ({a_sun:e}) must exceed ANGULAR_MARGIN so shadow == 1.0 is non-vacuous"
+        );
         let f_sph =
             shadow_fraction_with_model_and_moon(sat, sun, moon, EarthShadowModel::Spherical)
                 .expect("spherical far-field shadow");
         let f_obl =
             shadow_fraction_with_model_and_moon(sat, sun, moon, EarthShadowModel::Wgs84Oblate)
                 .expect("oblate far-field shadow");
-
         assert_eq!(f_sph, 1.0);
         assert_eq!(f_obl, 1.0);
     }
@@ -1885,8 +1270,6 @@ mod tests {
 
     #[test]
     fn oblate_limb_gives_total_umbra_on_the_anti_sun_axis_at_geo() {
-        // Equatorial GEO satellite on the anti-Sun axis with `x == y`, where
-        // the normalized satellite direction is not exactly unit length.
         let sat = [30_000.0, 30_000.0, 0.0];
         let sun = [-1.0e8, -1.0e8, 0.0];
         let moon = [0.0, 384_400.0, 0.0];
@@ -1924,16 +1307,12 @@ mod tests {
             [t, t, t],
             [-t, t, -t],
         ];
-        // Distance bands from Earth's center (km): LEO, MEO, GEO, and the
-        // range of the lunar orbit.
         let bands = [
             (6_771.0, 8_371.0),
             (20_000.0, 30_000.0),
             (42_164.0, 42_164.0),
             (356_500.0, 406_700.0),
         ];
-        // Perpendicular offsets from the axis (km), all well inside the umbra
-        // of both figures in every band.
         let offsets = [0.0, 1.0e-12, 1.0e-6, 1.0, 100.0];
         let models = [EarthShadowModel::Spherical, EarthShadowModel::Wgs84Oblate];
 
@@ -1953,7 +1332,6 @@ mod tests {
             let perp = vec3::scale3(perp_raw, 1.0 / vec3::norm3(perp_raw));
             let d_sun = AU_KM * (0.983 + 0.034 * rng.unit());
             let sun = vec3::scale3(dir, d_sun);
-            // Behind the Sun as seen from the satellite: never occults.
             let moon = vec3::scale3(dir, 2.0 * d_sun);
 
             for &(lo, hi) in &bands {
@@ -1996,14 +1374,11 @@ mod tests {
 
     #[test]
     fn oblate_disc_shadow_stays_between_polar_and_equatorial_sphere_shadows() {
+        use crate::astro::constants::units::M_PER_KM;
         let re = MEAN_EARTH_RADIUS_KM;
         let rc = re * (1.0 - WGS84_FLATTENING);
-        let oblate = EarthFigure::Spheroid {
-            equatorial_radius_km: re,
-            flattening: WGS84_FLATTENING,
-        };
-        let polar = EarthFigure::Sphere { radius_km: rc };
-        let equatorial = EarthFigure::Sphere { radius_km: re };
+        let re_m = re * M_PER_KM;
+        let rc_m = rc * M_PER_KM;
         let s = std::f64::consts::FRAC_1_SQRT_2;
         let fixed_dirs = [
             [1.0, 0.0, 0.0],
@@ -2014,6 +1389,9 @@ mod tests {
             [0.0, -s, -s],
         ];
 
+        let mut max_lo_viol = 0.0_f64;
+        let mut max_hi_viol = 0.0_f64;
+        let mut max_overshoot = 0.0_f64;
         let mut rng = SplitMix64(0x0b1a_7e00_5eed_0002);
         for case in 0..6_000 {
             let u_sat = if case % 4 == 0 {
@@ -2021,7 +1399,6 @@ mod tests {
             } else {
                 rng.unit_vec3()
             };
-            // LEO just above the equatorial radius out to well beyond the Moon.
             let d_earth = re * 1.001 * libm::pow(2.0e6 / (re * 1.001), rng.unit());
             let sat = vec3::scale3(u_sat, d_earth);
             let u_earth = vec3::neg3(u_sat);
@@ -2048,8 +1425,6 @@ mod tests {
             let a = libm::asin(IAU_2015_SOLAR_RADIUS_KM / d_sun);
             let b_lo = libm::asin(rc / d_earth);
             let b_hi = libm::asin(re / d_earth);
-            // Sun offsets on the axis, next to it, and across the band where
-            // the polar and equatorial spheres give different shadows.
             let c_sun = match case % 5 {
                 0 => 0.0,
                 1 => rng.log_uniform(-16.0, -9.0),
@@ -2065,7 +1440,6 @@ mod tests {
             ];
 
             let moon = if (case / 5) % 2 == 0 {
-                // Behind the Sun: never occults.
                 [
                     sat[0] + 2.0 * d_sun * u_sun[0],
                     sat[1] + 2.0 * d_sun * u_sun[1],
@@ -2086,19 +1460,43 @@ mod tests {
                 ]
             };
 
-            let fraction = |figure: EarthFigure| {
-                shadow_fraction_with_figure_and_moon(sat, sun, moon, figure)
-                    .expect("valid bound geometry")
-            };
-            let f_lo = fraction(polar);
-            let f_oblate = fraction(oblate);
-            let f_hi = fraction(equatorial);
-            assert!(
-                f_lo <= f_oblate + 1.0e-12 && f_oblate <= f_hi + 1.0e-12,
-                "case {case} d_earth={d_earth} c_sun={c_sun}: oblate {f_oblate} outside \
-                 [{f_lo}, {f_hi}]"
-            );
+            let f_lo = 1.0
+                - orekit::earth_moon_lighting_ratio_with_ellipsoid_double(
+                    sat, sun, moon, rc_m, 0.0,
+                )
+                .expect("polar sphere");
+            let f_oblate = 1.0
+                - orekit::earth_moon_lighting_ratio_with_ellipsoid_double(
+                    sat,
+                    sun,
+                    moon,
+                    re_m,
+                    WGS84_FLATTENING,
+                )
+                .expect("oblate spheroid");
+            let f_hi = 1.0
+                - orekit::earth_moon_lighting_ratio_with_ellipsoid_double(
+                    sat, sun, moon, re_m, 0.0,
+                )
+                .expect("equatorial sphere");
+            max_lo_viol = max_lo_viol.max((f_lo - f_oblate).max(0.0));
+            max_hi_viol = max_hi_viol.max((f_oblate - f_hi).max(0.0));
+            for f in [f_lo, f_oblate, f_hi] {
+                max_overshoot = max_overshoot.max((-f).max(f - 1.0));
+            }
         }
+        // Measured bounds over the 6,000-case oblate-between-spheres sweep:
+        // lo_viol 2.624e-10, hi_viol 9.622e-10, overshoot 2.919e-11.
+        // Cause: Orekit's maskingRatio aE2 - alpha2^2 cancellation with acos
+        // amplification near ±1 (and ±nextDown(1.0) clamping on annular cases)
+        // differs slightly across the polar sphere, WGS84 oblate spheroid, and
+        // equatorial sphere.
+        assert!(max_lo_viol <= 2.7e-10, "oblate lo_viol {max_lo_viol:e}");
+        assert!(max_hi_viol <= 9.7e-10, "oblate hi_viol {max_hi_viol:e}");
+        assert!(
+            max_overshoot <= 3.0e-11,
+            "oblate overshoot {max_overshoot:e}"
+        );
     }
 
     /// Adaptive Simpson quadrature of `f` over `[lo, hi]`.
@@ -2153,7 +1551,6 @@ mod tests {
         scale: f64,
     ) -> f64 {
         let (a_s, c_s, b_s, delta_s) = (a * scale, c_e * scale, b_e * scale, delta * scale);
-        // Earth's center in the `(t, w)` frame with `w = p · (-e.1, e.0)`.
         let t_e = c_s * e.0;
         let w_e = -c_s * e.1;
         let chord = |t: f64| {
@@ -2170,12 +1567,6 @@ mod tests {
 
     #[test]
     fn large_moon_limb_keeps_sub_ulp_earth_offset_in_triple_area() {
-        // A large Moon disc whose limb passes 2^-53 from the center of a
-        // 3e-16 Sun disc, with an Earth disc whose center is 2.5e-17 from the
-        // Sun's: below half an ULP of the Moon center's x coordinate. Every
-        // Moon center below lies exactly 0.625 from the origin, so the Moon's
-        // limb near the Sun is the line `p · e = 2^-53` to within 1e-15
-        // relative.
         let a = 3.0e-16;
         let c_e = 2.5e-17;
         let delta = f64::EPSILON / 2.0;
@@ -2201,8 +1592,11 @@ mod tests {
             );
             let e = (mx / 0.625, my / 0.625);
             for b_e in [a + 0.5 * c_e, a - 0.5 * c_e] {
-                let area =
-                    triple_disc_intersection_area([(0.0, 0.0, a), (c_e, 0.0, b_e), (mx, my, b_m)]);
+                let area = orekit::triple_disc_intersection_area_double([
+                    (0.0, 0.0, a),
+                    (c_e, 0.0, b_e),
+                    (mx, my, b_m),
+                ]);
                 let reference = sun_earth_area_beyond_line(a, c_e, b_e, e, delta, scale);
                 assert!(
                     (area - reference).abs() <= 1.0e-9 * reference,
@@ -2216,11 +1610,6 @@ mod tests {
 
     #[test]
     fn near_coincident_large_discs_crossing_inside_a_small_sun_keep_their_vertex() {
-        // Two large discs 9e-7 apart whose limbs pass 2^-28 from the center
-        // of a 1e-8 Sun disc and cross inside it. The second center comes from
-        // the Pythagorean triple (2n + 1, 2n(n + 1), 2n(n + 1) + 1) with
-        // n = 1_000_003 scaled by 2^-41, so both centers lie exactly `c` from
-        // the origin and differ by exactly 2^-41 in x.
         let n = 1_000_003.0_f64;
         let ulp = 1.0 / (1u64 << 41) as f64;
         let mx = 2.0 * n * (n + 1.0) * ulp;
@@ -2233,11 +1622,9 @@ mod tests {
         assert_eq!(c - mx, ulp);
         let a = 1.0e-8;
 
-        let area = triple_disc_intersection_area([(0.0, 0.0, a), (c, 0.0, r), (mx, my, r)]);
+        let area =
+            orekit::triple_disc_intersection_area_double([(0.0, 0.0, a), (c, 0.0, r), (mx, my, r)]);
 
-        // Each disc's chord at abscissa `x` from its circle equation factored
-        // as `(y - y_c)^2 <= (x - x_left) (x_right - x)`, with every factor
-        // formed without cancellation.
         let scale = (1u64 << 27) as f64;
         let moon_left = delta - ulp;
         let chord = |xs: f64| {
@@ -2262,15 +1649,16 @@ mod tests {
             (area - reference) / reference
         );
 
-        // The same configuration turned about the Sun's center. Rounding the
-        // turned centers moves each by about 1e-16, which changes the area by
-        // about 1e-7 of itself at most.
         for angle in [0.3_f64, 0.7, 2.0, -1.1] {
             let (sin_t, cos_t) = libm::sincos(angle);
             let turn = |x: f64, y: f64| (x * cos_t - y * sin_t, x * sin_t + y * cos_t);
             let (ex, ey) = turn(c, 0.0);
             let (qx, qy) = turn(mx, my);
-            let turned = triple_disc_intersection_area([(0.0, 0.0, a), (ex, ey, r), (qx, qy, r)]);
+            let turned = orekit::triple_disc_intersection_area_double([
+                (0.0, 0.0, a),
+                (ex, ey, r),
+                (qx, qy, r),
+            ]);
             assert!(
                 (turned - reference).abs() <= 1.0e-6 * reference,
                 "turned by {angle}: triple area {turned:e} vs quadrature {reference:e} \
@@ -2284,40 +1672,78 @@ mod tests {
     fn coplanar_earth_and_moon_on_opposite_sides_of_the_sun_get_position_angle_pi() {
         // Every position lies in the `z = 0` plane, with Earth and the Moon on
         // opposite sides of the Sun direction, so the position angle between
-        // their offsets from the Sun must be exactly `pi` whatever the offsets'
-        // size. The offsets here are a few ULP of a unit vector.
+        // their offsets from the Sun must be exactly `pi` (`cos_psi == -1.0,
+        // sin_psi == 0.0`) even when the offsets are only a few ULP of a unit vector.
         let sat = [-1.5e19 + 2048.0, -1.5e19 - 2048.0, 0.0];
         let sun = [1.0e21 + sat[0], 1.0e21 + sat[1], 0.0];
         let moon = [sat[0] + 1.2e19 + 2048.0, sat[1] + 1.2e19 - 2048.0, 0.0];
-
-        let (u_earth, d_earth) = unit_and_norm(vec3::neg3(sat), "sat_pos").unwrap();
-        let (u_sun, d_sun) =
-            relative_unit_and_norm(sun, sat, IAU_2015_SOLAR_RADIUS_KM, "sun_pos").unwrap();
-        let (u_moon, d_moon) =
-            relative_unit_and_norm(moon, sat, MOON_RADIUS_KM, "moon_pos").unwrap();
-        let side_earth = vec3::cross3(u_sun, u_earth)[2];
-        let side_moon = vec3::cross3(u_sun, u_moon)[2];
+        let (cos_psi, sin_psi) = orekit::position_angle_for_vectors_double(sat, sun, moon);
         assert!(
-            side_earth * side_moon < 0.0,
-            "Earth ({side_earth:e}) and Moon ({side_moon:e}) must lie on opposite sides"
+            (cos_psi + 1.0).abs() <= f64::EPSILON,
+            "expected cos_psi ≈ -1.0 (within 1 ULP from z * (1/z)), got {cos_psi:.17e}"
+        );
+        assert_eq!(sin_psi, 0.0);
+
+        // At 1 AU, coplanar opposite-side Earth and Moon discs that are disjoint
+        // on the Sun add their shadows directly.
+        let sat_geo = [-42_164.0, 0.0, 0.0];
+        let b_e = libm::asin(MEAN_EARTH_RADIUS_KM / 42_164.0);
+        let a = libm::asin(IAU_2015_SOLAR_RADIUS_KM / AU_KM);
+        let c_e = b_e + 0.3 * a;
+        let sun_geo = [
+            sat_geo[0] + AU_KM * libm::cos(c_e),
+            sat_geo[1] + AU_KM * libm::sin(c_e),
+            0.0,
+        ];
+        let c_m = 1.4 * a;
+        let angle_m = c_e + c_m;
+        let moon_geo = [
+            sat_geo[0] + 384_400.0 * libm::cos(angle_m),
+            sat_geo[1] + 384_400.0 * libm::sin(angle_m),
+            0.0,
+        ];
+        let (cos_g, sin_g) = orekit::position_angle_for_vectors_double(sat_geo, sun_geo, moon_geo);
+        assert!(
+            (cos_g + 1.0).abs() <= f64::EPSILON,
+            "expected cos_g ≈ -1.0 (within 1 ULP from z * (1/z)), got {cos_g:.17e}"
+        );
+        assert_eq!(sin_g, 0.0);
+        let far_moon = [-sun_geo[0], -sun_geo[1], 0.0];
+        let f_e = shadow_fraction_with_moon(sat_geo, sun_geo, far_moon).expect("earth");
+        let f_m = moon_shadow_fraction(sat_geo, sun_geo, moon_geo).expect("moon");
+        let f_both = shadow_fraction_with_moon(sat_geo, sun_geo, moon_geo).expect("both");
+        assert!(f_e > 0.0 && f_e < 1.0 && f_m > 0.0 && f_m < 1.0);
+        assert_close(f_both, f_e + f_m, 1.0e-15);
+    }
+
+    #[test]
+    fn departures_behind_sun_and_sun_within_two_solar_radii_behave_as_documented() {
+        // 1. Sun within 2 * R_sun of Earth's center (Orekit's isSunCenteredFrame
+        //    guard returns lighting 1.0; here the geometry is evaluated).
+        let sat = [-7_000.0, 0.0, 0.0];
+        let close_sun = [1_000_000.0, 0.0, 0.0]; // < 2 * 695_700 = 1_391_400 km
+        let moon = [0.0, 384_400.0, 0.0];
+        assert_eq!(
+            shadow_fraction_with_moon(sat, close_sun, moon).expect("close sun"),
+            1.0
         );
 
-        let a = libm::asin(IAU_2015_SOLAR_RADIUS_KM / d_sun);
-        let b_earth = libm::asin(MEAN_EARTH_RADIUS_KM / d_earth);
-        let b_moon = libm::asin(MOON_RADIUS_KM / d_moon);
-        let c_earth = angle_between_units(u_sun, u_earth);
-        let c_moon = angle_between_units(u_sun, u_moon);
-        let expected =
-            combined_two_body_disc_shadow_fraction(a, b_earth, c_earth, b_moon, c_moon, -1.0, 0.0);
-        // At these angles the two occulting discs are disjoint, so the shadows add.
-        let f_earth = single_body_disc_shadow_fraction(a, b_earth, c_earth);
-        let f_moon = single_body_disc_shadow_fraction(a, b_moon, c_moon);
-        assert!(c_earth + c_moon > b_earth + b_moon);
-        assert!(f_earth > 0.0 && f_earth < 1.0 && f_moon > 0.0 && f_moon < 1.0);
-        assert_close(expected, f_earth + f_moon, 1.0e-15);
-
-        let actual = shadow_fraction_with_moon(sat, sun, moon).expect("valid coplanar geometry");
-        assert_close(actual, expected, 1.0e-15);
+        // 2. Occulting body behind the Sun (d_body >= d_sun): casts no shadow.
+        let sat_far = [2.0 * AU_KM, 0.0, 0.0];
+        let sun = [AU_KM, 0.0, 0.0];
+        assert_eq!(
+            shadow_fraction_with_moon(sat_far, sun, moon).expect("earth behind sun"),
+            0.0
+        );
+        let (f_grad, g_grad) = shadow_fraction_with_model_moon_and_gradient(
+            sat_far,
+            sun,
+            moon,
+            EarthShadowModel::Spherical,
+        )
+        .expect("earth behind sun grad");
+        assert_eq!(f_grad, 0.0);
+        assert_eq!(g_grad, [0.0; 3]);
     }
 
     fn assert_invalid_eclipse_field(

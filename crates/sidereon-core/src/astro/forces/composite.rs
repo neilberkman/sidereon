@@ -1,5 +1,8 @@
 use crate::astro::error::PropagationError;
-use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::forces::r#trait::{
+    expect_parameter_count, finite_acceleration, finite_parameter_partials, finite_partials,
+    AccelerationPartials, ForceModel, ForceParameter,
+};
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
 use nalgebra::Vector3;
@@ -13,6 +16,10 @@ use nalgebra::Vector3;
 /// gravity. The summed vector is consumed by
 /// [`crate::astro::propagator::dynamics::OrbitalDynamics`] as the km/s²
 /// velocity derivative.
+///
+/// Its estimable parameters are those of its components, concatenated in
+/// component order; the state partials are the sums of the components'. A
+/// sum that overflows is [`PropagationError::NumericalFailure`].
 pub struct CompositeForceModel {
     /// Force components in the order in which they are evaluated.
     ///
@@ -53,6 +60,97 @@ impl ForceModel for CompositeForceModel {
         for model in &self.models {
             accel += model.acceleration(state, ctx)?;
         }
-        Ok(accel)
+        finite_acceleration(accel)
+    }
+
+    fn parameters(&self) -> Vec<ForceParameter> {
+        self.models
+            .iter()
+            .flat_map(|model| model.parameters())
+            .collect()
+    }
+
+    fn parameter_count(&self) -> usize {
+        self.models
+            .iter()
+            .map(|model| model.parameter_count())
+            .sum()
+    }
+
+    fn acceleration_with_parameters(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        ctx: &PropagationContext,
+    ) -> Result<Vector3<f64>, PropagationError> {
+        let mut accel = Vector3::zeros();
+        self.for_each_component(parameters, |model, own| {
+            accel += model.acceleration_with_parameters(own, state, ctx)?;
+            Ok(())
+        })?;
+        finite_acceleration(accel)
+    }
+
+    fn acceleration_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        ctx: &PropagationContext,
+    ) -> Result<AccelerationPartials, PropagationError> {
+        let mut partials = AccelerationPartials::zeros();
+        self.for_each_component(parameters, |model, own| {
+            let component = model.acceleration_partials(own, state, ctx)?;
+            partials.wrt_position += component.wrt_position;
+            partials.wrt_velocity += component.wrt_velocity;
+            Ok(())
+        })?;
+        finite_partials(partials)
+    }
+
+    fn parameter_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        ctx: &PropagationContext,
+    ) -> Result<Vec<Vector3<f64>>, PropagationError> {
+        let mut partials = Vec::with_capacity(parameters.len());
+        self.for_each_component(parameters, |model, own| {
+            let component = model.parameter_partials(own, state, ctx)?;
+            if component.len() != own.len() {
+                return Err(PropagationError::InvalidInput(format!(
+                    "force model returned {} parameter partials for {} parameters",
+                    component.len(),
+                    own.len()
+                )));
+            }
+            partials.extend(component);
+            Ok(())
+        })?;
+        finite_parameter_partials(partials)
+    }
+}
+
+impl CompositeForceModel {
+    /// Visit each component with its own slice of the concatenated parameter
+    /// values.
+    fn for_each_component(
+        &self,
+        parameters: &[f64],
+        mut visit: impl FnMut(&dyn ForceModel, &[f64]) -> Result<(), PropagationError>,
+    ) -> Result<(), PropagationError> {
+        let mut offset = 0;
+        for model in &self.models {
+            let count = model.parameter_count();
+            let own = parameters.get(offset..offset + count).ok_or_else(|| {
+                PropagationError::InvalidInput(format!(
+                    "composite force model takes at least {} parameter values, got {}",
+                    offset + count,
+                    parameters.len()
+                ))
+            })?;
+            visit(model.as_ref(), own)?;
+            offset += count;
+        }
+        expect_parameter_count(parameters, offset)
     }
 }

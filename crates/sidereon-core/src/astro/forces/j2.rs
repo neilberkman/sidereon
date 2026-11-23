@@ -1,9 +1,12 @@
 use crate::astro::constants::{J2_EARTH, MU_EARTH, RE_EARTH};
 use crate::astro::error::PropagationError;
-use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::forces::r#trait::{
+    expect_parameter_count, finite_partials, validate_finite_state, AccelerationPartials,
+    ForceModel,
+};
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
-use nalgebra::Vector3;
+use nalgebra::{Matrix3, Vector3};
 
 /// Degree-2 zonal-harmonic perturbation model for Cartesian propagation.
 ///
@@ -15,6 +18,8 @@ use nalgebra::Vector3;
 /// builds this model alongside [`crate::astro::forces::TwoBodyGravity`], and a
 /// position whose norm squared is exactly zero returns
 /// [`crate::astro::error::PropagationError::NumericalFailure`].
+/// [`ForceModel::acceleration_partials`] is the closed-form derivative of that
+/// acceleration with respect to position.
 pub struct J2Gravity {
     /// Gravitational parameter in km³/s². `Default::default` sets this to
     /// [`crate::astro::constants::MU_EARTH`], `ForceModelKind::build` copies
@@ -68,6 +73,49 @@ impl ForceModel for J2Gravity {
             f * (state.position_km.x / r_mag) * (5.0 * z_r2 - 1.0),
             f * (state.position_km.y / r_mag) * (5.0 * z_r2 - 1.0),
             f * (state.position_km.z / r_mag) * (5.0 * z_r2 - 3.0),
+        ))
+    }
+
+    fn acceleration_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        _ctx: &PropagationContext,
+    ) -> Result<AccelerationPartials, PropagationError> {
+        expect_parameter_count(parameters, 0)?;
+        validate_finite_state(state)?;
+        let position = state.position_km;
+        let r2 = position.norm_squared();
+        if r2 == 0.0 {
+            return Err(PropagationError::NumericalFailure(
+                "Zero position magnitude".to_string(),
+            ));
+        }
+        // a = k [x g, y g, z g_z] with g = (5 z² - r²) / r⁷ and
+        // g_z = (5 z² - 3 r²) / r⁷, k = 1.5 J2 mu Re².
+        let (x, y, z) = (position.x, position.y, position.z);
+        let z2 = z * z;
+        let r = r2.sqrt();
+        let r7 = r2 * r2 * r2 * r;
+        let r9 = r7 * r2;
+        let k = 1.5 * self.j2 * self.mu * self.re * self.re;
+        let g = (5.0 * z2 - r2) / r7;
+        let g_z = (5.0 * z2 - 3.0 * r2) / r7;
+        let dg_xy = (5.0 * r2 - 35.0 * z2) / r9;
+        let dg_z = (15.0 * r2 - 35.0 * z2) / r9;
+        let dgz_z = (25.0 * r2 - 35.0 * z2) / r9;
+        finite_partials(AccelerationPartials::position_only(
+            Matrix3::new(
+                g + x * x * dg_xy,
+                x * y * dg_xy,
+                x * z * dg_z,
+                x * y * dg_xy,
+                g + y * y * dg_xy,
+                y * z * dg_z,
+                x * z * dg_z,
+                y * z * dg_z,
+                g_z + z2 * dgz_z,
+            ) * k,
         ))
     }
 }
