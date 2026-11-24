@@ -169,13 +169,16 @@ fuzz_target!(|data: &[u8]| {
     let _ = eclipse::status_with_moon(input.sat, input.sun, input.r1);
 
     if let Ok(srp) = SolarRadiationPressure::new(1.2, 0.02) {
-        let srp = srp
-            .with_moon_eclipse(input.bytes[3] & 1 == 1)
-            .with_earth_shadow_model(if input.bytes[3] & 4 == 4 {
-                eclipse::EarthShadowModel::Wgs84Oblate
-            } else {
-                eclipse::EarthShadowModel::Spherical
-            });
+        let srp = srp.with_earth_shadow_model(if input.bytes[3] & 4 == 4 {
+            eclipse::EarthShadowModel::Wgs84Oblate
+        } else {
+            eclipse::EarthShadowModel::Spherical
+        });
+        let srp = if input.bytes[3] & 8 == 8 {
+            srp.with_shadow_function(eclipse::ShadowFunction::Conical)
+        } else {
+            srp.with_moon_eclipse(input.bytes[3] & 1 == 1)
+        };
         assert_ok_finite_or_err(
             "forces::SolarRadiationPressure::acceleration_with_sun_moon",
             srp.acceleration_with_sun_moon(input.sat.into(), input.sun.into(), input.r1.into())

@@ -708,8 +708,8 @@ fn force_models_use_crate_sun_moon_ephemeris_during_2024_solar_eclipse() {
     let state = CartesianState::new(epoch_tdb_s, sat_pos_km.into(), [0.0, 7.5, 0.0]);
     let ctx = PropagationContext::default();
 
-    let srp_earth_only = SolarRadiationPressure::new(1.3, 0.02).expect("valid SRP");
-    let srp_with_moon = srp_earth_only.with_moon_eclipse(true);
+    let srp_with_moon = SolarRadiationPressure::new(1.3, 0.02).expect("valid SRP");
+    let srp_earth_only = srp_with_moon.with_moon_eclipse(false);
     let a_srp_earth = srp_earth_only
         .acceleration(&state, &ctx)
         .expect("earth-only SRP");

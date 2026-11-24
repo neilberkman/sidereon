@@ -9,11 +9,12 @@
 //! `tests/fixtures/sp3/PROVENANCE.md`). The satellite stays in sunlight all
 //! day. Orekit rotated the positions to GCRF and fitted them with
 //! Gauss-Newton batch least squares, estimating the initial state with
-//! ParameterDrivers selected on the cannonball SRP coefficient and on
-//! empirical RTN accelerations, constant and once per revolution. Force models
-//! and constants are those of sidereon's Phase A composite (see the generator
-//! for the list). The method is that of Montenbruck & Gill, "Satellite
-//! Orbits", chapters 7 and 8.
+//! ParameterDrivers selected on the cannonball SRP coefficient, on empirical
+//! RTN accelerations (constant and once per revolution), and on Orekit's
+//! `ECOM2` model (used unchanged because G03 stays in full sunlight across the
+//! entire arc: D0/Y0/B0, D2B1, and D4B1). Force models and constants are those
+//! of sidereon's Phase A composite (see the generator for the list). The method
+//! is that of Montenbruck & Gill, "Satellite Orbits", chapters 7 and 8.
 //!
 //! The comparisons, in order:
 //! 1. the analytic Sun and Moon positions and every force model at the initial
@@ -31,9 +32,13 @@
 //!
 //! The largest disagreements with Orekit on the same observations, in formal
 //! standard deviations for a 1 m a-priori sigma: 4.6e-6 (`vz_km_s`, state and
-//! C_R), 6.6e-6 (along-track constant, state, C_R and RTN constants) and
-//! 3.4e-6 (along-track constant, state and nine RTN terms); per-epoch
-//! residuals within 3.3 um; variance factors within 8.4e-9 relative.
+//! C_R), 6.6e-6 (along-track constant, state, C_R and RTN constants), 3.4e-6
+//! (along-track constant, state and nine RTN terms), 1.2e-6 (`ecom2.y0`, state
+//! and ECOM2 D0/Y0/B0), 8.6e-7 (`vz_km_s`, state and ECOM2 D2B1), and 3.4e-7
+//! (`ecom2.d2c`, state and ECOM2 D4B1); per-epoch residuals within 3.3 um
+//! (within 2.7 um on ECOM2 cases); variance factors within 1.1e-8 relative;
+//! formal standard deviations within 9.3e-13 relative and correlations within
+//! 3.31e-12.
 
 #![cfg(sidereon_repo_tests)]
 
@@ -44,8 +49,9 @@ use serde_json::Value;
 use sidereon_core::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds;
 use sidereon_core::astro::forces::zonal::ZonalGravity;
 use sidereon_core::astro::forces::{
-    EmpiricalHarmonic, EmpiricalRtnAcceleration, ForceModel, RtnAxis, SchwarzschildRelativity,
-    SolarRadiationPressure, ThirdBodyBodies, ThirdBodyGravity, TwoBodyGravity,
+    Ecom2D2b1Coefficients, Ecom2D4b1Coefficients, Ecom2SolarRadiationPressure, EmpiricalHarmonic,
+    EmpiricalRtnAcceleration, ForceModel, RtnAxis, SchwarzschildRelativity, SolarRadiationPressure,
+    ThirdBodyBodies, ThirdBodyGravity, TwoBodyGravity,
 };
 use sidereon_core::astro::frames::orientation::{
     EarthOrientationProvider, PolarMotionSample, PolarMotionSeriesEarthOrientationProvider,
@@ -128,13 +134,26 @@ fn empirical_terms(estimated: &[String]) -> Vec<(RtnAxis, EmpiricalHarmonic)> {
 }
 
 fn options(estimated: &[String]) -> OrbitParameterFitOptions {
-    let srp = SolarRadiationPressure::new(1.0, 0.02).expect("valid SRP");
     let mut options = OrbitParameterFitOptions::default();
-    options.force_model = ForceModelKind::earth_phase_a(Some(srp));
-    let terms = empirical_terms(estimated);
-    if !terms.is_empty() {
-        options.additional_forces =
-            vec![Arc::new(EmpiricalRtnAcceleration::with_zero_terms(&terms))];
+    let is_ecom2 = estimated.iter().any(|entry| entry.starts_with("ecom2."));
+    if is_ecom2 {
+        let ecom2 = if estimated.iter().any(|entry| entry == "ecom2.d4c") {
+            Ecom2SolarRadiationPressure::d4b1(Ecom2D4b1Coefficients::default()).expect("valid D4B1")
+        } else if estimated.iter().any(|entry| entry == "ecom2.d2c") {
+            Ecom2SolarRadiationPressure::d2b1(Ecom2D2b1Coefficients::default()).expect("valid D2B1")
+        } else {
+            Ecom2SolarRadiationPressure::new(0, 0, vec![0.0; 3]).expect("valid D0B0")
+        };
+        options.force_model = ForceModelKind::earth_phase_a(None);
+        options.additional_forces = vec![Arc::new(ecom2)];
+    } else {
+        let srp = SolarRadiationPressure::new(1.0, 0.02).expect("valid SRP");
+        options.force_model = ForceModelKind::earth_phase_a(Some(srp));
+        let terms = empirical_terms(estimated);
+        if !terms.is_empty() {
+            options.additional_forces =
+                vec![Arc::new(EmpiricalRtnAcceleration::with_zero_terms(&terms))];
+        }
     }
     options.estimated_parameters = estimated.to_vec();
     let mut integrator = IntegratorOptions::default();
@@ -150,7 +169,7 @@ fn options(estimated: &[String]) -> OrbitParameterFitOptions {
 
 /// Metres (or m/s, m/s^2) per sidereon unit of a parameter.
 fn metres_per_unit(name: &str) -> f64 {
-    if name == "srp.cr" {
+    if name == "srp.cr" || name.starts_with("ecom2.") {
         1.0
     } else {
         1.0e3
@@ -310,8 +329,11 @@ const ESTIMATE_DIFFERENCE_SIGMAS: f64 = 1.7e-4 + 1.0e-4 + 1.3e-5;
 /// `(H^T W H)^-1`, which depends only on the partial derivatives; these agree
 /// to the relative accuracy of the integration, of order 1e-12, which the
 /// inversion amplifies by at most the condition number of the normal
-/// equations (below 1.1e5 in every case).
-const COFACTOR_DIFFERENCE: f64 = 1.0e-12 * 1.1e5;
+/// equations (up to 3.537e5 for `state_ecom2_d4b1`, below 3.6e5 in every
+/// case). Across all six cases the measured maxima are 9.30e-13 relative in
+/// formal standard deviations and 3.31e-12 in correlation coefficients (both
+/// on `state_ecom2_d4b1`).
+const COFACTOR_DIFFERENCE: f64 = 1.0e-12 * 3.6e5;
 
 #[test]
 fn analytic_bodies_and_force_models_match_the_oracle_inputs() {
@@ -381,6 +403,23 @@ fn analytic_bodies_and_force_models_match_the_oracle_inputs() {
             ));
         }
     }
+    models.push((
+        "ecom2_d4b1",
+        Box::new(
+            Ecom2SolarRadiationPressure::d4b1(Ecom2D4b1Coefficients {
+                b0: -1.0e-9,
+                b1c: 3.0e-10,
+                b1s: -4.0e-10,
+                d0: -1.0e-7,
+                d2c: 2.0e-9,
+                d4c: 1.0e-10,
+                d2s: -5.0e-10,
+                d4s: 2.0e-10,
+                y0: 5.0e-10,
+            })
+            .expect("valid ECOM2"),
+        ),
+    ));
     for (name, model) in &models {
         let sidereon = model.acceleration(&state, &ctx).expect("acceleration") * 1.0e3;
         let orekit = vector(&accelerations[*name]);
@@ -459,16 +498,26 @@ fn fits_of_the_same_observations_agree_with_orekit() {
             fit.iterations
         );
 
+        let mut max_sigma_diff = 0.0_f64;
+        let mut max_sigma_name = "";
+        let mut max_sigma_rel = 0.0_f64;
+        let mut max_corr_diff = 0.0_f64;
         for (k, name) in fit.parameter_names.iter().enumerate() {
             let difference = (estimate[k] - orekit.estimate[k]) / orekit_sigmas[k];
+            if difference.abs() > max_sigma_diff {
+                max_sigma_diff = difference.abs();
+                max_sigma_name = name.as_str();
+            }
             assert!(
                 difference.abs() <= ESTIMATE_DIFFERENCE_SIGMAS,
                 "{label} {name}: sidereon {:e}, Orekit {:e}, {difference:e} formal sigma",
                 estimate[k],
                 orekit.estimate[k]
             );
+            let sigma_rel = (sidereon_sigmas[k] / orekit_sigmas[k] - 1.0).abs();
+            max_sigma_rel = max_sigma_rel.max(sigma_rel);
             assert!(
-                (sidereon_sigmas[k] / orekit_sigmas[k] - 1.0).abs() <= COFACTOR_DIFFERENCE,
+                sigma_rel <= COFACTOR_DIFFERENCE,
                 "{label} {name}: formal sigma {:e} vs {:e}",
                 sidereon_sigmas[k],
                 orekit_sigmas[k]
@@ -480,8 +529,10 @@ fn fits_of_the_same_observations_agree_with_orekit() {
                     |c: &[Vec<f64>]| c[row][column] / (c[row][row] * c[column][column]).sqrt();
                 let sidereon = correlation(&covariance);
                 let oracle = correlation(&orekit.covariance);
+                let corr_diff = (sidereon - oracle).abs();
+                max_corr_diff = max_corr_diff.max(corr_diff);
                 assert!(
-                    (sidereon - oracle).abs() <= COFACTOR_DIFFERENCE,
+                    corr_diff <= COFACTOR_DIFFERENCE,
                     "{label} correlation {row},{column}: {sidereon} vs {oracle}"
                 );
                 if let OrbitParameterCovariance::Estimated { correlation, .. } = &fit.covariance {
@@ -495,25 +546,38 @@ fn fits_of_the_same_observations_agree_with_orekit() {
         // 2 |d| / |r|, with |d| <= sqrt(289) * RESIDUAL_DIFFERENCE_M.
         let residual_norm = (variance_factor * (3 * samples.len() - n) as f64).sqrt();
         let difference_norm = (samples.len() as f64).sqrt() * RESIDUAL_DIFFERENCE_M;
+        let vf_rel = (variance_factor / orekit.variance_factor - 1.0).abs();
         assert!(
-            (variance_factor / orekit.variance_factor - 1.0).abs()
-                <= 2.0 * difference_norm / residual_norm,
+            vf_rel <= 2.0 * difference_norm / residual_norm,
             "{label}: variance factor {variance_factor} vs {}",
             orekit.variance_factor
         );
 
         assert_eq!(fit.residuals.len(), orekit.rtn_residuals_m.len());
+        let mut max_res_diff_m = 0.0_f64;
         for (sidereon, oracle) in fit.residuals.iter().zip(&orekit.rtn_residuals_m) {
             let difference = ((sidereon.radial_m - oracle[0]).powi(2)
                 + (sidereon.along_m - oracle[1]).powi(2)
                 + (sidereon.cross_m - oracle[2]).powi(2))
             .sqrt();
+            max_res_diff_m = max_res_diff_m.max(difference);
             assert!(
                 difference <= RESIDUAL_DIFFERENCE_M,
                 "{label}: residual at {} differs by {difference:e} m",
                 sidereon.epoch_tdb_j2000_s
             );
         }
+        eprintln!(
+            "OD case {label}: iters={}, cond={:.3e}, max_est_diff={:.2e} sigma ({max_sigma_name}), max_res_diff={:.2e} m, vf_rel={:.2e}, max_sigma_rel={:.2e}, max_corr_diff={:.2e}, rms_3d={:.4} m",
+            fit.iterations,
+            fit.condition_number,
+            max_sigma_diff,
+            max_res_diff_m,
+            vf_rel,
+            max_sigma_rel,
+            max_corr_diff,
+            fit.residual_stats.rms_3d_m
+        );
         // The RMS of two residual series differs by at most the RMS of their
         // difference, which the per-epoch bound bounds.
         let stats = fit.residual_stats;

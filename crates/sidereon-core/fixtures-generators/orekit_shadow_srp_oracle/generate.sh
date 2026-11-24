@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regenerate tests/fixtures/eclipse/orekit_shadow_srp_oracle.json: bit-exact
 # hex-encoded lighting ratios, cannonball SRP accelerations and their
-# FieldSpacecraftState<Gradient> position partials from Orekit 13.1.10 /
+# FieldSpacecraftState<Gradient> position and C_R partials from Orekit 13.1.10 /
 # Hipparchus 4.0.3 (ShadowSrpOracle.java).
 #
 # usage: OREKIT_CP='/path/to/jars/*' OREKIT_DATA=/path/to/orekit-data \

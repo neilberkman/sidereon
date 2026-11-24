@@ -5,9 +5,23 @@
 //! Two formulations are provided:
 //!
 //! - [`shadow_fraction`] and [`shadow_fraction_with_model`] evaluate Earth-only
-//!   conical shadow in `[0.0, 1.0]` using linear penumbra interpolation between
-//!   the umbra and penumbra cone radii. Because Orekit has no linear conical
-//!   counterpart, these functions keep their established arithmetic unchanged.
+//!   conical shadow in `[0.0, 1.0]` using linear penumbra/antumbra
+//!   interpolation between the umbra and penumbra cone radii in a single shared
+//!   exponent-separated evaluation (shared with
+//!   [`shadow_fraction_with_gradient`],
+//!   [`shadow_fraction_with_model_and_gradient`], and the conical lighting
+//!   ratio and gradient of `ShadowFunction::Conical`). The cross product
+//!   `c = sun x sat` is formed with the compensated scaled cross product (with
+//!   polar scaling `k = 1 / (1 - WGS84_FLATTENING)` factored out of the exact
+//!   products under [`EarthShadowModel::Wgs84Oblate`]), so `c` is zero iff the
+//!   inputs are exactly collinear; `rho = |c| / |sun|`,
+//!   `u_perp = normalize(c x sun)`, and `proj = (sat . sun) / |sun|` are
+//!   evaluated in the scaled frame. Both `shadow` and the lighting ratio `nu`
+//!   are evaluated directly from `rho` (`shadow = (r_pen - rho) / (r_pen - r_umb)`
+//!   and `nu = (rho - r_umb) / (r_pen - r_umb)` in penumbra;
+//!   `shadow = (r_pen - rho) / r_pen` and `nu = rho / r_pen` in antumbra), and
+//!   `d(nu) = -d(shadow)` is formed with the quotient rule of whichever of `nu`
+//!   or `shadow` is at most `1/2`. Orekit has no linear conical counterpart.
 //! - [`moon_shadow_fraction`], [`shadow_fraction_with_moon`], and
 //!   [`shadow_fraction_with_model_and_moon`] port Orekit 13.1.10's
 //!   `OccultationEngine` (`angles`, `Ellipsoid.pointOnLimb`, `Vector3D.angle`)
@@ -52,7 +66,7 @@
 //!   this crate's positions are relative to Earth's centre (or arbitrary
 //!   inertial origin for `moon_shadow_fraction`), that test does not identify a
 //!   Sun-centred frame and the geometry is evaluated instead.
-//! - **Exact collinearity (including underflow):** Orekit's
+//! - **Exact collinearity (including underflow and frame noise):** Orekit's
 //!   `Ellipsoid.pointOnLimb` calls `cross(psat, pted).orthogonal()`, which
 //!   throws `ZERO_NORM` whenever the cross product's norm is zero—either
 //!   because the vectors are exactly collinear or because the norm underflows
@@ -62,7 +76,31 @@
 //!   double-precision annular collinearity evaluates `1 - (ro / rs)^2`, while
 //!   forward-mode field evaluation on-axis (or when the cross-product norm
 //!   underflows onto `angle = 0.0`) produces `NaN` and returns
-//!   [`ShadowGradientError::NumericalFailure`].
+//!   [`ShadowGradientError::NumericalFailure`]. In
+//!   [`crate::astro::forces::ecom`], exact exponent-separated collinearity and
+//!   orthogonality predicates (`sun x sat == 0` and, with `r x v != 0`,
+//!   `r . sun == 0 && v . sun == 0`) similarly guard the ECOM2 fast path so
+//!   rounding noise in `e_D x sat` or `Z x sun` never produces a finite frame
+//!   where the geometry is mathematically undefined.
+//! - **Overflowing vector operations and distant-body translation cancellation:**
+//!   Hipparchus 4.0.3's `Vector3D.normalize`, `FieldVector3D.normalize`,
+//!   `orthogonal`, and `angle` return zero or `NaN` when a finite vector's
+//!   squared norm or cross/dot product overflows to `+Inf`. Whenever the
+//!   unscaled real value is finite and nonzero, `normalize`, `orthogonal`, and
+//!   `angle` return Hipparchus's exact result (including non-finite gradient
+//!   entries). Only when the unscaled norm or product overflows while every
+//!   component value is finite are the components prescaled by an exact power of
+//!   two before evaluating, leaving every input with a finite nonzero unscaled
+//!   norm bit-identical. Likewise, in `pointOnLimb`, overflowing
+//!   `observer × outside` or limb-distance comparisons fall back to scaled
+//!   arithmetic, `getPlaneSection` falls back to `tan(theta) = 0` (with zero
+//!   gradient in the field path, Orekit's own `|gamma| < SAFE_MIN` branch)
+//!   when Orekit's `tan(theta)` value or any derivative entry is non-finite
+//!   (where `|beta - alpha|` and `|gamma|` are below about `2^-512`, making
+//!   the section circular far below binary64 resolution), and when translating
+//!   both satellite and Sun into a distant Moon's frame cancels
+//!   `(sat - moon) - (sun - moon)` to zero while `sat != sun`, `sat - sun` is
+//!   used for `ps`.
 //! - **Non-finite field evaluation:** Where Orekit's `Field<Gradient>`
 //!   evaluation produces `NaN` or an infinity, the gradient functions return
 //!   [`ShadowGradientError::NumericalFailure`].
@@ -71,15 +109,14 @@
 //! with respect to the satellite position ([`shadow_fraction_with_gradient`],
 //! [`shadow_fraction_with_model_and_gradient`],
 //! [`shadow_fraction_with_model_moon_and_gradient`]). The conical gradient
-//! functions differentiate the established linear conical arithmetic with
-//! bit-identical values; the Earth-Moon apparent-disc gradient function
+//! functions share the exponent-separated conical geometry evaluation with
+//! [`shadow_fraction`] and [`shadow_fraction_with_model`] (returning
+//! bit-identical values and [`ShadowGradientError::NumericalFailure`] on the
+//! exact antumbra axis); the Earth-Moon apparent-disc gradient function
 //! reproduces Hipparchus 4.0.3 `Gradient` arithmetic and Orekit 13.1.10's
 //! `FieldSpacecraftState` branch decisions.
 
-use crate::astro::constants::{
-    astro::SOLAR_RADIUS_KM,
-    earth::{MEAN_EARTH_RADIUS_KM, WGS84_F},
-};
+use crate::astro::constants::earth::WGS84_F;
 use crate::astro::math::vec3;
 
 pub(crate) mod ad;
@@ -92,8 +129,13 @@ pub use gradient::{
     shadow_fraction_with_model_moon_and_gradient, ShadowGradientError,
 };
 
-pub(crate) use gradient::conical_shadow_field;
-pub(crate) use orekit::{earth_moon_lighting_ratio_double, earth_moon_lighting_ratio_field};
+pub(crate) use gradient::{
+    conical_lighting_ratio_double_scaled, conical_lighting_ratio_field_scaled,
+};
+pub(crate) use orekit::{
+    earth_lighting_ratio_double, earth_lighting_ratio_field, earth_moon_lighting_ratio_double,
+    earth_moon_lighting_ratio_field,
+};
 
 /// Public eclipse alias for WGS84 flattening `1 / 298.257223563`.
 pub const WGS84_FLATTENING: f64 = WGS84_F;
@@ -115,6 +157,26 @@ pub enum EarthShadowModel {
     /// with equatorial radius [`MEAN_EARTH_RADIUS_KM`] and flattening
     /// [`WGS84_FLATTENING`] whose limb is computed by Orekit's `pointOnLimb`.
     Wgs84Oblate,
+}
+
+/// Shadow function used to compute the solar lighting ratio `nu` for solar
+/// radiation pressure force models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ShadowFunction {
+    /// Apparent-disc occultation lighting ratio porting Orekit 13.1.10's
+    /// `OccultationEngine` and `SolarRadiationPressure.getLightingRatio`,
+    /// using the selected [`EarthShadowModel`] and, when lunar occultation is
+    /// enabled, the Moon as a second occulting body.
+    ApparentDisc,
+    /// Earth-only linear conical lighting ratio using the selected
+    /// [`EarthShadowModel`], sharing the exponent-separated conical geometry
+    /// with [`shadow_fraction_with_model`] and evaluating
+    /// `nu = (rho - r_umbra) / (r_penumbra - r_umbra)` in penumbra and
+    /// `nu = rho / r_penumbra` in antumbra directly from `rho` (rather than as
+    /// `1 - shadow_fraction_with_model`, which loses precision near the umbra
+    /// boundary and antumbra axis).
+    Conical,
 }
 
 /// Illumination state of a satellite relative to Earth's conical shadow.
@@ -150,87 +212,21 @@ pub enum EclipseError {
 /// `sat_pos` is the satellite GCRS position (km); `sun_pos` is the vector from
 /// Earth center to the Sun (km).
 pub fn shadow_fraction(sat_pos: [f64; 3], sun_pos: [f64; 3]) -> Result<f64, EclipseError> {
-    validate_nonzero_vec3(sat_pos, "sat_pos")?;
-    validate_nonzero_vec3(sun_pos, "sun_pos")?;
-
-    let d_sun = vec3::norm3(sun_pos);
-    if d_sun <= SOLAR_RADIUS_KM + MEAN_EARTH_RADIUS_KM {
-        return Err(invalid_eclipse_input("sun_pos", "out of range"));
-    }
-
-    // Unit vector from Earth to Sun. The division form (not reciprocal-multiply
-    // via `vec3::unit3`) is required to stay bit-exact with the reference.
-    let sun_u = [sun_pos[0] / d_sun, sun_pos[1] / d_sun, sun_pos[2] / d_sun];
-
-    // Project the satellite onto the Earth-Sun line. Positive points toward the
-    // Sun; a satellite on the sunlit side cannot be in shadow.
-    let proj = vec3::dot3(sat_pos, sun_u);
-    if proj >= 0.0 {
-        return Ok(0.0);
-    }
-
-    // Perpendicular distance from the satellite to the shadow axis.
-    let perp = vec3::sub3(sat_pos, vec3::scale3(sun_u, proj));
-    let rho = vec3::norm3(perp);
-
-    // Distance behind Earth along the shadow axis (positive).
-    let dist_behind = -proj;
-
-    // Umbra cone (converging): sin(alpha) = (R_sun - R_earth) / d_sun.
-    let alpha_umbra = libm::asin((SOLAR_RADIUS_KM - MEAN_EARTH_RADIUS_KM) / d_sun);
-    // Penumbra cone (diverging): sin(alpha) = (R_sun + R_earth) / d_sun.
-    let alpha_penumbra = libm::asin((SOLAR_RADIUS_KM + MEAN_EARTH_RADIUS_KM) / d_sun);
-
-    // Cone radii at the satellite's distance behind Earth.
-    let r_umbra = MEAN_EARTH_RADIUS_KM - dist_behind * libm::tan(alpha_umbra);
-    let r_penumbra = MEAN_EARTH_RADIUS_KM + dist_behind * libm::tan(alpha_penumbra);
-
-    if !rho.is_finite() || !r_umbra.is_finite() || !r_penumbra.is_finite() {
-        return Err(invalid_eclipse_input("sat_pos", "out of range"));
-    }
-
-    if rho >= r_penumbra {
-        // Beyond the penumbra cone: full sunlight.
-        Ok(0.0)
-    } else if r_umbra > 0.0 && rho <= r_umbra {
-        // Inside the umbra cone: full shadow.
-        Ok(1.0)
-    } else if r_umbra > 0.0 {
-        // Penumbra region: linear interpolation between the cone radii.
-        Ok((r_penumbra - rho) / (r_penumbra - r_umbra))
-    } else {
-        // Past the umbra tip (antumbra): penumbra still applies, fraction
-        // decreasing from the axis.
-        Ok(0.0_f64.max((r_penumbra - rho) / r_penumbra))
-    }
+    gradient::conical_shadow_value(sat_pos, sun_pos, EarthShadowModel::Spherical)
 }
 
 /// Shadow fraction with an explicit Earth figure model.
 ///
-/// [`EarthShadowModel::Spherical`] delegates to [`shadow_fraction`] and is
-/// bit-identical to the default API. [`EarthShadowModel::Wgs84Oblate`] applies
-/// the WGS84 polar-axis scaling before evaluating the same conical model.
+/// [`EarthShadowModel::Spherical`] delegates to the same shared conical
+/// geometry evaluation as [`shadow_fraction`] and is bit-identical to it.
+/// [`EarthShadowModel::Wgs84Oblate`] evaluates the conical geometry in the
+/// WGS84 polar-scaled frame.
 pub fn shadow_fraction_with_model(
     sat_pos: [f64; 3],
     sun_pos: [f64; 3],
     model: EarthShadowModel,
 ) -> Result<f64, EclipseError> {
-    match model {
-        EarthShadowModel::Spherical => shadow_fraction(sat_pos, sun_pos),
-        EarthShadowModel::Wgs84Oblate => {
-            validate_nonzero_vec3(sat_pos, "sat_pos")?;
-            validate_nonzero_vec3(sun_pos, "sun_pos")?;
-            let sat_pos = scale_polar_axis(sat_pos);
-            let sun_pos = scale_polar_axis(sun_pos);
-            if !sat_pos[2].is_finite() {
-                return Err(invalid_eclipse_input("sat_pos", "out of range"));
-            }
-            if !sun_pos[2].is_finite() {
-                return Err(invalid_eclipse_input("sun_pos", "out of range"));
-            }
-            shadow_fraction(sat_pos, sun_pos)
-        }
-    }
+    gradient::conical_shadow_value(sat_pos, sun_pos, model)
 }
 
 /// Classify the satellite's eclipse status from its [`shadow_fraction`].
@@ -382,7 +378,10 @@ pub(crate) fn invalid_eclipse_input(field: &'static str, reason: &'static str) -
 
 #[cfg(test)]
 mod tests {
-    use crate::astro::constants::astro::{IAU_2015_SOLAR_RADIUS_KM, MOON_RADIUS_KM};
+    use crate::astro::constants::{
+        astro::{IAU_2015_SOLAR_RADIUS_KM, MOON_RADIUS_KM, SOLAR_RADIUS_KM},
+        earth::MEAN_EARTH_RADIUS_KM,
+    };
     use crate::astro::events::{CrossingDirection, EventFinder};
 
     use super::*;

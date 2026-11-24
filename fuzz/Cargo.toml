@@ -454,5 +454,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "ecom_srp"
+path = "fuzz_targets/ecom_srp.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

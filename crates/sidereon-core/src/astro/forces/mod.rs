@@ -3,6 +3,7 @@ pub mod albedo;
 /// components in insertion order and returns the first component error.
 pub mod composite;
 pub mod drag;
+pub mod ecom;
 pub mod empirical;
 pub mod geopotential;
 pub mod icgem;
@@ -25,9 +26,15 @@ pub mod r#trait;
 pub mod two_body;
 pub mod zonal;
 
+pub use crate::astro::events::eclipse::ShadowFunction;
 pub use albedo::EarthRadiationPressure;
 pub use composite::CompositeForceModel;
 pub use drag::{DragForce, DragParameters, SourcedDragForce, SpaceWeather, SpaceWeatherSource};
+pub use ecom::{
+    ecom_geometry, ecom_geometry_with_shadow, Ecom1Coefficients, Ecom1SolarRadiationPressure,
+    Ecom2D2b1Coefficients, Ecom2D4b1Coefficients, Ecom2SolarRadiationPressure, EcomGeometry,
+    ECOM1_COEFFICIENT_COUNT, ECOM2_D2B1_COEFFICIENT_COUNT, ECOM2_D4B1_COEFFICIENT_COUNT,
+};
 pub use empirical::{EmpiricalHarmonic, EmpiricalRtnAcceleration, RtnAxis};
 pub use geopotential::{
     SphericalHarmonicCoefficient, SphericalHarmonicGravity, SphericalHarmonicGravityConfig,

@@ -1,7 +1,6 @@
 /* Bit-exact oracle for Orekit 13.1.10 SolarRadiationPressure lighting ratios,
  * cannonball SRP accelerations, and their FieldSpacecraftState<Gradient>
- * position partials (with satellite position in metres as the 3 free
- * parameters).
+ * position and reflection-coefficient (C_R) partials.
  *
  * Evaluates Earth alone (spherical and WGS84), Moon alone, and Earth+Moon
  * (spherical and WGS84) with fixed-position Sun and Moon providers in GCRF
@@ -72,6 +71,8 @@ public final class ShadowSrpOracle {
     private static final GradientField FIELD = GradientField.getField(3);
     private static final Gradient ZERO = FIELD.getZero();
     private static final Gradient ONE = FIELD.getOne();
+    private static final GradientField FIELD_CR = GradientField.getField(4);
+    private static final Gradient ONE_CR = FIELD_CR.getOne();
 
     private static Frame gcrf;
 
@@ -185,6 +186,14 @@ public final class ShadowSrpOracle {
             + hexArr3(v.getX().getGradient()) + ", "
             + hexArr3(v.getY().getGradient()) + ", "
             + hexArr3(v.getZ().getGradient())
+            + "]";
+    }
+
+    private static String hexFieldVec3CrPartial(final FieldVector3D<Gradient> v) {
+        return "["
+            + hex(v.getX().getPartialDerivative(3)) + ", "
+            + hex(v.getY().getPartialDerivative(3)) + ", "
+            + hex(v.getZ().getPartialDerivative(3))
             + "]";
     }
 
@@ -522,6 +531,41 @@ public final class ShadowSrpOracle {
         return new FieldSpacecraftState<>(fApv).withMass(ONE);
     }
 
+    private static FieldSpacecraftState<Gradient> makeFieldStateWithCr(final AbsoluteDate date, final Vector3D satM) {
+        final FieldAbsoluteDate<Gradient> fDate = new FieldAbsoluteDate<>(FIELD_CR, date);
+        final FieldVector3D<Gradient> fPos = new FieldVector3D<>(
+            Gradient.variable(4, 0, satM.getX()),
+            Gradient.variable(4, 1, satM.getY()),
+            Gradient.variable(4, 2, satM.getZ()));
+        final FieldVector3D<Gradient> fVel = new FieldVector3D<>(FIELD_CR, Vector3D.ZERO);
+        final FieldAbsolutePVCoordinates<Gradient> fApv =
+            new FieldAbsolutePVCoordinates<>(gcrf, fDate, new FieldPVCoordinates<>(fPos, fVel));
+        return new FieldSpacecraftState<>(fApv).withMass(ONE_CR);
+    }
+
+    private static Gradient[] srpParamsWithCr(final SolarRadiationPressure srp,
+                                              final FieldAbsoluteDate<Gradient> fDate) {
+        final Gradient[] params = srp.getParameters(FIELD_CR, fDate);
+        if (params.length != 2 || params[0].getValue() != 1.0 || params[1].getValue() != CR) {
+            throw new IllegalStateException("unexpected SRP parameter layout");
+        }
+        params[1] = Gradient.variable(4, 3, CR);
+        return params;
+    }
+
+    private static void assertFieldPosMatchesCr(final String label,
+                                                final FieldVector3D<Gradient> a3,
+                                                final FieldVector3D<Gradient> a4) {
+        assertBitsEq(label + ".x.v", a3.getX().getValue(), a4.getX().getValue());
+        assertBitsEq(label + ".y.v", a3.getY().getValue(), a4.getY().getValue());
+        assertBitsEq(label + ".z.v", a3.getZ().getValue(), a4.getZ().getValue());
+        for (int j = 0; j < 3; ++j) {
+            assertBitsEq(label + ".x.g[" + j + "]", a3.getX().getPartialDerivative(j), a4.getX().getPartialDerivative(j));
+            assertBitsEq(label + ".y.g[" + j + "]", a3.getY().getPartialDerivative(j), a4.getY().getPartialDerivative(j));
+            assertBitsEq(label + ".z.g[" + j + "]", a3.getZ().getPartialDerivative(j), a4.getZ().getPartialDerivative(j));
+        }
+    }
+
     private static String evalEarthCase(final String name, final double flattening,
                                         final Vector3D satKm, final Vector3D sunKm) {
         final AbsoluteDate date = AbsoluteDate.J2000_EPOCH;
@@ -543,11 +587,15 @@ public final class ShadowSrpOracle {
         final SpacecraftState state = makeState(date, satM);
         final FieldSpacecraftState<Gradient> fState = makeFieldState(date, satM);
         final FieldAbsoluteDate<Gradient> fDate = fState.getDate();
+        final FieldSpacecraftState<Gradient> fStateCr = makeFieldStateWithCr(date, satM);
+        final FieldAbsoluteDate<Gradient> fDateCr = fStateCr.getDate();
 
         final double lightingD = srp.getLightingRatio(state);
         final Vector3D accelD = srp.acceleration(state, srp.getParameters(date));
         final Gradient lightingF = srp.getLightingRatio(fState);
         final FieldVector3D<Gradient> accelF = srp.acceleration(fState, srp.getParameters(FIELD, fDate));
+        final FieldVector3D<Gradient> accelFCr = srp.acceleration(fStateCr, srpParamsWithCr(srp, fDateCr));
+        assertFieldPosMatchesCr(name, accelF, accelFCr);
 
         if (name.contains("annular")) {
             final OccultationEngine.OccultationAngles earthAnglesD =
@@ -578,6 +626,9 @@ public final class ShadowSrpOracle {
         final Gradient clearMoonLightingF = srpClearMoon.getLightingRatio(fState);
         final FieldVector3D<Gradient> clearMoonAccelF =
             srpClearMoon.acceleration(fState, srpClearMoon.getParameters(FIELD, fDate));
+        final FieldVector3D<Gradient> clearMoonAccelFCr =
+            srpClearMoon.acceleration(fStateCr, srpParamsWithCr(srpClearMoon, fDateCr));
+        assertFieldPosMatchesCr(name + " clear_moon", clearMoonAccelF, clearMoonAccelFCr);
 
         final StringBuilder sb = new StringBuilder();
         sb.append("{\"name\": \"").append(name).append("\"");
@@ -597,6 +648,8 @@ public final class ShadowSrpOracle {
         sb.append(", \"clear_moon_lighting_field_grad_bits\": ").append(hexArr3(clearMoonLightingF.getGradient()));
         sb.append(", \"clear_moon_accel_field_val_bits\": ").append(hexFieldVec3Val(clearMoonAccelF));
         sb.append(", \"clear_moon_accel_field_partials_bits\": ").append(hexFieldVec3Partials(clearMoonAccelF));
+        sb.append(", \"accel_field_wrt_cr_bits\": ").append(hexFieldVec3CrPartial(accelFCr));
+        sb.append(", \"clear_moon_accel_field_wrt_cr_bits\": ").append(hexFieldVec3CrPartial(clearMoonAccelFCr));
         sb.append("}");
         return sb.toString();
     }
@@ -623,11 +676,15 @@ public final class ShadowSrpOracle {
         final SpacecraftState state = makeState(date, satM);
         final FieldSpacecraftState<Gradient> fState = makeFieldState(date, satM);
         final FieldAbsoluteDate<Gradient> fDate = fState.getDate();
+        final FieldSpacecraftState<Gradient> fStateCr = makeFieldStateWithCr(date, satM);
+        final FieldAbsoluteDate<Gradient> fDateCr = fStateCr.getDate();
 
         final double lightingD = srp.getLightingRatio(state);
         final Vector3D accelD = srp.acceleration(state, srp.getParameters(date));
         final Gradient lightingF = srp.getLightingRatio(fState);
         final FieldVector3D<Gradient> accelF = srp.acceleration(fState, srp.getParameters(FIELD, fDate));
+        final FieldVector3D<Gradient> accelFCr = srp.acceleration(fStateCr, srpParamsWithCr(srp, fDateCr));
+        assertFieldPosMatchesCr(name, accelF, accelFCr);
 
         if (name.contains("annular")) {
             final OccultationEngine.OccultationAngles moonAnglesD =
@@ -651,6 +708,7 @@ public final class ShadowSrpOracle {
         sb.append(", \"lighting_field_grad_bits\": ").append(hexArr3(lightingF.getGradient()));
         sb.append(", \"accel_field_val_bits\": ").append(hexFieldVec3Val(accelF));
         sb.append(", \"accel_field_partials_bits\": ").append(hexFieldVec3Partials(accelF));
+        sb.append(", \"accel_field_wrt_cr_bits\": ").append(hexFieldVec3CrPartial(accelFCr));
         sb.append("}");
         return sb.toString();
     }
@@ -687,14 +745,19 @@ public final class ShadowSrpOracle {
         final SpacecraftState state = makeState(date, satM);
         final FieldSpacecraftState<Gradient> fState = makeFieldState(date, satM);
         final FieldAbsoluteDate<Gradient> fDate = fState.getDate();
+        final FieldSpacecraftState<Gradient> fStateCr = makeFieldStateWithCr(date, satM);
+        final FieldAbsoluteDate<Gradient> fDateCr = fStateCr.getDate();
 
         // 1. Raw Orekit evaluation
         final double[] paramsD = srp.getParameters(date);
         final Gradient[] paramsF = srp.getParameters(FIELD, fDate);
+        final Gradient[] paramsFCr = srpParamsWithCr(srp, fDateCr);
         final double orekitLightingD = srp.getLightingRatio(state);
         final Vector3D orekitAccelD = srp.acceleration(state, paramsD);
         final Gradient orekitLightingF = srp.getLightingRatio(fState);
         final FieldVector3D<Gradient> orekitAccelF = srp.acceleration(fState, paramsF);
+        final FieldVector3D<Gradient> orekitAccelFCr = srp.acceleration(fStateCr, paramsFCr);
+        assertFieldPosMatchesCr(name + " orekit", orekitAccelF, orekitAccelFCr);
 
         // Detect whether Orekit's mutual subtraction fired using Orekit's exact tests:
         // lightingRatioI != 0.0, lightingRatioJ != 0.0, lightingRatioJ != 1.0,
@@ -829,6 +892,15 @@ public final class ShadowSrpOracle {
                                                                      earthAnglesF, moonAnglesF);
         final FieldVector3D<Gradient> unionAccelF =
             orekitSrpAccelField(fState, sunM, unionLightingF, sc, paramsF);
+        final Gradient unionLightingFCr = new Gradient(
+            unionLightingF.getValue(),
+            unionLightingF.getPartialDerivative(0),
+            unionLightingF.getPartialDerivative(1),
+            unionLightingF.getPartialDerivative(2),
+            0.0);
+        final FieldVector3D<Gradient> unionAccelFCr =
+            orekitSrpAccelField(fStateCr, sunM, unionLightingFCr, sc, paramsFCr);
+        assertFieldPosMatchesCr(name + " union", unionAccelF, unionAccelFCr);
 
         if (!orekitSubtractsMutual) {
             assertBitsEq(name + " ld", unionLightingD, orekitLightingD);
@@ -849,6 +921,9 @@ public final class ShadowSrpOracle {
                 assertBitsEq(name + " af.y.g[" + j + "]", unionAccelF.getY().getGradient()[j], orekitAccelF.getY().getGradient()[j]);
                 assertBitsEq(name + " af.z.g[" + j + "]", unionAccelF.getZ().getGradient()[j], orekitAccelF.getZ().getGradient()[j]);
             }
+            assertBitsEq(name + " af.x.cr", unionAccelFCr.getX().getPartialDerivative(3), orekitAccelFCr.getX().getPartialDerivative(3));
+            assertBitsEq(name + " af.y.cr", unionAccelFCr.getY().getPartialDerivative(3), orekitAccelFCr.getY().getPartialDerivative(3));
+            assertBitsEq(name + " af.z.cr", unionAccelFCr.getZ().getPartialDerivative(3), orekitAccelFCr.getZ().getPartialDerivative(3));
         }
 
         final StringBuilder sb = new StringBuilder();
@@ -870,6 +945,8 @@ public final class ShadowSrpOracle {
         sb.append(", \"union_lighting_field_grad_bits\": ").append(hexArr3(unionLightingF.getGradient()));
         sb.append(", \"union_accel_field_val_bits\": ").append(hexFieldVec3Val(unionAccelF));
         sb.append(", \"union_accel_field_partials_bits\": ").append(hexFieldVec3Partials(unionAccelF));
+        sb.append(", \"orekit_accel_field_wrt_cr_bits\": ").append(hexFieldVec3CrPartial(orekitAccelFCr));
+        sb.append(", \"union_accel_field_wrt_cr_bits\": ").append(hexFieldVec3CrPartial(unionAccelFCr));
         sb.append("}");
         return sb.toString();
     }
@@ -897,7 +974,7 @@ public final class ShadowSrpOracle {
                                                                final Gradient[] parameters) {
         final double kRef = P_REF * D_REF * D_REF;
         final FieldVector3D<Gradient> position = s.getPosition();
-        final FieldVector3D<Gradient> sunPosition = new FieldVector3D<>(FIELD, sunM);
+        final FieldVector3D<Gradient> sunPosition = new FieldVector3D<>(s.getDate().getField(), sunM);
         final FieldVector3D<Gradient> sunSatVector = position.subtract(sunPosition);
         final Gradient r2 = sunSatVector.getNormSq();
         final Gradient rawP = ratio.multiply(kRef).divide(r2);
