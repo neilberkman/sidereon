@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use sidereon_core::astro::events::eclipse::EarthShadowModel;
+use sidereon_core::astro::events::eclipse::{EarthShadowModel, ShadowFunction};
 use sidereon_core::astro::forces::{
     CompositeForceModel, EmpiricalHarmonic, EmpiricalRtnAcceleration, ForceModel, RtnAxis,
     SolarRadiationPressure, ThirdBodyGravity, TwoBodyGravity, ZonalGravity,
@@ -70,8 +70,8 @@ fuzz_target!(|input: Input| {
             }
         }
     }
-    // Bits 9 and 10, past the nine empirical terms, select the Moon's shadow
-    // and the oblate Earth.
+    // Bits 9, 10, and 11, past the nine empirical terms, select lunar
+    // occultation, the Earth figure, and the shadow function.
     let earth_shadow_model = if bit(input.term_bits, 10) {
         EarthShadowModel::Wgs84Oblate
     } else {
@@ -80,8 +80,12 @@ fuzz_target!(|input: Input| {
     let srp = SolarRadiationPressure::new(input.cr, input.area_to_mass)
         .ok()
         .map(|srp| {
-            srp.with_moon_eclipse(bit(input.term_bits, 9))
-                .with_earth_shadow_model(earth_shadow_model)
+            let srp = srp.with_earth_shadow_model(earth_shadow_model);
+            if bit(input.term_bits, 11) {
+                srp.with_shadow_function(ShadowFunction::Conical)
+            } else {
+                srp.with_moon_eclipse(bit(input.term_bits, 9))
+            }
         });
 
     // Partials of every closed-form model at caller-supplied parameters.

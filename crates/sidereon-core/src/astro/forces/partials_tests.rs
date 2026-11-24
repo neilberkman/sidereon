@@ -9,7 +9,8 @@
 
 use super::r#trait::{difference_quotient_partials, AccelerationPartials, ForceModel};
 use super::{
-    CompositeForceModel, EmpiricalHarmonic, EmpiricalRtnAcceleration, J2Gravity, RtnAxis,
+    CompositeForceModel, Ecom1Coefficients, Ecom1SolarRadiationPressure, Ecom2D4b1Coefficients,
+    Ecom2SolarRadiationPressure, EmpiricalHarmonic, EmpiricalRtnAcceleration, J2Gravity, RtnAxis,
     SchwarzschildRelativity, SolarRadiationPressure, ThirdBodyBodies, ThirdBodyGravity,
     TwoBodyGravity, ZonalGravity,
 };
@@ -294,7 +295,9 @@ fn non_finite_states_are_refused_by_every_partial() {
     let ctx = PropagationContext::default();
     let srp = SolarRadiationPressure::new(1.3, 0.02).expect("valid SRP");
     let empirical = EmpiricalRtnAcceleration::all_terms();
-    let models: [(&dyn ForceModel, usize); 8] = [
+    let ecom2 = Ecom2SolarRadiationPressure::d4b1(Ecom2D4b1Coefficients::default()).expect("ECOM2");
+    let ecom1 = Ecom1SolarRadiationPressure::new(Ecom1Coefficients::default()).expect("ECOM1");
+    let models: [(&dyn ForceModel, usize); 10] = [
         (&TwoBodyGravity::default(), 0),
         (&J2Gravity::default(), 0),
         (&ZonalGravity::earth_j2_through_j6(), 0),
@@ -302,6 +305,8 @@ fn non_finite_states_are_refused_by_every_partial() {
         (&SchwarzschildRelativity::default(), 0),
         (&srp, 1),
         (&empirical, 9),
+        (&ecom2, 9),
+        (&ecom1, 9),
         (&Spring, 0),
     ];
     for component in 0..6 {

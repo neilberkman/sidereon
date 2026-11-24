@@ -11,7 +11,10 @@
 //     PolynomialAccelerationModel, directed by a QSW LofOffset);
 //   - once-per-revolution empirical accelerations, the cosine and sine of the
 //     argument of latitude along the same axes (ParametricAcceleration with
-//     the ArgumentOfLatitudeHarmonic model below).
+//     the ArgumentOfLatitudeHarmonic model below);
+//   - ECOM2 empirical solar radiation pressure (org.orekit.forces.radiation.ECOM2,
+//     used unchanged because G03 stays in full sunlight across the entire arc:
+//     D0/Y0/B0, D2B1, and D4B1 replacing cannonball SRP).
 // Orekit's HarmonicAccelerationModel is a harmonic of elapsed time,
 // gamma sin(2 pi n (t - t0) / P + phi), with a phase parameter; the model
 // fitted here is linear in a cosine and a sine of the argument of latitude,
@@ -86,6 +89,7 @@ import org.orekit.forces.gravity.ThirdBodyAttraction;
 import org.orekit.forces.gravity.potential.GravityFieldFactory;
 import org.orekit.forces.gravity.potential.NormalizedSphericalHarmonicsProvider;
 import org.orekit.forces.gravity.potential.TideSystem;
+import org.orekit.forces.radiation.ECOM2;
 import org.orekit.forces.radiation.IsotropicRadiationSingleCoefficient;
 import org.orekit.forces.radiation.SolarRadiationPressure;
 import org.orekit.frames.EOPHistory;
@@ -264,6 +268,16 @@ public final class OrbitParameterOracle {
             forces.put("empirical." + AXES[axis] + ".cos", harmonic(gcrf, axis, true, 1.0e-9));
             forces.put("empirical." + AXES[axis] + ".sin", harmonic(gcrf, axis, false, 1.0e-9));
         }
+        ECOM2 guessEcom2 = new ECOM2(2, 1, 0.0, sun, MEAN_EARTH_RADIUS);
+        double[] guessEcom2Params = {
+            -1.0e-9, 3.0e-10, -4.0e-10,
+            -1.0e-7, 2.0e-9, 1.0e-10, -5.0e-10, 2.0e-10,
+            5.0e-10
+        };
+        for (int k = 0; k < guessEcom2Params.length; k++) {
+            guessEcom2.getParametersDrivers().get(k).setValue(guessEcom2Params[k]);
+        }
+        forces.put("ecom2_d4b1", guessEcom2);
         out.append("  \"accelerations_at_guess_m_s2\": {\n");
         int written = 0;
         for (Map.Entry<String, ForceModel> entry : forces.entrySet()) {
@@ -282,6 +296,11 @@ public final class OrbitParameterOracle {
                 "empirical.radial.sin", "empirical.along.constant", "empirical.along.cos",
                 "empirical.along.sin", "empirical.cross.constant", "empirical.cross.cos",
                 "empirical.cross.sin"},
+            {"state_ecom2_d0b0", "ecom2.b0", "ecom2.d0", "ecom2.y0"},
+            {"state_ecom2_d2b1", "ecom2.b0", "ecom2.b1c", "ecom2.b1s",
+                "ecom2.d0", "ecom2.d2c", "ecom2.d2s", "ecom2.y0"},
+            {"state_ecom2_d4b1", "ecom2.b0", "ecom2.b1c", "ecom2.b1s",
+                "ecom2.d0", "ecom2.d2c", "ecom2.d4c", "ecom2.d2s", "ecom2.d4s", "ecom2.y0"},
         };
         out.append("  \"cases\": [\n");
         for (int c = 0; c < cases.length; c++) {
@@ -304,8 +323,21 @@ public final class OrbitParameterOracle {
         builder.addForceModel(zonal(gcrf));
         builder.addForceModel(new ThirdBodyAttraction(sun, "Sun", GM_SUN));
         builder.addForceModel(new ThirdBodyAttraction(moon, "Moon", GM_MOON));
-        builder.addForceModel(new SolarRadiationPressure(AU_M, SOLAR_PRESSURE, sun, shadowBody,
-            new IsotropicRadiationSingleCoefficient(AREA_TO_MASS, CR_START)));
+        boolean isEcom2 = selected.stream().anyMatch(s -> s.startsWith("ecom2."));
+        if (isEcom2) {
+            int nD = selected.contains("ecom2.d4c") ? 2 : (selected.contains("ecom2.d2c") ? 1 : 0);
+            int nB = selected.contains("ecom2.b1c") ? 1 : 0;
+            // The arc is verified above to stay in full sunlight at every epoch,
+            // so Orekit's ECOM2 is used unchanged.
+            ECOM2 ecom2 = new ECOM2(nD, nB, 0.0, sun, MEAN_EARTH_RADIUS);
+            for (ParameterDriver driver : ecom2.getParametersDrivers()) {
+                driver.setSelected(false);
+            }
+            builder.addForceModel(ecom2);
+        } else {
+            builder.addForceModel(new SolarRadiationPressure(AU_M, SOLAR_PRESSURE, sun, shadowBody,
+                new IsotropicRadiationSingleCoefficient(AREA_TO_MASS, CR_START)));
+        }
         builder.addForceModel(new Relativity(GM_EARTH));
         for (int axis = 0; axis < 3; axis++) {
             if (selected.contains("empirical." + AXES[axis] + ".constant")) {
@@ -439,6 +471,35 @@ public final class OrbitParameterOracle {
         }
         if (driver.startsWith("empirical.")) {
             return driver.endsWith("[0]") ? driver.substring(0, driver.length() - 3) : driver;
+        }
+        String ecomPrefix = ECOM2.ECOM_COEFFICIENT + " ";
+        if (driver.startsWith(ecomPrefix)) {
+            String suffix = driver.substring(ecomPrefix.length());
+            if (suffix.equals("B0")) {
+                return "ecom2.b0";
+            }
+            if (suffix.equals("D0")) {
+                return "ecom2.d0";
+            }
+            if (suffix.equals("Y0")) {
+                return "ecom2.y0";
+            }
+            if (suffix.startsWith("Bcos")) {
+                int idx = Integer.parseInt(suffix.substring(4));
+                return "ecom2.b" + (2 * idx + 1) + "c";
+            }
+            if (suffix.startsWith("Bsin")) {
+                int idx = Integer.parseInt(suffix.substring(4));
+                return "ecom2.b" + (2 * idx + 1) + "s";
+            }
+            if (suffix.startsWith("Dcos")) {
+                int idx = Integer.parseInt(suffix.substring(4));
+                return "ecom2.d" + (2 * idx + 2) + "c";
+            }
+            if (suffix.startsWith("Dsin")) {
+                int idx = Integer.parseInt(suffix.substring(4));
+                return "ecom2.d" + (2 * idx + 2) + "s";
+            }
         }
         return null;
     }

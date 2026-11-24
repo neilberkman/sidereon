@@ -4,7 +4,7 @@
 //! with the corrected exact three-disc union for simultaneous Earth-Moon
 //! occultations.
 
-use super::ad::{FieldVec3, Grad, Vec3};
+use super::ad::{FieldVec3, Grad, ScaledFieldVec3, ScaledVec3, Vec3};
 use super::fast_math;
 use super::{invalid_eclipse_input, EarthShadowModel, EclipseError, WGS84_FLATTENING};
 use crate::astro::constants::{
@@ -61,6 +61,17 @@ impl Ellipsoid {
     }
 
     /// Orekit `Ellipsoid.getPlaneSection(planePoint, planeNormal)`.
+    ///
+    /// Wherever Orekit's `tanTheta` value is finite, its bits are unchanged.
+    /// Where Orekit's `tanTheta` is non-finite (underflow of
+    /// `(beta - alpha)^2 + 4 * gamma^2`), it falls back to `0.0` (Orekit's own
+    /// branch for `|gamma| < SAFE_MIN`). The fallback region implies
+    /// `|beta - alpha|` and `|gamma|` are below about `2^-512`, while
+    /// `alpha, beta ~ 1 / a^2`, so the section is a circle far below binary64
+    /// resolution and the limb point does not depend on `theta`. For a sphere,
+    /// `beta - alpha` and `gamma` are identically zero; for the oblate Earth,
+    /// the `theta` term is of relative order `f * sin(tilt)`, about `1e-70`
+    /// there.
     fn plane_section(self, plane_point: Vec3, plane_normal: Vec3) -> Option<Ellipse2D> {
         let u = plane_normal.orthogonal()?;
         let v = plane_normal.cross(u).normalize()?;
@@ -90,10 +101,16 @@ impl Ellipsoid {
             0.0
         } else {
             let b_m_a = beta - alpha;
-            if b_m_a >= 0.0 {
-                -2.0 * gamma / (b_m_a + fast_math::sqrt(b_m_a * b_m_a + 4.0 * gamma * gamma))
+            let disc = fast_math::sqrt(b_m_a * b_m_a + 4.0 * gamma * gamma);
+            let raw = if b_m_a >= 0.0 {
+                -2.0 * gamma / (b_m_a + disc)
             } else {
-                -2.0 * gamma / (b_m_a - fast_math::sqrt(b_m_a * b_m_a + 4.0 * gamma * gamma))
+                -2.0 * gamma / (b_m_a - disc)
+            };
+            if raw.is_finite() {
+                raw
+            } else {
+                0.0
             }
         };
         let tan2 = tan_theta * tan_theta;
@@ -140,6 +157,17 @@ impl Ellipsoid {
     }
 
     /// Orekit `Ellipsoid.getPlaneSection(FieldVector3D, FieldVector3D)`.
+    ///
+    /// Wherever Orekit's `tanTheta` value and every derivative entry are finite,
+    /// its bits are unchanged. Where Orekit's `tanTheta` value or any derivative
+    /// entry is non-finite (`!raw.is_all_finite()`), it falls back to
+    /// `Grad::ZERO` (Orekit's own branch for `|gamma| < SAFE_MIN`). The fallback
+    /// region implies `|beta - alpha|` and `|gamma|` are below about `2^-512`,
+    /// while `alpha, beta ~ 1 / a^2`, so the section is a circle far below
+    /// binary64 resolution and neither the limb point nor its derivative depends
+    /// on `theta`. For a sphere, `beta - alpha` and `gamma` are identically
+    /// zero; for the oblate Earth, the `theta` term of the limb derivative is of
+    /// relative order `f * sin(tilt)`, about `1e-70` there.
     fn plane_section_field(
         self,
         plane_point: FieldVec3,
@@ -187,10 +215,15 @@ impl Ellipsoid {
         } else {
             let b_m_a = beta.sub(alpha);
             let disc = b_m_a.mul(b_m_a).add(gamma.mul(gamma).mul_f64(4.0)).sqrt();
-            if b_m_a.value >= 0.0 {
+            let raw = if b_m_a.value >= 0.0 {
                 gamma.mul_f64(-2.0).div(b_m_a.add(disc))
             } else {
                 gamma.mul_f64(-2.0).div(b_m_a.sub(disc))
+            };
+            if raw.is_all_finite() {
+                raw
+            } else {
+                Grad::ZERO
             }
         };
         let tan2 = tan_theta.mul(tan_theta);
@@ -247,7 +280,17 @@ impl Ellipsoid {
             return Err(invalid_eclipse_input("sat_pos", "out of range"));
         }
         let raw_normal = observer.cross(outside);
-        let normal = if raw_normal.norm() == 0.0 {
+        let normal = if !(raw_normal.x.is_finite()
+            && raw_normal.y.is_finite()
+            && raw_normal.z.is_finite())
+        {
+            ScaledVec3::from_vec3(observer)
+                .cross(ScaledVec3::from_vec3(outside))
+                .normalize()
+                .map(|(u, _)| u)
+                .or_else(|| observer.orthogonal())
+                .ok_or_else(|| invalid_eclipse_input("sat_pos", "out of range"))?
+        } else if raw_normal.norm() == 0.0 {
             observer
                 .orthogonal()
                 .ok_or_else(|| invalid_eclipse_input("sat_pos", "out of range"))?
@@ -292,7 +335,14 @@ impl Ellipsoid {
 
         let tp1 = section.to_space(ap * xpt1, bp * ypt1);
         let tp2 = section.to_space(ap * xpt2, bp * ypt2);
-        if tp1.distance(outside) <= tp2.distance(outside) {
+        let d1 = tp1.distance(outside);
+        let d2 = tp2.distance(outside);
+        let pick_tp1 = if d1.is_finite() && d2.is_finite() {
+            d1 <= d2
+        } else {
+            (tp1.norm_sq() - tp2.norm_sq()) - 2.0 * tp1.sub(tp2).dot(outside) <= 0.0
+        };
+        if pick_tp1 {
             Ok(tp1)
         } else {
             Ok(tp2)
@@ -311,7 +361,17 @@ impl Ellipsoid {
             return Err(invalid_eclipse_input("sat_pos", "out of range"));
         }
         let raw_normal = observer.cross(outside);
-        let normal = if raw_normal.norm().value == 0.0 {
+        let normal = if !(raw_normal.x.value.is_finite()
+            && raw_normal.y.value.is_finite()
+            && raw_normal.z.value.is_finite())
+        {
+            ScaledFieldVec3::from_field_vec3(observer)
+                .cross(ScaledFieldVec3::from_field_vec3(outside))
+                .normalize()
+                .and_then(ScaledFieldVec3::to_field_vec3)
+                .or_else(|| observer.orthogonal())
+                .ok_or_else(|| invalid_eclipse_input("sat_pos", "out of range"))?
+        } else if raw_normal.norm().value == 0.0 {
             observer
                 .orthogonal()
                 .ok_or_else(|| invalid_eclipse_input("sat_pos", "out of range"))?
@@ -356,7 +416,17 @@ impl Ellipsoid {
 
         let tp1 = section.to_space(ap.mul(xpt1), bp.mul(ypt1));
         let tp2 = section.to_space(ap.mul(xpt2), bp.mul(ypt2));
-        if tp1.distance(outside).sub(tp2.distance(outside)).value <= 0.0 {
+        let d1 = tp1.distance(outside).value;
+        let d2 = tp2.distance(outside).value;
+        let pick_tp1 = if d1.is_finite() && d2.is_finite() {
+            d1 - d2 <= 0.0
+        } else {
+            let p1 = Vec3::new(tp1.x.value, tp1.y.value, tp1.z.value);
+            let p2 = Vec3::new(tp2.x.value, tp2.y.value, tp2.z.value);
+            let out = Vec3::new(outside.x.value, outside.y.value, outside.z.value);
+            (p1.norm_sq() - p2.norm_sq()) - 2.0 * p1.sub(p2).dot(out) <= 0.0
+        };
+        if pick_tp1 {
             Ok(tp1)
         } else {
             Ok(tp2)
@@ -434,8 +504,23 @@ fn occultation_angles(
     occulting: Ellipsoid,
     occulted_radius: f64,
 ) -> Result<(OccultationAngles, Vec3, bool), EclipseError> {
+    occultation_angles_with_ps_fallback(psat, pted, None, occulting, occulted_radius)
+}
+
+fn occultation_angles_with_ps_fallback(
+    psat: Vec3,
+    pted: Vec3,
+    ps_fallback: Option<Vec3>,
+    occulting: Ellipsoid,
+    occulted_radius: f64,
+) -> Result<(OccultationAngles, Vec3, bool), EclipseError> {
     let plimb = occulting.point_on_limb(psat, pted)?;
-    let ps = psat.sub(pted);
+    let ps_raw = psat.sub(pted);
+    let ps = if ps_raw.norm() == 0.0 {
+        ps_fallback.unwrap_or(ps_raw)
+    } else {
+        ps_raw
+    };
     let pi = psat.sub(plimb);
     let angle =
         Vec3::angle(ps, psat).ok_or_else(|| invalid_eclipse_input("sat_pos", "out of range"))?;
@@ -469,8 +554,23 @@ fn occultation_angles_field(
     occulting: Ellipsoid,
     occulted_radius: f64,
 ) -> Result<(FieldOccultationAngles, FieldVec3, bool), EclipseError> {
+    occultation_angles_field_with_ps_fallback(psat, pted, None, occulting, occulted_radius)
+}
+
+fn occultation_angles_field_with_ps_fallback(
+    psat: FieldVec3,
+    pted: FieldVec3,
+    ps_fallback: Option<FieldVec3>,
+    occulting: Ellipsoid,
+    occulted_radius: f64,
+) -> Result<(FieldOccultationAngles, FieldVec3, bool), EclipseError> {
     let plimb = occulting.point_on_limb_field(psat, pted)?;
-    let ps = psat.sub(pted);
+    let ps_raw = psat.sub(pted);
+    let ps = if ps_raw.norm().value == 0.0 {
+        ps_fallback.unwrap_or(ps_raw)
+    } else {
+        ps_raw
+    };
     let pi = psat.sub(plimb);
     let angle = FieldVec3::angle(ps, psat)
         .ok_or_else(|| invalid_eclipse_input("sat_pos", "out of range"))?;
@@ -679,7 +779,13 @@ pub(crate) fn moon_lighting_ratio_m_double(
         return Err(invalid_eclipse_input("sun_pos", "out of range"));
     }
     let moon_shape = Ellipsoid::one_axis(MOON_RADIUS_M, 0.0);
-    let (angles, ps, inside_sun) = occultation_angles(psat, pted, moon_shape, SUN_RADIUS_M)?;
+    let (angles, ps, inside_sun) = occultation_angles_with_ps_fallback(
+        psat,
+        pted,
+        Some(sat_m.sub(sun_m)),
+        moon_shape,
+        SUN_RADIUS_M,
+    )?;
     if !ps.norm().is_finite() {
         return Err(invalid_eclipse_input("sun_pos", "out of range"));
     }
@@ -694,8 +800,18 @@ pub(crate) fn moon_lighting_ratio_m_double(
     Ok(lighting)
 }
 
+/// Earth-only lighting ratio (`double`), taking km inputs.
+pub(crate) fn earth_lighting_ratio_double(
+    sat_km: [f64; 3],
+    sun_km: [f64; 3],
+    model: EarthShadowModel,
+) -> Result<f64, EclipseError> {
+    let sat_m = validate_nonzero_vec3_m(sat_km, "sat_pos")?;
+    let sun_m = validate_nonzero_vec3_m(sun_km, "sun_pos")?;
+    earth_lighting_ratio_m_double(sat_m, sun_m, model)
+}
+
 /// Earth-only lighting ratio (`double`), inputs already in metres.
-#[cfg(all(test, sidereon_repo_tests))]
 pub(crate) fn earth_lighting_ratio_m_double(
     sat_m: Vec3,
     sun_m: Vec3,
@@ -717,8 +833,20 @@ pub(crate) fn earth_lighting_ratio_m_double(
     Ok(lighting)
 }
 
+/// Earth-only lighting ratio (`Field<Gradient>`), taking km inputs and
+/// returning value plus partials with respect to satellite position in metres
+/// (`d(lighting)/d(pos_m)`).
+pub(crate) fn earth_lighting_ratio_field(
+    sat_km: [f64; 3],
+    sun_km: [f64; 3],
+    model: EarthShadowModel,
+) -> Result<Grad, EclipseError> {
+    let sat_m = validate_nonzero_vec3_m(sat_km, "sat_pos")?;
+    let sun_m = validate_nonzero_vec3_m(sun_km, "sun_pos")?;
+    earth_lighting_ratio_m_field(sat_m, sun_m, model)
+}
+
 /// Earth-only lighting ratio (`Field<Gradient>`), inputs already in metres.
-#[cfg(all(test, sidereon_repo_tests))]
 pub(crate) fn earth_lighting_ratio_m_field(
     sat_m: Vec3,
     sun_m: Vec3,
@@ -759,7 +887,13 @@ pub(crate) fn moon_lighting_ratio_m_field(
     let psat = to_body_frame_field(sat_f, moon_f);
     let pted = to_body_frame_field(sun_f, moon_f);
     let moon_shape = Ellipsoid::one_axis(MOON_RADIUS_M, 0.0);
-    let (angles, ps, inside_sun) = occultation_angles_field(psat, pted, moon_shape, SUN_RADIUS_M)?;
+    let (angles, ps, inside_sun) = occultation_angles_field_with_ps_fallback(
+        psat,
+        pted,
+        Some(sat_f.sub(sun_f)),
+        moon_shape,
+        SUN_RADIUS_M,
+    )?;
     if !ps.norm().value.is_finite() {
         return Err(invalid_eclipse_input("sun_pos", "out of range"));
     }
@@ -841,8 +975,13 @@ fn earth_moon_lighting_ratio_with_shape_m_double(
     if !pted_moon.norm().is_finite() {
         return Err(invalid_eclipse_input("sun_pos", "out of range"));
     }
-    let (angles_moon, ps_moon, moon_inside_sun) =
-        occultation_angles(psat_moon, pted_moon, moon_shape, SUN_RADIUS_M)?;
+    let (angles_moon, ps_moon, moon_inside_sun) = occultation_angles_with_ps_fallback(
+        psat_moon,
+        pted_moon,
+        Some(ps_earth),
+        moon_shape,
+        SUN_RADIUS_M,
+    )?;
     if !ps_moon.norm().is_finite() {
         return Err(invalid_eclipse_input("sun_pos", "out of range"));
     }
@@ -943,8 +1082,13 @@ pub(crate) fn earth_moon_lighting_ratio_m_field(
     if !pted_moon.norm().value.is_finite() {
         return Err(invalid_eclipse_input("sun_pos", "out of range"));
     }
-    let (angles_moon, ps_moon, moon_inside_sun) =
-        occultation_angles_field(psat_moon, pted_moon, moon_shape, SUN_RADIUS_M)?;
+    let (angles_moon, ps_moon, moon_inside_sun) = occultation_angles_field_with_ps_fallback(
+        psat_moon,
+        pted_moon,
+        Some(ps_earth),
+        moon_shape,
+        SUN_RADIUS_M,
+    )?;
     if !ps_moon.norm().value.is_finite() {
         return Err(invalid_eclipse_input("sun_pos", "out of range"));
     }

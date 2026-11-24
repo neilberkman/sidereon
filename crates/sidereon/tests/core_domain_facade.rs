@@ -107,6 +107,8 @@ fn core_domain_modules_are_reachable_through_facade() {
     assert_eq!(batch[0].to_bits(), scalar.to_bits());
 
     let _shadow_model = sidereon::astro::events::eclipse::EarthShadowModel::Wgs84Oblate;
+    let _shadow_fn = sidereon::astro::events::eclipse::ShadowFunction::ApparentDisc;
+    let _shadow_fn_forces = sidereon::astro::forces::ShadowFunction::Conical;
     assert_eq!(
         sidereon::astro::events::eclipse::WGS84_FLATTENING.to_bits(),
         0x3f6b_775a_84f3_e128
