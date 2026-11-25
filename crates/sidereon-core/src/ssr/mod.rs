@@ -14,7 +14,7 @@ use crate::antex::{Antex, AntexDateTime};
 use crate::astro::bodies::sun_moon_ecef;
 use crate::astro::frames::transforms::Ut1Gate;
 use crate::astro::math::vec3::add3;
-use crate::astro::time::civil::civil_from_j2000_seconds;
+use crate::astro::time::civil::civil_fields_from_j2000_seconds;
 use crate::astro::time::eop::Ut1DepartureRecord;
 use crate::astro::time::model::{GnssWeekTow, TimeScale};
 use crate::astro::time::scales::TimeScales;
@@ -5537,22 +5537,14 @@ fn time_scales_from_j2000_gpst(t_j2000_s: f64) -> Option<TimeScales> {
 }
 
 fn civil_fields_from_j2000_gpst(t_j2000_s: f64) -> Option<(i32, u8, u8, u8, u8, f64)> {
-    if !t_j2000_s.is_finite() {
-        return None;
-    }
-    let whole = t_j2000_s.floor();
-    if whole < i64::MIN as f64 || whole > i64::MAX as f64 {
-        return None;
-    }
-    let fraction = t_j2000_s - whole;
-    let (year, month, day, hour, minute, second) = civil_from_j2000_seconds(whole as i64);
+    let (year, month, day, hour, minute, second) = civil_fields_from_j2000_seconds(t_j2000_s)?;
     Some((
-        i32::try_from(year).ok()?,
+        year,
         u8::try_from(month).ok()?,
         u8::try_from(day).ok()?,
         u8::try_from(hour).ok()?,
         u8::try_from(minute).ok()?,
-        second as f64 + fraction,
+        second,
     ))
 }
 
@@ -18660,5 +18652,74 @@ mod tests {
             store.query_code_bias(gps, rtcm_sig(gps, 0), t).status,
             SsrBiasStatus::Available
         );
+    }
+
+    #[test]
+    fn civil_fields_from_j2000_gpst_bounds_and_year_limits() {
+        use crate::astro::time::civil::j2000_seconds;
+
+        // 2^63 (`i64::MAX as f64`), -2^63, and non-finite inputs are rejected.
+        let two_pow_63 = 2.0_f64.powi(63);
+        assert_eq!(two_pow_63, i64::MAX as f64);
+        for invalid in [
+            two_pow_63,
+            -two_pow_63,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            4.0e11 + 1.0,
+            -4.0e11 - 1.0,
+            -4.0e11 - 0.5,
+        ] {
+            assert_eq!(civil_fields_from_j2000_gpst(invalid), None, "{invalid:e}");
+            assert_eq!(antex_epoch_from_j2000_gpst(invalid), None, "{invalid:e}");
+            assert_eq!(time_scales_from_j2000_gpst(invalid), None, "{invalid:e}");
+        }
+
+        // At +4e11 s: inside civil_fields_from_j2000_seconds' ±4e11 s range,
+        // but beyond year 9999 so ANTEX and TimeScales reject it.
+        let pos_limit = civil_fields_from_j2000_gpst(4.0e11).expect("+4e11 s converts");
+        assert!(pos_limit.0 > 9999);
+        assert_eq!(antex_epoch_from_j2000_gpst(4.0e11), None);
+        assert_eq!(time_scales_from_j2000_gpst(4.0e11), None);
+
+        // At -4e11 s: negative JDN produces negative month/day fields, so
+        // checked u8 conversion returns None.
+        assert_eq!(civil_fields_from_j2000_gpst(-4.0e11), None);
+        assert_eq!(antex_epoch_from_j2000_gpst(-4.0e11), None);
+        assert_eq!(time_scales_from_j2000_gpst(-4.0e11), None);
+
+        // Calendar year limits 0000-01-01 00:00:00 and 9999-12-31 23:59:59.5.
+        let min_year_s = j2000_seconds(0, 1, 1, 0, 0, 0.0);
+        assert_eq!(
+            civil_fields_from_j2000_gpst(min_year_s),
+            Some((0, 1, 1, 0, 0, 0.0))
+        );
+        assert!(antex_epoch_from_j2000_gpst(min_year_s).is_some());
+        assert!(time_scales_from_j2000_gpst(min_year_s).is_some());
+
+        let below_min_year_s = min_year_s - 1.0;
+        assert_eq!(
+            civil_fields_from_j2000_gpst(below_min_year_s),
+            Some((-1, 12, 31, 23, 59, 59.0))
+        );
+        assert_eq!(antex_epoch_from_j2000_gpst(below_min_year_s), None);
+        assert_eq!(time_scales_from_j2000_gpst(below_min_year_s), None);
+
+        let max_year_s = j2000_seconds(9999, 12, 31, 23, 59, 59.5);
+        assert_eq!(
+            civil_fields_from_j2000_gpst(max_year_s),
+            Some((9999, 12, 31, 23, 59, 59.5))
+        );
+        assert!(antex_epoch_from_j2000_gpst(max_year_s).is_some());
+        assert!(time_scales_from_j2000_gpst(max_year_s).is_some());
+
+        let above_max_year_s = j2000_seconds(9999, 12, 31, 23, 59, 59.0) + 1.0;
+        assert_eq!(
+            civil_fields_from_j2000_gpst(above_max_year_s),
+            Some((10_000, 1, 1, 0, 0, 0.0))
+        );
+        assert_eq!(antex_epoch_from_j2000_gpst(above_max_year_s), None);
+        assert_eq!(time_scales_from_j2000_gpst(above_max_year_s), None);
     }
 }

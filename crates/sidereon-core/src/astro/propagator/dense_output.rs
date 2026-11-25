@@ -68,6 +68,32 @@ mod error_display_tests {
             assert_eq!(error.to_string(), expected);
         }
     }
+
+    #[test]
+    fn zero_length_dense_segment_returns_post_step_state_and_rejects_other_epochs() {
+        use super::{DenseOutput, DenseSegment};
+        use crate::astro::state::{CartesianState, StateDerivative};
+        use nalgebra::Vector3;
+
+        let t = 831_902_460.0;
+        let y_start = CartesianState::new(t, [7000.0, 0.0, 0.0], [0.0, 7.546, 0.0]);
+        let y_end = CartesianState::new(t, [7000.0, 0.00022638, 0.0], [-0.00000024, 7.546, 0.0]);
+        let zero_ks = [StateDerivative {
+            dpos_km_s: Vector3::zeros(),
+            dvel_km_s2: Vector3::zeros(),
+        }; 7];
+        let seg = DenseSegment::from_dp54_stages(t, 0.0, y_start, y_end, &zero_ks);
+
+        assert_eq!(seg.eval(t).expect("eval at endpoint"), y_end);
+        assert!(matches!(
+            seg.eval(t + 1.0e-6),
+            Err(DenseOutputError::SegmentOutOfRange { .. })
+        ));
+        let dense = DenseOutput {
+            segments: vec![seg],
+        };
+        assert_eq!(dense.eval(t).expect("dense eval at endpoint"), y_end);
+    }
 }
 
 /// Dense output segment for continuous interpolation.
@@ -90,11 +116,30 @@ impl DenseSegment {
     /// Evaluate the interpolant at time t.
     /// Returns Err if t is out of range [t_start, t_start + h] (with a small epsilon).
     pub fn eval(&self, t: f64) -> Result<CartesianState, DenseOutputError> {
-        // Bit-exact endpoint checks based on time
+        // Bit-exact endpoint checks based on time. Check the post-step
+        // endpoint first so a zero-length segment (h == 0.0) returns y_end
+        // rather than the pre-step state y_start.
+        let t_end = self.t_start + self.h;
+        if t == t_end {
+            return Ok(self.y_end);
+        }
         if t == self.t_start {
             return Ok(self.y_start);
         }
-        if t == self.t_start + self.h {
+        if self.h == 0.0 {
+            return Err(DenseOutputError::SegmentOutOfRange {
+                t,
+                t_start: self.t_start,
+                t_end,
+                theta: 0.0,
+            });
+        }
+        // When `t_start + (t_end_exact - t_start)` rounds by a unit off
+        // `y_end.epoch_tdb_seconds` across a binade boundary, preserve bit-exact
+        // endpoint evaluation.
+        if t == self.y_end.epoch_tdb_seconds
+            && (t - t_end).abs() <= 2.0 * f64::EPSILON * t.abs().max(self.t_start.abs())
+        {
             return Ok(self.y_end);
         }
 
@@ -106,7 +151,6 @@ impl DenseSegment {
 
         // Allow for very small numerical overshoot at boundaries
         if !(-1e-12..=1.0 + 1e-12).contains(&theta) {
-            let t_end = self.t_start + self.h;
             return Err(DenseOutputError::SegmentOutOfRange {
                 t,
                 t_start: self.t_start,

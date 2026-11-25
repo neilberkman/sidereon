@@ -13,7 +13,7 @@ use crate::astro::error::PropagationError;
 use crate::astro::events::root::{try_bisect_crossing_until, RootError};
 use crate::astro::forces::drag::geodetic_altitude_km;
 use crate::astro::forces::{DragForce, DragParameters, SpaceWeatherSource};
-use crate::astro::propagator::api::IntegratorOptions;
+use crate::astro::propagator::api::{IntegratorOptions, PropagationContext};
 use crate::astro::propagator::driver::PropagationForceModel;
 use crate::astro::propagator::numerical::{ForceModelKind, IntegratorKind, StatePropagator};
 use crate::astro::state::CartesianState;
@@ -169,7 +169,22 @@ pub fn estimate_decay(
     initial: CartesianState,
     config: &DecayConfig,
 ) -> Result<DecayEstimate, DecayError> {
-    estimate_decay_driver(initial, config, None)
+    let ctx = PropagationContext::default();
+    estimate_decay_driver(initial, config, None, &ctx)
+}
+
+/// Estimate time to reentry using drag-perturbed numerical propagation with an
+/// explicit [`PropagationContext`].
+///
+/// Passing [`PropagationContext::default`] is equivalent to [`estimate_decay`];
+/// any UT1 departure encountered during the scan or bisection is recorded in
+/// `ctx`.
+pub fn estimate_decay_with_context(
+    initial: CartesianState,
+    config: &DecayConfig,
+    ctx: &PropagationContext,
+) -> Result<DecayEstimate, DecayError> {
+    estimate_decay_driver(initial, config, None, ctx)
 }
 
 /// Estimate time to reentry using per-epoch space weather from `source`.
@@ -181,17 +196,35 @@ pub fn estimate_decay_with_source(
     config: &DecayConfig,
     source: &SpaceWeatherSource,
 ) -> Result<DecayEstimate, DecayError> {
-    estimate_decay_driver(initial, config, Some(source))
+    let ctx = PropagationContext::default();
+    estimate_decay_driver(initial, config, Some(source), &ctx)
+}
+
+/// Estimate time to reentry using per-epoch space weather from `source` and an
+/// explicit [`PropagationContext`].
+///
+/// `config.drag` supplies the ballistic coefficient and cutoff altitude; its
+/// fixed [`crate::astro::forces::SpaceWeather`] value is not consulted. Passing
+/// [`PropagationContext::default`] is equivalent to
+/// [`estimate_decay_with_source`].
+pub fn estimate_decay_with_source_and_context(
+    initial: CartesianState,
+    config: &DecayConfig,
+    source: &SpaceWeatherSource,
+    ctx: &PropagationContext,
+) -> Result<DecayEstimate, DecayError> {
+    estimate_decay_driver(initial, config, Some(source), ctx)
 }
 
 fn estimate_decay_driver(
     initial: CartesianState,
     config: &DecayConfig,
     source: Option<&SpaceWeatherSource>,
+    ctx: &PropagationContext,
 ) -> Result<DecayEstimate, DecayError> {
     validate_config(config)?;
 
-    let initial_altitude = geodetic_altitude_km(&initial).map_err(DecayError::Propagation)?;
+    let initial_altitude = geodetic_altitude_km(&initial, ctx).map_err(DecayError::Propagation)?;
     if initial_altitude <= config.reentry_altitude_km {
         return Ok(DecayEstimate {
             time_to_decay_s: 0.0,
@@ -220,9 +253,10 @@ fn estimate_decay_driver(
 
         let next_elapsed_s = (elapsed_s + config.scan_step_s).min(config.max_duration_s);
         let next_state =
-            propagate_segment(current, initial_epoch + next_elapsed_s, config, source)?;
+            propagate_segment(current, initial_epoch + next_elapsed_s, config, source, ctx)?;
         samples += 1;
-        let next_altitude = geodetic_altitude_km(&next_state).map_err(DecayError::Propagation)?;
+        let next_altitude =
+            geodetic_altitude_km(&next_state, ctx).map_err(DecayError::Propagation)?;
 
         if next_altitude <= config.reentry_altitude_km {
             return refine_reentry(
@@ -232,6 +266,7 @@ fn estimate_decay_driver(
                 next_elapsed_s,
                 config,
                 source,
+                ctx,
             );
         }
 
@@ -273,14 +308,16 @@ fn refine_reentry(
     high_elapsed_s: f64,
     config: &DecayConfig,
     source: Option<&SpaceWeatherSource>,
+    ctx: &PropagationContext,
 ) -> Result<DecayEstimate, DecayError> {
     let threshold = config.reentry_altitude_km;
     let root_elapsed_s = try_bisect_crossing_until(
         low_elapsed_s,
         high_elapsed_s,
         |elapsed_s| {
-            let state = propagate_segment(low_state, initial_epoch + elapsed_s, config, source)?;
-            let altitude = geodetic_altitude_km(&state).map_err(DecayError::Propagation)?;
+            let state =
+                propagate_segment(low_state, initial_epoch + elapsed_s, config, source, ctx)?;
+            let altitude = geodetic_altitude_km(&state, ctx).map_err(DecayError::Propagation)?;
             Ok(altitude - threshold)
         },
         |lo, hi| (lo + hi) * 0.5,
@@ -288,10 +325,15 @@ fn refine_reentry(
     )
     .map_err(map_root_error)?;
 
-    let reentry_state =
-        propagate_segment(low_state, initial_epoch + root_elapsed_s, config, source)?;
+    let reentry_state = propagate_segment(
+        low_state,
+        initial_epoch + root_elapsed_s,
+        config,
+        source,
+        ctx,
+    )?;
     let reentry_altitude_km =
-        geodetic_altitude_km(&reentry_state).map_err(DecayError::Propagation)?;
+        geodetic_altitude_km(&reentry_state, ctx).map_err(DecayError::Propagation)?;
     Ok(DecayEstimate {
         time_to_decay_s: reentry_state.epoch_tdb_seconds - initial_epoch,
         reentry_state,
@@ -313,6 +355,7 @@ fn propagate_segment(
     t_end_tdb_seconds: f64,
     config: &DecayConfig,
     source: Option<&SpaceWeatherSource>,
+    ctx: &PropagationContext,
 ) -> Result<CartesianState, DecayError> {
     let propagator = StatePropagator {
         initial,
@@ -323,7 +366,7 @@ fn propagate_segment(
         space_weather: source.cloned(),
     };
     Ok(propagator
-        .propagate_to(t_end_tdb_seconds)
+        .propagate_to_with_context(t_end_tdb_seconds, ctx)
         .map_err(DecayError::Propagation)?
         .final_state)
 }
@@ -345,27 +388,28 @@ mod tests {
     use super::*;
     use crate::astro::constants::RE_EARTH;
     use crate::astro::forces::SpaceWeather;
-    use crate::astro::frames::transforms::{
-        geodetic_to_itrs, greenwich_mean_sidereal_time_radians_from_j2000_seconds,
+    use crate::astro::frames::orientation::{
+        EarthOrientationProvider, TdbEarthOrientationProvider,
     };
+    use crate::astro::frames::transforms::geodetic_to_itrs;
 
     const TEST_EPOCH_S: f64 = 646_315_200.0;
 
     fn state_from_geodetic_alt(epoch: f64, altitude_km: f64) -> CartesianState {
         let (x_ecef, y_ecef, z_ecef) =
             geodetic_to_itrs(0.0, 0.0, altitude_km).expect("valid geodetic");
-        let theta =
-            greenwich_mean_sidereal_time_radians_from_j2000_seconds(epoch).expect("valid gmst");
-        let c = libm::cos(theta);
-        let s = libm::sin(theta);
-        let x_eci = c * x_ecef - s * y_ecef;
-        let y_eci = s * x_ecef + c * y_ecef;
+        let orientation = TdbEarthOrientationProvider::new()
+            .orientation_at_tdb_seconds(epoch)
+            .expect("valid orientation");
+        let pos_eci = orientation
+            .itrf_to_gcrf_position_km([x_ecef, y_ecef, z_ecef])
+            .expect("valid ITRF to GCRF");
         let r = RE_EARTH + altitude_km;
         let v = (MU_EARTH / r).sqrt();
         CartesianState::new(
             epoch,
-            [x_eci, y_eci, z_ecef],
-            [-v * y_eci / r, v * x_eci / r, 0.0],
+            pos_eci,
+            [-v * pos_eci[1] / r, v * pos_eci[0] / r, 0.0],
         )
     }
 
@@ -410,11 +454,13 @@ mod tests {
             estimate.time_to_decay_s.to_bits(),
             (estimate.reentry_state.epoch_tdb_seconds - initial.epoch_tdb_seconds).to_bits()
         );
+        let ctx = PropagationContext::default();
         let before = propagate_segment(
             initial,
             initial.epoch_tdb_seconds + estimate.time_to_decay_s - config.crossing_tolerance_s,
             &config,
             None,
+            &ctx,
         )
         .expect("before crossing");
         let after = propagate_segment(
@@ -422,10 +468,11 @@ mod tests {
             initial.epoch_tdb_seconds + estimate.time_to_decay_s + config.crossing_tolerance_s,
             &config,
             None,
+            &ctx,
         )
         .expect("after crossing");
-        let before_alt = geodetic_altitude_km(&before).expect("before altitude");
-        let after_alt = geodetic_altitude_km(&after).expect("after altitude");
+        let before_alt = geodetic_altitude_km(&before, &ctx).expect("before altitude");
+        let after_alt = geodetic_altitude_km(&after, &ctx).expect("after altitude");
         let altitude_window_km = (before_alt - after_alt).abs().max(1.0e-6);
         assert!(
             (estimate.reentry_altitude_km - config.reentry_altitude_km).abs() <= altitude_window_km
@@ -460,5 +507,54 @@ mod tests {
         assert_eq!(estimate.time_to_decay_s, 0.0);
         assert_eq!(estimate.reentry_state, initial);
         assert!(estimate.reentry_altitude_km <= DecayConfig::DEFAULT_REENTRY_ALTITUDE_KM);
+    }
+
+    #[test]
+    fn estimate_decay_outside_ut1_table_succeeds_under_default_and_refuses_under_strict_context() {
+        use crate::astro::time::DegradeReason;
+        use std::sync::Arc;
+
+        // 2028-01-01 00:00:00 TDB (after embedded UT1 table coverage).
+        let state = CartesianState::new(883_569_600.0, [6503.137, 0.0, 0.0], [0.0, 7.83, 0.0]);
+        let config = base_config();
+
+        let default_estimate =
+            estimate_decay(state, &config).expect("default context decay succeeds after UT1 table");
+        assert!(default_estimate.time_to_decay_s > 0.0);
+
+        let default_ctx = PropagationContext::default();
+        let ctx_estimate = estimate_decay_with_context(state, &config, &default_ctx)
+            .expect("explicit default context decay succeeds");
+        assert_eq!(ctx_estimate, default_estimate);
+        assert_eq!(
+            default_ctx.ut1_departure(),
+            Some(DegradeReason::AfterCoverage)
+        );
+
+        let fixed_source = SpaceWeatherSource::Fixed(config.drag.space_weather());
+        let sourced_ctx = PropagationContext::default();
+        let sourced_estimate =
+            estimate_decay_with_source_and_context(state, &config, &fixed_source, &sourced_ctx)
+                .expect("sourced decay with default context succeeds");
+        assert_eq!(sourced_estimate, default_estimate);
+        assert_eq!(
+            sourced_ctx.ut1_departure(),
+            Some(DegradeReason::AfterCoverage)
+        );
+
+        let strict_ctx = PropagationContext::new()
+            .with_body_fixed_frame_provider(Arc::new(TdbEarthOrientationProvider::new()));
+        assert!(matches!(
+            estimate_decay_with_context(state, &config, &strict_ctx),
+            Err(DecayError::Propagation(
+                PropagationError::Ut1OutsideCoverage(DegradeReason::AfterCoverage)
+            ))
+        ));
+        assert!(matches!(
+            estimate_decay_with_source_and_context(state, &config, &fixed_source, &strict_ctx),
+            Err(DecayError::Propagation(
+                PropagationError::Ut1OutsideCoverage(DegradeReason::AfterCoverage)
+            ))
+        ));
     }
 }

@@ -3,8 +3,9 @@ use sidereon::astro::forces::{
     SpaceWeather as FacadeSpaceWeather, SpaceWeatherSource as FacadeSpaceWeatherSource,
 };
 use sidereon::propagator::{
-    estimate_decay, estimate_decay_with_source, propagate_states, DecayConfig, DecayEstimate,
-    DragParameters, PropagationConfig,
+    estimate_decay, estimate_decay_with_context, estimate_decay_with_source,
+    estimate_decay_with_source_and_context, propagate_states, DecayConfig, DecayEstimate,
+    DragParameters, PropagationConfig, PropagationContext,
 };
 use sidereon::{
     DragForce, ObservationClass, SourcedDragForce, SpaceWeather, SpaceWeatherPolicy,
@@ -34,6 +35,18 @@ fn facade_reexports_drag_decay_and_matches_core() {
         sidereon::astro::state::CartesianState,
         &DecayConfig,
     ) -> Result<DecayEstimate, sidereon::propagator::DecayError> = estimate_decay;
+    let _decay_ctx_api: fn(
+        sidereon::astro::state::CartesianState,
+        &DecayConfig,
+        &PropagationContext,
+    ) -> Result<DecayEstimate, sidereon::propagator::DecayError> = estimate_decay_with_context;
+    let _decay_src_ctx_api: fn(
+        sidereon::astro::state::CartesianState,
+        &DecayConfig,
+        &SpaceWeatherSource,
+        &PropagationContext,
+    ) -> Result<DecayEstimate, sidereon::propagator::DecayError> =
+        estimate_decay_with_source_and_context;
     let _decay_config = DecayConfig::new(drag);
 
     let facade_config = PropagationConfig::new(

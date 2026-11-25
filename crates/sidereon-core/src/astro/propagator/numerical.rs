@@ -2,16 +2,18 @@
 //!
 //! Builds a propagatable object from a raw epoch plus an ECI Cartesian state
 //! (position + velocity) and propagates it forward (or backward) with the
-//! existing integrators ([`RK4`], [`DP54`]) and the existing force models
-//! (two-body, two-body + J2, and additive perturbation sets). This is a thin
-//! orchestration layer over
-//! [`crate::astro::integrators`] and [`crate::astro::forces`]: it constructs the
-//! force model, wraps it in [`OrbitalDynamics`], and drives the chosen
-//! integrator. It adds no integration math of its own, so a single-shot
-//! [`StatePropagator::propagate_to`] is bit-for-bit identical to assembling the
-//! force model, dynamics, integrator, and options by hand. State-transition
-//! matrices are formed by finite-differencing this same entry point, so they
-//! reflect the selected force model and integrator without duplicating dynamics.
+//! Runge-Kutta integrators ([`IntegratorKind::Rk4`], [`IntegratorKind::Dp54`])
+//! and the force models (two-body, two-body + J2, and additive perturbation
+//! sets). The equations of motion are integrated with elapsed Terrestrial Time
+//! (TT) as the independent variable (IERS Conventions 2010, chapter 10), using
+//! the same TT/TDB epoch mapping and integrator loop as
+//! [`crate::astro::propagator::propagate_variational`]. Public epochs remain
+//! absolute TDB seconds past J2000, each target TDB epoch is mapped to elapsed
+//! TT through [`crate::astro::time::tt_from_tdb_j2000_seconds`], and each force
+//! evaluation receives the absolute TDB epoch rebuilt from elapsed TT.
+//! State-transition matrices are formed by finite-differencing this same entry
+//! point, so they reflect the selected force model and integrator without
+//! duplicating dynamics.
 
 use crate::astro::constants::{J2_EARTH, MU_EARTH, RE_EARTH};
 use crate::astro::covariance::{Covariance6, Covariance6Error};
@@ -22,13 +24,14 @@ use crate::astro::forces::{
     SolidEarthTideGravity, SourcedDragForce, SpaceWeatherSource, SphericalHarmonicGravityConfig,
     ThirdBodyGravity, TideSystem, TwoBodyGravity, ZonalGravity,
 };
-use crate::astro::integrators::{Integrator, DP54, RK4};
 use crate::astro::propagator::api::{IntegratorOptions, PropagationContext};
 use crate::astro::propagator::covariance::{
     CovarianceFrame, CovariancePropagationOptions, LabeledCovariance6,
 };
 use crate::astro::propagator::dynamics::OrbitalDynamics;
 use crate::astro::propagator::result::PropagationResult;
+use crate::astro::propagator::tt::{TtEpochMap, TtSegment};
+use crate::astro::propagator::variational::propagate_segment_result;
 use crate::astro::state::CartesianState;
 
 /// Row-major 6x6 state-transition matrix for `[r_x, r_y, r_z, v_x, v_y, v_z]`.
@@ -418,9 +421,9 @@ impl StatePropagator {
     }
 
     /// Propagate from the initial epoch to `t_end_tdb_seconds` (an absolute TDB
-    /// epoch), returning the underlying integrator's full
-    /// [`PropagationResult`]. Bit-for-bit identical to building the force model,
-    /// [`OrbitalDynamics`], integrator, and options by hand.
+    /// epoch), integrating over elapsed TT and returning the full
+    /// [`PropagationResult`]. Shares the TT/TDB epoch mapping and integrator
+    /// with [`crate::astro::propagator::propagate_variational`].
     pub fn propagate_to(
         &self,
         t_end_tdb_seconds: f64,
@@ -456,6 +459,21 @@ impl StatePropagator {
         covariance0: Covariance6,
         span_seconds: f64,
     ) -> Result<(CartesianState, Covariance6), PropagationError> {
+        let ctx = PropagationContext::default();
+        self.propagate_state_with_covariance_with_context(covariance0, span_seconds, &ctx)
+    }
+
+    /// Propagate the initial state and a 6x6 state covariance over a relative
+    /// span in seconds with an explicit propagation context.
+    ///
+    /// Passing [`PropagationContext::default`] is equivalent to
+    /// [`Self::propagate_state_with_covariance`].
+    pub fn propagate_state_with_covariance_with_context(
+        &self,
+        covariance0: Covariance6,
+        span_seconds: f64,
+        ctx: &PropagationContext,
+    ) -> Result<(CartesianState, Covariance6), PropagationError> {
         validate_initial_state(self.initial)?;
         crate::validate::finite(span_seconds, "span_seconds").map_err(map_field_error)?;
         let t_end_tdb_seconds = self.initial.epoch_tdb_seconds + span_seconds;
@@ -465,13 +483,14 @@ impl StatePropagator {
             return Ok((self.initial, covariance0));
         }
 
-        let ephemeris = self.propagate_covariance(
+        let ephemeris = self.propagate_covariance_with_context(
             LabeledCovariance6 {
                 covariance: covariance0,
                 frame: CovarianceFrame::Inertial,
             },
             &[t_end_tdb_seconds],
             &CovariancePropagationOptions::default(),
+            ctx,
         )?;
         let node = ephemeris.nodes()[0];
         Ok((node.state, node.covariance))
@@ -520,20 +539,34 @@ impl StatePropagator {
         let dynamics = OrbitalDynamics {
             force_model: force.as_ref(),
         };
-        self.state_transition_matrix_between(self.initial, t_end_tdb_seconds, &dynamics, ctx)
+        if t_end_tdb_seconds == self.initial.epoch_tdb_seconds {
+            return Ok(identity_stm());
+        }
+        let (epoch_map, from) = TtEpochMap::from_initial_tdb(self.initial.epoch_tdb_seconds);
+        let to = epoch_map.anchor_for_tdb(t_end_tdb_seconds);
+        self.state_transition_matrix_between_segment(
+            self.initial,
+            epoch_map,
+            TtSegment { from, to },
+            &dynamics,
+            ctx,
+        )
     }
 
-    pub(super) fn state_transition_matrix_between(
+    pub(super) fn state_transition_matrix_between_segment(
         &self,
         initial: CartesianState,
-        t_end_tdb_seconds: f64,
+        epoch_map: TtEpochMap,
+        segment: TtSegment,
         dynamics: &OrbitalDynamics,
         ctx: &PropagationContext,
     ) -> Result<StateTransitionMatrix, PropagationError> {
-        crate::validate::finite(t_end_tdb_seconds, "t_end_tdb_seconds").map_err(map_field_error)?;
-        if t_end_tdb_seconds == initial.epoch_tdb_seconds {
+        if segment.to.elapsed == segment.from.elapsed {
             return Ok(identity_stm());
         }
+        validate_epoch_finite(initial.epoch_tdb_seconds, "initial.epoch_tdb_seconds")?;
+        validate_epoch_finite(segment.to.tdb, "t_end_tdb_seconds")?;
+        validate_initial_state(initial)?;
 
         let mut stm = [[0.0_f64; 6]; 6];
         let initial_vector = state_vector(&initial);
@@ -544,10 +577,10 @@ impl StatePropagator {
             let minus = perturb_state(initial, column, -delta);
 
             let plus_final = self
-                .run(plus, t_end_tdb_seconds, dynamics, ctx)?
+                .run_segment(plus, epoch_map, segment, dynamics, ctx)?
                 .final_state;
             let minus_final = self
-                .run(minus, t_end_tdb_seconds, dynamics, ctx)?
+                .run_segment(minus, epoch_map, segment, dynamics, ctx)?
                 .final_state;
             let plus_vector = state_vector(&plus_final);
             let minus_vector = state_vector(&minus_final);
@@ -596,19 +629,26 @@ impl StatePropagator {
             force_model: force.as_ref(),
         };
 
+        let (epoch_map, mut from) = TtEpochMap::from_initial_tdb(self.initial.epoch_tdb_seconds);
         let mut states = Vec::with_capacity(epochs_tdb_seconds.len());
         let mut current = self.initial;
         for &t in epochs_tdb_seconds {
-            if t != current.epoch_tdb_seconds {
-                current = self.run(current, t, &dynamics, ctx)?.final_state;
+            let to = epoch_map.anchor_for_tdb(t);
+            if to.elapsed != from.elapsed {
+                current = self
+                    .run_segment(current, epoch_map, TtSegment { from, to }, &dynamics, ctx)?
+                    .final_state;
+            } else if t != current.epoch_tdb_seconds {
+                current.epoch_tdb_seconds = t;
             }
             states.push(current);
+            from = to;
         }
         Ok(states)
     }
 
-    /// Dispatch to the selected integrator. Kept private so the public surface
-    /// stays `propagate_to` / `ephemeris`.
+    /// Dispatch to the selected TT integrator. Kept private so the public
+    /// surface stays `propagate_to` / `ephemeris`.
     pub(super) fn run(
         &self,
         initial: CartesianState,
@@ -620,16 +660,28 @@ impl StatePropagator {
         validate_epoch_finite(t_end_tdb_seconds, "t_end_tdb_seconds")?;
         validate_initial_state(initial)?;
 
-        // The integrators record this run's UT1 departure in the result and
-        // pass it back to `ctx`.
-        match self.integrator {
-            IntegratorKind::Rk4 => {
-                RK4.propagate(initial, t_end_tdb_seconds, dynamics, ctx, &self.options)
-            }
-            IntegratorKind::Dp54 => {
-                DP54.propagate(initial, t_end_tdb_seconds, dynamics, ctx, &self.options)
-            }
-        }
+        let (epoch_map, from) = TtEpochMap::from_initial_tdb(initial.epoch_tdb_seconds);
+        let to = epoch_map.anchor_for_tdb(t_end_tdb_seconds);
+        self.run_segment(initial, epoch_map, TtSegment { from, to }, dynamics, ctx)
+    }
+
+    pub(super) fn run_segment(
+        &self,
+        initial: CartesianState,
+        epoch_map: TtEpochMap,
+        segment: TtSegment,
+        dynamics: &OrbitalDynamics,
+        ctx: &PropagationContext,
+    ) -> Result<PropagationResult, PropagationError> {
+        propagate_segment_result(
+            initial,
+            epoch_map,
+            segment,
+            dynamics.force_model,
+            self.integrator,
+            &self.options,
+            ctx,
+        )
     }
 
     pub(crate) fn build_force(&self) -> Result<Box<dyn ForceModel>, PropagationError> {
@@ -746,7 +798,10 @@ fn validate_epoch_finite(value: f64, field: &'static str) -> Result<(), Propagat
 mod tests {
     use super::*;
     use crate::astro::forces::{DragParameters, SpaceWeather, SpaceWeatherSource};
-    use crate::astro::integrators::Integrator;
+    use crate::astro::integrators::{Integrator, DP54, RK4};
+    use crate::astro::propagator::variational::{
+        propagate_variational, VariationalEpoch, VariationalEquations,
+    };
     use nalgebra::Vector3;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -901,12 +956,12 @@ mod tests {
                 two_body.velocity_km_s.z.to_bits(),
             ],
             [
-                4_664_491_478_405_259_647,
-                13_868_042_866_614_843_437,
-                4_653_651_863_611_153_978,
-                4_592_023_743_103_375_898,
-                4_619_903_732_185_607_459,
-                4_599_631_655_498_578_350,
+                4_664_491_478_405_255_160,
+                13_868_042_866_619_974_463,
+                4_653_651_863_611_095_832,
+                4_592_023_743_125_086_532,
+                4_619_903_732_185_591_186,
+                4_599_631_655_499_615_239,
             ]
         );
         assert_eq!(
@@ -919,12 +974,12 @@ mod tests {
                 j2.velocity_km_s.z.to_bits(),
             ],
             [
-                4_664_491_415_796_994_328,
-                13_868_042_735_578_520_184,
-                4_653_651_704_383_841_626,
-                4_591_955_084_532_107_724,
-                4_619_903_849_988_711_109,
-                4_599_620_700_962_266_984,
+                4_664_491_415_796_989_883,
+                13_868_042_735_583_651_284,
+                4_653_651_704_383_783_586,
+                4_591_955_084_553_841_548,
+                4_619_903_849_988_694_819,
+                4_599_620_700_963_307_602,
             ]
         );
     }
@@ -1140,73 +1195,295 @@ mod tests {
     }
 
     #[test]
-    fn entry_point_matches_integrator_called_directly_bit_for_bit() {
+    fn entry_point_matches_variational_propagator_bit_for_bit() {
         let (pos, vel, _) = circular_state();
+        let initial = CartesianState::new(0.0, pos, vel);
+        let t_end = crate::constants::SECONDS_PER_HOUR;
+        let force = TwoBodyGravity::default();
+        let ctx = PropagationContext::default();
+        let equations = VariationalEquations {
+            force: &force,
+            parameters: &[],
+            sensitivity_parameters: &[],
+        };
+        let epochs = [VariationalEpoch::from_tdb_seconds(
+            initial.epoch_tdb_seconds,
+            t_end,
+        )];
+
+        for (integrator, opts) in [
+            (
+                IntegratorKind::Dp54,
+                IntegratorOptions {
+                    abs_tol: 1e-12,
+                    rel_tol: 1e-12,
+                    ..IntegratorOptions::default()
+                },
+            ),
+            (
+                IntegratorKind::Rk4,
+                IntegratorOptions {
+                    initial_step: 10.0,
+                    ..IntegratorOptions::default()
+                },
+            ),
+        ] {
+            let via_entry = StatePropagator::new(
+                initial.epoch_tdb_seconds,
+                pos,
+                vel,
+                ForceModelKind::two_body(),
+                integrator,
+            )
+            .with_options(opts)
+            .propagate_to(t_end)
+            .unwrap()
+            .final_state;
+
+            let via_variational =
+                propagate_variational(initial, &epochs, &equations, integrator, &opts, &ctx)
+                    .unwrap()[0]
+                    .state;
+
+            assert_eq!(
+                via_entry.epoch_tdb_seconds.to_bits(),
+                via_variational.epoch_tdb_seconds.to_bits()
+            );
+            for axis in 0..3 {
+                assert_eq!(
+                    via_entry.position_km[axis].to_bits(),
+                    via_variational.position_km[axis].to_bits()
+                );
+                assert_eq!(
+                    via_entry.velocity_km_s[axis].to_bits(),
+                    via_variational.velocity_km_s[axis].to_bits()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dp54_dense_output_evaluates_across_tdb_span() {
+        let (pos, vel, _) = circular_state();
+        let epoch0 = 831_902_400.0;
+        let t_end = epoch0 + 1800.0;
         let opts = IntegratorOptions {
             abs_tol: 1e-12,
             rel_tol: 1e-12,
+            dense_output: true,
             ..IntegratorOptions::default()
         };
-
-        // Entry point.
         let propagator = StatePropagator::new(
+            epoch0,
+            pos,
+            vel,
+            ForceModelKind::two_body(),
+            IntegratorKind::Dp54,
+        )
+        .with_options(opts);
+        let result = propagator.propagate_to(t_end).expect("dense propagation");
+        let dense = result.dense.as_ref().expect("dense output present");
+        let at_start = dense.eval(epoch0).expect("eval start");
+        let at_end = dense.eval(t_end).expect("eval end");
+        assert_eq!(at_start.position_km, propagator.initial.position_km);
+        assert_eq!(at_end.position_km, result.final_state.position_km);
+
+        let mid = epoch0 + 900.0;
+        let at_mid = dense.eval(mid).expect("eval mid");
+        let direct_mid = propagator.propagate_to(mid).expect("mid").final_state;
+        // At epoch0 ~ 8.32e8 s, DenseSegment::t_start (f64 TDB seconds) is
+        // quantized to 2^-23 s (~1.2e-7 s), bounding midpoint error by ~5e-7 km.
+        let pos_err = (at_mid.position_km - direct_mid.position_km).norm();
+        let vel_err = (at_mid.velocity_km_s - direct_mid.velocity_km_s).norm();
+        assert!(pos_err < 1.0e-6, "mid pos_err {pos_err:e} km");
+        assert!(vel_err < 1.0e-9, "mid vel_err {vel_err:e} km/s");
+
+        // Near J2000 (epoch 0.0), t_start quantization is negligible (< 1e-12 s).
+        let j2000_prop = StatePropagator::new(
             0.0,
             pos,
             vel,
             ForceModelKind::two_body(),
             IntegratorKind::Dp54,
         )
-        .with_options(IntegratorOptions {
-            abs_tol: 1e-12,
-            rel_tol: 1e-12,
+        .with_options(opts);
+        let j2000_res = j2000_prop.propagate_to(1800.0).expect("j2000 dense");
+        let j2000_mid = j2000_res
+            .dense
+            .as_ref()
+            .expect("dense")
+            .eval(900.0)
+            .expect("eval 900");
+        let j2000_direct = j2000_prop
+            .propagate_to(900.0)
+            .expect("direct 900")
+            .final_state;
+        assert!((j2000_mid.position_km - j2000_direct.position_km).norm() < 1.0e-7);
+        assert!((j2000_mid.velocity_km_s - j2000_direct.velocity_km_s).norm() < 1.0e-10);
+    }
+
+    #[test]
+    fn dp54_dense_output_closing_and_mid_arc_sub_ulp_steps_return_post_step_states() {
+        let epoch0 = 831_902_400.0;
+        let t_end = 831_902_460.0;
+
+        // Default tolerances with initial_step = max_step = 59.99999997 s over 60 s.
+        let default_closing_opts = IntegratorOptions {
+            initial_step: 59.99999997,
+            max_step: 59.99999997,
+            dense_output: true,
             ..IntegratorOptions::default()
-        });
-        let via_entry = propagator
-            .propagate_to(crate::constants::SECONDS_PER_HOUR)
-            .unwrap()
-            .final_state;
-
-        // Integrator called directly, the way the entry point assembles it.
-        let force = TwoBodyGravity::default();
-        let dynamics = OrbitalDynamics {
-            force_model: &force,
         };
-        let ctx = PropagationContext::default();
-        let via_direct = DP54
-            .propagate(
-                CartesianState::new(0.0, pos, vel),
-                crate::constants::SECONDS_PER_HOUR,
-                &dynamics,
-                &ctx,
-                &opts,
-            )
-            .unwrap()
-            .final_state;
+        let default_closing_prop = StatePropagator::new(
+            epoch0,
+            [7000.0, 0.0, 0.0],
+            [0.0, 7.546, 0.0],
+            ForceModelKind::two_body(),
+            IntegratorKind::Dp54,
+        )
+        .with_options(default_closing_opts);
+        let default_closing_res = default_closing_prop
+            .propagate_to(t_end)
+            .expect("default closing dense");
+        let default_closing_dense = default_closing_res.dense.as_ref().expect("dense present");
+        assert!(default_closing_dense
+            .segments
+            .iter()
+            .all(|seg| seg.h != 0.0));
+        assert_states_bit_for_bit(
+            &[default_closing_dense.eval(epoch0).expect("eval start")],
+            &[default_closing_prop.initial],
+        );
+        assert_states_bit_for_bit(
+            &[default_closing_dense.eval(t_end).expect("eval end")],
+            &[default_closing_res.final_state],
+        );
 
-        assert_eq!(
-            via_entry.position_km.x.to_bits(),
-            via_direct.position_km.x.to_bits()
+        // Two-step arc whose closing step is ~3e-8 s (< 0.5 ULP at 831_902_460.0),
+        // so step 1 rounds to t_end and step 2 has h_tdb == 0.0.
+        let two_step_opts = IntegratorOptions {
+            abs_tol: 1.0e-3,
+            rel_tol: 1.0e-3,
+            initial_step: 59.99999997,
+            max_step: 59.99999997,
+            dense_output: true,
+            ..IntegratorOptions::default()
+        };
+        let closing_prop = StatePropagator::new(
+            epoch0,
+            [7000.0, 0.0, 0.0],
+            [0.0, 7.546, 0.0],
+            ForceModelKind::two_body(),
+            IntegratorKind::Dp54,
+        )
+        .with_options(two_step_opts);
+        let closing_res = closing_prop.propagate_to(t_end).expect("closing dense");
+        assert_eq!(closing_res.stats.accepted_steps, 2);
+        let closing_dense = closing_res.dense.as_ref().expect("dense present");
+        assert_eq!(closing_dense.segments.len(), 1);
+        assert!(
+            closing_dense.segments.iter().all(|seg| seg.h != 0.0),
+            "no zero-length TDB segment may be emitted"
         );
-        assert_eq!(
-            via_entry.position_km.y.to_bits(),
-            via_direct.position_km.y.to_bits()
+        let eval_start = closing_dense.eval(epoch0).expect("eval start");
+        let eval_end = closing_dense.eval(t_end).expect("eval end");
+        assert_states_bit_for_bit(&[eval_start], &[closing_prop.initial]);
+        assert_states_bit_for_bit(&[eval_end], &[closing_res.final_state]);
+        for point in &closing_res.points {
+            let evaluated = closing_dense
+                .eval(point.epoch_tdb_seconds)
+                .expect("eval recorded point");
+            assert_states_bit_for_bit(
+                &[evaluated],
+                &[CartesianState::new(
+                    point.epoch_tdb_seconds,
+                    point.position_km,
+                    point.velocity_km_s,
+                )],
+            );
+        }
+
+        // Backward two-step closing sub-ULP step.
+        let backward_prop = StatePropagator::new(
+            t_end,
+            [7000.0, 0.0, 0.0],
+            [0.0, 7.546, 0.0],
+            ForceModelKind::two_body(),
+            IntegratorKind::Dp54,
+        )
+        .with_options(two_step_opts);
+        let backward_res = backward_prop
+            .propagate_to(epoch0)
+            .expect("backward closing dense");
+        assert_eq!(backward_res.stats.accepted_steps, 2);
+        let backward_dense = backward_res.dense.as_ref().expect("backward dense");
+        assert_eq!(backward_dense.segments.len(), 1);
+        assert!(backward_dense.segments.iter().all(|seg| seg.h != 0.0));
+        assert_states_bit_for_bit(
+            &[backward_dense.eval(t_end).expect("backward start")],
+            &[backward_prop.initial],
         );
-        assert_eq!(
-            via_entry.position_km.z.to_bits(),
-            via_direct.position_km.z.to_bits()
+        assert_states_bit_for_bit(
+            &[backward_dense.eval(epoch0).expect("backward end")],
+            &[backward_res.final_state],
         );
-        assert_eq!(
-            via_entry.velocity_km_s.x.to_bits(),
-            via_direct.velocity_km_s.x.to_bits()
+
+        // Opening, mid-arc, and closing sub-ULP steps: max_step = 3e-8 s is
+        // ~0.25 ULP at 831_902_400.0 (~1.192e-7 s per ULP), so ~3 out of every
+        // 4 accepted steps have h_tdb == 0.0 across the entire arc.
+        let tiny_span_end = epoch0 + 1.0e-6;
+        let mid_arc_opts = IntegratorOptions {
+            initial_step: 3.0e-8,
+            min_step: 1.0e-9,
+            max_step: 3.0e-8,
+            dense_output: true,
+            ..IntegratorOptions::default()
+        };
+        let mid_arc_prop = StatePropagator::new(
+            epoch0,
+            [7000.0, 0.0, 0.0],
+            [0.0, 7.546, 0.0],
+            ForceModelKind::two_body(),
+            IntegratorKind::Dp54,
+        )
+        .with_options(mid_arc_opts);
+        let mid_arc_res = mid_arc_prop
+            .propagate_to(tiny_span_end)
+            .expect("mid-arc sub-ULP dense");
+        let mid_arc_dense = mid_arc_res.dense.as_ref().expect("mid-arc dense");
+        assert!(
+            mid_arc_res.stats.accepted_steps as usize > mid_arc_dense.segments.len() + 10,
+            "expected multiple sub-ULP steps folded mid-arc"
         );
-        assert_eq!(
-            via_entry.velocity_km_s.y.to_bits(),
-            via_direct.velocity_km_s.y.to_bits()
+        assert!(
+            mid_arc_dense.segments.iter().all(|seg| seg.h > 0.0),
+            "all emitted segments must have strictly positive TDB length"
         );
-        assert_eq!(
-            via_entry.velocity_km_s.z.to_bits(),
-            via_direct.velocity_km_s.z.to_bits()
+        assert_states_bit_for_bit(
+            &[mid_arc_dense.eval(epoch0).expect("mid-arc start")],
+            &[mid_arc_prop.initial],
         );
+        assert_states_bit_for_bit(
+            &[mid_arc_dense.eval(tiny_span_end).expect("mid-arc end")],
+            &[mid_arc_res.final_state],
+        );
+        for window in mid_arc_dense.segments.windows(2) {
+            assert_eq!(window[0].t_end().to_bits(), window[1].t_start.to_bits());
+            assert_states_bit_for_bit(&[window[0].y_end], &[window[1].y_start]);
+        }
+        for point in &mid_arc_res.points {
+            let evaluated = mid_arc_dense
+                .eval(point.epoch_tdb_seconds)
+                .expect("eval mid-arc point");
+            assert_states_bit_for_bit(
+                &[evaluated],
+                &[CartesianState::new(
+                    point.epoch_tdb_seconds,
+                    point.position_km,
+                    point.velocity_km_s,
+                )],
+            );
+        }
     }
 
     #[test]
@@ -1593,7 +1870,7 @@ mod tests {
             .propagate_to(1.0)
             .expect_err("non-finite integration result should be rejected");
 
-        assert_output_non_finite_error(err, "final_state");
+        assert_output_non_finite_error(err, "state");
     }
 
     #[test]
@@ -1614,7 +1891,7 @@ mod tests {
             .state_transition_matrix_for_span(1.0)
             .expect_err("non-finite STM propagation leg should be rejected");
 
-        assert_output_non_finite_error(err, "final_state");
+        assert_output_non_finite_error(err, "state");
     }
 
     fn assert_invalid_propagation_field(error: PropagationError, expected: &str) {

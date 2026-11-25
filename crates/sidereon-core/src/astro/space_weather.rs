@@ -349,9 +349,9 @@ impl SpaceWeatherTable {
     /// NRLMSISE-00 conventional space-weather inputs at an epoch, under the
     /// default (strict) policy.
     ///
-    /// `epoch_j2000_s` is treated as UT seconds on the same convention used by
-    /// the drag module for `CartesianState::epoch_tdb_seconds`; the TDB-UT
-    /// difference is below one minute against daily and 3-hour source data.
+    /// `epoch_j2000_s` is continuous UTC seconds past the J2000 epoch (which
+    /// [`SourcedDragForce`](crate::astro::forces::SourcedDragForce) supplies
+    /// from the evaluation epoch's [`TimeScales`](crate::astro::time::TimeScales)).
     pub fn space_weather_at(&self, epoch_j2000_s: f64) -> Result<SpaceWeather, SpaceWeatherError> {
         self.sample_at(epoch_j2000_s)
             .map(|sample| sample.space_weather)

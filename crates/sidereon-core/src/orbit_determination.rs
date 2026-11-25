@@ -74,9 +74,9 @@
 //! at the TT of that TDB. The fitted initial state and the residual epochs
 //! are TDB; [`OrbitRtnResidual::variational_epoch`] gives the epochs that
 //! reproduce the fitted trajectory with [`propagate_variational`].
-//! [`StatePropagator`] integrates with TDB as its time argument, and a state
-//! propagated with it departs from the fitted trajectory by that rate times
-//! the elapsed time, up to 0.12 m a day at GNSS altitude.
+//! [`StatePropagator`] shares the same TT/TDB epoch mapping and integrator,
+//! mapping requested TDB epochs to elapsed TT through
+//! [`crate::astro::time::tt_from_tdb_j2000_seconds`].
 //!
 //! ## Validation
 //!

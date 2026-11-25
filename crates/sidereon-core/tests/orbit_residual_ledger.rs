@@ -129,10 +129,9 @@ fn two_body_j2_force() -> CompositeForceModel {
 
 /// Samples of `initial` propagated with the force model, integrator and
 /// propagation context of `options` to whole-second epochs in `scale`, the
-/// first of which is the initial state's epoch. The plain propagator's time
-/// argument is TDB: over hours its trajectory departs from the fit's, whose
-/// time argument is TT, by the rate of TDB - TT, under 3.4e-10 of the elapsed
-/// time.
+/// first of which is the initial state's epoch. Both [`StatePropagator`] and
+/// the fit integrate with elapsed TT as the independent variable and pass TDB
+/// epochs to the force models.
 fn generated_samples_with_context(
     sat: GnssSatelliteId,
     scale: TimeScale,

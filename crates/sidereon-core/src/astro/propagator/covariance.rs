@@ -9,6 +9,7 @@ use crate::astro::math::mat3;
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::propagator::dynamics::OrbitalDynamics;
 use crate::astro::propagator::numerical::{map_covariance6_error, StatePropagator};
+use crate::astro::propagator::tt::{TtEpochMap, TtSegment};
 use crate::astro::propagator::StateTransitionMatrix;
 use crate::astro::state::CartesianState;
 
@@ -201,6 +202,24 @@ impl StatePropagator {
         epochs_tdb_seconds: &[f64],
         options: &CovariancePropagationOptions,
     ) -> Result<CovarianceEphemeris, PropagationError> {
+        let ctx = PropagationContext::default();
+        self.propagate_covariance_with_context(initial, epochs_tdb_seconds, options, &ctx)
+    }
+
+    /// Propagate the initial state and covariance to each requested epoch with
+    /// an explicit propagation context.
+    ///
+    /// Passing [`PropagationContext::default`] is equivalent to
+    /// [`Self::propagate_covariance`]. Segments share one TT epoch mapping
+    /// anchored at `self.initial`, so node states match
+    /// [`Self::ephemeris_with_context`] bit for bit.
+    pub fn propagate_covariance_with_context(
+        &self,
+        initial: LabeledCovariance6,
+        epochs_tdb_seconds: &[f64],
+        options: &CovariancePropagationOptions,
+        ctx: &PropagationContext,
+    ) -> Result<CovarianceEphemeris, PropagationError> {
         validate_initial_state(self.initial)?;
         validate_epochs_monotonic(self.initial.epoch_tdb_seconds, epochs_tdb_seconds)?;
         validate_process_noise(options.process_noise)?;
@@ -209,8 +228,8 @@ impl StatePropagator {
         let dynamics = OrbitalDynamics {
             force_model: force.as_ref(),
         };
-        let ctx = PropagationContext::default();
 
+        let (epoch_map, mut from) = TtEpochMap::from_initial_tdb(self.initial.epoch_tdb_seconds);
         let mut current_state = self.initial;
         let mut current_covariance = match initial.frame {
             CovarianceFrame::Inertial => initial.covariance,
@@ -221,13 +240,29 @@ impl StatePropagator {
         let mut nodes = Vec::with_capacity(epochs_tdb_seconds.len());
 
         for &epoch in epochs_tdb_seconds {
-            if epoch != current_state.epoch_tdb_seconds {
-                let dt = epoch - current_state.epoch_tdb_seconds;
-                let q_rotation_state =
-                    segment_q_rotation_state(self, current_state, epoch, options, &dynamics, &ctx)?;
-                let stm =
-                    self.state_transition_matrix_between(current_state, epoch, &dynamics, &ctx)?;
-                let final_state = self.run(current_state, epoch, &dynamics, &ctx)?.final_state;
+            let to = epoch_map.anchor_for_tdb(epoch);
+            if to.elapsed != from.elapsed {
+                let segment = TtSegment { from, to };
+                let dt = to.elapsed - from.elapsed;
+                let q_rotation_state = segment_q_rotation_state(
+                    self,
+                    current_state,
+                    epoch_map,
+                    segment,
+                    options,
+                    &dynamics,
+                    ctx,
+                )?;
+                let stm = self.state_transition_matrix_between_segment(
+                    current_state,
+                    epoch_map,
+                    segment,
+                    &dynamics,
+                    ctx,
+                )?;
+                let final_state = self
+                    .run_segment(current_state, epoch_map, segment, &dynamics, ctx)?
+                    .final_state;
                 let segments = [CovarianceSegment {
                     stm,
                     dt_seconds: dt,
@@ -237,7 +272,10 @@ impl StatePropagator {
                     transport_covariance(current_covariance, &segments, options.process_noise)?;
                 current_covariance = transported[1];
                 current_state = final_state;
+            } else if epoch != current_state.epoch_tdb_seconds {
+                current_state.epoch_tdb_seconds = epoch;
             }
+            from = to;
 
             nodes.push(CovarianceNode {
                 state: current_state,
@@ -301,7 +339,8 @@ pub fn transport_covariance(
 fn segment_q_rotation_state(
     propagator: &StatePropagator,
     current_state: CartesianState,
-    epoch: f64,
+    epoch_map: TtEpochMap,
+    segment: TtSegment,
     options: &CovariancePropagationOptions,
     dynamics: &OrbitalDynamics,
     ctx: &PropagationContext,
@@ -309,12 +348,22 @@ fn segment_q_rotation_state(
     if matches!(options.process_noise, ProcessNoise::None) {
         return Ok(current_state);
     }
-    let midpoint = 0.5 * (current_state.epoch_tdb_seconds + epoch);
-    if midpoint == current_state.epoch_tdb_seconds {
+    let midpoint = segment.from.tdb + 0.5 * (segment.to.tdb - segment.from.tdb);
+    let mid = epoch_map.anchor_for_tdb(midpoint);
+    if mid.elapsed == segment.from.elapsed {
         Ok(current_state)
     } else {
         Ok(propagator
-            .run(current_state, midpoint, dynamics, ctx)?
+            .run_segment(
+                current_state,
+                epoch_map,
+                TtSegment {
+                    from: segment.from,
+                    to: mid,
+                },
+                dynamics,
+                ctx,
+            )?
             .final_state)
     }
 }
@@ -1225,5 +1274,188 @@ mod tests {
             }
         }
         Covariance6::try_from_matrix(matrix).expect("linear midpoint remains PSD")
+    }
+
+    #[test]
+    fn multi_segment_covariance_shares_initial_tt_anchor_and_matches_ephemeris_bit_for_bit() {
+        let epoch0 = 600_019_700.0;
+        let r: f64 = 7000.0;
+        let v = (MU_EARTH / r).sqrt();
+        let propagator = StatePropagator::new(
+            epoch0,
+            [r, 0.0, 0.0],
+            [0.0, v, 0.0],
+            ForceModelKind::two_body_j2(),
+            IntegratorKind::Dp54,
+        )
+        .with_options(IntegratorOptions {
+            abs_tol: 1.0e-12,
+            rel_tol: 1.0e-12,
+            ..IntegratorOptions::default()
+        });
+        let epochs = [600_021_500.0, 600_023_300.0];
+        let process_noise = ProcessNoise::RtnAccelerationPsd {
+            q_radial_km2_s3: 1.0e-12,
+            q_transverse_km2_s3: 2.0e-12,
+            q_normal_km2_s3: 3.0e-12,
+        };
+        let options = CovariancePropagationOptions {
+            process_noise,
+            output_frame: CovarianceFrame::Inertial,
+        };
+        let covariance0 = coupled_covariance();
+
+        let cov_eph = propagator
+            .propagate_covariance(
+                LabeledCovariance6 {
+                    covariance: covariance0,
+                    frame: CovarianceFrame::Inertial,
+                },
+                &epochs,
+                &options,
+            )
+            .expect("covariance ephemeris");
+        let states = propagator.ephemeris(&epochs).expect("plain ephemeris");
+
+        assert_eq!(cov_eph.len(), states.len());
+        for (node, expected) in cov_eph.nodes().iter().zip(&states) {
+            assert_eq!(
+                node.state.epoch_tdb_seconds.to_bits(),
+                expected.epoch_tdb_seconds.to_bits()
+            );
+            for axis in 0..3 {
+                assert_eq!(
+                    node.state.position_km[axis].to_bits(),
+                    expected.position_km[axis].to_bits(),
+                    "position axis {axis} at {}",
+                    expected.epoch_tdb_seconds
+                );
+                assert_eq!(
+                    node.state.velocity_km_s[axis].to_bits(),
+                    expected.velocity_km_s[axis].to_bits(),
+                    "velocity axis {axis} at {}",
+                    expected.epoch_tdb_seconds
+                );
+            }
+        }
+
+        // Verify segment dt comes from the single initial-anchored TtEpochMap
+        // and matches manual transport_covariance bit for bit.
+        let force = propagator.build_force().expect("force");
+        let dynamics = OrbitalDynamics {
+            force_model: force.as_ref(),
+        };
+        let ctx = PropagationContext::default();
+        let (epoch_map, mut from) = TtEpochMap::from_initial_tdb(epoch0);
+        let mut current = propagator.initial;
+        let mut manual_segments = Vec::new();
+        for &epoch in &epochs {
+            let to = epoch_map.anchor_for_tdb(epoch);
+            let segment = TtSegment { from, to };
+            let midpoint = from.tdb + 0.5 * (to.tdb - from.tdb);
+            let mid = epoch_map.anchor_for_tdb(midpoint);
+            let q_rotation_state = propagator
+                .run_segment(
+                    current,
+                    epoch_map,
+                    TtSegment { from, to: mid },
+                    &dynamics,
+                    &ctx,
+                )
+                .expect("midpoint")
+                .final_state;
+            let stm = propagator
+                .state_transition_matrix_between_segment(
+                    current, epoch_map, segment, &dynamics, &ctx,
+                )
+                .expect("segment stm");
+            current = propagator
+                .run_segment(current, epoch_map, segment, &dynamics, &ctx)
+                .expect("segment state")
+                .final_state;
+            manual_segments.push(CovarianceSegment {
+                stm,
+                dt_seconds: to.elapsed - from.elapsed,
+                q_rotation_state,
+            });
+            from = to;
+        }
+        let manual = transport_covariance(covariance0, &manual_segments, process_noise)
+            .expect("manual transport");
+        for (node, expected_cov) in cov_eph.nodes().iter().zip(&manual[1..]) {
+            assert_eq!(node.covariance, *expected_cov);
+        }
+    }
+
+    #[test]
+    fn covariance_with_context_honors_default_permissive_and_strict_provider_for_drag() {
+        use crate::astro::frames::TdbEarthOrientationProvider;
+        use crate::astro::propagator::DragParameters;
+        use crate::astro::time::DegradeReason;
+        use std::sync::Arc;
+
+        // 2028-01-01 00:00:00 TDB (after embedded UT1 table coverage).
+        let epoch0 = 883_569_600.0;
+        let drag = DragParameters::from_bc_factor_m2_kg(
+            0.02,
+            SpaceWeather::default(),
+            DragForce::DEFAULT_REENTRY_ALTITUDE_KM,
+        )
+        .expect("valid drag");
+        let propagator = StatePropagator::new(
+            epoch0,
+            [6778.137, 0.0, 0.0],
+            [0.0, 7.668_558_175_407_055, 0.0],
+            ForceModelKind::two_body(),
+            IntegratorKind::Dp54,
+        )
+        .with_drag(drag);
+        let covariance0 = test_covariance();
+        let labeled = LabeledCovariance6 {
+            covariance: covariance0,
+            frame: CovarianceFrame::Inertial,
+        };
+        let options = CovariancePropagationOptions::default();
+
+        let default_ctx = PropagationContext::default();
+        let cov_eph = propagator
+            .propagate_covariance_with_context(labeled, &[epoch0 + 60.0], &options, &default_ctx)
+            .expect("default context drag covariance succeeds");
+        assert_eq!(cov_eph.len(), 1);
+        assert_eq!(
+            default_ctx.ut1_departure(),
+            Some(DegradeReason::AfterCoverage)
+        );
+
+        let single_ctx = PropagationContext::default();
+        let (state_single, cov_single) = propagator
+            .propagate_state_with_covariance_with_context(covariance0, 60.0, &single_ctx)
+            .expect("default context single-segment drag covariance succeeds");
+        assert_eq!(state_single, cov_eph.nodes()[0].state);
+        assert_eq!(cov_single, cov_eph.nodes()[0].covariance);
+        assert_eq!(
+            single_ctx.ut1_departure(),
+            Some(DegradeReason::AfterCoverage)
+        );
+
+        let strict_ctx = PropagationContext::new()
+            .with_body_fixed_frame_provider(Arc::new(TdbEarthOrientationProvider::new()));
+        assert!(matches!(
+            propagator.propagate_covariance_with_context(
+                labeled,
+                &[epoch0 + 60.0],
+                &options,
+                &strict_ctx
+            ),
+            Err(PropagationError::Ut1OutsideCoverage(
+                DegradeReason::AfterCoverage
+            ))
+        ));
+        assert!(matches!(
+            propagator.propagate_state_with_covariance_with_context(covariance0, 60.0, &strict_ctx),
+            Err(PropagationError::Ut1OutsideCoverage(
+                DegradeReason::AfterCoverage
+            ))
+        ));
     }
 }
