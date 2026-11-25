@@ -91,7 +91,11 @@ pub(crate) mod test_helpers {
     /// Geocentric GCRS Sun and Moon positions (km) via the force-model
     /// production path.
     pub(crate) fn gcrs_sun_moon_km(epoch_tdb_seconds: f64) -> (Vector3<f64>, Vector3<f64>) {
-        let bodies = sun_moon_positions_km(epoch_tdb_seconds).expect("GCRS Sun/Moon");
+        let bodies = sun_moon_positions_km(
+            epoch_tdb_seconds,
+            &crate::astro::propagator::PropagationContext::default(),
+        )
+        .expect("GCRS Sun/Moon");
         (bodies.sun_km, bodies.moon_km)
     }
 

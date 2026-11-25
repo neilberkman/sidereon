@@ -1,3 +1,4 @@
+use crate::astro::de::DeEphemeris;
 use crate::astro::error::PropagationError;
 use crate::astro::frames::orientation::{EarthOrientation, EarthOrientationProvider};
 use crate::astro::time::eop::Ut1DepartureRecord;
@@ -22,6 +23,7 @@ use std::sync::Arc;
 #[derive(Clone, Default)]
 pub struct PropagationContext {
     body_fixed_frame_provider: Option<Arc<dyn EarthOrientationProvider>>,
+    de_ephemeris: Option<Arc<DeEphemeris>>,
     ut1_departures: Ut1DepartureRecord,
 }
 
@@ -32,6 +34,7 @@ impl core::fmt::Debug for PropagationContext {
                 "body_fixed_frame_provider",
                 &self.body_fixed_frame_provider.is_some(),
             )
+            .field("de_ephemeris", &self.de_ephemeris.is_some())
             .field("ut1_departure", &self.ut1_departure())
             .finish()
     }
@@ -50,6 +53,20 @@ impl PropagationContext {
     ) -> Self {
         self.body_fixed_frame_provider = Some(provider);
         self
+    }
+
+    /// Use the DE ephemeris for the Sun and Moon in force evaluations.
+    ///
+    /// Force evaluations requiring either body fail when the ephemeris does
+    /// not cover the requested epoch.
+    pub fn with_de_ephemeris(mut self, ephemeris: Arc<DeEphemeris>) -> Self {
+        self.de_ephemeris = Some(ephemeris);
+        self
+    }
+
+    /// Return the attached DE ephemeris, if present.
+    pub fn de_ephemeris(&self) -> Option<&DeEphemeris> {
+        self.de_ephemeris.as_deref()
     }
 
     /// Return the body-fixed frame provider, if one was attached.
@@ -86,6 +103,7 @@ impl PropagationContext {
     pub(crate) fn with_fresh_departure_record(&self) -> Self {
         Self {
             body_fixed_frame_provider: self.body_fixed_frame_provider.clone(),
+            de_ephemeris: self.de_ephemeris.clone(),
             ut1_departures: Ut1DepartureRecord::default(),
         }
     }

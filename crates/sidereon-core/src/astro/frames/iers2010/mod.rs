@@ -28,7 +28,7 @@
 //! Leap labels in a positive UTC step are measured as elapsed TAI seconds
 //! from 23:59:59, including during the pre-1972 UTC drifts.
 
-mod date;
+pub(crate) mod date;
 pub(crate) mod rotation;
 mod series;
 

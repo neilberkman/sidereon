@@ -72,6 +72,7 @@ import org.hipparchus.linear.QRDecomposer;
 import org.hipparchus.linear.RealMatrix;
 import org.hipparchus.optim.nonlinear.vector.leastsquares.GaussNewtonOptimizer;
 import org.orekit.attitudes.LofOffset;
+import org.orekit.bodies.CelestialBodyFactory;
 import org.orekit.bodies.OneAxisEllipsoid;
 import org.orekit.data.DataContext;
 import org.orekit.data.DirectoryCrawler;
@@ -166,8 +167,11 @@ public final class OrbitParameterOracle {
         }
         AbsoluteDate t0 = samples.get(0).date;
 
-        SeriesBody sun = new SeriesBody(false, gcrf);
-        SeriesBody moon = new SeriesBody(true, gcrf);
+        boolean useDe440 = args.length > 4 && args[4].equals("--de440");
+        ExtendedPositionProvider sun = useDe440
+            ? CelestialBodyFactory.getSun() : new SeriesBody(false, gcrf);
+        ExtendedPositionProvider moon = useDe440
+            ? CelestialBodyFactory.getMoon() : new SeriesBody(true, gcrf);
         OneAxisEllipsoid shadowBody = new OneAxisEllipsoid(MEAN_EARTH_RADIUS, 0.0, gcrf);
 
         Vector3D guessPosition = samples.get(0).gcrf;
@@ -190,6 +194,12 @@ public final class OrbitParameterOracle {
         }
 
         StringBuilder out = new StringBuilder();
+        if (useDe440) {
+            runCase(out, "state_cr_de440", new String[] {"srp.cr"}, guess, samples,
+                gcrf, sun, moon, shadowBody, t0);
+            System.out.println(out.toString().trim());
+            return;
+        }
         out.append("{\n");
         out.append("  \"provenance\": ").append(provenance).append(",\n");
         out.append("  \"sp3\": ").append(quote(new File(sp3Path).getName())).append(",\n");
@@ -317,7 +327,7 @@ public final class OrbitParameterOracle {
     }
 
     static void runCase(StringBuilder out, String name, String[] estimated, CartesianOrbit guess,
-                        List<Sample> samples, Frame gcrf, SeriesBody sun, SeriesBody moon,
+                        List<Sample> samples, Frame gcrf, ExtendedPositionProvider sun, ExtendedPositionProvider moon,
                         OneAxisEllipsoid shadowBody, AbsoluteDate t0) {
         List<String> selected = Arrays.asList(estimated);
         NumericalPropagatorBuilder builder = new NumericalPropagatorBuilder(guess,

@@ -4,10 +4,9 @@
 //! `mu_b * ((r_b - r) / |r_b - r|^3 - r_b / |r_b|^3)`, as given by
 //! Montenbruck & Gill, "Satellite Orbits", section 3.2, and Vallado,
 //! "Fundamentals of Astrodynamics and Applications", section 8.6. Body
-//! positions come from the crate's analytic Sun/Moon series at the state epoch,
-//! in GCRS ([`sun_moon_gcrs_at_tdb_seconds`]), the frame of the propagation
-//! state (the series evaluated at the TT of the state's TDB epoch and rotated
-//! to GCRS at TDB). Only the direct term depends on the satellite position, so
+//! positions come from the context's [DE ephemeris](PropagationContext::de_ephemeris)
+//! or the default analytic Sun/Moon series in GCRS
+//! ([`sun_moon_gcrs_at_tdb_seconds`]). Only the direct term depends on the satellite position, so
 //! the position partials are `-mu_b / d^3 * (I - 3 d̂ d̂ᵀ)` with `d = r_b - r`
 //! (Montenbruck & Gill, section 7.3).
 
@@ -111,9 +110,9 @@ impl ForceModel for ThirdBodyGravity {
     fn acceleration(
         &self,
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        let bodies = sun_moon_positions_km(state.epoch_tdb_seconds)?;
+        let bodies = sun_moon_positions_km(state.epoch_tdb_seconds, ctx)?;
         let mut accel = Vector3::zeros();
         if self.bodies.sun {
             accel += third_body_acceleration(state.position_km, bodies.sun_km, self.gm_sun_km3_s2)?;
@@ -129,11 +128,11 @@ impl ForceModel for ThirdBodyGravity {
         &self,
         parameters: &[f64],
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<AccelerationPartials, PropagationError> {
         expect_parameter_count(parameters, 0)?;
         validate_finite_state(state)?;
-        let bodies = sun_moon_positions_km(state.epoch_tdb_seconds)?;
+        let bodies = sun_moon_positions_km(state.epoch_tdb_seconds, ctx)?;
         let mut gradient = Matrix3::zeros();
         if self.bodies.sun {
             gradient -= point_mass_gradient(bodies.sun_km - state.position_km, self.gm_sun_km3_s2)
@@ -159,10 +158,22 @@ pub(crate) struct SunMoonKm {
 }
 
 /// The Sun and Moon positions in GCRS at a TDB epoch (seconds past J2000),
-/// from [`sun_moon_gcrs_at_tdb_seconds`], for the force models that use them.
-pub(crate) fn sun_moon_positions_km(epoch_tdb_seconds: f64) -> Result<SunMoonKm, PropagationError> {
-    let bodies = sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds)
-        .map_err(|error| PropagationError::ForceModelFailure(format!("Sun/Moon: {error}")))?;
+/// from the attached DE ephemeris or the analytic series.
+pub(crate) fn sun_moon_positions_km(
+    epoch_tdb_seconds: f64,
+    ctx: &PropagationContext,
+) -> Result<SunMoonKm, PropagationError> {
+    let body_error = |error: &dyn core::fmt::Display| {
+        PropagationError::ForceModelFailure(format!("Sun/Moon: {error}"))
+    };
+    let bodies = match ctx.de_ephemeris() {
+        Some(ephemeris) => ephemeris
+            .sun_moon_positions_at_tdb_seconds(epoch_tdb_seconds)
+            .map_err(|error| body_error(&error))?,
+        None => {
+            sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds).map_err(|error| body_error(&error))?
+        }
+    };
     Ok(SunMoonKm {
         sun_km: meters_to_km(bodies.sun),
         moon_km: meters_to_km(bodies.moon),

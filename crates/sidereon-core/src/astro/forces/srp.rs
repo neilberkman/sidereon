@@ -11,7 +11,8 @@
 //! [`ForceModel::acceleration`], [`ForceModel::acceleration_with_parameters`],
 //! [`ForceModel::acceleration_partials`] and
 //! [`ForceModel::parameter_partials`] take the Sun and Moon positions from
-//! the analytic series in GCRS
+//! the context's [DE ephemeris](PropagationContext::de_ephemeris) or the
+//! default analytic series in GCRS
 //! ([`sun_moon_gcrs_at_tdb_seconds`](crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds)),
 //! the frame of the propagation state, with the series evaluated at the TT of
 //! the state's TDB epoch and rotated to GCRS at TDB;
@@ -173,8 +174,7 @@ impl SolarRadiationPressure {
     /// Enabled by default under [`ShadowFunction::ApparentDisc`], where every
     /// evaluation (the acceleration, the acceleration at estimated parameter
     /// values and both kinds of partials) uses the combined Earth and Moon
-    /// apparent-disc occultation, with the Moon position from
-    /// [`sun_moon_gcrs_at_tdb_seconds`](crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds).
+    /// apparent-disc occultation, using the Moon position at the state epoch.
     /// Setting `false` disables lunar occultation while keeping the selected
     /// [`Self::shadow_function`] (so on the default model it evaluates
     /// Earth-only apparent-disc occultation). Setting `true` enables lunar
@@ -263,8 +263,9 @@ impl SolarRadiationPressure {
     fn bodies_km(
         &self,
         epoch_tdb_seconds: f64,
+        ctx: &PropagationContext,
     ) -> Result<(Vector3<f64>, Option<Vector3<f64>>), PropagationError> {
-        let bodies = sun_moon_positions_km(epoch_tdb_seconds)?;
+        let bodies = sun_moon_positions_km(epoch_tdb_seconds, ctx)?;
         let moon = self.include_moon_eclipse.then_some(bodies.moon_km);
         Ok((bodies.sun_km, moon))
     }
@@ -274,9 +275,9 @@ impl ForceModel for SolarRadiationPressure {
     fn acceleration(
         &self,
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        let (sun_pos_km, moon_pos_km) = self.bodies_km(state.epoch_tdb_seconds)?;
+        let (sun_pos_km, moon_pos_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         srp_acceleration_with_bodies(state.position_km, sun_pos_km, moon_pos_km, *self)
     }
 
@@ -295,10 +296,10 @@ impl ForceModel for SolarRadiationPressure {
         &self,
         parameters: &[f64],
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
         let model = self.with_estimated_cr(parameters)?;
-        let (sun_pos_km, moon_pos_km) = model.bodies_km(state.epoch_tdb_seconds)?;
+        let (sun_pos_km, moon_pos_km) = model.bodies_km(state.epoch_tdb_seconds, ctx)?;
         srp_acceleration_with_bodies(state.position_km, sun_pos_km, moon_pos_km, model)
     }
 
@@ -308,11 +309,11 @@ impl ForceModel for SolarRadiationPressure {
         &self,
         parameters: &[f64],
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<AccelerationPartials, PropagationError> {
         let model = self.with_estimated_cr(parameters)?;
         validate_finite_state(state)?;
-        let (sun_pos_km, moon_pos_km) = model.bodies_km(state.epoch_tdb_seconds)?;
+        let (sun_pos_km, moon_pos_km) = model.bodies_km(state.epoch_tdb_seconds, ctx)?;
         srp_position_partials_with_bodies(state.position_km, sun_pos_km, moon_pos_km, model)
             .map(AccelerationPartials::position_only)
             .and_then(finite_partials)
@@ -328,10 +329,10 @@ impl ForceModel for SolarRadiationPressure {
         &self,
         parameters: &[f64],
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<Vec<Vector3<f64>>, PropagationError> {
         let model = self.with_estimated_cr(parameters)?;
-        let (sun_pos_km, moon_pos_km) = model.bodies_km(state.epoch_tdb_seconds)?;
+        let (sun_pos_km, moon_pos_km) = model.bodies_km(state.epoch_tdb_seconds, ctx)?;
         Ok(vec![srp_parameter_partial_with_bodies(
             state.position_km,
             sun_pos_km,

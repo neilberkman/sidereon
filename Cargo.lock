@@ -1447,6 +1447,7 @@ dependencies = [
  "libm",
  "memmap2",
  "nalgebra",
+ "num-bigint",
  "num-traits",
  "rayon",
  "roxmltree",

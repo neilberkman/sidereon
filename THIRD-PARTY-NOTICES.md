@@ -18,6 +18,8 @@ tests measure, so the bytes are kept as published rather than cleaned up.
 The IERS 2010 Earth-orientation module includes Orekit 13.1.10's coefficient
 tables and fundamental nutation arguments. The module adapts Orekit's frame
 providers and Hipparchus 4.0.3's quaternion and interpolation arithmetic.
+The DE binary ephemeris reader adapts Orekit's JPL loader, Chebyshev
+evaluation and barycentric dates and translations.
 The source copyright notices appear in the
 [crate's third-party notices](crates/sidereon-core/THIRD-PARTY-NOTICES.md#orekit-13110-and-hipparchus-403).
 The [Apache License, Version 2.0](crates/sidereon-core/APACHE-2.0.txt),

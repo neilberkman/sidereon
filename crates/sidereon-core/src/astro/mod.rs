@@ -26,6 +26,7 @@ pub mod constants;
 pub mod covariance;
 pub mod coverage;
 pub mod data;
+pub mod de;
 pub mod doppler;
 pub mod elements;
 pub mod equinoctial;
