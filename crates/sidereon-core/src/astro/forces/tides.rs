@@ -34,6 +34,7 @@ use crate::astro::forces::geopotential::{
     EGM96_REFERENCE_RADIUS_KM,
 };
 use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::forces::third_body::sun_moon_positions_km;
 use crate::astro::frames::nutation::iers_2010_solid_tide_arguments;
 use crate::astro::frames::orientation::EarthOrientation;
 use crate::astro::frames::transforms::{
@@ -272,14 +273,34 @@ impl SolidEarthTideGravity {
         ctx: &PropagationContext,
     ) -> Result<[SphericalHarmonicCoefficient; 10], PropagationError> {
         let orientation = orientation_at_state(ctx, epoch_tdb_seconds)?;
-        self.corrections_for_orientation(&orientation)
+        self.corrections_for_orientation(&orientation, epoch_tdb_seconds, ctx)
     }
 
     fn corrections_for_orientation(
         &self,
         orientation: &EarthOrientation,
+        epoch_tdb_seconds: f64,
+        ctx: &PropagationContext,
     ) -> Result<[SphericalHarmonicCoefficient; 10], PropagationError> {
-        let bodies = sun_moon_itrf_km(orientation)?;
+        let bodies = if ctx.de_ephemeris().is_some() {
+            let bodies = sun_moon_positions_km(epoch_tdb_seconds, ctx)?;
+            let rotate = |position: Vector3<f64>| {
+                orientation
+                    .gcrf_to_itrf_position_km(position.into())
+                    .map_err(|error| {
+                        PropagationError::from_frame(
+                            "solid Earth tide body-fixed body rotation failed",
+                            error,
+                        )
+                    })
+            };
+            SunMoonItrfKm {
+                sun_itrf_km: rotate(bodies.sun_km)?,
+                moon_itrf_km: rotate(bodies.moon_km)?,
+            }
+        } else {
+            sun_moon_itrf_km(orientation)?
+        };
         let step2 = if self.frequency_dependent {
             Some(frequency_dependent_corrections_at(
                 &orientation.time_scales(),
@@ -305,7 +326,8 @@ impl ForceModel for SolidEarthTideGravity {
                     "solid Earth tide body-fixed position rotation failed: {error}"
                 ))
             })?;
-        let corrections = self.corrections_for_orientation(&orientation)?;
+        let corrections =
+            self.corrections_for_orientation(&orientation, state.epoch_tdb_seconds, ctx)?;
         let tide = SphericalHarmonicGravity::from_normalized_coefficients(
             self.mu_earth_km3_s2,
             self.reference_radius_km,

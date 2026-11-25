@@ -14,7 +14,8 @@
 # stands for the jars in dir. OREKIT_DATA is an orekit-data directory, recorded
 # by its git commit; its Earth orientation parameters rotate the SP3 positions
 # to GCRF. Needs a JDK (javac, java).
-# Writes the fixture JSON to standard output.
+# Writes the fixture JSON to standard output. With --de440, writes the
+# DE440 state and cannonball SRP fit case to standard output.
 set -euo pipefail
 
 : "${OREKIT_CP:?set OREKIT_CP to the Orekit and Hipparchus jar classpath}"
@@ -49,4 +50,8 @@ JAVA_VERSION="$(java -version 2>&1 | head -1 | sed 's/"/\\"/g')"
 PROVENANCE="$(printf '{"generator": "fixtures-generators/orekit_orbit_parameter_oracle/generate.sh", "oracle": "Orekit %s BatchLSEstimator, Gauss-Newton, ParameterDrivers selected on SolarRadiationPressure, ParametricAcceleration, and ECOM2", "orekit": "%s", "hipparchus": "%s", "orekit_data_commit": "%s", "java": "%s"}' \
     "$OREKIT_VERSION" "$OREKIT_VERSION" "$HIPPARCHUS_VERSION" "$DATA_COMMIT" "$JAVA_VERSION")"
 
-java -cp "$BUILD:$OREKIT_CP" OrbitParameterOracle "$OREKIT_DATA" "$PROVENANCE" "$SP3" "$SATELLITE"
+if [[ "${1:-}" == "--de440" ]]; then
+    [[ "$OREKIT_VERSION" == "13.1.10" && "$HIPPARCHUS_VERSION" == "4.0.3" ]]
+fi
+
+java -cp "$BUILD:$OREKIT_CP" OrbitParameterOracle "$OREKIT_DATA" "$PROVENANCE" "$SP3" "$SATELLITE" "$@"

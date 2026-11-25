@@ -77,8 +77,8 @@
 //! the explicit-body methods are in km/s^2; parameter partials are in km/s^2
 //! per m/s^2; state partials are in 1/s^2 (position) and 1/s (velocity).
 //!
-//! Through [`ForceModel`], Sun and Moon positions come from the crate's GCRS
-//! analytic ephemeris
+//! Through [`ForceModel`], Sun and Moon positions come from the context's
+//! [DE ephemeris](PropagationContext::de_ephemeris) or the default GCRS analytic ephemeris
 //! ([`sun_moon_gcrs_at_tdb_seconds`](crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds)),
 //! matching [`SolarRadiationPressure`](crate::astro::forces::SolarRadiationPressure).
 //!
@@ -822,8 +822,9 @@ impl Ecom2SolarRadiationPressure {
     fn bodies_km(
         &self,
         epoch_tdb_seconds: f64,
+        ctx: &PropagationContext,
     ) -> Result<(Vector3<f64>, Option<Vector3<f64>>), PropagationError> {
-        let bodies = sun_moon_positions_km(epoch_tdb_seconds)?;
+        let bodies = sun_moon_positions_km(epoch_tdb_seconds, ctx)?;
         let moon = self.include_moon_eclipse.then_some(bodies.moon_km);
         Ok((bodies.sun_km, moon))
     }
@@ -838,10 +839,10 @@ impl ForceModel for Ecom2SolarRadiationPressure {
     fn acceleration(
         &self,
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
         validate_finite_state(state)?;
-        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds)?;
+        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom2_acceleration_with_bodies(
             state.position_km,
             state.velocity_km_s,
@@ -874,11 +875,11 @@ impl ForceModel for Ecom2SolarRadiationPressure {
         &self,
         parameters: &[f64],
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
         self.validate_parameters(parameters)?;
         validate_finite_state(state)?;
-        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds)?;
+        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom2_acceleration_with_bodies(
             state.position_km,
             state.velocity_km_s,
@@ -897,11 +898,11 @@ impl ForceModel for Ecom2SolarRadiationPressure {
         &self,
         parameters: &[f64],
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<AccelerationPartials, PropagationError> {
         self.validate_parameters(parameters)?;
         validate_finite_state(state)?;
-        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds)?;
+        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom2_state_partials_with_bodies(
             state.position_km,
             state.velocity_km_s,
@@ -920,11 +921,11 @@ impl ForceModel for Ecom2SolarRadiationPressure {
         &self,
         parameters: &[f64],
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<Vec<Vector3<f64>>, PropagationError> {
         self.validate_parameters(parameters)?;
         validate_finite_state(state)?;
-        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds)?;
+        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom2_parameter_partials_with_bodies(
             state.position_km,
             state.velocity_km_s,
@@ -1197,8 +1198,9 @@ impl Ecom1SolarRadiationPressure {
     fn bodies_km(
         &self,
         epoch_tdb_seconds: f64,
+        ctx: &PropagationContext,
     ) -> Result<(Vector3<f64>, Option<Vector3<f64>>), PropagationError> {
-        let bodies = sun_moon_positions_km(epoch_tdb_seconds)?;
+        let bodies = sun_moon_positions_km(epoch_tdb_seconds, ctx)?;
         let moon = self.include_moon_eclipse.then_some(bodies.moon_km);
         Ok((bodies.sun_km, moon))
     }
@@ -1218,10 +1220,10 @@ impl ForceModel for Ecom1SolarRadiationPressure {
     fn acceleration(
         &self,
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
         validate_finite_state(state)?;
-        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds)?;
+        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom1_acceleration_with_bodies(
             state.position_km,
             state.velocity_km_s,
@@ -1250,11 +1252,11 @@ impl ForceModel for Ecom1SolarRadiationPressure {
         &self,
         parameters: &[f64],
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
         let coeffs = Self::parse_parameters(parameters)?;
         validate_finite_state(state)?;
-        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds)?;
+        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom1_acceleration_with_bodies(
             state.position_km,
             state.velocity_km_s,
@@ -1271,11 +1273,11 @@ impl ForceModel for Ecom1SolarRadiationPressure {
         &self,
         parameters: &[f64],
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<AccelerationPartials, PropagationError> {
         let coeffs = Self::parse_parameters(parameters)?;
         validate_finite_state(state)?;
-        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds)?;
+        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom1_state_partials_with_bodies(
             state.position_km,
             state.velocity_km_s,
@@ -1292,11 +1294,11 @@ impl ForceModel for Ecom1SolarRadiationPressure {
         &self,
         parameters: &[f64],
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<Vec<Vector3<f64>>, PropagationError> {
         let coeffs = Self::parse_parameters(parameters)?;
         validate_finite_state(state)?;
-        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds)?;
+        let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom1_parameter_partials_with_bodies(
             state.position_km,
             state.velocity_km_s,

@@ -47,6 +47,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use sidereon_core::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds;
+use sidereon_core::astro::de::DeEphemeris;
 use sidereon_core::astro::forces::zonal::ZonalGravity;
 use sidereon_core::astro::forces::{
     Ecom2D2b1Coefficients, Ecom2D4b1Coefficients, Ecom2SolarRadiationPressure, EmpiricalHarmonic,
@@ -447,7 +448,7 @@ fn analytic_bodies_and_force_models_match_the_oracle_inputs() {
 fn inertial_fit(
     fixture: &Value,
     samples: &[InertialPositionSample],
-    estimated: &[String],
+    options: &OrbitParameterFitOptions,
 ) -> OrbitParameterFit {
     let guess = &fixture["initial_guess"];
     let km = |m: [f64; 3]| [m[0] / 1.0e3, m[1] / 1.0e3, m[2] / 1.0e3];
@@ -456,7 +457,7 @@ fn inertial_fit(
         km(vector(&guess["position_m"])),
         km(vector(&guess["velocity_m_s"])),
     );
-    fit_inertial_orbit_parameters(samples, g03(), Some(seed), &options(estimated)).expect("fit")
+    fit_inertial_orbit_parameters(samples, g03(), Some(seed), options).expect("fit")
 }
 
 fn case_names(case: &Value) -> Vec<String> {
@@ -480,9 +481,25 @@ fn formal_sigmas(covariance: &[Vec<f64>], variance_factor: f64) -> Vec<f64> {
 fn fits_of_the_same_observations_agree_with_orekit() {
     let fixture = fixture();
     let samples = inertial_samples(&fixture);
-    for case in fixture["cases"].as_array().expect("cases") {
+    let de_case: Value = serde_json::from_str(include_str!(
+        "fixtures/orbit_determination/orbit_parameter_fit_de440_orekit.json"
+    ))
+    .expect("DE440 fit");
+    for case in fixture["cases"]
+        .as_array()
+        .expect("cases")
+        .iter()
+        .chain([&de_case])
+    {
         let estimated = case_names(case);
-        let fit = inertial_fit(&fixture, &samples, &estimated);
+        let mut options = options(&estimated);
+        if case["name"] == "state_cr_de440" {
+            let de = DeEphemeris::from_bytes(include_bytes!("fixtures/bodies/de440/lnxp1990.440"))
+                .expect("DE440 ephemeris");
+            options.propagation_context =
+                options.propagation_context.with_de_ephemeris(Arc::new(de));
+        }
+        let fit = inertial_fit(&fixture, &samples, &options);
         let orekit = orekit_case(case, &fit.parameter_names);
         assert_eq!(orekit.estimated, estimated);
         let label = &orekit.name;
@@ -694,7 +711,7 @@ fn the_sp3_path_agrees_within_the_frame_difference() {
     let product = product();
     for case in fixture["cases"].as_array().expect("cases") {
         let estimated = case_names(case);
-        let inertial = inertial_fit(&fixture, &samples, &estimated);
+        let inertial = inertial_fit(&fixture, &samples, &options(&estimated));
         let guess = &fixture["initial_guess"];
         let km = |m: [f64; 3]| [m[0] / 1.0e3, m[1] / 1.0e3, m[2] / 1.0e3];
         let seed = CartesianState::new(

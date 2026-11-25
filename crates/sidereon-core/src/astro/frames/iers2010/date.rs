@@ -5,18 +5,18 @@ const NANOS: i128 = 1_000_000_000;
 const J2000_MJD: i32 = 51_544;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct Offset(i128);
+pub(crate) struct Offset(i128);
 
 impl Offset {
-    pub(super) const fn seconds(seconds: i64) -> Self {
+    pub(crate) const fn seconds(seconds: i64) -> Self {
         Self(seconds as i128 * ATTOS)
     }
 
-    pub(super) const fn millis(ms: i64) -> Self {
+    pub(crate) const fn millis(ms: i64) -> Self {
         Self(ms as i128 * (ATTOS / 1000))
     }
 
-    pub(super) fn from_seconds(seconds: f64) -> Option<Self> {
+    pub(crate) fn from_seconds(seconds: f64) -> Option<Self> {
         if !seconds.is_finite() {
             return None;
         }
@@ -41,7 +41,7 @@ impl Offset {
         Some((day, Self(i128::from(day) * 86_400 * ATTOS)))
     }
 
-    pub(super) fn as_seconds(self) -> f64 {
+    pub(crate) fn as_seconds(self) -> f64 {
         let mut seconds = self.0.div_euclid(ATTOS);
         let mut sub = self.0.rem_euclid(ATTOS);
         if sub > ATTOS / 2 {
@@ -51,11 +51,11 @@ impl Offset {
         seconds as f64 + sub as f64 / ATTOS as f64
     }
 
-    pub(super) fn plus(self, other: Self) -> Self {
+    pub(crate) fn plus(self, other: Self) -> Self {
         Self(self.0 + other.0)
     }
 
-    pub(super) fn minus(self, other: Self) -> Self {
+    pub(crate) fn minus(self, other: Self) -> Self {
         Self(self.0 - other.0)
     }
 
@@ -65,6 +65,14 @@ impl Offset {
 
     pub(super) fn checked_minus(self, other: Self) -> Option<Self> {
         self.0.checked_sub(other.0).map(Self)
+    }
+
+    pub(crate) fn divided_by(self, divisor: u32) -> Self {
+        self.drift(1, i128::from(divisor))
+    }
+
+    pub(crate) fn multiplied_by(self, factor: u32) -> Self {
+        Self(self.0 * i128::from(factor))
     }
 
     fn drift(self, slope: i128, divisor: i128) -> Self {

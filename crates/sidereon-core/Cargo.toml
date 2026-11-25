@@ -36,6 +36,7 @@ nalgebra = { workspace = true }
 # changing it is a numerical re-pinning release.
 simba = { workspace = true }
 approx = "0.5"
+num-bigint = "0.4.5"
 num-traits = "0.2"
 thiserror = "1.0"
 libm = "=0.2.16"

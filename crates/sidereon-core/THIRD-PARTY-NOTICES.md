@@ -43,6 +43,16 @@ includes adaptations of the following Apache-2.0 sources.
   to the Hipparchus NOTICE for copyright ownership and identify the
   modifications by the Hipparchus project.
 
+The JPL DE binary reader also includes adaptations of these Orekit sources.
+
+- `JPLEphemeridesLoader.java`, `PosVelChebyshev.java`, `JPLCelestialBody.java`,
+  `Frame.java`, `TimeScale.java`, `TDBScale.java` and `TCBScale.java`.
+  Copyright 2002–2025 CS GROUP.
+- `JPLInertialTransformProvider.java`. Copyright 2002–2026 CS Group.
+
+The DE440 test records are from the NASA/JPL ephemeris distributed with
+orekit-data.
+
 See the [Apache License, Version 2.0](APACHE-2.0.txt), the
 [Orekit NOTICE](OREKIT-NOTICE.txt), and the
 [Hipparchus NOTICE](HIPPARCHUS-NOTICE.txt).

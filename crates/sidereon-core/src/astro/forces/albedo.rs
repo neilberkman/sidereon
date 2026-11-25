@@ -12,7 +12,8 @@
 //! uses the celestial intermediate pole, the third row of the
 //! GCRS-to-true-of-date rotation evaluated at the state's epoch.
 
-//! The Sun and Moon positions come from the crate's analytic series in GCRS
+//! The Sun and Moon positions come from the context's
+//! [DE ephemeris](PropagationContext::de_ephemeris) or the default analytic series in GCRS
 //! ([`sun_moon_gcrs_at_tdb_seconds`](crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds)),
 //! with the series evaluated at the TT of the state's TDB epoch and rotated
 //! to GCRS at TDB. With [`EarthRadiationPressure::with_moon_eclipse`], the
@@ -82,8 +83,7 @@ impl EarthRadiationPressure {
     /// Off by default, which leaves the Moon out of the model. When enabled,
     /// each sunlit Earth surface element attenuates its reflected
     /// shortwave albedo flux by `1.0 - moon_shadow_fraction` using the Moon
-    /// position from
-    /// [`sun_moon_gcrs_at_tdb_seconds`](crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds),
+    /// position at the state epoch,
     /// while emitted thermal infrared remains unchanged.
     pub fn with_moon_eclipse(mut self, enabled: bool) -> Self {
         self.include_moon_eclipse = enabled;
@@ -167,7 +167,7 @@ impl ForceModel for EarthRadiationPressure {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        let bodies = sun_moon_positions_km(state.epoch_tdb_seconds)?;
+        let bodies = sun_moon_positions_km(state.epoch_tdb_seconds, ctx)?;
         let moon = self.include_moon_eclipse.then_some(bodies.moon_km);
         if let Some(provider) = ctx.body_fixed_frame_provider() {
             let orientation = provider
@@ -551,7 +551,7 @@ mod tests {
             .orientation_at_tdb_seconds(state.epoch_tdb_seconds)
             .unwrap();
         let pole = Vector3::from(orientation.gcrf_to_itrf_matrix()[2]);
-        let sun = sun_moon_positions_km(state.epoch_tdb_seconds)
+        let sun = sun_moon_positions_km(state.epoch_tdb_seconds, &PropagationContext::default())
             .unwrap()
             .sun_km;
         let expected =
