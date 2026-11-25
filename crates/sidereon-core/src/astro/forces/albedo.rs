@@ -22,12 +22,14 @@
 //! central difference quotients of [`ForceModel::acceleration_partials`]'s
 //! default, which see the Moon's shadow through the acceleration.
 
-use crate::astro::constants::astro::AU_KM;
+use super::r#trait::{finite_acceleration, position_difference_quotients, AccelerationPartials};
+use super::scaled::{wide_norm_squared, ForceScalar, Wide};
+use crate::astro::constants::astro::{AU_KM, MOON_RADIUS_KM};
 use crate::astro::constants::earth::WGS84_A_KM;
 use crate::astro::constants::time::{DAYS_PER_JULIAN_YEAR, J2000_JD, SECONDS_PER_DAY};
 use crate::astro::constants::units::M_PER_KM;
 use crate::astro::error::PropagationError;
-use crate::astro::events::eclipse::moon_shadow_fraction;
+use crate::astro::events::eclipse::{moon_shadow_fraction, EclipseError};
 use crate::astro::forces::r#trait::ForceModel;
 use crate::astro::forces::third_body::sun_moon_positions_km;
 use crate::astro::frames::transforms::celestial_pole_gcrs_unchecked;
@@ -142,16 +144,13 @@ impl EarthRadiationPressure {
     ///
     /// When [`Self::moon_eclipse_enabled`] is `true`, each sunlit surface
     /// element scales its reflected shortwave contribution by the unocculted
-    /// solar fraction past the Moon. When `false`, `moon_pos_km` is still
-    /// validated for finiteness and the result is bit-identical to the
-    /// Earth-only model.
+    /// solar fraction past the Moon. The Earth-only model ignores `moon_pos_km`.
     pub fn acceleration_with_sun_moon(
         &self,
         state: &CartesianState,
         sun_pos_km: Vector3<f64>,
         moon_pos_km: Vector3<f64>,
     ) -> Result<Vector3<f64>, PropagationError> {
-        validate_vector(moon_pos_km, "moon_pos_km")?;
         let moon = if self.include_moon_eclipse {
             Some(moon_pos_km)
         } else {
@@ -167,6 +166,7 @@ impl ForceModel for EarthRadiationPressure {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
+        validate_state(state)?;
         let bodies = sun_moon_positions_km(state.epoch_tdb_seconds, ctx)?;
         let moon = self.include_moon_eclipse.then_some(bodies.moon_km);
         if let Some(provider) = ctx.body_fixed_frame_provider() {
@@ -177,6 +177,11 @@ impl ForceModel for EarthRadiationPressure {
                     PropagationError::from_frame("albedo body-fixed frame evaluation failed", error)
                 })?;
             let [x, y, z] = orientation.gcrf_to_itrf_matrix()[2];
+            if ![x, y, z].iter().all(|value| value.is_finite()) {
+                return Err(PropagationError::ForceModelFailure(
+                    "albedo body-fixed pole is non-finite at epoch".to_string(),
+                ));
+            }
             return earth_radiation_acceleration_with_pole(
                 state,
                 bodies.sun_km,
@@ -186,6 +191,14 @@ impl ForceModel for EarthRadiationPressure {
             );
         }
         earth_radiation_acceleration_with_bodies(state, bodies.sun_km, moon, *self)
+    }
+    fn acceleration_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        ctx: &PropagationContext,
+    ) -> Result<AccelerationPartials, PropagationError> {
+        position_difference_quotients(self, parameters, state, ctx)
     }
 }
 
@@ -203,7 +216,7 @@ fn celestial_pole_gcrs(epoch_tdb_seconds: f64) -> Result<Vector3<f64>, Propagati
     let jd_tt = J2000_JD + tt_from_tdb_j2000_seconds(epoch_tdb_seconds) / SECONDS_PER_DAY;
     let pole = celestial_pole_gcrs_unchecked(jd_tt, jd_tdb);
     if !pole.iter().all(|v| v.is_finite()) {
-        return Err(PropagationError::NumericalFailure(
+        return Err(PropagationError::ForceModelFailure(
             "Non-finite celestial pole".to_string(),
         ));
     }
@@ -222,9 +235,6 @@ fn earth_radiation_acceleration_with_bodies(
 ) -> Result<Vector3<f64>, PropagationError> {
     validate_state(state)?;
     validate_vector(sun_pos_km, "sun_pos_km")?;
-    if let Some(moon) = moon_pos_km {
-        validate_vector(moon, "moon_pos_km")?;
-    }
     let pole_gcrs = celestial_pole_gcrs(state.epoch_tdb_seconds)?;
     earth_radiation_acceleration_with_pole(state, sun_pos_km, moon_pos_km, pole_gcrs, model)
 }
@@ -238,9 +248,6 @@ fn earth_radiation_acceleration_with_pole(
 ) -> Result<Vector3<f64>, PropagationError> {
     validate_state(state)?;
     validate_vector(sun_pos_km, "sun_pos_km")?;
-    if let Some(moon) = moon_pos_km {
-        validate_vector(moon, "moon_pos_km")?;
-    }
 
     let sat_radius_km = state.position_km.norm();
     if sat_radius_km <= model.earth_radius_km() {
@@ -248,40 +255,73 @@ fn earth_radiation_acceleration_with_pole(
             "satellite radius must exceed Earth radius".to_string(),
         ));
     }
-    let sun_r2 = sun_pos_km.norm_squared();
-    if sun_r2 == 0.0 {
+    let solar_radius_squared = sun_pos_km.norm_squared();
+    if sun_pos_km.iter().all(|&value| value == 0.0) {
         return Err(PropagationError::NumericalFailure(
             "Zero Sun position magnitude".to_string(),
         ));
     }
-    if !sun_r2.is_finite() {
-        return Err(PropagationError::NumericalFailure(
-            "Non-finite Sun position magnitude".to_string(),
-        ));
-    }
-    if let Some(moon) = moon_pos_km {
-        let moon_r2 = moon.norm_squared();
-        if moon_r2 == 0.0 {
-            return Err(PropagationError::NumericalFailure(
-                "Zero Moon position magnitude".to_string(),
-            ));
-        }
-        if !moon_r2.is_finite() {
-            return Err(PropagationError::NumericalFailure(
-                "Non-finite Moon position magnitude".to_string(),
-            ));
+    if sat_radius_km.is_finite() && solar_radius_squared.is_finite() && solar_radius_squared > 0.0 {
+        let result = earth_radiation_sum(
+            state,
+            sun_pos_km,
+            moon_pos_km,
+            pole_gcrs,
+            model,
+            sat_radius_km,
+            solar_radius_squared,
+        );
+        match result {
+            Ok(acceleration) if acceleration.iter().all(|value| value.is_finite()) => {
+                return Ok(Vector3::from(acceleration));
+            }
+            Err(error) => return Err(error),
+            Ok(_) => {}
         }
     }
 
-    let radial_hat = state.position_km / sat_radius_km;
+    // The disk weight and pressure can be evaluated outside binary64's
+    // exponent range before multiplication by the spacecraft constants.
+    let position = state.position_array().map(Wide::from);
+    let sun = <[f64; 3]>::from(sun_pos_km).map(Wide::from);
+    let acceleration = earth_radiation_sum(
+        state,
+        sun_pos_km,
+        moon_pos_km,
+        pole_gcrs,
+        model,
+        wide_norm_squared(position).sqrt(),
+        wide_norm_squared(sun),
+    )?;
+    finite_acceleration(Vector3::from(acceleration.map(Wide::value)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn earth_radiation_sum<T: ForceScalar>(
+    state: &CartesianState,
+    sun_pos_km: Vector3<f64>,
+    moon_pos_km: Option<Vector3<f64>>,
+    pole_gcrs: Vector3<f64>,
+    model: EarthRadiationPressure,
+    sat_radius: T,
+    sun_r2: T,
+) -> Result<[T; 3], PropagationError> {
+    let radial_hat = state
+        .position_km
+        .map(|value| (T::from(value) / sat_radius).value());
     let (east_hat, north_hat) = tangent_basis(radial_hat)?;
-    let sun_hat = sun_pos_km / sun_r2.sqrt();
-    let solar_pressure = model.pressure_n_m2() * model.au_km() * model.au_km() / sun_r2;
-    let disk_half_angle = libm::asin(model.earth_radius_km() / sat_radius_km);
-    let one_minus_cos_disk = 1.0 - libm::cos(disk_half_angle);
-    let apparent_weight = 2.0 * one_minus_cos_disk / KNOCKE_ELEMENT_COUNT as f64;
-
-    let mut accel_m_s2 = Vector3::zeros();
+    let sun_radius = sun_r2.sqrt();
+    let sun_hat = sun_pos_km.map(|value| (T::from(value) / sun_radius).value());
+    let solar_pressure =
+        T::from(model.pressure_n_m2()) * T::from(model.au_km()) * T::from(model.au_km()) / sun_r2;
+    let earth_radius = T::from(model.earth_radius_km());
+    let disk_sine = earth_radius / sat_radius;
+    let disk_half_angle = libm::asin(disk_sine.value());
+    let disk_cosine = libm::cos(disk_half_angle);
+    let one_minus_cos_disk = 1.0 - disk_cosine;
+    let apparent_weight =
+        T::from(2.0) * T::from(one_minus_cos_disk) / T::from(KNOCKE_ELEMENT_COUNT as f64);
+    let mut acceleration = [T::from(0.0); 3];
     let mut previous_elements = 0usize;
     for (ring_index, &segments) in KNOCKE_RING_SEGMENTS.iter().enumerate() {
         if ring_index == 0 {
@@ -290,7 +330,7 @@ fn earth_radiation_acceleration_with_pole(
                 normal: radial_hat,
                 element_to_sat_hat: radial_hat,
             };
-            accel_m_s2 += element_acceleration(
+            let contribution = element_acceleration(
                 state.epoch_tdb_seconds,
                 sample,
                 pole_gcrs,
@@ -301,6 +341,7 @@ fn earth_radiation_acceleration_with_pole(
                 apparent_weight,
                 model,
             )?;
+            add_element(&mut acceleration, contribution);
         } else {
             let current_elements = previous_elements + segments;
             let inner_mu =
@@ -312,17 +353,17 @@ fn earth_radiation_acceleration_with_pole(
             for segment in 0..segments {
                 let azimuth = (segment as f64 + 0.5) * std::f64::consts::TAU / segments as f64;
                 let (sin_azimuth, cos_azimuth) = libm::sincos(azimuth);
-                let sat_to_element_hat = -cos_psi * radial_hat
-                    + sin_psi * (cos_azimuth * east_hat + sin_azimuth * north_hat);
+                let tangent = cos_azimuth * east_hat + sin_azimuth * north_hat;
+                let sat_to_element_hat = -cos_psi * radial_hat + sin_psi * tangent;
                 let sample = surface_sample_from_ray(
                     state.position_km,
-                    sat_radius_km,
+                    sat_radius,
                     sat_to_element_hat,
                     sin_psi,
                     cos_psi,
-                    model.earth_radius_km(),
+                    earth_radius,
                 )?;
-                accel_m_s2 += element_acceleration(
+                let contribution = element_acceleration(
                     state.epoch_tdb_seconds,
                     sample,
                     pole_gcrs,
@@ -333,18 +374,19 @@ fn earth_radiation_acceleration_with_pole(
                     apparent_weight,
                     model,
                 )?;
+                add_element(&mut acceleration, contribution);
             }
         }
         previous_elements += segments;
     }
 
-    let accel_km_s2 = accel_m_s2 / M_PER_KM;
-    if !accel_km_s2.iter().all(|v| v.is_finite()) {
-        return Err(PropagationError::NumericalFailure(
-            "Non-finite Earth radiation acceleration".to_string(),
-        ));
+    Ok(acceleration.map(|value| value / T::from(M_PER_KM)))
+}
+
+fn add_element<T: ForceScalar>(sum: &mut [T; 3], contribution: [T; 3]) {
+    for (total, value) in sum.iter_mut().zip(contribution) {
+        *total = *total + value;
     }
-    Ok(accel_km_s2)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -354,24 +396,28 @@ struct SurfaceElementSample {
     element_to_sat_hat: Vector3<f64>,
 }
 
-fn surface_sample_from_ray(
+fn surface_sample_from_ray<T: ForceScalar>(
     sat_pos_km: Vector3<f64>,
-    sat_radius_km: f64,
+    sat_radius_km: T,
     sat_to_element_hat: Vector3<f64>,
     sin_psi: f64,
     cos_psi: f64,
-    earth_radius_km: f64,
+    earth_radius_km: T,
 ) -> Result<SurfaceElementSample, PropagationError> {
+    let sin_psi = T::from(sin_psi);
     let discriminant =
         earth_radius_km * earth_radius_km - sat_radius_km * sat_radius_km * sin_psi * sin_psi;
-    if discriminant < 0.0 {
+    if discriminant.is_negative() {
         return Err(PropagationError::NumericalFailure(
             "Earth radiation ray misses Earth".to_string(),
         ));
     }
-    let path_km = sat_radius_km * cos_psi - discriminant.sqrt();
-    let element_pos_km = sat_pos_km + path_km * sat_to_element_hat;
-    let normal = element_pos_km / earth_radius_km;
+    let path_km = sat_radius_km * T::from(cos_psi) - discriminant.sqrt();
+    let element = core::array::from_fn::<_, 3, _>(|i| {
+        T::from(sat_pos_km[i]) + path_km * T::from(sat_to_element_hat[i])
+    });
+    let element_pos_km = Vector3::from(element.map(ForceScalar::value));
+    let normal = Vector3::from(element.map(|value| (value / earth_radius_km).value()));
     Ok(SurfaceElementSample {
         element_pos_km,
         normal,
@@ -380,32 +426,23 @@ fn surface_sample_from_ray(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn element_acceleration(
+fn element_acceleration<T: ForceScalar>(
     epoch_tdb_seconds: f64,
     sample: SurfaceElementSample,
     pole_gcrs: Vector3<f64>,
     sun_pos_km: Vector3<f64>,
     moon_pos_km: Option<Vector3<f64>>,
     sun_hat: Vector3<f64>,
-    solar_pressure_n_m2: f64,
-    apparent_weight: f64,
+    solar_pressure_n_m2: T,
+    apparent_weight: T,
     model: EarthRadiationPressure,
-) -> Result<Vector3<f64>, PropagationError> {
+) -> Result<[T; 3], PropagationError> {
     let latitude_rad = element_latitude_rad(sample.normal, pole_gcrs);
     let (albedo, emissivity) = knocke_albedo_emissivity(epoch_tdb_seconds, latitude_rad);
     let cos_solar_zenith = sample.normal.dot(&sun_hat);
     let reflected = if cos_solar_zenith > 0.0 {
         if let Some(moon) = moon_pos_km {
-            let shadow = moon_shadow_fraction(
-                [
-                    sample.element_pos_km.x,
-                    sample.element_pos_km.y,
-                    sample.element_pos_km.z,
-                ],
-                [sun_pos_km.x, sun_pos_km.y, sun_pos_km.z],
-                [moon.x, moon.y, moon.z],
-            )
-            .map_err(|error| PropagationError::ForceModelFailure(format!("eclipse: {error}")))?;
+            let shadow = reflected_moon_shadow(sample.element_pos_km, sun_pos_km, moon)?;
             albedo * cos_solar_zenith * (1.0 - shadow)
         } else {
             albedo * cos_solar_zenith
@@ -413,9 +450,67 @@ fn element_acceleration(
     } else {
         0.0
     };
-    let pressure_scale = solar_pressure_n_m2 * (reflected + 0.25 * emissivity) * apparent_weight;
+    let pressure_scale =
+        solar_pressure_n_m2 * T::from(reflected + 0.25 * emissivity) * apparent_weight;
 
-    Ok(sample.element_to_sat_hat * (model.cr * model.area_to_mass_m2_kg * pressure_scale))
+    let scale = T::from(model.cr) * T::from(model.area_to_mass_m2_kg) * pressure_scale;
+    Ok(<[f64; 3]>::from(sample.element_to_sat_hat).map(|value| T::from(value) * scale))
+}
+
+fn reflected_moon_shadow(
+    element: Vector3<f64>,
+    sun: Vector3<f64>,
+    moon: Vector3<f64>,
+) -> Result<f64, PropagationError> {
+    validate_vector(moon, "moon_pos_km")?;
+    if moon.iter().all(|&value| value == 0.0) {
+        return Err(PropagationError::NumericalFailure(
+            "Zero Moon position magnitude".to_string(),
+        ));
+    }
+    match moon_shadow_fraction(element.into(), sun.into(), moon.into()) {
+        Ok(shadow) => Ok(shadow),
+        Err(error) => {
+            if matches!(
+                error,
+                EclipseError::InvalidInput {
+                    reason: "out of range",
+                    ..
+                }
+            ) && moon_is_beyond_sun(element, sun, moon)
+            {
+                return Ok(0.0);
+            }
+            Err(PropagationError::ForceModelFailure(format!(
+                "eclipse: {error}"
+            )))
+        }
+    }
+}
+
+fn moon_is_beyond_sun(element: Vector3<f64>, sun: Vector3<f64>, moon: Vector3<f64>) -> bool {
+    let in_metres = |vector: Vector3<f64>| {
+        <[f64; 3]>::from(vector).map(|value| Wide::from(value) * Wide::from(M_PER_KM))
+    };
+    let (element, sun, moon) = (in_metres(element), in_metres(sun), in_metres(moon));
+    let to_moon = core::array::from_fn(|i| -moon[i] + element[i]);
+    let sun_from_moon: [Wide; 3] = core::array::from_fn(|i| -moon[i] + sun[i]);
+    let translated_sun = core::array::from_fn(|i| to_moon[i] - sun_from_moon[i]);
+    let mut sun_distance = wide_norm_squared(translated_sun).sqrt();
+    if sun_distance.is_zero() {
+        sun_distance = wide_norm_squared(core::array::from_fn(|i| element[i] - sun[i])).sqrt();
+    }
+    let moon_distance_squared = wide_norm_squared(to_moon);
+    let moon_distance = moon_distance_squared.sqrt();
+    // A nonzero Sun distance at most as large as the Moon distance gives
+    // full sunlight, including the eclipse model's inside-Sun limit.
+    (!moon_distance_squared.value().is_finite()
+        || !wide_norm_squared(sun_from_moon).value().is_finite()
+        || !wide_norm_squared(translated_sun).value().is_finite()
+        || !wide_norm_squared(moon).value().is_finite())
+        && !sun_distance.is_zero()
+        && (moon_distance - Wide::from(MOON_RADIUS_KM * M_PER_KM)).value() > 0.0
+        && (moon_distance - sun_distance).value() >= 0.0
 }
 
 fn knocke_albedo_emissivity(epoch_tdb_seconds: f64, latitude_rad: f64) -> (f64, f64) {
@@ -454,8 +549,7 @@ fn tangent_basis(
 
 fn validate_state(state: &CartesianState) -> Result<(), PropagationError> {
     validate_finite("epoch_tdb_seconds", state.epoch_tdb_seconds)?;
-    validate_vector(state.position_km, "position_km")?;
-    validate_vector(state.velocity_km_s, "velocity_km_s")
+    validate_vector(state.position_km, "position_km")
 }
 
 fn validate_vector(vector: Vector3<f64>, field: &'static str) -> Result<(), PropagationError> {
@@ -704,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn moon_eclipse_rejects_overflowing_moon_position_on_both_dayside_and_nightside() {
+    fn albedo_accepts_a_distant_moon_and_ignores_it_on_the_nightside() {
         let moon_model = EarthRadiationPressure::new(1.2, 0.011)
             .expect("valid model")
             .with_moon_eclipse(true);
@@ -715,17 +809,28 @@ mod tests {
         let nightside =
             CartesianState::new(0.0, [-(WGS84_A_KM + 700.0), 0.0, 0.0], [0.0, 7.5, 0.0]);
 
-        assert!(
+        assert_eq!(
             moon_model
                 .acceleration_with_sun_moon(&dayside, sun, overflowing_moon)
-                .is_err(),
-            "dayside must reject overflowing moon position"
-        );
-        assert!(
+                .unwrap()
+                .map(f64::to_bits),
             moon_model
-                .acceleration_with_sun_moon(&nightside, sun, overflowing_moon)
-                .is_err(),
-            "nightside must also reject overflowing moon position"
+                .with_moon_eclipse(false)
+                .acceleration_with_sun_moon(&dayside, sun, overflowing_moon)
+                .unwrap()
+                .map(f64::to_bits),
+        );
+        let unused_moon = Vector3::new(f64::NAN, 0.0, 0.0);
+        assert_eq!(
+            moon_model
+                .acceleration_with_sun_moon(&nightside, sun, unused_moon)
+                .unwrap()
+                .map(f64::to_bits),
+            moon_model
+                .with_moon_eclipse(false)
+                .acceleration_with_sun_moon(&nightside, sun, unused_moon)
+                .unwrap()
+                .map(f64::to_bits),
         );
     }
 

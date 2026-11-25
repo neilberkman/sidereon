@@ -88,7 +88,7 @@ use crate::astro::events::eclipse::{
     earth_moon_lighting_ratio_field, fast_math, EarthShadowModel, ShadowFunction,
 };
 use crate::astro::forces::r#trait::{
-    expect_parameter_count, finite_acceleration, finite_partials, validate_finite_state,
+    expect_parameter_count, finite_acceleration, finite_partials, validate_position,
     AccelerationPartials, ForceModel, ForceParameter,
 };
 use crate::astro::forces::third_body::sun_moon_positions_km;
@@ -231,10 +231,7 @@ impl SolarRadiationPressure {
     /// Sun and Moon positions (km).
     ///
     /// When [`Self::moon_eclipse_enabled`] is `true`, `moon_pos_km` enters the
-    /// combined Earth-and-Moon apparent-disc shadow function. When `false`,
-    /// `moon_pos_km` is still validated for finiteness while the selected
-    /// Earth-only shadow function ([`ShadowFunction::ApparentDisc`] or
-    /// [`ShadowFunction::Conical`]) is evaluated.
+    /// selected shadow function. Earth-only shadow functions ignore `moon_pos_km`.
     pub fn acceleration_with_sun_moon(
         &self,
         sat_pos_km: Vector3<f64>,
@@ -243,8 +240,13 @@ impl SolarRadiationPressure {
     ) -> Result<Vector3<f64>, PropagationError> {
         validate_vector("sat_pos_km", sat_pos_km)?;
         validate_vector("sun_pos_km", sun_pos_km)?;
-        validate_vector("moon_pos_km", moon_pos_km)?;
-        srp_acceleration_with_bodies(sat_pos_km, sun_pos_km, Some(moon_pos_km), *self)
+        let moon = if self.include_moon_eclipse {
+            validate_vector("moon_pos_km", moon_pos_km)?;
+            Some(moon_pos_km)
+        } else {
+            None
+        };
+        srp_acceleration_with_bodies(sat_pos_km, sun_pos_km, moon, *self)
     }
 
     fn with_estimated_cr(&self, parameters: &[f64]) -> Result<Self, PropagationError> {
@@ -277,6 +279,7 @@ impl ForceModel for SolarRadiationPressure {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
+        validate_position(state)?;
         let (sun_pos_km, moon_pos_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         srp_acceleration_with_bodies(state.position_km, sun_pos_km, moon_pos_km, *self)
     }
@@ -299,6 +302,7 @@ impl ForceModel for SolarRadiationPressure {
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
         let model = self.with_estimated_cr(parameters)?;
+        validate_position(state)?;
         let (sun_pos_km, moon_pos_km) = model.bodies_km(state.epoch_tdb_seconds, ctx)?;
         srp_acceleration_with_bodies(state.position_km, sun_pos_km, moon_pos_km, model)
     }
@@ -312,7 +316,7 @@ impl ForceModel for SolarRadiationPressure {
         ctx: &PropagationContext,
     ) -> Result<AccelerationPartials, PropagationError> {
         let model = self.with_estimated_cr(parameters)?;
-        validate_finite_state(state)?;
+        validate_position(state)?;
         let (sun_pos_km, moon_pos_km) = model.bodies_km(state.epoch_tdb_seconds, ctx)?;
         srp_position_partials_with_bodies(state.position_km, sun_pos_km, moon_pos_km, model)
             .map(AccelerationPartials::position_only)
@@ -332,6 +336,7 @@ impl ForceModel for SolarRadiationPressure {
         ctx: &PropagationContext,
     ) -> Result<Vec<Vector3<f64>>, PropagationError> {
         let model = self.with_estimated_cr(parameters)?;
+        validate_position(state)?;
         let (sun_pos_km, moon_pos_km) = model.bodies_km(state.epoch_tdb_seconds, ctx)?;
         Ok(vec![srp_parameter_partial_with_bodies(
             state.position_km,

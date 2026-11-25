@@ -8,14 +8,15 @@
 //! J2 force model. The position partials of the acceleration are the second
 //! derivatives of the same potential, in closed form.
 
+use super::scaled::{wide_norm_squared, ForceScalar, Wide};
 use crate::astro::constants::{
     J2_EARTH, J3_EARTH, J4_EARTH, J5_EARTH, J6_EARTH, MU_EARTH, RE_EARTH,
 };
 use crate::astro::error::PropagationError;
 use crate::astro::forces::geopotential::TideSystem;
 use crate::astro::forces::r#trait::{
-    expect_parameter_count, finite_partials, validate_finite_state, AccelerationPartials,
-    ForceModel,
+    expect_parameter_count, finite_acceleration, finite_partials, validate_finite,
+    validate_position, AccelerationPartials, ForceModel,
 };
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
@@ -206,12 +207,11 @@ impl ForceModel for ZonalGravity {
         state: &CartesianState,
         _ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        let r_mag2 = state.position_km.norm_squared();
-        if r_mag2 == 0.0 {
-            return Err(PropagationError::NumericalFailure(
-                "Zero position magnitude".to_string(),
-            ));
+        if self.degrees == ZonalDegrees::NONE {
+            return Ok(Vector3::zeros());
         }
+        self.validate(state)?;
+        let r_mag2 = state.position_km.norm_squared();
         let r_mag = r_mag2.sqrt();
         let s = state.position_km.z / r_mag;
 
@@ -229,7 +229,27 @@ impl ForceModel for ZonalGravity {
                 );
             }
         }
-        Ok(accel)
+        if self.powers_are_finite(r_mag) && accel.iter().all(|value| value.is_finite()) {
+            return Ok(accel);
+        }
+        finite_acceleration(Vector3::from(self.scaled_sum(
+            state,
+            |[x, y, z], r, degree, common| {
+                let s = z / r;
+                let n = Wide::from(f64::from(degree));
+                let one = Wide::from(1.0);
+                let (p, dp) = legendre_and_derivative(degree, s);
+                let xy_bracket = (n + one) * p + s * dp;
+                let z_bracket = (n + one) * s * p - (one - s * s) * dp;
+                let xy_scale = common / r.powi(u32::from(degree) + 3);
+                let z_scale = common / r.powi(u32::from(degree) + 2);
+                [
+                    xy_scale * x * xy_bracket,
+                    xy_scale * y * xy_bracket,
+                    z_scale * z_bracket,
+                ]
+            },
+        )))
     }
 
     fn acceleration_partials(
@@ -239,13 +259,11 @@ impl ForceModel for ZonalGravity {
         _ctx: &PropagationContext,
     ) -> Result<AccelerationPartials, PropagationError> {
         expect_parameter_count(parameters, 0)?;
-        validate_finite_state(state)?;
-        let r_mag2 = state.position_km.norm_squared();
-        if r_mag2 == 0.0 {
-            return Err(PropagationError::NumericalFailure(
-                "Zero position magnitude".to_string(),
-            ));
+        if self.degrees == ZonalDegrees::NONE {
+            return Ok(AccelerationPartials::zeros());
         }
+        self.validate(state)?;
+        let r_mag2 = state.position_km.norm_squared();
         let r_mag = r_mag2.sqrt();
         let s = state.position_km.z / r_mag;
 
@@ -263,8 +281,93 @@ impl ForceModel for ZonalGravity {
                 );
             }
         }
-        finite_partials(AccelerationPartials::position_only(gradient))
+        if self.powers_are_finite(r_mag) && gradient.iter().all(|value| value.is_finite()) {
+            return Ok(AccelerationPartials::position_only(gradient));
+        }
+        finite_partials(AccelerationPartials::position_only(
+            Matrix3::from_row_slice(&self.scaled_sum(state, scaled_zonal_gradient)),
+        ))
     }
+}
+
+impl ZonalGravity {
+    fn validate(&self, state: &CartesianState) -> Result<(), PropagationError> {
+        validate_position(state)?;
+        if state.position_km.iter().all(|&value| value == 0.0) {
+            return Err(PropagationError::NumericalFailure(
+                "Zero position magnitude".to_string(),
+            ));
+        }
+        validate_finite([self.mu_km3_s2, self.re_km], "zonal constants")?;
+        validate_finite(
+            (2..=6)
+                .filter(|&degree| self.degrees.is_active(degree))
+                .map(|degree| self.coefficients.get(degree)),
+            "active zonal coefficients",
+        )?;
+        Ok(())
+    }
+
+    fn powers_are_finite(&self, radius: f64) -> bool {
+        (2_u8..=6)
+            .rev()
+            .find(|&degree| self.degrees.is_active(degree))
+            .is_none_or(|degree| radius.powi(i32::from(degree) + 3).is_finite())
+    }
+
+    /// Evaluate the same degree sum when an intermediate exceeds the
+    /// binary64 exponent range, including before cancellation between degrees.
+    fn scaled_sum<const N: usize>(
+        &self,
+        state: &CartesianState,
+        term: impl Fn([Wide; 3], Wide, u8, Wide) -> [Wide; N],
+    ) -> [f64; N] {
+        let position = state.position_array().map(Wide::from);
+        let radius = wide_norm_squared(position).sqrt();
+        let mut sum = [Wide::from(0.0); N];
+        for degree in (2..=6).filter(|&degree| self.degrees.is_active(degree)) {
+            let common = Wide::from(self.mu_km3_s2)
+                * Wide::from(self.coefficients.get(degree))
+                * Wide::from(self.re_km).powi(u32::from(degree));
+            for (total, entry) in sum.iter_mut().zip(term(position, radius, degree, common)) {
+                *total = *total + entry;
+            }
+        }
+        sum.map(Wide::value)
+    }
+}
+
+fn scaled_zonal_gradient(
+    [x, y, z]: [Wide; 3],
+    radius: Wide,
+    degree: u8,
+    common: Wide,
+) -> [Wide; 9] {
+    let (x, y, s) = (x / radius, y / radius, z / radius);
+    let (p, dp) = legendre_and_derivative(degree, s);
+    let ddp = legendre_second_derivative(degree, s);
+    let n = f64::from(degree);
+    let one_minus_s2 = Wide::from(1.0) - s * s;
+    let a = Wide::from(n + 1.0) * p + s * dp;
+    let da = Wide::from(n + 2.0) * dp + s * ddp;
+    let b = Wide::from(n + 1.0) * s * p - one_minus_s2 * dp;
+    let db = Wide::from(n + 1.0) * p + Wide::from(n + 3.0) * s * dp - one_minus_s2 * ddp;
+    let xy_cross = -(s * da + Wide::from(n + 3.0) * a);
+    let xz = one_minus_s2 * da - Wide::from(n + 3.0) * s * a;
+    let zz = one_minus_s2 * db - Wide::from(n + 2.0) * s * b;
+    let scale = common / radius.powi(u32::from(degree) + 3);
+    [
+        a + x * x * xy_cross,
+        x * y * xy_cross,
+        x * xz,
+        x * y * xy_cross,
+        a + y * y * xy_cross,
+        y * xz,
+        x * xz,
+        y * xz,
+        zz,
+    ]
+    .map(|entry| entry * scale)
 }
 
 fn zonal_degree_acceleration(
@@ -338,36 +441,46 @@ fn zonal_degree_gradient(
     ) * scale
 }
 
-fn legendre_second_derivative(degree: u8, s: f64) -> f64 {
+fn legendre_second_derivative<T: ForceScalar>(degree: u8, s: T) -> T {
     let s2 = s * s;
     match degree {
-        2 => 3.0,
-        3 => 15.0 * s,
-        4 => (105.0 * s2 - 15.0) / 2.0,
-        5 => (315.0 * s2 * s - 105.0 * s) / 2.0,
-        6 => (3465.0 * s2 * s2 - 1890.0 * s2 + 105.0) / 8.0,
-        _ => 0.0,
+        2 => T::from(3.0),
+        3 => T::from(15.0) * s,
+        4 => (T::from(105.0) * s2 - T::from(15.0)) / T::from(2.0),
+        5 => (T::from(315.0) * s2 * s - T::from(105.0) * s) / T::from(2.0),
+        6 => (T::from(3465.0) * s2 * s2 - T::from(1890.0) * s2 + T::from(105.0)) / T::from(8.0),
+        _ => T::from(0.0),
     }
 }
 
-fn legendre_and_derivative(degree: u8, s: f64) -> (f64, f64) {
+fn legendre_and_derivative<T: ForceScalar>(degree: u8, s: T) -> (T, T) {
     let s2 = s * s;
     match degree {
-        2 => ((3.0 * s2 - 1.0) / 2.0, 3.0 * s),
-        3 => ((5.0 * s2 * s - 3.0 * s) / 2.0, (15.0 * s2 - 3.0) / 2.0),
+        2 => (
+            (T::from(3.0) * s2 - T::from(1.0)) / T::from(2.0),
+            T::from(3.0) * s,
+        ),
+        3 => (
+            (T::from(5.0) * s2 * s - T::from(3.0) * s) / T::from(2.0),
+            (T::from(15.0) * s2 - T::from(3.0)) / T::from(2.0),
+        ),
         4 => (
-            (35.0 * s2 * s2 - 30.0 * s2 + 3.0) / 8.0,
-            (35.0 * s2 * s - 15.0 * s) / 2.0,
+            (T::from(35.0) * s2 * s2 - T::from(30.0) * s2 + T::from(3.0)) / T::from(8.0),
+            (T::from(35.0) * s2 * s - T::from(15.0) * s) / T::from(2.0),
         ),
         5 => (
-            (63.0 * s2 * s2 * s - 70.0 * s2 * s + 15.0 * s) / 8.0,
-            (315.0 * s2 * s2 - 210.0 * s2 + 15.0) / 8.0,
+            (T::from(63.0) * s2 * s2 * s - T::from(70.0) * s2 * s + T::from(15.0) * s)
+                / T::from(8.0),
+            (T::from(315.0) * s2 * s2 - T::from(210.0) * s2 + T::from(15.0)) / T::from(8.0),
         ),
         6 => (
-            (231.0 * s2 * s2 * s2 - 315.0 * s2 * s2 + 105.0 * s2 - 5.0) / 16.0,
-            (693.0 * s2 * s2 * s - 630.0 * s2 * s + 105.0 * s) / 8.0,
+            (T::from(231.0) * s2 * s2 * s2 - T::from(315.0) * s2 * s2 + T::from(105.0) * s2
+                - T::from(5.0))
+                / T::from(16.0),
+            (T::from(693.0) * s2 * s2 * s - T::from(630.0) * s2 * s + T::from(105.0) * s)
+                / T::from(8.0),
         ),
-        _ => (0.0, 0.0),
+        _ => (T::from(0.0), T::from(0.0)),
     }
 }
 

@@ -291,7 +291,7 @@ fn a_composite_concatenates_parameters_and_sums_partials() {
 }
 
 #[test]
-fn non_finite_states_are_refused_by_every_partial() {
+fn non_finite_components_are_refused_when_used_by_partials() {
     let ctx = PropagationContext::default();
     let srp = SolarRadiationPressure::new(1.3, 0.02).expect("valid SRP");
     let empirical = EmpiricalRtnAcceleration::all_terms();
@@ -318,13 +318,20 @@ fn non_finite_states_are_refused_by_every_partial() {
         }
         for (index, (model, count)) in models.iter().enumerate() {
             let parameters = vec![1.0e-12; *count];
-            assert!(
-                matches!(
-                    model.acceleration_partials(&parameters, &state, &ctx),
-                    Err(PropagationError::InvalidInput(_))
-                ),
-                "model {index}, component {component}"
-            );
+            let result = model.acceleration_partials(&parameters, &state, &ctx);
+            if component >= 3 && [0, 1, 2, 3, 5].contains(&index) {
+                assert_eq!(
+                    result.unwrap(),
+                    model
+                        .acceleration_partials(&parameters, &states()[0], &ctx)
+                        .unwrap()
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(PropagationError::InvalidInput(_))),
+                    "model {index}, component {component}: {result:?}"
+                );
+            }
         }
     }
 }

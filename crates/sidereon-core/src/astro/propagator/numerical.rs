@@ -1852,21 +1852,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn propagate_to_rejects_non_finite_integrator_outputs() {
-        let (pos, vel, _) = circular_state();
-        let propagator = StatePropagator::new(
+    fn rk4_with_overflowing_position_increment() -> StatePropagator {
+        let (position, _, _) = circular_state();
+        // The four stage states are finite, but the weighted sum of their
+        // position derivatives exceeds the binary64 range.
+        StatePropagator::new(
             0.0,
-            pos,
-            vel,
-            ForceModelKind::TwoBody {
-                mu_km3_s2: f64::INFINITY,
-            },
+            position,
+            [f64::MAX / 4.0, 0.0, 0.0],
+            ForceModelKind::two_body(),
             IntegratorKind::Rk4,
         )
-        .with_options(rk4_test_options());
+        .with_options(rk4_test_options())
+    }
 
-        let err = propagator
+    #[test]
+    fn propagate_to_rejects_non_finite_integrator_outputs() {
+        let err = rk4_with_overflowing_position_increment()
             .propagate_to(1.0)
             .expect_err("non-finite integration result should be rejected");
 
@@ -1875,19 +1877,7 @@ mod tests {
 
     #[test]
     fn state_transition_matrix_rejects_non_finite_propagation_legs() {
-        let (pos, vel, _) = circular_state();
-        let propagator = StatePropagator::new(
-            0.0,
-            pos,
-            vel,
-            ForceModelKind::TwoBody {
-                mu_km3_s2: f64::INFINITY,
-            },
-            IntegratorKind::Rk4,
-        )
-        .with_options(rk4_test_options());
-
-        let err = propagator
+        let err = rk4_with_overflowing_position_increment()
             .state_transition_matrix_for_span(1.0)
             .expect_err("non-finite STM propagation leg should be rejected");
 

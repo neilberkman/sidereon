@@ -1,8 +1,9 @@
+use super::scaled::{wide_norm_squared, Wide};
 use crate::astro::constants::{J2_EARTH, MU_EARTH, RE_EARTH};
 use crate::astro::error::PropagationError;
 use crate::astro::forces::r#trait::{
-    expect_parameter_count, finite_partials, validate_finite_state, AccelerationPartials,
-    ForceModel,
+    expect_parameter_count, finite_acceleration, finite_partials, validate_finite,
+    validate_position, AccelerationPartials, ForceModel,
 };
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
@@ -57,23 +58,37 @@ impl ForceModel for J2Gravity {
         state: &CartesianState,
         _ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
+        self.validate(state)?;
         let r_mag2 = state.position_km.norm_squared();
-        if r_mag2 == 0.0 {
-            return Err(PropagationError::NumericalFailure(
-                "Zero position magnitude".to_string(),
-            ));
-        }
         let r_mag = r_mag2.sqrt();
 
         let re_over_r = self.re / r_mag;
         let f = 1.5 * self.j2 * (self.mu / r_mag2) * (re_over_r * re_over_r);
         let z_r2 = (state.position_km.z * state.position_km.z) / r_mag2;
 
-        Ok(Vector3::new(
+        let acceleration = Vector3::new(
             f * (state.position_km.x / r_mag) * (5.0 * z_r2 - 1.0),
             f * (state.position_km.y / r_mag) * (5.0 * z_r2 - 1.0),
             f * (state.position_km.z / r_mag) * (5.0 * z_r2 - 3.0),
-        ))
+        );
+        if r_mag2.is_finite() && acceleration.iter().all(|value| value.is_finite()) {
+            return Ok(acceleration);
+        }
+
+        // Preserve the radius and reference-radius powers across exponent limits.
+        let position = state.position_array().map(Wide::from);
+        let r2 = wide_norm_squared(position);
+        let r = r2.sqrt();
+        let re_over_r = Wide::from(self.re) / r;
+        let f = Wide::from(1.5)
+            * Wide::from(self.j2)
+            * (Wide::from(self.mu) / r2)
+            * (re_over_r * re_over_r);
+        let z_r2 = position[2] * position[2] / r2;
+        finite_acceleration(Vector3::from(core::array::from_fn(|axis| {
+            let offset = if axis == 2 { 3.0 } else { 1.0 };
+            (f * (position[axis] / r) * (Wide::from(5.0) * z_r2 - Wide::from(offset))).value()
+        })))
     }
 
     fn acceleration_partials(
@@ -83,14 +98,9 @@ impl ForceModel for J2Gravity {
         _ctx: &PropagationContext,
     ) -> Result<AccelerationPartials, PropagationError> {
         expect_parameter_count(parameters, 0)?;
-        validate_finite_state(state)?;
+        self.validate(state)?;
         let position = state.position_km;
         let r2 = position.norm_squared();
-        if r2 == 0.0 {
-            return Err(PropagationError::NumericalFailure(
-                "Zero position magnitude".to_string(),
-            ));
-        }
         // a = k [x g, y g, z g_z] with g = (5 z² - r²) / r⁷ and
         // g_z = (5 z² - 3 r²) / r⁷, k = 1.5 J2 mu Re².
         let (x, y, z) = (position.x, position.y, position.z);
@@ -104,19 +114,67 @@ impl ForceModel for J2Gravity {
         let dg_xy = (5.0 * r2 - 35.0 * z2) / r9;
         let dg_z = (15.0 * r2 - 35.0 * z2) / r9;
         let dgz_z = (25.0 * r2 - 35.0 * z2) / r9;
+        let gradient = Matrix3::new(
+            g + x * x * dg_xy,
+            x * y * dg_xy,
+            x * z * dg_z,
+            x * y * dg_xy,
+            g + y * y * dg_xy,
+            y * z * dg_z,
+            x * z * dg_z,
+            y * z * dg_z,
+            g_z + z2 * dgz_z,
+        ) * k;
+        if r9.is_finite() && gradient.iter().all(|value| value.is_finite()) {
+            return Ok(AccelerationPartials::position_only(gradient));
+        }
         finite_partials(AccelerationPartials::position_only(
-            Matrix3::new(
-                g + x * x * dg_xy,
-                x * y * dg_xy,
-                x * z * dg_z,
-                x * y * dg_xy,
-                g + y * y * dg_xy,
-                y * z * dg_z,
-                x * z * dg_z,
-                y * z * dg_z,
-                g_z + z2 * dgz_z,
-            ) * k,
+            self.scaled_gradient(state),
         ))
+    }
+}
+
+impl J2Gravity {
+    fn validate(&self, state: &CartesianState) -> Result<(), PropagationError> {
+        validate_position(state)?;
+        validate_finite([self.mu, self.re, self.j2], "J2 constants")?;
+        if state.position_km.iter().all(|&value| value == 0.0) {
+            return Err(PropagationError::NumericalFailure(
+                "Zero position magnitude".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn scaled_gradient(&self, state: &CartesianState) -> Matrix3<f64> {
+        let position = state.position_array().map(Wide::from);
+        let [x, y, z] = position;
+        let r2 = wide_norm_squared(position);
+        let z2 = z * z;
+        let r7 = r2 * r2 * r2 * r2.sqrt();
+        let r9 = r7 * r2;
+        let k = Wide::from(1.5)
+            * Wide::from(self.j2)
+            * Wide::from(self.mu)
+            * Wide::from(self.re)
+            * Wide::from(self.re);
+        let g = (Wide::from(5.0) * z2 - r2) / r7;
+        let g_z = (Wide::from(5.0) * z2 - Wide::from(3.0) * r2) / r7;
+        let dg_xy = (Wide::from(5.0) * r2 - Wide::from(35.0) * z2) / r9;
+        let dg_z = (Wide::from(15.0) * r2 - Wide::from(35.0) * z2) / r9;
+        let dgz_z = (Wide::from(25.0) * r2 - Wide::from(35.0) * z2) / r9;
+        let entries = [
+            g + x * x * dg_xy,
+            x * y * dg_xy,
+            x * z * dg_z,
+            x * y * dg_xy,
+            g + y * y * dg_xy,
+            y * z * dg_z,
+            x * z * dg_z,
+            y * z * dg_z,
+            g_z + z2 * dgz_z,
+        ];
+        Matrix3::from_row_slice(&entries.map(|entry| (entry * k).value()))
     }
 }
 

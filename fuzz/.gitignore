@@ -110,3 +110,8 @@
 !/corpus/fuzz_orbit_scoring/
 /corpus/fuzz_orbit_scoring/*
 !/corpus/fuzz_orbit_scoring/regression-difference-at-f64-max
+
+# Orbit parameter fitting regression seeds.
+!/corpus/orbit_parameter_fit/
+/corpus/orbit_parameter_fit/*
+!/corpus/orbit_parameter_fit/regression-two-body-nan-position

@@ -34,10 +34,15 @@
 //! recursion factors of that one method through its maximum degree; clones
 //! share the factors.
 
+use super::r#trait::{position_difference_quotients, AccelerationPartials};
+use super::scaled::{ForceScalar, Wide};
 use crate::astro::constants::{MU_EARTH, RE_EARTH};
 use crate::astro::error::PropagationError;
 use crate::astro::forces::icgem::TimeVariableCoefficients;
 use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::forces::r#trait::{finite_acceleration, validate_epoch, validate_position};
+use crate::astro::frames::orientation::EarthOrientation;
+use crate::astro::frames::transforms::mat3_vec3_mul_unchecked;
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
 use crate::astro::time::scales::tt_from_tdb_j2000_seconds;
@@ -289,23 +294,23 @@ impl HolmesFeatherstoneTables {
     }
 
     /// Fill `column[n]` with the scaled `Q_nm` for `n = m..=n_max`.
-    fn fill_column(&self, m: usize, n_max: usize, t: f64, column: &mut [f64]) {
-        column[m] = self.sectoral[m];
+    fn fill_column<T: ForceScalar>(&self, m: usize, n_max: usize, t: T, column: &mut [T]) {
+        column[m] = T::from(self.sectoral[m]);
         if m < n_max {
             let idx = (m + 1) * (m + 2) / 2 + m;
-            column[m + 1] = self.recursion[idx][0] * t * column[m];
+            column[m + 1] = T::from(self.recursion[idx][0]) * t * column[m];
             for n in (m + 2)..=n_max {
                 let [a, b, _] = self.recursion[n * (n + 1) / 2 + m];
-                column[n] = a * t * column[n - 1] - b * column[n - 2];
+                column[n] = T::from(a) * t * column[n - 1] - T::from(b) * column[n - 2];
             }
         }
     }
 }
 
 /// Potential and acceleration of the degree 2 and higher terms.
-struct HarmonicSum {
-    potential_km2_s2: f64,
-    acceleration_km_s2: [f64; 3],
+struct HarmonicSum<T> {
+    potential_km2_s2: T,
+    acceleration_km_s2: [T; 3],
 }
 
 impl Default for SphericalHarmonicGravity {
@@ -554,9 +559,7 @@ impl SphericalHarmonicGravity {
             return self.body_fixed_acceleration_km_s2(position_body_fixed_km);
         }
         let low = self.time_variable_coefficients(epoch_tt_seconds)?;
-        Ok(self
-            .holmes_featherstone_sum(position_body_fixed_km, &low)?
-            .acceleration_km_s2)
+        checked_acceleration(self.holmes_featherstone_sum(position_body_fixed_km, &low)?)
     }
 
     /// Perturbing potential of the degree 2 and higher terms in the
@@ -571,9 +574,16 @@ impl SphericalHarmonicGravity {
         position_body_fixed_km: [f64; 3],
     ) -> Result<f64, PropagationError> {
         self.require_static()?;
-        Ok(self
+        let potential = self
             .holmes_featherstone_sum(position_body_fixed_km, &[])?
-            .potential_km2_s2)
+            .potential_km2_s2;
+        if potential.is_finite() {
+            Ok(potential)
+        } else {
+            Err(PropagationError::NumericalFailure(
+                "spherical-harmonic potential not finite".to_string(),
+            ))
+        }
     }
 
     /// Perturbing potential at `epoch_tt_seconds` (TT seconds since J2000);
@@ -584,9 +594,16 @@ impl SphericalHarmonicGravity {
         epoch_tt_seconds: f64,
     ) -> Result<f64, PropagationError> {
         let low = self.time_variable_coefficients(epoch_tt_seconds)?;
-        Ok(self
+        let potential = self
             .holmes_featherstone_sum(position_body_fixed_km, &low)?
-            .potential_km2_s2)
+            .potential_km2_s2;
+        if potential.is_finite() {
+            Ok(potential)
+        } else {
+            Err(PropagationError::NumericalFailure(
+                "spherical-harmonic potential not finite".to_string(),
+            ))
+        }
     }
 
     fn require_static(&self) -> Result<(), PropagationError> {
@@ -609,14 +626,125 @@ impl SphericalHarmonicGravity {
         position_body_fixed_km: [f64; 3],
     ) -> Result<[f64; 3], PropagationError> {
         self.require_static()?;
-        Ok(self
-            .holmes_featherstone_sum(position_body_fixed_km, &[])?
-            .acceleration_km_s2)
+        checked_acceleration(self.holmes_featherstone_sum(position_body_fixed_km, &[])?)
+    }
+
+    fn holmes_featherstone_sum(
+        &self,
+        position: [f64; 3],
+        low: &[CoefficientPair],
+    ) -> Result<HarmonicSum<f64>, PropagationError> {
+        validate_vec3(position, "position_body_fixed_km")?;
+        if position.iter().all(|&value| value == 0.0) {
+            return Err(PropagationError::NumericalFailure(
+                "zero position magnitude".to_string(),
+            ));
+        }
+        if let Some(sum) = self.binary64_harmonic_sum(position, low) {
+            return Ok(sum);
+        }
+        // Radius squares and the powers of a/r can exceed the binary64
+        // exponent range before the final potential and gradient are formed.
+        let sum = self.harmonic_sum(position.map(Wide::from), self.coefficient_lookup(low));
+        Ok(HarmonicSum {
+            potential_km2_s2: sum.potential_km2_s2.value(),
+            acceleration_km_s2: sum.acceleration_km_s2.map(Wide::value),
+        })
+    }
+
+    fn binary64_harmonic_sum(
+        &self,
+        position: [f64; 3],
+        low: &[CoefficientPair],
+    ) -> Option<HarmonicSum<f64>> {
+        let [x, y, z] = position;
+        let r2 = x * x + y * y + z * z;
+        if r2 == 0.0 || !r2.is_finite() {
+            return None;
+        }
+        let sum = self.harmonic_sum(position, self.coefficient_lookup(low));
+        (sum.potential_km2_s2.is_finite() && sum.acceleration_km_s2.iter().all(|a| a.is_finite()))
+            .then_some(sum)
+    }
+
+    fn coefficient_lookup<'a, T: ForceScalar>(
+        &'a self,
+        low: &'a [CoefficientPair],
+    ) -> impl Fn(usize) -> [T; 2] + 'a {
+        |index| {
+            let pair = low.get(index).unwrap_or(&self.coefficients[index]);
+            [T::from(pair.c), T::from(pair.s)]
+        }
+    }
+
+    pub(super) fn acceleration_in_frame(
+        &self,
+        position: [f64; 3],
+        orientation: &EarthOrientation,
+        epoch_tt_seconds: f64,
+    ) -> Result<Vector3<f64>, PropagationError> {
+        let low = self.time_variable_coefficients(epoch_tt_seconds)?;
+        validate_vec3(position, "position_km")?;
+        let position_itrf = match orientation.iers2010_quaternion() {
+            Some(q) => rotate_quaternion(q, position),
+            None => mat3_vec3_mul_unchecked(&orientation.gcrf_to_itrf_matrix(), &position),
+        };
+        if let Some(sum) = self.binary64_harmonic_sum(position_itrf, &low) {
+            let position = sum.acceleration_km_s2;
+            let acceleration = match orientation.iers2010_quaternion() {
+                Some([a, b, c, d]) => rotate_quaternion([-a, b, c, d], position),
+                None => mat3_vec3_mul_unchecked(&orientation.itrf_to_gcrf_matrix(), &position),
+            };
+            if acceleration.iter().all(|a| a.is_finite()) {
+                return Ok(Vector3::from(acceleration));
+            }
+        }
+        self.scaled_acceleration_in_frame(position, orientation, self.coefficient_lookup(&low))
+    }
+
+    pub(super) fn scaled_acceleration_in_frame(
+        &self,
+        position: [f64; 3],
+        orientation: &EarthOrientation,
+        coefficients: impl Fn(usize) -> [Wide; 2],
+    ) -> Result<Vector3<f64>, PropagationError> {
+        if position.iter().all(|&value| value == 0.0) {
+            return Err(PropagationError::NumericalFailure(
+                "zero position magnitude".to_string(),
+            ));
+        }
+        let forward = orientation.gcrf_to_itrf_matrix();
+        let inverse = orientation.itrf_to_gcrf_matrix();
+        if !forward
+            .iter()
+            .chain(&inverse)
+            .flatten()
+            .all(|value| value.is_finite())
+        {
+            return Err(PropagationError::ForceModelFailure(
+                "body-fixed rotation is non-finite at epoch".to_string(),
+            ));
+        }
+        // Retain the body's fixed position and acceleration until both
+        // rotations are complete when an intermediate exceeds binary64.
+        let quaternion = orientation.iers2010_quaternion();
+        let position = position.map(Wide::from);
+        let position_itrf = match quaternion {
+            Some(q) => rotate_quaternion(q, position),
+            None => forward.map(|row| rotate_matrix_row(row, position)),
+        };
+        let result = self.harmonic_sum(position_itrf, coefficients);
+        let acceleration_itrf = result.acceleration_km_s2;
+        let acceleration = match quaternion {
+            Some([a, b, c, d]) => rotate_quaternion([-a, b, c, d], acceleration_itrf),
+            None => inverse.map(|row| rotate_matrix_row(row, acceleration_itrf)),
+        };
+        let acceleration = acceleration.map(Wide::value);
+        finite_acceleration(Vector3::from(acceleration))
     }
 
     /// Holmes and Featherstone (2002) sum with Cartesian gradient; see the
-    /// module documentation. Coefficients at indices below `low.len()` are
-    /// read from `low` instead of the static table.
+    /// module documentation.
     ///
     /// With `t = z/r`, `u = rho/r`, `q = a/r`, `Q_nm = Pnm/u^m` and
     /// `Phi_m = C cos(m lambda) + S sin(m lambda)`, each term
@@ -628,86 +756,72 @@ impl SphericalHarmonicGravity {
     /// `Psi'_m = S cos((m-1) lambda) - C sin((m-1) lambda)` and
     /// `Q'_nm = k_nm Q_n,m+1`. All powers of `u` are non-negative, so the
     /// expression holds on the polar axis, where `lambda` is taken as zero.
-    fn holmes_featherstone_sum(
+    fn harmonic_sum<T: ForceScalar>(
         &self,
-        position_body_fixed_km: [f64; 3],
-        low: &[CoefficientPair],
-    ) -> Result<HarmonicSum, PropagationError> {
-        validate_vec3(position_body_fixed_km, "position_body_fixed_km")?;
-        let [x, y, z] = position_body_fixed_km;
+        [x, y, z]: [T; 3],
+        coefficients: impl Fn(usize) -> [T; 2],
+    ) -> HarmonicSum<T> {
+        let zero = T::from(0.0);
+        let one = T::from(1.0);
         let rho2 = x * x + y * y;
         let r2 = rho2 + z * z;
-        if r2 == 0.0 {
-            return Err(PropagationError::NumericalFailure(
-                "zero position magnitude".to_string(),
-            ));
-        }
-        if !r2.is_finite() {
-            return Err(PropagationError::NumericalFailure(
-                "position magnitude overflows".to_string(),
-            ));
-        }
         let r = r2.sqrt();
         let rho = rho2.sqrt();
         let t = z / r;
         let u = rho / r;
-        let (cos_lambda, sin_lambda) = if rho > 0.0 {
+        let (cos_lambda, sin_lambda) = if !rho.is_zero() {
             (x / rho, y / rho)
         } else {
-            (1.0, 0.0)
+            (one, zero)
         };
 
         let n_max = usize::from(self.max_degree);
         let m_max = usize::from(self.max_order);
         let tables = &*self.holmes_featherstone;
         let (cos_m, sin_m) = split_longitude_trig(m_max, cos_lambda, sin_lambda);
-        let q_pow = split_powers(n_max, self.reference_radius_km / r);
+        let q_pow = split_powers(n_max, T::from(self.reference_radius_km) / r);
 
-        let mut column = vec![0.0; n_max + 1];
-        let mut next_column = vec![0.0; n_max + 1];
+        let mut column = vec![zero; n_max + 1];
+        let mut next_column = vec![zero; n_max + 1];
         if m_max < n_max {
             tables.fill_column(m_max + 1, n_max, t, &mut next_column);
         }
 
         // Horner accumulators in u: potential, the radial-like sum shared by
         // all three axes, the z sum, and the x and y sums of order m >= 1.
-        let mut h_potential = 0.0;
-        let mut h_radial = 0.0;
-        let mut h_z = 0.0;
-        let mut h_x = 0.0;
-        let mut h_y = 0.0;
+        let mut h_potential = zero;
+        let mut h_radial = zero;
+        let mut h_z = zero;
+        let mut h_x = zero;
+        let mut h_y = zero;
         for m in (0..=m_max).rev() {
             tables.fill_column(m, n_max, t, &mut column);
-            let mut sum_c = 0.0;
-            let mut sum_s = 0.0;
-            let mut radial_c = 0.0;
-            let mut radial_s = 0.0;
-            let mut dt_c = 0.0;
-            let mut dt_s = 0.0;
+            let mut sum_c = zero;
+            let mut sum_s = zero;
+            let mut radial_c = zero;
+            let mut radial_s = zero;
+            let mut dt_c = zero;
+            let mut dt_s = zero;
             let order_term = (m + 1) as f64;
             for n in m.max(2)..=n_max {
                 let idx = n * (n + 1) / 2 + m;
-                let pair = if idx < low.len() {
-                    low[idx]
-                } else {
-                    self.coefficients[idx]
-                };
-                if pair.c == 0.0 && pair.s == 0.0 {
+                let [c, s] = coefficients(idx);
+                if c.is_zero() && s.is_zero() {
                     continue;
                 }
                 let p = column[n] * q_pow[n];
                 let dp = if n > m {
-                    tables.recursion[idx][2] * next_column[n] * q_pow[n]
+                    T::from(tables.recursion[idx][2]) * next_column[n] * q_pow[n]
                 } else {
-                    0.0
+                    zero
                 };
-                let w = (n as f64 + order_term) * p + t * dp;
-                sum_c += p * pair.c;
-                sum_s += p * pair.s;
-                radial_c += w * pair.c;
-                radial_s += w * pair.s;
-                dt_c += dp * pair.c;
-                dt_s += dp * pair.s;
+                let w = T::from(n as f64 + order_term) * p + t * dp;
+                sum_c = sum_c + p * c;
+                sum_s = sum_s + p * s;
+                radial_c = radial_c + w * c;
+                radial_s = radial_s + w * s;
+                dt_c = dt_c + dp * c;
+                dt_s = dt_s + dp * s;
             }
             let (c_m, s_m) = (cos_m[m], sin_m[m]);
             h_potential = h_potential * u + (c_m * sum_c + s_m * sum_s);
@@ -715,15 +829,15 @@ impl SphericalHarmonicGravity {
             h_z = h_z * u + (c_m * dt_c + s_m * dt_s);
             if m >= 1 {
                 let (c_p, s_p) = (cos_m[m - 1], sin_m[m - 1]);
-                let order = m as f64;
+                let order = T::from(m as f64);
                 h_x = h_x * u + order * (c_p * sum_c + s_p * sum_s);
                 h_y = h_y * u + order * (c_p * sum_s - s_p * sum_c);
             }
             std::mem::swap(&mut column, &mut next_column);
         }
 
-        let unscale = f64::powi(2.0, HOLMES_FEATHERSTONE_SCALING_EXPONENT);
-        let mu_over_r = self.mu_km3_s2 / r;
+        let unscale = T::from(f64::powi(2.0, HOLMES_FEATHERSTONE_SCALING_EXPONENT));
+        let mu_over_r = T::from(self.mu_km3_s2) / r;
         let mu_over_r2 = mu_over_r / r;
         let radial = h_radial * unscale;
         let potential_km2_s2 = mu_over_r * (h_potential * unscale);
@@ -732,17 +846,10 @@ impl SphericalHarmonicGravity {
             mu_over_r2 * (h_y * unscale - y / r * radial),
             mu_over_r2 * (h_z * unscale - z / r * radial),
         ];
-        if !potential_km2_s2.is_finite() || acceleration_km_s2.iter().any(|a| !a.is_finite()) {
-            return Err(PropagationError::NumericalFailure(format!(
-                "spherical-harmonic sum through degree {} is not finite at radius {r} km \
-                 (reference radius {} km)",
-                self.max_degree, self.reference_radius_km
-            )));
-        }
-        Ok(HarmonicSum {
+        HarmonicSum {
             potential_km2_s2,
             acceleration_km_s2,
-        })
+        }
     }
 }
 
@@ -752,6 +859,10 @@ impl ForceModel for SphericalHarmonicGravity {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
+        validate_position(state)?;
+        if self.time_variable.is_some() || ctx.body_fixed_frame_provider().is_some() {
+            validate_epoch(state)?;
+        }
         let orientation = match ctx.body_fixed_frame_provider() {
             Some(provider) => Some(
                 provider
@@ -772,35 +883,55 @@ impl ForceModel for SphericalHarmonicGravity {
             }
         };
 
-        let position_body_fixed_km = match orientation {
-            Some(orientation) => orientation
-                .gcrf_to_itrf_position_km(state.position_array())
-                .map_err(|error| {
-                    PropagationError::ForceModelFailure(format!(
-                        "body-fixed position rotation failed: {error}"
-                    ))
-                })?,
-            None => state.position_array(),
-        };
-        let accel_body_fixed = if self.time_variable.is_some() {
-            // ICGEM epochs are TT; the state epoch is TDB.
-            let epoch_tt_seconds = tt_from_tdb_j2000_seconds(state.epoch_tdb_seconds);
-            self.body_fixed_acceleration_at_km_s2(position_body_fixed_km, epoch_tt_seconds)?
+        // ICGEM epochs are TT; the state epoch is TDB.
+        let epoch_tt_seconds = if self.time_variable.is_some() {
+            tt_from_tdb_j2000_seconds(state.epoch_tdb_seconds)
         } else {
-            self.body_fixed_acceleration_km_s2(position_body_fixed_km)?
+            0.0
         };
-        let accel_gcrf = match orientation {
-            Some(orientation) => orientation
-                .itrf_to_gcrf_position_km(accel_body_fixed)
-                .map_err(|error| {
-                    PropagationError::ForceModelFailure(format!(
-                        "inertial acceleration rotation failed: {error}"
-                    ))
-                })?,
-            None => accel_body_fixed,
-        };
-        Ok(Vector3::new(accel_gcrf[0], accel_gcrf[1], accel_gcrf[2]))
+        if let Some(orientation) = orientation {
+            return self.acceleration_in_frame(
+                state.position_array(),
+                &orientation,
+                epoch_tt_seconds,
+            );
+        }
+        self.body_fixed_acceleration_at_km_s2(state.position_array(), epoch_tt_seconds)
+            .map(Vector3::from)
     }
+    fn acceleration_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        ctx: &PropagationContext,
+    ) -> Result<AccelerationPartials, PropagationError> {
+        position_difference_quotients(self, parameters, state, ctx)
+    }
+}
+
+fn rotate_matrix_row(row: [f64; 3], vector: [Wide; 3]) -> Wide {
+    row.into_iter()
+        .zip(vector)
+        .fold(Wide::from(0.0), |sum, (coefficient, value)| {
+            sum + Wide::from(coefficient) * value
+        })
+}
+
+/// Apply the scalar-first, frame-transform quaternion.
+fn rotate_quaternion<T: ForceScalar>(quaternion: [f64; 4], vector: [T; 3]) -> [T; 3] {
+    let [x, y, z] = vector.map(|value| value + T::from(0.0));
+    let [a, b, c, d] = quaternion.map(T::from);
+    let two = T::from(2.0);
+    let s = b * x + c * y + d * z;
+    [
+        two * (a * (x * a - (c * z - d * y)) + s * b) - x,
+        two * (a * (y * a - (d * x - b * z)) + s * c) - y,
+        two * (a * (z * a - (b * y - c * x)) + s * d) - z,
+    ]
+}
+
+fn checked_acceleration(sum: HarmonicSum<f64>) -> Result<[f64; 3], PropagationError> {
+    finite_acceleration(Vector3::from(sum.acceleration_km_s2)).map(Into::into)
 }
 
 fn parse_ascii_coefficients(
@@ -849,10 +980,10 @@ fn parse_ascii_coefficients(
 /// `cos(m lambda)` and `sin(m lambda)` for `m = 0..=max_order`, each formed
 /// from two lower orders split near the middle so rounding grows with
 /// `log2(m)` rather than `m`.
-fn split_longitude_trig(max_order: usize, cos_1: f64, sin_1: f64) -> (Vec<f64>, Vec<f64>) {
-    let mut cos_m = vec![0.0; max_order + 1];
-    let mut sin_m = vec![0.0; max_order + 1];
-    cos_m[0] = 1.0;
+fn split_longitude_trig<T: ForceScalar>(max_order: usize, cos_1: T, sin_1: T) -> (Vec<T>, Vec<T>) {
+    let mut cos_m = vec![T::from(0.0); max_order + 1];
+    let mut sin_m = vec![T::from(0.0); max_order + 1];
+    cos_m[0] = T::from(1.0);
     if max_order >= 1 {
         cos_m[1] = cos_1;
         sin_m[1] = sin_1;
@@ -867,9 +998,9 @@ fn split_longitude_trig(max_order: usize, cos_1: f64, sin_1: f64) -> (Vec<f64>, 
 }
 
 /// `ratio^n` for `n = 0..=max_degree`, split like [`split_longitude_trig`].
-fn split_powers(max_degree: usize, ratio: f64) -> Vec<f64> {
-    let mut powers = vec![0.0; max_degree + 1];
-    powers[0] = 1.0;
+fn split_powers<T: ForceScalar>(max_degree: usize, ratio: T) -> Vec<T> {
+    let mut powers = vec![T::from(0.0); max_degree + 1];
+    powers[0] = T::from(1.0);
     if max_degree >= 1 {
         powers[1] = ratio;
     }

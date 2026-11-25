@@ -33,10 +33,11 @@
 //! once-per-revolution terms are compared with Orekit through an acceleration
 //! model written for the purpose (`tests/orbit_parameter_fit_orekit.rs`).
 
+use super::scaled::{wide_dot, wide_norm_squared, ForceScalar, Wide};
 use crate::astro::error::PropagationError;
 use crate::astro::forces::r#trait::{
     expect_parameter_count, finite_acceleration, finite_partials, outer, validate_finite_state,
-    AccelerationPartials, ForceModel, ForceParameter,
+    validate_position, AccelerationPartials, ForceModel, ForceParameter,
 };
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
@@ -103,7 +104,7 @@ impl EmpiricalHarmonic {
 /// axis and then by [`EmpiricalHarmonic`], named by
 /// [`EmpiricalRtnAcceleration::parameter_name`]. A model with no cosine or
 /// sine term does not evaluate the argument of latitude and so is defined for
-/// equatorial orbits too.
+/// equatorial orbits too. A radial constant alone depends only on position.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EmpiricalRtnAcceleration {
     /// `[axis][harmonic]` coefficient in km/s^2, `None` for an absent term.
@@ -204,6 +205,10 @@ impl EmpiricalRtnAcceleration {
             .count()
     }
 
+    fn has_only_radial_constant(&self) -> bool {
+        self.coefficients_km_s2[0][0].is_some() && self.term_count() == 1
+    }
+
     fn has_harmonic_term(&self) -> bool {
         self.coefficients_km_s2.iter().any(|axis| {
             axis[EmpiricalHarmonic::Cosine.index()].is_some()
@@ -257,17 +262,18 @@ struct RtnGeometry {
 fn rtn_geometry(
     state: &CartesianState,
     with_argument_of_latitude: bool,
-) -> Result<RtnGeometry, PropagationError> {
+) -> Result<Option<RtnGeometry>, PropagationError> {
     validate_finite_state(state)?;
     let position = state.position_km;
     let velocity = state.velocity_km_s;
     let position_norm = position.norm();
     let momentum = position.cross(&velocity);
     let momentum_norm = momentum.norm();
-    if !position_norm.is_finite() || !momentum_norm.is_finite() {
-        return Err(PropagationError::NumericalFailure(
-            "state too large for the radial, along-track, cross-track frame".to_string(),
-        ));
+    if !position_norm.is_finite()
+        || !momentum_norm.is_finite()
+        || (position_norm == 0.0 && position != Vector3::zeros())
+    {
+        return Ok(None);
     }
     if position_norm == 0.0 {
         return Err(PropagationError::NumericalFailure(
@@ -275,6 +281,16 @@ fn rtn_geometry(
         ));
     }
     if momentum_norm == 0.0 {
+        if momentum != Vector3::zeros()
+            || wide_cross(
+                state.position_array().map(Wide::from),
+                state.velocity_array().map(Wide::from),
+            )
+            .iter()
+            .any(|coordinate| !coordinate.is_zero())
+        {
+            return Ok(None);
+        }
         return Err(PropagationError::NumericalFailure(
             "position and velocity are parallel: the orbit plane is undefined".to_string(),
         ));
@@ -300,18 +316,24 @@ fn rtn_geometry(
         ([1.0, 0.0, 0.0], None)
     };
 
-    Ok(RtnGeometry {
+    Ok(Some(RtnGeometry {
         axes: [radial, along, cross],
         position_norm,
         momentum_norm,
         harmonics,
         node,
-    })
+    }))
 }
 
 /// `[a]x`, the matrix with `[a]x b = a x b`.
 fn cross_matrix(a: &Vector3<f64>) -> Matrix3<f64> {
-    Matrix3::new(0.0, -a.z, a.y, a.z, 0.0, -a.x, -a.y, a.x, 0.0)
+    let rows = cross_matrix_rows((*a).into());
+    Matrix3::from_fn(|i, j| rows[i][j])
+}
+
+fn cross_matrix_rows<T: ForceScalar>([x, y, z]: [T; 3]) -> [[T; 3]; 3] {
+    let zero = T::from(0.0);
+    [[zero, -z, y], [z, zero, -x], [-y, x, zero]]
 }
 
 impl ForceModel for EmpiricalRtnAcceleration {
@@ -346,7 +368,22 @@ impl ForceModel for EmpiricalRtnAcceleration {
         if parameters.is_empty() {
             return Ok(Vector3::zeros());
         }
-        let geometry = rtn_geometry(state, self.has_harmonic_term())?;
+        if self.has_only_radial_constant() {
+            if let Some((_, radial)) = radial_coordinates(state)? {
+                let mut acceleration = Vector3::zeros();
+                acceleration += radial * table[0][0];
+                if let Ok(acceleration) = finite_acceleration(acceleration) {
+                    return Ok(acceleration);
+                }
+            }
+            let (_, radial) = scaled_radial_coordinates(state);
+            let coefficient = Wide::from(table[0][0]);
+            let acceleration = radial.map(|axis| (Wide::from(0.0) + axis * coefficient).value());
+            return finite_acceleration(Vector3::from(acceleration));
+        }
+        let Some(geometry) = rtn_geometry(state, self.has_harmonic_term())? else {
+            return self.scaled_acceleration(state, table);
+        };
         let mut accel = Vector3::zeros();
         for (axis, coefficients) in geometry.axes.iter().zip(&table) {
             let amplitude: f64 = coefficients
@@ -356,7 +393,7 @@ impl ForceModel for EmpiricalRtnAcceleration {
                 .sum();
             accel += axis * amplitude;
         }
-        finite_acceleration(accel)
+        finite_acceleration(accel).or_else(|_| self.scaled_acceleration(state, table))
     }
 
     fn acceleration_partials(
@@ -369,7 +406,27 @@ impl ForceModel for EmpiricalRtnAcceleration {
         if parameters.is_empty() {
             return Ok(AccelerationPartials::zeros());
         }
-        let geometry = rtn_geometry(state, self.has_harmonic_term())?;
+        if self.has_only_radial_constant() {
+            if let Some((radius, radial)) = radial_coordinates(state)? {
+                let mut gradient = Matrix3::zeros();
+                gradient += (Matrix3::identity() - outer(&radial, &radial)) / radius * table[0][0];
+                let partials = AccelerationPartials::position_only(gradient);
+                if let Ok(partials) = finite_partials(partials) {
+                    return Ok(partials);
+                }
+            }
+            let (radius, radial) = scaled_radial_coordinates(state);
+            let coefficient = Wide::from(table[0][0]);
+            let gradient = Matrix3::from_fn(|i, j| {
+                let identity = Wide::from(f64::from(i == j));
+                (Wide::from(0.0) + (identity - radial[i] * radial[j]) / radius * coefficient)
+                    .value()
+            });
+            return finite_partials(AccelerationPartials::position_only(gradient));
+        }
+        let Some(geometry) = rtn_geometry(state, self.has_harmonic_term())? else {
+            return self.scaled_partials(state, table);
+        };
         let [radial, along, cross] = geometry.axes;
         let identity = Matrix3::identity();
 
@@ -408,7 +465,7 @@ impl ForceModel for EmpiricalRtnAcceleration {
             partials.wrt_velocity += axes_wrt_velocity[index] * amplitude
                 + outer(&geometry.axes[index], &u_wrt_velocity) * amplitude_per_u;
         }
-        finite_partials(partials)
+        finite_partials(partials).or_else(|_| self.scaled_partials(state, table))
     }
 
     fn parameter_partials(
@@ -421,14 +478,215 @@ impl ForceModel for EmpiricalRtnAcceleration {
         if parameters.is_empty() {
             return Ok(Vec::new());
         }
-        let geometry = rtn_geometry(state, self.has_harmonic_term())?;
-        Ok(self
-            .terms()
-            .into_iter()
-            .map(|(axis, harmonic, _)| {
-                geometry.axes[axis.index()] * geometry.harmonics[harmonic.index()]
+        if self.has_only_radial_constant() {
+            if let Some((_, radial)) = radial_coordinates(state)? {
+                return Ok(vec![radial]);
+            }
+            let (_, radial) = scaled_radial_coordinates(state);
+            return Ok(vec![Vector3::from(radial.map(Wide::value))]);
+        }
+        match rtn_geometry(state, self.has_harmonic_term())? {
+            Some(geometry) => Ok(self
+                .terms()
+                .into_iter()
+                .map(|(axis, harmonic, _)| {
+                    geometry.axes[axis.index()] * geometry.harmonics[harmonic.index()]
+                })
+                .collect()),
+            None => {
+                let geometry = scaled_rtn_geometry(state, self.has_harmonic_term())?;
+                Ok(self
+                    .terms()
+                    .into_iter()
+                    .map(|(axis, harmonic, _)| {
+                        Vector3::from(
+                            geometry.axes[axis.index()].map(|value| {
+                                (value * geometry.harmonics[harmonic.index()]).value()
+                            }),
+                        )
+                    })
+                    .collect())
+            }
+        }
+    }
+}
+
+/// A radial constant uses the position direction alone and stays defined
+/// when the angular momentum vanishes.
+fn radial_coordinates(
+    state: &CartesianState,
+) -> Result<Option<(f64, Vector3<f64>)>, PropagationError> {
+    validate_position(state)?;
+    let position = state.position_km;
+    if position == Vector3::zeros() {
+        return Err(PropagationError::NumericalFailure(
+            "Zero position magnitude".to_string(),
+        ));
+    }
+    let radius = position.norm();
+    Ok((radius.is_finite() && radius > 0.0).then(|| (radius, position / radius)))
+}
+
+fn scaled_radial_coordinates(state: &CartesianState) -> (Wide, [Wide; 3]) {
+    let position = state.position_array().map(Wide::from);
+    let radius = wide_norm_squared(position).sqrt();
+    (radius, position.map(|coordinate| coordinate / radius))
+}
+
+struct ScaledRtn {
+    axes: [[Wide; 3]; 3],
+    position_norm: Wide,
+    momentum_norm: Wide,
+    harmonics: [Wide; 3],
+    node: Option<([Wide; 3], Wide)>,
+}
+
+fn scaled_rtn_geometry(
+    state: &CartesianState,
+    with_argument_of_latitude: bool,
+) -> Result<ScaledRtn, PropagationError> {
+    let position = state.position_array().map(Wide::from);
+    let velocity = state.velocity_array().map(Wide::from);
+    let momentum = wide_cross(position, velocity);
+    let position_norm = wide_norm_squared(position).sqrt();
+    let momentum_norm = wide_norm_squared(momentum).sqrt();
+    if position_norm.is_zero() {
+        return Err(PropagationError::NumericalFailure(
+            "Zero position magnitude".to_string(),
+        ));
+    }
+    if momentum_norm.is_zero() {
+        return Err(PropagationError::NumericalFailure(
+            "position and velocity are parallel: the orbit plane is undefined".to_string(),
+        ));
+    }
+    let radial = position.map(|coordinate| coordinate / position_norm);
+    let cross = momentum.map(|coordinate| coordinate / momentum_norm);
+    let along = wide_cross(cross, radial);
+    let zero = Wide::from(0.0);
+    let one = Wide::from(1.0);
+    let mut harmonics = [one, zero, zero];
+    let node = if with_argument_of_latitude {
+        let node = [-cross[1], cross[0], zero];
+        let sin_inclination = wide_norm_squared(node).sqrt();
+        if sin_inclination.value() < EQUATORIAL_SIN_INCLINATION {
+            return Err(PropagationError::NumericalFailure(
+                "equatorial orbit: the argument of latitude is undefined".to_string(),
+            ));
+        }
+        let node = node.map(|coordinate| coordinate / sin_inclination);
+        harmonics[1] = wide_dot(radial, node);
+        harmonics[2] = wide_dot(radial, wide_cross(cross, node));
+        Some((node, cross[2] / sin_inclination))
+    } else {
+        None
+    };
+    Ok(ScaledRtn {
+        axes: [radial, along, cross],
+        position_norm,
+        momentum_norm,
+        harmonics,
+        node,
+    })
+}
+
+fn wide_cross(a: [Wide; 3], b: [Wide; 3]) -> [Wide; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+impl EmpiricalRtnAcceleration {
+    /// Keep frame norms and coefficient-weighted sums in range before
+    /// converting the requested acceleration or derivative to binary64.
+    fn scaled_acceleration(
+        &self,
+        state: &CartesianState,
+        table: [[f64; 3]; 3],
+    ) -> Result<Vector3<f64>, PropagationError> {
+        let geometry = scaled_rtn_geometry(state, self.has_harmonic_term())?;
+        let zero = Wide::from(0.0);
+        let amplitude = table.map(|coeffs| {
+            coeffs
+                .into_iter()
+                .zip(geometry.harmonics)
+                .fold(Wide::from(-0.0), |sum, (coefficient, harmonic)| {
+                    sum + Wide::from(coefficient) * harmonic
+                })
+        });
+        finite_acceleration(Vector3::from(core::array::from_fn(|i| {
+            geometry
+                .axes
+                .into_iter()
+                .zip(amplitude)
+                .fold(zero, |sum, (axis, amplitude)| sum + axis[i] * amplitude)
+                .value()
+        })))
+    }
+
+    fn scaled_partials(
+        &self,
+        state: &CartesianState,
+        table: [[f64; 3]; 3],
+    ) -> Result<AccelerationPartials, PropagationError> {
+        let geometry = scaled_rtn_geometry(state, self.has_harmonic_term())?;
+        let [radial, along, cross] = geometry.axes;
+        let position = state.position_array().map(Wide::from);
+        let velocity = state.velocity_array().map(Wide::from);
+        let [_, cos_u, sin_u] = geometry.harmonics;
+        let zero = Wide::from(0.0);
+        let amplitude = table.map(|[constant, cosine, sine]| {
+            Wide::from(constant) + Wide::from(cosine) * cos_u + Wide::from(sine) * sin_u
+        });
+        let amplitude_per_u =
+            table.map(|[_, cosine, sine]| -Wide::from(cosine) * sin_u + Wide::from(sine) * cos_u);
+        let radial_cross = cross_matrix_rows(radial);
+        let cross_cross = cross_matrix_rows(cross);
+        let velocity_cross = cross_matrix_rows(velocity);
+        let position_cross = cross_matrix_rows(position);
+        let momentum_projector: [[Wide; 3]; 3] = core::array::from_fn(|i| {
+            core::array::from_fn(|k| {
+                (Wide::from(f64::from(i == k)) - cross[i] * cross[k]) / geometry.momentum_norm
             })
-            .collect())
+        });
+        let negative_projector = momentum_projector.map(|row| row.map(|value| -value));
+        let negative_radial_cross = radial_cross.map(|row| row.map(|value| -value));
+        let mut partials = AccelerationPartials::zeros();
+        for j in 0..3 {
+            let radial_p = core::array::from_fn(|i| {
+                (Wide::from(f64::from(i == j)) - radial[i] * radial[j]) / geometry.position_norm
+            });
+            let cross_p =
+                negative_projector.map(|row| wide_dot(row, velocity_cross.map(|row| row[j])));
+            let cross_v =
+                momentum_projector.map(|row| wide_dot(row, position_cross.map(|row| row[j])));
+            let along_p: [Wide; 3] = core::array::from_fn(|i| {
+                wide_dot(cross_cross[i], radial_p) - wide_dot(radial_cross[i], cross_p)
+            });
+            let along_v = negative_radial_cross.map(|row| wide_dot(row, cross_v));
+            let (u_p, u_v) = geometry.node.map_or((zero, zero), |(node, cot)| {
+                let scale = cot / geometry.momentum_norm;
+                (
+                    along[j] / geometry.position_norm - wide_cross(velocity, node)[j] * scale,
+                    -wide_cross(node, position)[j] * scale,
+                )
+            });
+            for i in 0..3 {
+                let column = |axis_derivatives: [Wide; 3], u_derivative: Wide| {
+                    (0..3)
+                        .fold(zero, |sum, axis| {
+                            sum + (axis_derivatives[axis] * amplitude[axis]
+                                + geometry.axes[axis][i] * u_derivative * amplitude_per_u[axis])
+                        })
+                        .value()
+                };
+                partials.wrt_position[(i, j)] = column([radial_p[i], along_p[i], cross_p[i]], u_p);
+                partials.wrt_velocity[(i, j)] = column([zero, along_v[i], cross_v[i]], u_v);
+            }
+        }
+        finite_partials(partials)
     }
 }
 

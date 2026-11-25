@@ -189,17 +189,24 @@ fn default_shadow_is_wgs84_apparent_disc_with_moon_and_all_options_work() {
     assert!(accel_annular.norm() < 0.25 * accel_default.norm());
     assert!(accel_annular.norm() > 0.1 * accel_default.norm());
 
-    // Non-finite Moon position returns a typed error under every option.
+    let invalid_moon = Vector3::new(f64::NAN, 0.0, 0.0);
     for model in all_shadow_configs(default_model) {
-        let err = model
-            .acceleration_with_sun_moon(sat, sun, Vector3::new(f64::NAN, 0.0, 0.0))
-            .expect_err("non-finite moon rejected");
-        assert!(matches!(err, PropagationError::InvalidInput(_)));
+        let result = model.acceleration_with_sun_moon(sat, sun, invalid_moon);
+        if model.moon_eclipse_enabled() {
+            assert!(matches!(result, Err(PropagationError::InvalidInput(_))));
+        } else {
+            assert_eq!(
+                result.unwrap(),
+                model
+                    .acceleration_with_sun_moon(sat, sun, moon_clear)
+                    .unwrap(),
+            );
+        }
     }
 }
 
 #[test]
-fn non_finite_state_position_preserves_force_model_error_variant() {
+fn non_finite_state_position_is_invalid_input() {
     let model = SolarRadiationPressure::new(1.2, 0.02).expect("valid SRP");
     let state = CartesianState::new(0.0, [f64::NAN, 0.0, 0.0], [0.0, 7.5, 0.0]);
     let ctx = PropagationContext::default();
@@ -207,8 +214,8 @@ fn non_finite_state_position_preserves_force_model_error_variant() {
         .acceleration(&state, &ctx)
         .expect_err("non-finite state position must fail");
     assert!(
-        matches!(err, PropagationError::ForceModelFailure(_)),
-        "expected ForceModelFailure, got {err:?}"
+        matches!(err, PropagationError::InvalidInput(_)),
+        "expected InvalidInput, got {err:?}"
     );
 }
 

@@ -1,3 +1,4 @@
+use super::scaled::ForceSum;
 use crate::astro::error::PropagationError;
 use crate::astro::forces::r#trait::{
     expect_parameter_count, finite_acceleration, finite_parameter_partials, finite_partials,
@@ -5,7 +6,7 @@ use crate::astro::forces::r#trait::{
 };
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
-use nalgebra::Vector3;
+use nalgebra::{Matrix3, Vector3};
 
 #[derive(Default)]
 /// An additive force model that combines the accelerations returned by its
@@ -56,11 +57,11 @@ impl ForceModel for CompositeForceModel {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        let mut accel = Vector3::zeros();
+        let mut accel = ForceSum::new();
         for model in &self.models {
-            accel += model.acceleration(state, ctx)?;
+            accel.add(model.acceleration(state, ctx)?.into());
         }
-        finite_acceleration(accel)
+        finite_acceleration(Vector3::from(accel.values()))
     }
 
     fn parameters(&self) -> Vec<ForceParameter> {
@@ -83,12 +84,14 @@ impl ForceModel for CompositeForceModel {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        let mut accel = Vector3::zeros();
+        let mut accel = ForceSum::new();
         self.for_each_component(parameters, |model, own| {
-            accel += model.acceleration_with_parameters(own, state, ctx)?;
+            accel.add(
+                finite_acceleration(model.acceleration_with_parameters(own, state, ctx)?)?.into(),
+            );
             Ok(())
         })?;
-        finite_acceleration(accel)
+        finite_acceleration(Vector3::from(accel.values()))
     }
 
     fn acceleration_partials(
@@ -97,14 +100,19 @@ impl ForceModel for CompositeForceModel {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<AccelerationPartials, PropagationError> {
-        let mut partials = AccelerationPartials::zeros();
+        let mut position: ForceSum<9> = ForceSum::new();
+        let mut velocity: ForceSum<9> = ForceSum::new();
         self.for_each_component(parameters, |model, own| {
             let component = model.acceleration_partials(own, state, ctx)?;
-            partials.wrt_position += component.wrt_position;
-            partials.wrt_velocity += component.wrt_velocity;
+            let component = finite_partials(component)?;
+            position.add(core::array::from_fn(|i| component.wrt_position[i]));
+            velocity.add(core::array::from_fn(|i| component.wrt_velocity[i]));
             Ok(())
         })?;
-        finite_partials(partials)
+        finite_partials(AccelerationPartials {
+            wrt_position: Matrix3::from_column_slice(&position.values()),
+            wrt_velocity: Matrix3::from_column_slice(&velocity.values()),
+        })
     }
 
     fn parameter_partials(
@@ -138,18 +146,21 @@ impl CompositeForceModel {
         parameters: &[f64],
         mut visit: impl FnMut(&dyn ForceModel, &[f64]) -> Result<(), PropagationError>,
     ) -> Result<(), PropagationError> {
-        let mut offset = 0;
+        let mut offset = 0_usize;
         for model in &self.models {
             let count = model.parameter_count();
-            let own = parameters.get(offset..offset + count).ok_or_else(|| {
+            let end = offset.checked_add(count).ok_or_else(|| {
+                PropagationError::InvalidInput("composite parameter count overflows".to_string())
+            })?;
+            let own = parameters.get(offset..end).ok_or_else(|| {
                 PropagationError::InvalidInput(format!(
                     "composite force model takes at least {} parameter values, got {}",
-                    offset + count,
+                    end,
                     parameters.len()
                 ))
             })?;
             visit(model.as_ref(), own)?;
-            offset += count;
+            offset = end;
         }
         expect_parameter_count(parameters, offset)
     }

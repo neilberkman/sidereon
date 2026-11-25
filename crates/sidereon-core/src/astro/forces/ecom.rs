@@ -198,7 +198,7 @@ use crate::astro::events::eclipse::{
 };
 use crate::astro::forces::r#trait::{
     expect_parameter_count, finite_acceleration, finite_parameter_partials, finite_partials,
-    validate_finite_state, AccelerationPartials, ForceModel, ForceParameter,
+    validate_position, AccelerationPartials, ForceModel, ForceParameter,
 };
 use crate::astro::forces::third_body::sun_moon_positions_km;
 use crate::astro::propagator::api::PropagationContext;
@@ -681,10 +681,7 @@ impl Ecom2SolarRadiationPressure {
     /// Evaluate ECOM2 acceleration (km/s^2) with explicit inertial Sun and
     /// Moon positions (km).
     ///
-    /// When [`Self::moon_eclipse_enabled`] is `false`, `moon_position_km` is
-    /// still validated for finiteness while the selected Earth-only shadow
-    /// function ([`ShadowFunction::ApparentDisc`] or
-    /// [`ShadowFunction::Conical`]) is evaluated.
+    /// Earth-only shadow functions ignore `moon_position_km`.
     pub fn acceleration_with_sun_moon(
         &self,
         position_km: Vector3<f64>,
@@ -692,12 +689,17 @@ impl Ecom2SolarRadiationPressure {
         sun_position_km: Vector3<f64>,
         moon_position_km: Vector3<f64>,
     ) -> Result<Vector3<f64>, PropagationError> {
-        validate_finite_vec3("moon_position_km", moon_position_km)?;
+        let moon = if self.include_moon_eclipse {
+            validate_finite_vec3("moon_position_km", moon_position_km)?;
+            Some(moon_position_km)
+        } else {
+            None
+        };
         ecom2_acceleration_with_bodies(
             position_km,
             velocity_km_s,
             sun_position_km,
-            Some(moon_position_km),
+            moon,
             self.n_d,
             self.n_b,
             &self.coefficients,
@@ -748,12 +750,17 @@ impl Ecom2SolarRadiationPressure {
         sun_position_km: Vector3<f64>,
         moon_position_km: Vector3<f64>,
     ) -> Result<AccelerationPartials, PropagationError> {
-        validate_finite_vec3("moon_position_km", moon_position_km)?;
+        let moon = if self.include_moon_eclipse {
+            validate_finite_vec3("moon_position_km", moon_position_km)?;
+            Some(moon_position_km)
+        } else {
+            None
+        };
         ecom2_state_partials_with_bodies(
             position_km,
             velocity_km_s,
             sun_position_km,
-            Some(moon_position_km),
+            moon,
             self.n_d,
             self.n_b,
             &self.coefficients,
@@ -804,12 +811,17 @@ impl Ecom2SolarRadiationPressure {
         sun_position_km: Vector3<f64>,
         moon_position_km: Vector3<f64>,
     ) -> Result<Vec<Vector3<f64>>, PropagationError> {
-        validate_finite_vec3("moon_position_km", moon_position_km)?;
+        let moon = if self.include_moon_eclipse {
+            validate_finite_vec3("moon_position_km", moon_position_km)?;
+            Some(moon_position_km)
+        } else {
+            None
+        };
         ecom2_parameter_partials_with_bodies(
             position_km,
             velocity_km_s,
             sun_position_km,
-            Some(moon_position_km),
+            moon,
             self.n_d,
             self.n_b,
             &self.coefficients,
@@ -841,7 +853,7 @@ impl ForceModel for Ecom2SolarRadiationPressure {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        validate_finite_state(state)?;
+        validate_position(state)?;
         let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom2_acceleration_with_bodies(
             state.position_km,
@@ -878,7 +890,7 @@ impl ForceModel for Ecom2SolarRadiationPressure {
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
         self.validate_parameters(parameters)?;
-        validate_finite_state(state)?;
+        validate_position(state)?;
         let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom2_acceleration_with_bodies(
             state.position_km,
@@ -901,7 +913,7 @@ impl ForceModel for Ecom2SolarRadiationPressure {
         ctx: &PropagationContext,
     ) -> Result<AccelerationPartials, PropagationError> {
         self.validate_parameters(parameters)?;
-        validate_finite_state(state)?;
+        validate_position(state)?;
         let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom2_state_partials_with_bodies(
             state.position_km,
@@ -924,7 +936,7 @@ impl ForceModel for Ecom2SolarRadiationPressure {
         ctx: &PropagationContext,
     ) -> Result<Vec<Vector3<f64>>, PropagationError> {
         self.validate_parameters(parameters)?;
-        validate_finite_state(state)?;
+        validate_position(state)?;
         let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom2_parameter_partials_with_bodies(
             state.position_km,
@@ -1066,10 +1078,7 @@ impl Ecom1SolarRadiationPressure {
     /// Evaluate ECOM1 acceleration (km/s^2) with explicit inertial Sun and
     /// Moon positions (km).
     ///
-    /// When [`Self::moon_eclipse_enabled`] is `false`, `moon_position_km` is
-    /// still validated for finiteness while the selected Earth-only shadow
-    /// function ([`ShadowFunction::ApparentDisc`] or
-    /// [`ShadowFunction::Conical`]) is evaluated.
+    /// Earth-only shadow functions ignore `moon_position_km`.
     pub fn acceleration_with_sun_moon(
         &self,
         position_km: Vector3<f64>,
@@ -1077,12 +1086,17 @@ impl Ecom1SolarRadiationPressure {
         sun_position_km: Vector3<f64>,
         moon_position_km: Vector3<f64>,
     ) -> Result<Vector3<f64>, PropagationError> {
-        validate_finite_vec3("moon_position_km", moon_position_km)?;
+        let moon = if self.include_moon_eclipse {
+            validate_finite_vec3("moon_position_km", moon_position_km)?;
+            Some(moon_position_km)
+        } else {
+            None
+        };
         ecom1_acceleration_with_bodies(
             position_km,
             velocity_km_s,
             sun_position_km,
-            Some(moon_position_km),
+            moon,
             self.coefficients.to_array(),
             self.shadow_function,
             self.earth_shadow_model,
@@ -1129,12 +1143,17 @@ impl Ecom1SolarRadiationPressure {
         sun_position_km: Vector3<f64>,
         moon_position_km: Vector3<f64>,
     ) -> Result<AccelerationPartials, PropagationError> {
-        validate_finite_vec3("moon_position_km", moon_position_km)?;
+        let moon = if self.include_moon_eclipse {
+            validate_finite_vec3("moon_position_km", moon_position_km)?;
+            Some(moon_position_km)
+        } else {
+            None
+        };
         ecom1_state_partials_with_bodies(
             position_km,
             velocity_km_s,
             sun_position_km,
-            Some(moon_position_km),
+            moon,
             self.coefficients.to_array(),
             self.shadow_function,
             self.earth_shadow_model,
@@ -1182,12 +1201,17 @@ impl Ecom1SolarRadiationPressure {
         sun_position_km: Vector3<f64>,
         moon_position_km: Vector3<f64>,
     ) -> Result<[Vector3<f64>; ECOM1_COEFFICIENT_COUNT], PropagationError> {
-        validate_finite_vec3("moon_position_km", moon_position_km)?;
+        let moon = if self.include_moon_eclipse {
+            validate_finite_vec3("moon_position_km", moon_position_km)?;
+            Some(moon_position_km)
+        } else {
+            None
+        };
         ecom1_parameter_partials_with_bodies(
             position_km,
             velocity_km_s,
             sun_position_km,
-            Some(moon_position_km),
+            moon,
             self.coefficients.to_array(),
             self.shadow_function,
             self.earth_shadow_model,
@@ -1222,7 +1246,7 @@ impl ForceModel for Ecom1SolarRadiationPressure {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        validate_finite_state(state)?;
+        validate_position(state)?;
         let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom1_acceleration_with_bodies(
             state.position_km,
@@ -1255,7 +1279,7 @@ impl ForceModel for Ecom1SolarRadiationPressure {
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
         let coeffs = Self::parse_parameters(parameters)?;
-        validate_finite_state(state)?;
+        validate_position(state)?;
         let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom1_acceleration_with_bodies(
             state.position_km,
@@ -1276,7 +1300,7 @@ impl ForceModel for Ecom1SolarRadiationPressure {
         ctx: &PropagationContext,
     ) -> Result<AccelerationPartials, PropagationError> {
         let coeffs = Self::parse_parameters(parameters)?;
-        validate_finite_state(state)?;
+        validate_position(state)?;
         let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom1_state_partials_with_bodies(
             state.position_km,
@@ -1297,7 +1321,7 @@ impl ForceModel for Ecom1SolarRadiationPressure {
         ctx: &PropagationContext,
     ) -> Result<Vec<Vector3<f64>>, PropagationError> {
         let coeffs = Self::parse_parameters(parameters)?;
-        validate_finite_state(state)?;
+        validate_position(state)?;
         let (sun_km, moon_km) = self.bodies_km(state.epoch_tdb_seconds, ctx)?;
         ecom1_parameter_partials_with_bodies(
             state.position_km,
@@ -1944,7 +1968,6 @@ fn ecom2_acceleration_with_bodies(
     include_moon_eclipse: bool,
 ) -> Result<Vector3<f64>, PropagationError> {
     validate_finite_vec3("position_km", sat_pos_km)?;
-    validate_finite_vec3("velocity_km_s", sat_vel_km_s)?;
     validate_finite_vec3("sun_position_km", sun_pos_km)?;
 
     let (ratio_s, is_sunlit) = lighting_ratio_double_scaled(
@@ -1959,6 +1982,7 @@ fn ecom2_acceleration_with_bodies(
         return Ok(Vector3::zeros());
     }
 
+    let sat_vel_km_s = ecom_velocity(sat_vel_km_s, ecom2_has_nonzero_periodic(n_d, n_b, params))?;
     let need_y_or_b = ecom2_needs_y_or_b(n_d, n_b, params);
     let ey_collinear = is_collinear_exact(sun_pos_km, sat_pos_km);
     if ey_collinear && need_y_or_b {
@@ -2307,7 +2331,6 @@ fn ecom2_state_partials_with_bodies(
     include_moon_eclipse: bool,
 ) -> Result<AccelerationPartials, PropagationError> {
     validate_finite_vec3("position_km", sat_pos_km)?;
-    validate_finite_vec3("velocity_km_s", sat_vel_km_s)?;
     validate_finite_vec3("sun_position_km", sun_pos_km)?;
 
     if matches!(shadow_function, ShadowFunction::Conical) {
@@ -2327,6 +2350,8 @@ fn ecom2_state_partials_with_bodies(
                 ScaledF64::ZERO,
             ],
         };
+        let sat_vel_km_s =
+            ecom_velocity(sat_vel_km_s, ecom2_has_nonzero_periodic(n_d, n_b, params))?;
         let params_g: Vec<Grad<6>> = params.iter().map(|&c| Grad::constant(c)).collect();
         let partials = if is_sunlit {
             match ecom2_acceleration_field(
@@ -2392,6 +2417,7 @@ fn ecom2_state_partials_with_bodies(
             ScaledF64::ZERO,
         ],
     };
+    let sat_vel_km_s = ecom_velocity(sat_vel_km_s, ecom2_has_nonzero_periodic(n_d, n_b, params))?;
     let params_g: Vec<Grad<6>> = params.iter().map(|&c| Grad::constant(c)).collect();
 
     let partials = match ecom2_acceleration_field(
@@ -2510,7 +2536,6 @@ fn ecom2_parameter_partials_with_bodies(
     include_moon_eclipse: bool,
 ) -> Result<Vec<Vector3<f64>>, PropagationError> {
     validate_finite_vec3("position_km", sat_pos_km)?;
-    validate_finite_vec3("velocity_km_s", sat_vel_km_s)?;
     validate_finite_vec3("sun_position_km", sun_pos_km)?;
 
     let (ratio_s, sunlit) = match lighting_ratio_for_parameter_partials(
@@ -2524,6 +2549,7 @@ fn ecom2_parameter_partials_with_bodies(
         ParameterLighting::Umbra => return Ok(vec![Vector3::zeros(); params.len()]),
         ParameterLighting::Lit { ratio, is_sunlit } => (ratio, is_sunlit),
     };
+    let sat_vel_km_s = ecom_velocity(sat_vel_km_s, n_d != 0 || n_b != 0)?;
     let force_scaled = matches!(shadow_function, ShadowFunction::Conical) && !sunlit;
 
     let mut out = Vec::with_capacity(params.len());
@@ -2667,6 +2693,14 @@ fn ecom1_sin_cos_field_scaled<const N: usize>(
 }
 
 #[inline]
+fn ecom_velocity(velocity: Vector3<f64>, required: bool) -> Result<Vector3<f64>, PropagationError> {
+    match validate_finite_vec3("velocity_km_s", velocity) {
+        Ok(()) => Ok(velocity),
+        Err(_) if !required => Ok(Vector3::zeros()),
+        Err(error) => Err(error),
+    }
+}
+
 fn ecom1_has_nonzero_periodic(c: [f64; ECOM1_COEFFICIENT_COUNT]) -> bool {
     c[1] != 0.0 || c[2] != 0.0 || c[4] != 0.0 || c[5] != 0.0 || c[7] != 0.0 || c[8] != 0.0
 }
@@ -2734,7 +2768,6 @@ fn ecom1_acceleration_with_bodies(
     include_moon_eclipse: bool,
 ) -> Result<Vector3<f64>, PropagationError> {
     validate_finite_vec3("position_km", sat_pos_km)?;
-    validate_finite_vec3("velocity_km_s", sat_vel_km_s)?;
     validate_finite_vec3("sun_position_km", sun_pos_km)?;
 
     let (ratio_s, is_sunlit) = lighting_ratio_double_scaled(
@@ -2749,6 +2782,7 @@ fn ecom1_acceleration_with_bodies(
         return Ok(Vector3::zeros());
     }
 
+    let sat_vel_km_s = ecom_velocity(sat_vel_km_s, ecom1_has_nonzero_periodic(c))?;
     let sat_s = ScaledVec3::from_vec3(Vec3::new(sat_pos_km.x, sat_pos_km.y, sat_pos_km.z));
     let vel_s = ScaledVec3::from_vec3(Vec3::new(sat_vel_km_s.x, sat_vel_km_s.y, sat_vel_km_s.z));
     let sun_s = ScaledVec3::from_vec3(Vec3::new(sun_pos_km.x, sun_pos_km.y, sun_pos_km.z));
@@ -2864,7 +2898,6 @@ fn ecom1_state_partials_with_bodies(
     include_moon_eclipse: bool,
 ) -> Result<AccelerationPartials, PropagationError> {
     validate_finite_vec3("position_km", sat_pos_km)?;
-    validate_finite_vec3("velocity_km_s", sat_vel_km_s)?;
     validate_finite_vec3("sun_position_km", sun_pos_km)?;
 
     let (ratio_s, is_sunlit) = if matches!(shadow_function, ShadowFunction::Conical) {
@@ -2916,6 +2949,7 @@ fn ecom1_state_partials_with_bodies(
         )
     };
 
+    let sat_vel_km_s = ecom_velocity(sat_vel_km_s, ecom1_has_nonzero_periodic(c))?;
     let sat_s = scaled_field_vec3_variable::<6>(sat_pos_km, 0);
     let vel_s = scaled_field_vec3_variable::<6>(sat_vel_km_s, 3);
     let sun_s = scaled_field_vec3_constant::<6>(sun_pos_km);
@@ -2941,7 +2975,6 @@ fn ecom1_parameter_partials_with_bodies(
     include_moon_eclipse: bool,
 ) -> Result<[Vector3<f64>; ECOM1_COEFFICIENT_COUNT], PropagationError> {
     validate_finite_vec3("position_km", sat_pos_km)?;
-    validate_finite_vec3("velocity_km_s", sat_vel_km_s)?;
     validate_finite_vec3("sun_position_km", sun_pos_km)?;
 
     let (ratio_val, sunlit) = match lighting_ratio_for_parameter_partials(
@@ -2956,6 +2989,7 @@ fn ecom1_parameter_partials_with_bodies(
         ParameterLighting::Lit { ratio, is_sunlit } => (ratio, is_sunlit),
     };
 
+    let sat_vel_km_s = ecom_velocity(sat_vel_km_s, true)?;
     let sat_s = scaled_field_vec3_constant::<9>(sat_pos_km);
     let vel_s = scaled_field_vec3_constant::<9>(sat_vel_km_s);
     let sun_s = scaled_field_vec3_constant::<9>(sun_pos_km);
