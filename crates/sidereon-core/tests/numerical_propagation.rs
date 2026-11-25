@@ -421,19 +421,18 @@ fn reference_arc_is_deterministic_and_frozen() {
         }
     }
 
-    // Frozen-bits regression lock on the last sample (full arc cross-checked
-    // Python-side against the dumped fixture).
-    let last = states.last().unwrap();
-    assert_eq!(last.position_km.x.to_bits(), 0xc0c0_c53c_41a3_0dec);
-    assert_eq!(last.position_km.y.to_bits(), 0xc0b2_3e93_8f81_479c);
-    assert_eq!(last.position_km.z.to_bits(), 0xc083_abd6_a7a2_99c2);
-    assert_eq!(last.velocity_km_s.x.to_bits(), 0x400e_7a9b_316e_911e);
-    assert_eq!(last.velocity_km_s.y.to_bits(), 0xc012_7346_7de6_54ce);
-    assert_eq!(last.velocity_km_s.z.to_bits(), 0xbfe3_beff_5792_7b3d);
-
     if std::env::var("SIDEREON_DUMP_FIXTURES").is_ok() {
         dump_fixture(&times, &states);
     }
+
+    // Endpoint for the DP54 arc with Orekit's J2 arithmetic order.
+    let last = states.last().unwrap();
+    assert_eq!(last.position_km.x.to_bits(), 0xc0c0_c53c_41a3_0dfa);
+    assert_eq!(last.position_km.y.to_bits(), 0xc0b2_3e93_8f81_4794);
+    assert_eq!(last.position_km.z.to_bits(), 0xc083_abd6_a7a2_99bb);
+    assert_eq!(last.velocity_km_s.x.to_bits(), 0x400e_7a9b_316e_90ef);
+    assert_eq!(last.velocity_km_s.y.to_bits(), 0xc012_7346_7de6_54d6);
+    assert_eq!(last.velocity_km_s.z.to_bits(), 0xbfe3_beff_5792_7b45);
 }
 
 /// Env-gated emitter (`SIDEREON_DUMP_FIXTURES=1`) that serializes the reference

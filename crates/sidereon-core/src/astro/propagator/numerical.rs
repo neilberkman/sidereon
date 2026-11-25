@@ -70,7 +70,10 @@ pub enum ForceModelKind {
         /// Gravitational parameter, km^3/s^2.
         mu_km3_s2: f64,
     },
-    /// Two-body gravity plus the J2 oblateness perturbation.
+    /// Two-body gravity plus the J2 oblateness perturbation about the GCRF z axis.
+    ///
+    /// The equivalent Orekit `J2OnlyPerturbation` uses GCRF for its J2 frame
+    /// and its propagation frame.
     TwoBodyJ2 {
         /// Gravitational parameter, km^3/s^2.
         mu_km3_s2: f64,
