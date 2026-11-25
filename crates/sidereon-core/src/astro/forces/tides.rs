@@ -24,6 +24,8 @@
 //! body-fixed frame provider in [`PropagationContext`] because the coefficients
 //! are evaluated in the terrestrial frame and then rotated back to GCRF.
 
+use super::r#trait::{position_difference_quotients, AccelerationPartials};
+use super::scaled::Wide;
 use crate::astro::bodies::sun_moon::sun_moon_ecef_with_polar_motion;
 use crate::astro::constants::astro::{GM_MOON_KM3_S2, GM_SUN_KM3_S2};
 use crate::astro::constants::time::{DAYS_PER_JULIAN_CENTURY, J2000_JD};
@@ -34,6 +36,7 @@ use crate::astro::forces::geopotential::{
     EGM96_REFERENCE_RADIUS_KM,
 };
 use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::forces::r#trait::{validate_epoch, validate_position};
 use crate::astro::forces::third_body::sun_moon_positions_km;
 use crate::astro::frames::nutation::iers_2010_solid_tide_arguments;
 use crate::astro::frames::orientation::EarthOrientation;
@@ -282,6 +285,20 @@ impl SolidEarthTideGravity {
         epoch_tdb_seconds: f64,
         ctx: &PropagationContext,
     ) -> Result<[SphericalHarmonicCoefficient; 10], PropagationError> {
+        let inputs = self.tide_inputs(orientation, epoch_tdb_seconds, ctx)?;
+        self.corrections(
+            inputs.bodies.sun_itrf_km,
+            inputs.bodies.moon_itrf_km,
+            inputs.step2,
+        )
+    }
+
+    fn tide_inputs(
+        &self,
+        orientation: &EarthOrientation,
+        epoch_tdb_seconds: f64,
+        ctx: &PropagationContext,
+    ) -> Result<TideInputs, PropagationError> {
         let bodies = if ctx.de_ephemeris().is_some() {
             let bodies = sun_moon_positions_km(epoch_tdb_seconds, ctx)?;
             let rotate = |position: Vector3<f64>| {
@@ -308,7 +325,7 @@ impl SolidEarthTideGravity {
         } else {
             None
         };
-        self.corrections(bodies.sun_itrf_km, bodies.moon_itrf_km, step2)
+        Ok(TideInputs { bodies, step2 })
     }
 }
 
@@ -318,34 +335,53 @@ impl ForceModel for SolidEarthTideGravity {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
+        validate_position(state)?;
+        validate_epoch(state)?;
+        validate_positive(self.mu_earth_km3_s2, "mu_earth_km3_s2")?;
+        validate_positive(self.reference_radius_km, "reference_radius_km")?;
+        validate_positive(self.gm_sun_km3_s2, "gm_sun_km3_s2")?;
+        validate_positive(self.gm_moon_km3_s2, "gm_moon_km3_s2")?;
         let orientation = orientation_at_state(ctx, state.epoch_tdb_seconds)?;
-        let position_itrf_km = orientation
-            .gcrf_to_itrf_position_km(state.position_array())
-            .map_err(|error| {
-                PropagationError::ForceModelFailure(format!(
-                    "solid Earth tide body-fixed position rotation failed: {error}"
-                ))
-            })?;
-        let corrections =
-            self.corrections_for_orientation(&orientation, state.epoch_tdb_seconds, ctx)?;
-        let tide = SphericalHarmonicGravity::from_normalized_coefficients(
-            self.mu_earth_km3_s2,
-            self.reference_radius_km,
-            SOLID_TIDE_MAX_DEGREE,
-            SOLID_TIDE_MAX_ORDER,
-            &corrections,
-            // A field of corrections holds no permanent tide of its own.
-            TideSystem::TideFree,
-        )?;
-        let accel_itrf = tide.body_fixed_acceleration_km_s2(position_itrf_km)?;
-        let accel_gcrf = orientation
-            .itrf_to_gcrf_position_km(accel_itrf)
-            .map_err(|error| {
-                PropagationError::ForceModelFailure(format!(
-                    "solid Earth tide inertial acceleration rotation failed: {error}"
-                ))
-            })?;
-        Ok(Vector3::new(accel_gcrf[0], accel_gcrf[1], accel_gcrf[2]))
+        let inputs = self.tide_inputs(&orientation, state.epoch_tdb_seconds, ctx)?;
+        let corrections = self.corrections(
+            inputs.bodies.sun_itrf_km,
+            inputs.bodies.moon_itrf_km,
+            inputs.step2,
+        );
+        let model = |coeffs: &[SphericalHarmonicCoefficient]| {
+            SphericalHarmonicGravity::from_normalized_coefficients(
+                self.mu_earth_km3_s2,
+                self.reference_radius_km,
+                SOLID_TIDE_MAX_DEGREE,
+                SOLID_TIDE_MAX_ORDER,
+                coeffs,
+                TideSystem::TideFree,
+            )
+        };
+        match corrections {
+            Ok(coeffs) => {
+                model(&coeffs)?.acceleration_in_frame(state.position_array(), &orientation, 0.0)
+            }
+            Err(PropagationError::NumericalFailure(_)) => {
+                // Keep the coefficients in extended range until the radius
+                // powers and the gravitational parameter have been applied.
+                let coefficients = wide_tide_coefficients(self, inputs)?;
+                model(&[])?.scaled_acceleration_in_frame(
+                    state.position_array(),
+                    &orientation,
+                    |index| coefficients[index],
+                )
+            }
+            Err(error) => Err(error),
+        }
+    }
+    fn acceleration_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        ctx: &PropagationContext,
+    ) -> Result<AccelerationPartials, PropagationError> {
+        position_difference_quotients(self, parameters, state, ctx)
     }
 }
 
@@ -405,34 +441,60 @@ impl ForceModel for SolidEarthPoleTideGravity {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
+        validate_position(state)?;
+        validate_epoch(state)?;
+        validate_positive(self.mu_earth_km3_s2, "mu_earth_km3_s2")?;
+        validate_positive(self.reference_radius_km, "reference_radius_km")?;
         let orientation = orientation_at_state(ctx, state.epoch_tdb_seconds)?;
-        let position_itrf_km = orientation
-            .gcrf_to_itrf_position_km(state.position_array())
-            .map_err(|error| {
-                PropagationError::ForceModelFailure(format!(
-                    "solid Earth pole tide body-fixed position rotation failed: {error}"
-                ))
-            })?;
-        let correction =
-            self.coefficient_correction(orientation.time_scales(), orientation.polar_motion())?;
-        let tide = SphericalHarmonicGravity::from_normalized_coefficients(
-            self.mu_earth_km3_s2,
-            self.reference_radius_km,
-            POLE_TIDE_MAX_DEGREE,
-            POLE_TIDE_MAX_ORDER,
-            &[correction],
-            // A field of corrections holds no permanent tide of its own.
-            TideSystem::TideFree,
-        )?;
-        let accel_itrf = tide.body_fixed_acceleration_km_s2(position_itrf_km)?;
-        let accel_gcrf = orientation
-            .itrf_to_gcrf_position_km(accel_itrf)
-            .map_err(|error| {
-                PropagationError::ForceModelFailure(format!(
-                    "solid Earth pole tide inertial acceleration rotation failed: {error}"
-                ))
-            })?;
-        Ok(Vector3::new(accel_gcrf[0], accel_gcrf[1], accel_gcrf[2]))
+        let time = orientation.time_scales();
+        let polar_motion = orientation.polar_motion();
+        if ![time.jd_tt, polar_motion.xp_rad, polar_motion.yp_rad]
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return Err(PropagationError::ForceModelFailure(
+                "pole tide inputs are non-finite at epoch".to_string(),
+            ));
+        }
+        let correction = self.coefficient_correction(time, polar_motion)?;
+        let model = |coeffs: &[SphericalHarmonicCoefficient]| {
+            SphericalHarmonicGravity::from_normalized_coefficients(
+                self.mu_earth_km3_s2,
+                self.reference_radius_km,
+                POLE_TIDE_MAX_DEGREE,
+                POLE_TIDE_MAX_ORDER,
+                coeffs,
+                TideSystem::TideFree,
+            )
+        };
+        if correction.c.is_finite() && correction.s.is_finite() {
+            return model(&[correction])?.acceleration_in_frame(
+                state.position_array(),
+                &orientation,
+                0.0,
+            );
+        }
+        let (mean_x, mean_y) = conventional_mean_pole_arcsec(time)?;
+        let unit = Wide::from(ARCSEC_TO_RAD);
+        let m1 = Wide::from(polar_motion.xp_rad) / unit - Wide::from(mean_x);
+        let m2 = -(Wide::from(polar_motion.yp_rad) / unit - Wide::from(mean_y));
+        let scale = Wide::from(SOLID_EARTH_POLE_TIDE_SCALE);
+        let coupling = Wide::from(SOLID_EARTH_POLE_TIDE_IMAG_COUPLING);
+        model(&[])?.scaled_acceleration_in_frame(state.position_array(), &orientation, |index| {
+            if index == 4 {
+                [scale * (m1 + coupling * m2), scale * (m2 - coupling * m1)]
+            } else {
+                [Wide::from(0.0); 2]
+            }
+        })
+    }
+    fn acceleration_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        ctx: &PropagationContext,
+    ) -> Result<AccelerationPartials, PropagationError> {
+        position_difference_quotients(self, parameters, state, ctx)
     }
 }
 
@@ -833,6 +895,63 @@ fn frequency_dependent_term(
             -(in_phase * sin_theta + out_of_phase * cos_theta),
         ),
     }
+}
+
+struct TideInputs {
+    bodies: SunMoonItrfKm,
+    step2: Option<[SphericalHarmonicCoefficient; 3]>,
+}
+
+fn wide_tide_coefficients(
+    model: &SolidEarthTideGravity,
+    inputs: TideInputs,
+) -> Result<[[Wide; 2]; 15], PropagationError> {
+    let zero = Wide::from(0.0);
+    let mut coeffs = [[zero; 2]; 15];
+    let mu = Wide::from(model.mu_earth_km3_s2);
+    for (gm, body) in [
+        (model.gm_sun_km3_s2, inputs.bodies.sun_itrf_km),
+        (model.gm_moon_km3_s2, inputs.bodies.moon_itrf_km),
+    ] {
+        let geometry = body_geometry(body, model.reference_radius_km)?;
+        let radius_ratio = Wide::from_scaled(
+            geometry.radius_ratio_fraction,
+            geometry.radius_ratio_exponent,
+        );
+        for (degree, legendre, numbers) in [
+            (
+                2,
+                &geometry.p2[..],
+                &DEGREE2_LOVE.map(|love| love.primary)[..],
+            ),
+            (3, &geometry.p3[..], &DEGREE3_LOVE[..]),
+        ] {
+            let gm_power = (Wide::from(gm) / mu) * radius_ratio.powi(degree + 1);
+            let start = (degree * (degree + 1) / 2) as usize;
+            for (order, (&p, love)) in legendre.iter().zip(numbers).enumerate() {
+                let base = gm_power * Wide::from(p) / Wide::from(f64::from(2 * degree + 1));
+                let cos = geometry.cos_m[order];
+                let sin = geometry.sin_m[order];
+                let c = base * Wide::from(love.real * cos + love.imag * sin);
+                let s = base * Wide::from(love.real * sin - love.imag * cos);
+                coeffs[start + order][0] = coeffs[start + order][0] + c;
+                coeffs[start + order][1] = coeffs[start + order][1] + s;
+                if degree == 2 {
+                    let plus = base * Wide::from(DEGREE2_LOVE[order].plus);
+                    coeffs[10 + order][0] = coeffs[10 + order][0] + plus * Wide::from(cos);
+                    coeffs[10 + order][1] = coeffs[10 + order][1] + plus * Wide::from(sin);
+                }
+            }
+        }
+    }
+    if let Some(step2) = inputs.step2 {
+        for (index, correction) in step2.into_iter().enumerate() {
+            coeffs[3 + index][0] = coeffs[3 + index][0] + Wide::from(correction.c);
+            coeffs[3 + index][1] = coeffs[3 + index][1] + Wide::from(correction.s);
+        }
+    }
+    coeffs[3][0] = coeffs[3][0] - Wide::from(permanent_tide_c20(model.tide_system));
+    Ok(coeffs)
 }
 
 fn add_body_tide_coefficients(

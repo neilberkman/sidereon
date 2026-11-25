@@ -1,3 +1,4 @@
+use super::scaled::{wide_norm_squared, Wide};
 use crate::astro::error::PropagationError;
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
@@ -91,7 +92,8 @@ pub trait ForceModel: Send + Sync {
     /// result directly into [`StateDerivative`](crate::astro::state::StateDerivative)'s
     /// `dvel_km_s2` field. Models that need body-fixed coordinates obtain them
     /// from `ctx`; singularities, invalid parameters, and model or frame
-    /// failures are returned as [`PropagationError`].
+    /// failures are returned as [`PropagationError`]. State components used in
+    /// the evaluation must be finite. Successful results contain finite components.
     fn acceleration(
         &self,
         state: &CartesianState,
@@ -125,7 +127,7 @@ pub trait ForceModel: Send + Sync {
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
         expect_parameter_count(parameters, 0)?;
-        self.acceleration(state, ctx)
+        self.acceleration(state, ctx).and_then(finite_acceleration)
     }
 
     /// Partial derivatives of [`ForceModel::acceleration_with_parameters`]
@@ -167,7 +169,9 @@ impl<T: ForceModel + ?Sized> ForceModel for Arc<T> {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        (**self).acceleration(state, ctx)
+        (**self)
+            .acceleration(state, ctx)
+            .and_then(finite_acceleration)
     }
 
     fn parameters(&self) -> Vec<ForceParameter> {
@@ -184,7 +188,9 @@ impl<T: ForceModel + ?Sized> ForceModel for Arc<T> {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        (**self).acceleration_with_parameters(parameters, state, ctx)
+        (**self)
+            .acceleration_with_parameters(parameters, state, ctx)
+            .and_then(finite_acceleration)
     }
 
     fn acceleration_partials(
@@ -193,7 +199,9 @@ impl<T: ForceModel + ?Sized> ForceModel for Arc<T> {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<AccelerationPartials, PropagationError> {
-        (**self).acceleration_partials(parameters, state, ctx)
+        (**self)
+            .acceleration_partials(parameters, state, ctx)
+            .and_then(finite_partials)
     }
 
     fn parameter_partials(
@@ -202,13 +210,36 @@ impl<T: ForceModel + ?Sized> ForceModel for Arc<T> {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vec<Vector3<f64>>, PropagationError> {
-        (**self).parameter_partials(parameters, state, ctx)
+        (**self)
+            .parameter_partials(parameters, state, ctx)
+            .and_then(finite_parameter_partials)
     }
 }
 
 /// Outer product `a bᵀ`.
 pub(crate) fn outer(a: &Vector3<f64>, b: &Vector3<f64>) -> Matrix3<f64> {
     Matrix3::from_fn(|row, col| a[row] * b[col])
+}
+
+pub(crate) fn validate_finite(
+    values: impl IntoIterator<Item = f64>,
+    name: &str,
+) -> Result<(), PropagationError> {
+    if values.into_iter().all(f64::is_finite) {
+        Ok(())
+    } else {
+        Err(PropagationError::InvalidInput(format!(
+            "{name} must be finite"
+        )))
+    }
+}
+
+pub(crate) fn validate_position(state: &CartesianState) -> Result<(), PropagationError> {
+    validate_finite(state.position_array(), "position")
+}
+
+pub(crate) fn validate_epoch(state: &CartesianState) -> Result<(), PropagationError> {
+    validate_finite([state.epoch_tdb_seconds], "epoch")
 }
 
 /// Refuse a state with a non-finite position or velocity component.
@@ -313,12 +344,50 @@ pub fn difference_quotient_partials<F: ForceModel + ?Sized>(
     state: &CartesianState,
     ctx: &PropagationContext,
 ) -> Result<AccelerationPartials, PropagationError> {
-    validate_finite_state(state)?;
-    let position_step = (state.position_km.norm() * DIFFERENCE_QUOTIENT_POSITION_STEP)
-        .max(DIFFERENCE_QUOTIENT_MIN_POSITION_STEP_KM);
-    let velocity_step = (state.velocity_km_s.norm() * DIFFERENCE_QUOTIENT_VELOCITY_STEP)
-        .max(DIFFERENCE_QUOTIENT_MIN_VELOCITY_STEP_KM_S);
-    if !position_step.is_finite() || !velocity_step.is_finite() {
+    difference_quotients(model, parameters, state, ctx, true)
+}
+
+pub(super) fn position_difference_quotients<F: ForceModel + ?Sized>(
+    model: &F,
+    parameters: &[f64],
+    state: &CartesianState,
+    ctx: &PropagationContext,
+) -> Result<AccelerationPartials, PropagationError> {
+    difference_quotients(model, parameters, state, ctx, false)
+}
+
+fn difference_quotients<F: ForceModel + ?Sized>(
+    model: &F,
+    parameters: &[f64],
+    state: &CartesianState,
+    ctx: &PropagationContext,
+    reads_velocity: bool,
+) -> Result<AccelerationPartials, PropagationError> {
+    validate_position(state)?;
+    let position_step = difference_step(
+        state.position_km,
+        DIFFERENCE_QUOTIENT_POSITION_STEP,
+        DIFFERENCE_QUOTIENT_MIN_POSITION_STEP_KM,
+    );
+    let velocity_step = if reads_velocity {
+        validate_finite(state.velocity_array(), "velocity")?;
+        difference_step(
+            state.velocity_km_s,
+            DIFFERENCE_QUOTIENT_VELOCITY_STEP,
+            DIFFERENCE_QUOTIENT_MIN_VELOCITY_STEP_KM_S,
+        )
+    } else {
+        0.0
+    };
+
+    let samples_fit = |vector: Vector3<f64>, step: f64| {
+        vector
+            .iter()
+            .all(|&value| (value + step).is_finite() && (value - step).is_finite())
+    };
+    if !samples_fit(state.position_km, position_step)
+        || (reads_velocity && !samples_fit(state.velocity_km_s, velocity_step))
+    {
         return Err(PropagationError::NumericalFailure(
             "state too large for difference quotients".to_string(),
         ));
@@ -330,19 +399,56 @@ pub fn difference_quotient_partials<F: ForceModel + ?Sized>(
         let mut minus = *state;
         plus.position_km[axis] += position_step;
         minus.position_km[axis] -= position_step;
-        let column = (model.acceleration_with_parameters(parameters, &plus, ctx)?
-            - model.acceleration_with_parameters(parameters, &minus, ctx)?)
-            / (plus.position_km[axis] - minus.position_km[axis]);
+        let column = difference_column(
+            model.acceleration_with_parameters(parameters, &plus, ctx)?,
+            model.acceleration_with_parameters(parameters, &minus, ctx)?,
+            plus.position_km[axis],
+            minus.position_km[axis],
+        );
         partials.wrt_position.set_column(axis, &column);
 
-        let mut plus = *state;
-        let mut minus = *state;
-        plus.velocity_km_s[axis] += velocity_step;
-        minus.velocity_km_s[axis] -= velocity_step;
-        let column = (model.acceleration_with_parameters(parameters, &plus, ctx)?
-            - model.acceleration_with_parameters(parameters, &minus, ctx)?)
-            / (plus.velocity_km_s[axis] - minus.velocity_km_s[axis]);
-        partials.wrt_velocity.set_column(axis, &column);
+        if reads_velocity {
+            let mut plus = *state;
+            let mut minus = *state;
+            plus.velocity_km_s[axis] += velocity_step;
+            minus.velocity_km_s[axis] -= velocity_step;
+            let column = difference_column(
+                model.acceleration_with_parameters(parameters, &plus, ctx)?,
+                model.acceleration_with_parameters(parameters, &minus, ctx)?,
+                plus.velocity_km_s[axis],
+                minus.velocity_km_s[axis],
+            );
+            partials.wrt_velocity.set_column(axis, &column);
+        }
     }
     finite_partials(partials)
+}
+
+fn difference_step(vector: Vector3<f64>, relative: f64, minimum: f64) -> f64 {
+    let norm = vector.norm();
+    if norm.is_finite() {
+        (norm * relative).max(minimum)
+    } else {
+        let wide = <[f64; 3]>::from(vector).map(Wide::from);
+        (wide_norm_squared(wide).sqrt() * Wide::from(relative))
+            .value()
+            .max(minimum)
+    }
+}
+
+fn difference_column(
+    plus: Vector3<f64>,
+    minus: Vector3<f64>,
+    upper: f64,
+    lower: f64,
+) -> Vector3<f64> {
+    let width = upper - lower;
+    let column = (plus - minus) / width;
+    if width.is_finite() && column.iter().all(|value| value.is_finite()) {
+        return column;
+    }
+    let width = Wide::from(upper) - Wide::from(lower);
+    Vector3::from(core::array::from_fn(|axis| {
+        ((Wide::from(plus[axis]) - Wide::from(minus[axis])) / width).value()
+    }))
 }

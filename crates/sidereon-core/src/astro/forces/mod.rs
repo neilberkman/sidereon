@@ -11,6 +11,7 @@ pub mod icgem;
 /// after [`TwoBodyGravity`] by [`crate::astro::propagator::ForceModelKind::TwoBodyJ2`].
 pub mod j2;
 pub mod relativity;
+mod scaled;
 pub mod srp;
 pub mod third_body;
 pub mod tides;
@@ -65,6 +66,8 @@ pub use tides::{
 pub use two_body::TwoBodyGravity;
 pub use zonal::{ZonalCoefficients, ZonalDegrees, ZonalGravity};
 
+#[cfg(test)]
+mod finite_tests;
 #[cfg(test)]
 mod partials_tests;
 

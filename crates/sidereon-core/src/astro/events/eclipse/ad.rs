@@ -1479,6 +1479,13 @@ impl ScaledF64 {
     }
 
     #[inline]
+    pub(crate) fn sqrt(self) -> Self {
+        let exponent = self.e.div_euclid(2);
+        let mantissa = libm::ldexp(self.m, self.e.rem_euclid(2));
+        Self::from_scaled(mantissa.sqrt(), exponent)
+    }
+
+    #[inline]
     pub(crate) fn is_zero(self) -> bool {
         self.m == 0.0
     }

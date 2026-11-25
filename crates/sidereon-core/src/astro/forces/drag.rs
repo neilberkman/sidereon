@@ -20,11 +20,13 @@
 //! intentionally left for a future optimization so each RHS evaluation is
 //! reproducible from the instantaneous state.
 
-use crate::astro::atmosphere::{self, NrlmsiseInput, MAX_ALTITUDE_KM};
-use crate::astro::constants::{
-    time::{DAYS_PER_JULIAN_YEAR, SECONDS_PER_DAY},
-    units::M_PER_KM,
+use super::r#trait::{
+    difference_quotient_partials, finite_acceleration, position_difference_quotients,
+    AccelerationPartials,
 };
+use super::scaled::{wide_norm_squared, Wide};
+use crate::astro::atmosphere::{self, NrlmsiseInput, MAX_ALTITUDE_KM};
+use crate::astro::constants::units::M_PER_KM;
 use crate::astro::error::PropagationError;
 use crate::astro::forces::r#trait::ForceModel;
 use crate::astro::frames::orientation::{
@@ -41,8 +43,6 @@ use crate::astro::time::scales::TimeScales;
 use crate::astro::time::ValidityMode;
 use nalgebra::Vector3;
 use std::sync::Arc;
-
-const MAX_EPOCH_OFFSET_S: f64 = 1000.0 * DAYS_PER_JULIAN_YEAR * SECONDS_PER_DAY;
 
 /// Space-weather inputs to NRLMSISE-00 for drag.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -177,15 +177,26 @@ impl ForceModel for DragForce {
     ) -> Result<Vector3<f64>, PropagationError> {
         validate_drag_state(state)?;
         let orientation = orientation_at_state(ctx, state.epoch_tdb_seconds)?;
-        let calendar = calendar_from_time_scales(&orientation.time_scales())?;
         drag_acceleration(
-            self.space_weather,
             self.bc_factor_m2_kg,
             self.cutoff_altitude_km,
             state,
             &orientation,
-            calendar,
+            |_| Ok(self.space_weather),
         )
+    }
+
+    fn acceleration_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        ctx: &PropagationContext,
+    ) -> Result<AccelerationPartials, PropagationError> {
+        if vector_is_finite(&state.velocity_km_s) {
+            difference_quotient_partials(self, parameters, state, ctx)
+        } else {
+            position_difference_quotients(self, parameters, state, ctx)
+        }
     }
 }
 
@@ -234,21 +245,30 @@ impl ForceModel for SourcedDragForce {
     ) -> Result<Vector3<f64>, PropagationError> {
         validate_drag_state(state)?;
         let orientation = orientation_at_state(ctx, state.epoch_tdb_seconds)?;
-        let calendar = calendar_from_time_scales(&orientation.time_scales())?;
-        let space_weather =
-            self.source
-                .at(calendar.space_weather_utc_j2000_s)
-                .map_err(|error| {
-                    PropagationError::ForceModelFailure(format!("space weather: {error}"))
-                })?;
         drag_acceleration(
-            space_weather,
             self.bc_factor_m2_kg,
             self.cutoff_altitude_km,
             state,
             &orientation,
-            calendar,
+            |epoch| {
+                self.source.at(epoch).map_err(|error| {
+                    PropagationError::ForceModelFailure(format!("space weather: {error}"))
+                })
+            },
         )
+    }
+
+    fn acceleration_partials(
+        &self,
+        parameters: &[f64],
+        state: &CartesianState,
+        ctx: &PropagationContext,
+    ) -> Result<AccelerationPartials, PropagationError> {
+        if vector_is_finite(&state.velocity_km_s) {
+            difference_quotient_partials(self, parameters, state, ctx)
+        } else {
+            position_difference_quotients(self, parameters, state, ctx)
+        }
     }
 }
 
@@ -376,19 +396,39 @@ fn orientation_at_state(
 }
 
 fn drag_acceleration(
-    space_weather: SpaceWeather,
     bc_factor_m2_kg: f64,
     cutoff_altitude_km: f64,
     state: &CartesianState,
     orientation: &EarthOrientation,
-    calendar: DragCalendar,
+    space_weather: impl FnOnce(f64) -> Result<SpaceWeather, PropagationError>,
 ) -> Result<Vector3<f64>, PropagationError> {
-    let geodetic = geodetic_from_orientation(state, orientation)?;
+    let geodetic = match geodetic_from_orientation(state, orientation) {
+        Ok(geodetic) => geodetic,
+        Err(_)
+            if !state.position_km.norm_squared().is_finite()
+                && orientation
+                    .gcrf_to_itrf_matrix()
+                    .iter()
+                    .flatten()
+                    .all(|value| value.is_finite()) =>
+        {
+            return Ok(Vector3::zeros());
+        }
+        Err(error) => return Err(error),
+    };
 
     if geodetic.alt_km <= cutoff_altitude_km || geodetic.alt_km > MAX_ALTITUDE_KM {
         return Ok(Vector3::zeros());
     }
 
+    if !vector_is_finite(&state.velocity_km_s) {
+        return Err(PropagationError::InvalidInput(
+            "velocity_km_s not finite".to_string(),
+        ));
+    }
+    let calendar = calendar_from_time_scales(&orientation.time_scales())?;
+    let space_weather = space_weather(calendar.space_weather_utc_j2000_s)?;
+    validate_space_weather(space_weather)?;
     let input = NrlmsiseInput {
         year: calendar.year,
         doy: calendar.doy,
@@ -414,27 +454,23 @@ fn drag_acceleration(
     }
 
     let v_rel_km_s = relative_velocity_km_s(state, orientation)?;
-    if !vector_is_finite(&v_rel_km_s) {
-        return Err(PropagationError::NumericalFailure(
-            "drag relative velocity not finite".to_string(),
-        ));
-    }
     let v_rel_m_s = v_rel_km_s * M_PER_KM;
     let speed_m_s = v_rel_m_s.norm();
-    if !speed_m_s.is_finite() {
-        return Err(PropagationError::NumericalFailure(
-            "drag relative speed not finite".to_string(),
-        ));
-    }
-
     let accel_m_s2 = v_rel_m_s * (-0.5 * density * bc_factor_m2_kg * speed_m_s);
     let accel_km_s2 = accel_m_s2 / M_PER_KM;
-    if !vector_is_finite(&accel_km_s2) {
-        return Err(PropagationError::NumericalFailure(
-            "drag acceleration not finite".to_string(),
-        ));
+    if vector_is_finite(&accel_km_s2) {
+        return Ok(accel_km_s2);
     }
-    Ok(accel_km_s2)
+
+    // The velocity's norm and the cannonball scale are allowed to exceed
+    // binary64 before the density and final units are applied.
+    let meters_per_km = Wide::from(M_PER_KM);
+    let velocity = <[f64; 3]>::from(v_rel_km_s).map(|value| Wide::from(value) * meters_per_km);
+    let speed = wide_norm_squared(velocity).sqrt();
+    let scale = Wide::from(-0.5) * Wide::from(density) * Wide::from(bc_factor_m2_kg) * speed;
+    finite_acceleration(Vector3::from(
+        velocity.map(|value| ((value * scale) / meters_per_km).value()),
+    ))
 }
 
 fn validate_finite_positive(field: &'static str, value: f64) -> Result<(), PropagationError> {
@@ -489,22 +525,12 @@ fn validate_drag_state(state: &CartesianState) -> Result<(), PropagationError> {
             "epoch_tdb_seconds not finite".to_string(),
         ));
     }
-    if state.epoch_tdb_seconds.abs() > MAX_EPOCH_OFFSET_S {
-        return Err(PropagationError::InvalidInput(
-            "epoch_tdb_seconds outside +/-1000 Julian years from J2000".to_string(),
-        ));
-    }
     if !vector_is_finite(&state.position_km) {
         return Err(PropagationError::InvalidInput(
             "position_km not finite".to_string(),
         ));
     }
-    if !vector_is_finite(&state.velocity_km_s) {
-        return Err(PropagationError::InvalidInput(
-            "velocity_km_s not finite".to_string(),
-        ));
-    }
-    if state.position_km.norm_squared() == 0.0 {
+    if state.position_km.iter().all(|&value| value == 0.0) {
         return Err(PropagationError::NumericalFailure(
             "Zero position magnitude".to_string(),
         ));
@@ -736,6 +762,36 @@ mod tests {
             max_step: 120.0,
             max_steps: 200_000,
             dense_output: false,
+        }
+    }
+
+    #[test]
+    fn drag_accepts_later_epochs_with_finite_frame_and_density() {
+        let ctx = PropagationContext::default();
+        let epoch = j2000_seconds(3100, 1, 1, 0, 0, 0.0);
+        let state = circular_state(epoch, 400.0, 0.1);
+        let result = test_drag(0.02).acceleration(&state, &ctx).unwrap();
+        assert!(result.norm() > 0.0);
+    }
+
+    #[test]
+    fn drag_recovers_an_overflowing_relative_speed_squared() {
+        let ctx = PropagationContext::default();
+        let mut nominal = state_from_geodetic_alt(TEST_EPOCH_S, 400.0);
+        let orientation = orientation_at_state(&ctx, nominal.epoch_tdb_seconds).unwrap();
+        nominal.velocity_km_s.fill(0.0);
+        let wind = -relative_velocity_km_s(&nominal, &orientation).unwrap();
+        nominal.velocity_km_s = wind + Vector3::x();
+        let mut large = nominal;
+        large.velocity_km_s = wind + Vector3::x() * libm::ldexp(1.0, 520);
+        let parameters = test_drag_parameters(libm::ldexp(1.0, -800));
+        let drag = parameters.to_force();
+        let source = SourcedDragForce::new(parameters, SpaceWeatherSource::Fixed(quiet_sw()));
+        for model in [&drag as &dyn ForceModel, &source] {
+            let reference = model.acceleration(&nominal, &ctx).unwrap();
+            let actual = model.acceleration(&large, &ctx).unwrap();
+            assert!(reference.x < 0.0);
+            assert_eq!(actual.x.to_bits(), libm::ldexp(reference.x, 1040).to_bits());
         }
     }
 

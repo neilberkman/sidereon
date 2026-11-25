@@ -10,15 +10,16 @@
 //! the position partials are `-mu_b / d^3 * (I - 3 d̂ d̂ᵀ)` with `d = r_b - r`
 //! (Montenbruck & Gill, section 7.3).
 
+use super::scaled::{wide_norm_squared, Wide};
 use crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds;
 use crate::astro::constants::astro::{GM_MOON_KM3_S2, GM_SUN_KM3_S2};
 use crate::astro::constants::units::M_PER_KM;
 use crate::astro::error::PropagationError;
 use crate::astro::forces::r#trait::{
-    expect_parameter_count, finite_partials, validate_finite_state, AccelerationPartials,
-    ForceModel,
+    expect_parameter_count, finite_acceleration, finite_partials, validate_finite,
+    validate_position, AccelerationPartials, ForceModel,
 };
-use crate::astro::forces::two_body::point_mass_gradient;
+use crate::astro::forces::two_body::{binary64_point_mass_gradient, scaled_point_mass_gradient};
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
 use nalgebra::{Matrix3, Vector3};
@@ -112,16 +113,31 @@ impl ForceModel for ThirdBodyGravity {
         state: &CartesianState,
         ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
+        if self.bodies == ThirdBodyBodies::NONE {
+            return Ok(Vector3::zeros());
+        }
+        self.validate(state)?;
         let bodies = sun_moon_positions_km(state.epoch_tdb_seconds, ctx)?;
-        let mut accel = Vector3::zeros();
-        if self.bodies.sun {
-            accel += third_body_acceleration(state.position_km, bodies.sun_km, self.gm_sun_km3_s2)?;
+        let active = self.active_bodies(&bodies);
+        let mut acceleration = Vector3::zeros();
+        let mut recover = false;
+        for (body, gm) in active.clone() {
+            match binary64_third_body_acceleration(state.position_km, body, gm)? {
+                Some(contribution) => acceleration += contribution,
+                None => recover = true,
+            }
         }
-        if self.bodies.moon {
-            accel +=
-                third_body_acceleration(state.position_km, bodies.moon_km, self.gm_moon_km3_s2)?;
+        if !recover && acceleration.iter().all(|value| value.is_finite()) {
+            return Ok(acceleration);
         }
-        Ok(accel)
+        let mut sum = [Wide::from(0.0); 3];
+        for (body, gm) in active {
+            let contribution = scaled_third_body_acceleration(state.position_km, body, gm);
+            for (total, value) in sum.iter_mut().zip(contribution) {
+                *total = *total + value;
+            }
+        }
+        finite_acceleration(Vector3::from(sum.map(Wide::value)))
     }
 
     fn acceleration_partials(
@@ -131,19 +147,68 @@ impl ForceModel for ThirdBodyGravity {
         ctx: &PropagationContext,
     ) -> Result<AccelerationPartials, PropagationError> {
         expect_parameter_count(parameters, 0)?;
-        validate_finite_state(state)?;
+        if self.bodies == ThirdBodyBodies::NONE {
+            return Ok(AccelerationPartials::zeros());
+        }
+        self.validate(state)?;
         let bodies = sun_moon_positions_km(state.epoch_tdb_seconds, ctx)?;
+        let active = self.active_bodies(&bodies);
         let mut gradient = Matrix3::zeros();
-        if self.bodies.sun {
-            gradient -= point_mass_gradient(bodies.sun_km - state.position_km, self.gm_sun_km3_s2)
+        let mut recover = false;
+        for (body, gm) in active.clone() {
+            let separation = body - state.position_km;
+            if separation.iter().all(|&value| value == 0.0) {
+                return Err(coincident_with_third_body());
+            }
+            match binary64_point_mass_gradient(separation, gm) {
+                Some(contribution) => gradient -= contribution,
+                None => recover = true,
+            }
+        }
+        if !recover && gradient.iter().all(|value| value.is_finite()) {
+            return Ok(AccelerationPartials::position_only(gradient));
+        }
+        let mut sum = [Wide::from(0.0); 9];
+        let satellite = state.position_array().map(Wide::from);
+        for (body, gm) in active {
+            let body = <[f64; 3]>::from(body).map(Wide::from);
+            let separation = core::array::from_fn(|i| body[i] - satellite[i]);
+            let contribution = scaled_point_mass_gradient(separation, gm)
                 .map_err(|_| coincident_with_third_body())?;
+            for (total, value) in sum.iter_mut().zip(contribution) {
+                *total = *total - value;
+            }
+        }
+        let gradient = Matrix3::from_column_slice(&sum.map(Wide::value));
+        finite_partials(AccelerationPartials::position_only(gradient))
+    }
+}
+
+impl ThirdBodyGravity {
+    fn active_bodies(
+        &self,
+        bodies: &SunMoonKm,
+    ) -> impl Iterator<Item = (Vector3<f64>, f64)> + Clone {
+        [
+            self.bodies
+                .sun
+                .then_some((bodies.sun_km, self.gm_sun_km3_s2)),
+            self.bodies
+                .moon
+                .then_some((bodies.moon_km, self.gm_moon_km3_s2)),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    fn validate(&self, state: &CartesianState) -> Result<(), PropagationError> {
+        if self.bodies.sun {
+            validate_finite([self.gm_sun_km3_s2], "solar gravitational parameter")?;
         }
         if self.bodies.moon {
-            gradient -=
-                point_mass_gradient(bodies.moon_km - state.position_km, self.gm_moon_km3_s2)
-                    .map_err(|_| coincident_with_third_body())?;
+            validate_finite([self.gm_moon_km3_s2], "lunar gravitational parameter")?;
         }
-        finite_partials(AccelerationPartials::position_only(gradient))
+        validate_position(state)
     }
 }
 
@@ -163,6 +228,7 @@ pub(crate) fn sun_moon_positions_km(
     epoch_tdb_seconds: f64,
     ctx: &PropagationContext,
 ) -> Result<SunMoonKm, PropagationError> {
+    validate_finite([epoch_tdb_seconds], "epoch")?;
     let body_error = |error: &dyn core::fmt::Display| {
         PropagationError::ForceModelFailure(format!("Sun/Moon: {error}"))
     };
@@ -174,6 +240,14 @@ pub(crate) fn sun_moon_positions_km(
             sun_moon_gcrs_at_tdb_seconds(epoch_tdb_seconds).map_err(|error| body_error(&error))?
         }
     };
+    if !bodies
+        .sun
+        .iter()
+        .chain(&bodies.moon)
+        .all(|value| value.is_finite())
+    {
+        return Err(body_error(&"non-finite position at epoch"));
+    }
     Ok(SunMoonKm {
         sun_km: meters_to_km(bodies.sun),
         moon_km: meters_to_km(bodies.moon),
@@ -188,20 +262,20 @@ fn meters_to_km(position_m: [f64; 3]) -> Vector3<f64> {
     )
 }
 
-fn third_body_acceleration(
+fn binary64_third_body_acceleration(
     sat_pos_km: Vector3<f64>,
     body_pos_km: Vector3<f64>,
     gm_body_km3_s2: f64,
-) -> Result<Vector3<f64>, PropagationError> {
+) -> Result<Option<Vector3<f64>>, PropagationError> {
     let body_r2 = body_pos_km.norm_squared();
-    if body_r2 == 0.0 {
+    if body_pos_km.iter().all(|&value| value == 0.0) {
         return Err(PropagationError::NumericalFailure(
             "Zero third-body position magnitude".to_string(),
         ));
     }
     let delta = body_pos_km - sat_pos_km;
     let delta_r2 = delta.norm_squared();
-    if delta_r2 == 0.0 {
+    if delta.iter().all(|&value| value == 0.0) {
         return Err(PropagationError::NumericalFailure(
             "Satellite coincident with third body".to_string(),
         ));
@@ -209,7 +283,45 @@ fn third_body_acceleration(
 
     let body_r = body_r2.sqrt();
     let delta_r = delta_r2.sqrt();
-    Ok(gm_body_km3_s2 * (delta / (delta_r2 * delta_r) - body_pos_km / (body_r2 * body_r)))
+    let body_r3 = body_r2 * body_r;
+    let delta_r3 = delta_r2 * delta_r;
+    let acceleration = gm_body_km3_s2 * (delta / delta_r3 - body_pos_km / body_r3);
+    if body_r3.is_finite()
+        && delta_r3.is_finite()
+        && acceleration.iter().all(|value| value.is_finite())
+    {
+        return Ok(Some(acceleration));
+    }
+
+    Ok(None)
+}
+
+#[cfg(test)]
+fn third_body_acceleration(
+    satellite: Vector3<f64>,
+    body: Vector3<f64>,
+    gm: f64,
+) -> Result<Vector3<f64>, PropagationError> {
+    Ok(
+        binary64_third_body_acceleration(satellite, body, gm)?.unwrap_or_else(|| {
+            Vector3::from(scaled_third_body_acceleration(satellite, body, gm).map(Wide::value))
+        }),
+    )
+}
+
+fn scaled_third_body_acceleration(
+    sat_pos_km: Vector3<f64>,
+    body_pos_km: Vector3<f64>,
+    gm_body_km3_s2: f64,
+) -> [Wide; 3] {
+    let body = <[f64; 3]>::from(body_pos_km).map(Wide::from);
+    let satellite = <[f64; 3]>::from(sat_pos_km).map(Wide::from);
+    let delta = core::array::from_fn(|i| body[i] - satellite[i]);
+    let body_r2 = wide_norm_squared(body);
+    let delta_r2 = wide_norm_squared(delta);
+    let body_r3 = body_r2 * body_r2.sqrt();
+    let delta_r3 = delta_r2 * delta_r2.sqrt();
+    core::array::from_fn(|i| Wide::from(gm_body_km3_s2) * (delta[i] / delta_r3 - body[i] / body_r3))
 }
 
 #[cfg(test)]
@@ -224,6 +336,7 @@ mod tests {
 
     use super::*;
     use crate::astro::constants::astro::AU_KM;
+    use crate::astro::forces::two_body::point_mass_gradient;
 
     fn assert_close_vector(actual: Vector3<f64>, expected: [f64; 3], tolerance: f64) {
         for axis in 0..3 {
@@ -262,6 +375,18 @@ mod tests {
             ],
             1.0e-20,
         );
+    }
+
+    #[test]
+    fn tidal_term_recovers_when_both_radius_cubes_underflow() {
+        let body = Vector3::new(2.0, 0.0, 0.0);
+        let satellite = Vector3::x();
+        let gm = libm::ldexp(1.0, -800);
+        let reference = third_body_acceleration(satellite, body, gm).unwrap();
+        let scale = libm::ldexp(1.0, -400);
+        let actual = third_body_acceleration(satellite * scale, body * scale, gm).unwrap();
+        assert_ne!(reference.x, 0.0);
+        assert_eq!(actual.x.to_bits(), libm::ldexp(reference.x, 800).to_bits());
     }
 
     #[test]
