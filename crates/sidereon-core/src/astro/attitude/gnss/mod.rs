@@ -2,6 +2,9 @@
 //! midnight turn and shadow-crossing laws, orbit-normal mode, and the
 //! Sun-fixed DYB frame.
 //!
+//! [`OrbitAttitudeTrajectory`] supplies GCRF states and the Sun along an orbit
+//! on the TDB seconds past J2000 axis.
+//!
 //! # Conventions
 //!
 //! All vectors are in one geocentric inertial frame chosen by the caller; the
@@ -353,9 +356,11 @@
 mod block;
 mod geometry;
 mod laws;
+mod orbit;
 mod search;
 
 pub use block::{BeidouManufacturer, BeidouOrbitClass, GnssBlock, GnssBlockError};
+pub use orbit::OrbitAttitudeTrajectory;
 
 use crate::astro::math::vec3::{cross3, neg3, norm3, sub3, unit3};
 use geometry::{wrap_pi, Context};
