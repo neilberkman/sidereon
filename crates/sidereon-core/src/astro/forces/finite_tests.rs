@@ -427,6 +427,28 @@ fn high_degree_and_relativistic_recovery_preserve_homogeneity() {
 }
 
 #[test]
+fn j2_recovers_when_the_cubed_radius_overflows() {
+    let model = J2Gravity {
+        mu: pow2(600),
+        re: pow2(200),
+        j2: 0.125,
+    };
+    let state = axial(350);
+    let ctx = PropagationContext::default();
+    // On the x axis, a_x = -(3/2) J2 mu Re² / x⁴ and da_x/dx = -4 a_x / x.
+    let acceleration = model.acceleration(&state, &ctx).unwrap();
+    let partials = model.acceleration_partials(&[], &state, &ctx).unwrap();
+    assert_eq!(acceleration.x, -0.1875 * pow2(-400));
+    assert_eq!(partials.wrt_position[(0, 0)], 0.75 * pow2(-750));
+    for (row, col) in [(0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1)] {
+        assert_eq!(
+            partials.wrt_position[(row, col)].to_bits(),
+            0.0_f64.to_bits()
+        );
+    }
+}
+
+#[test]
 fn newtonian_limit_returns_zero_acceleration_and_partials() {
     let model = SchwarzschildRelativity::new(4.0e5, f64::INFINITY);
     let ctx = PropagationContext::default();

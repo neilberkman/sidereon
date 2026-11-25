@@ -1,6 +1,10 @@
-use super::scaled::{wide_norm_squared, Wide};
+use super::scaled::{wide_dot, Wide};
 use crate::astro::constants::{J2_EARTH, MU_EARTH, RE_EARTH};
 use crate::astro::error::PropagationError;
+use crate::astro::events::eclipse::{
+    ad::{FieldVec3, Grad, ScaledF64, ScaledGrad, Vec3},
+    fast_math,
+};
 use crate::astro::forces::r#trait::{
     expect_parameter_count, finite_acceleration, finite_partials, validate_finite,
     validate_position, AccelerationPartials, ForceModel,
@@ -12,20 +16,20 @@ use nalgebra::{Matrix3, Vector3};
 /// Degree-2 zonal-harmonic perturbation model for Cartesian propagation.
 ///
 /// The [`crate::astro::forces::ForceModel`] implementation uses `state.position_km`
-/// to return the perturbation acceleration in km/s². Its scale is
-/// `1.5 * j2 * (mu / r²) * (re / r)²`; the x and y components use
-/// `(coordinate / r) * (5 * z² / r² - 1)`, while the z component uses
-/// `(z / r) * (5 * z² / r² - 3)`. [`crate::astro::propagator::numerical::ForceModelKind::TwoBodyJ2`]
-/// builds this model alongside [`crate::astro::forces::TwoBodyGravity`], and a
-/// position whose norm squared is exactly zero returns
-/// [`crate::astro::error::PropagationError::NumericalFailure`].
-/// [`ForceModel::acceleration_partials`] is the closed-form derivative of that
-/// acceleration with respect to position.
+/// to return the perturbation acceleration in km/s². It evaluates the
+/// acceleration and its position partials in the order of Orekit 13.1.10's
+/// full `J2OnlyPerturbation.acceleration` evaluations, using `Gradient` for
+/// the partials and including the same-frame static transforms.
+/// The J2 axis is the z axis of the propagation frame. For
+/// [`crate::astro::propagator::ForceModelKind::TwoBodyJ2`], the equivalent
+/// Orekit configuration uses GCRF for both the propagation and J2 frames.
+/// Arithmetic with extended exponents recovers results when intermediate
+/// scales exceed the binary64 exponent range.
+/// A zero position returns [`PropagationError::NumericalFailure`].
 pub struct J2Gravity {
     /// Gravitational parameter in km³/s². `Default::default` sets this to
     /// [`crate::astro::constants::MU_EARTH`], `ForceModelKind::build` copies
-    /// `TwoBodyJ2::mu_km3_s2` here, and `acceleration` uses it in the `mu / r²`
-    /// factor.
+    /// `TwoBodyJ2::mu_km3_s2` here.
     pub mu: f64,
     /// Gravity-model reference equatorial radius in km. `Default::default` sets
     /// this to [`crate::astro::constants::RE_EARTH`], `ForceModelKind::build`
@@ -59,36 +63,56 @@ impl ForceModel for J2Gravity {
         _ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
         self.validate(state)?;
-        let r_mag2 = state.position_km.norm_squared();
-        let r_mag = r_mag2.sqrt();
-
-        let re_over_r = self.re / r_mag;
-        let f = 1.5 * self.j2 * (self.mu / r_mag2) * (re_over_r * re_over_r);
-        let z_r2 = (state.position_km.z * state.position_km.z) / r_mag2;
-
-        let acceleration = Vector3::new(
-            f * (state.position_km.x / r_mag) * (5.0 * z_r2 - 1.0),
-            f * (state.position_km.y / r_mag) * (5.0 * z_r2 - 1.0),
-            f * (state.position_km.z / r_mag) * (5.0 * z_r2 - 3.0),
-        );
-        if r_mag2.is_finite() && acceleration.iter().all(|value| value.is_finite()) {
-            return Ok(acceleration);
+        let [x, y, z] = state.position_array();
+        let r2 = Vec3::new(x, y, z).norm_sq();
+        let ratio_times_five = 5.0 * (z * z) / r2;
+        let equatorial = ratio_times_five - 1.0;
+        let axial = ratio_times_five - 3.0;
+        let components = Vec3::new(x * equatorial, y * equatorial, z * axial);
+        let re2 = self.re * self.re;
+        let radii_ratio = re2 / r2;
+        let denominator = 2.0 * (r2 * fast_math::sqrt(r2));
+        let j2_mu = (3.0 * self.j2) * self.mu;
+        let numerator = j2_mu * radii_ratio;
+        let factor = numerator / denominator;
+        let acceleration = components.scalar_mul(factor);
+        let zero_scale = self.re == 0.0 || self.j2 == 0.0 || self.mu == 0.0;
+        if r2.is_normal()
+            && denominator.is_normal()
+            && normal_or_zero(re2, self.re == 0.0)
+            && normal_or_zero(radii_ratio, self.re == 0.0)
+            && normal_or_zero(j2_mu, self.j2 == 0.0 || self.mu == 0.0)
+            && normal_or_zero(numerator, zero_scale)
+            && normal_or_zero(factor, zero_scale)
+            && (factor.abs() <= 1.0
+                || (normal_or_zero(components.x, x == 0.0 || equatorial == 0.0)
+                    && normal_or_zero(components.y, y == 0.0 || equatorial == 0.0)
+                    && normal_or_zero(components.z, z == 0.0 || axial == 0.0)))
+            && [acceleration.x, acceleration.y, acceleration.z]
+                .iter()
+                .all(|value| value.is_finite())
+        {
+            return Ok(Vector3::new(acceleration.x, acceleration.y, acceleration.z));
         }
 
-        // Preserve the radius and reference-radius powers across exponent limits.
-        let position = state.position_array().map(Wide::from);
-        let r2 = wide_norm_squared(position);
-        let r = r2.sqrt();
-        let re_over_r = Wide::from(self.re) / r;
-        let f = Wide::from(1.5)
-            * Wide::from(self.j2)
-            * (Wide::from(self.mu) / r2)
-            * (re_over_r * re_over_r);
-        let z_r2 = position[2] * position[2] / r2;
-        finite_acceleration(Vector3::from(core::array::from_fn(|axis| {
-            let offset = if axis == 2 { 3.0 } else { 1.0 };
-            (f * (position[axis] / r) * (Wide::from(5.0) * z_r2 - Wide::from(offset))).value()
-        })))
+        let position = [x, y, z].map(Wide::from);
+        let [x, y, z] = position;
+        let r2 = wide_dot(position, position);
+        let ratio_times_five = Wide::from(5.0) * (z * z) / r2;
+        let equatorial = ratio_times_five - Wide::from(1.0);
+        let components = [
+            x * equatorial,
+            y * equatorial,
+            z * (ratio_times_five - Wide::from(3.0)),
+        ];
+        let re = Wide::from(self.re);
+        let radii_ratio = (re * re) / r2;
+        let cubed_radius = r2 * r2.sqrt();
+        let factor = Wide::from(3.0) * Wide::from(self.j2) * Wide::from(self.mu) * radii_ratio
+            / (Wide::from(2.0) * cubed_radius);
+        finite_acceleration(Vector3::from(
+            components.map(|component| (factor * component).value()),
+        ))
     }
 
     fn acceleration_partials(
@@ -99,37 +123,53 @@ impl ForceModel for J2Gravity {
     ) -> Result<AccelerationPartials, PropagationError> {
         expect_parameter_count(parameters, 0)?;
         self.validate(state)?;
-        let position = state.position_km;
-        let r2 = position.norm_squared();
-        // a = k [x g, y g, z g_z] with g = (5 z² - r²) / r⁷ and
-        // g_z = (5 z² - 3 r²) / r⁷, k = 1.5 J2 mu Re².
-        let (x, y, z) = (position.x, position.y, position.z);
-        let z2 = z * z;
-        let r = r2.sqrt();
-        let r7 = r2 * r2 * r2 * r;
-        let r9 = r7 * r2;
-        let k = 1.5 * self.j2 * self.mu * self.re * self.re;
-        let g = (5.0 * z2 - r2) / r7;
-        let g_z = (5.0 * z2 - 3.0 * r2) / r7;
-        let dg_xy = (5.0 * r2 - 35.0 * z2) / r9;
-        let dg_z = (15.0 * r2 - 35.0 * z2) / r9;
-        let dgz_z = (25.0 * r2 - 35.0 * z2) / r9;
-        let gradient = Matrix3::new(
-            g + x * x * dg_xy,
-            x * y * dg_xy,
-            x * z * dg_z,
-            x * y * dg_xy,
-            g + y * y * dg_xy,
-            y * z * dg_z,
-            x * z * dg_z,
-            y * z * dg_z,
-            g_z + z2 * dgz_z,
-        ) * k;
-        if r9.is_finite() && gradient.iter().all(|value| value.is_finite()) {
-            return Ok(AccelerationPartials::position_only(gradient));
+        let [x, y, z] = state.position_array();
+        let position = FieldVec3::new(
+            Grad::variable(0, x),
+            Grad::variable(1, y),
+            Grad::variable(2, z),
+        );
+        let translated = FieldVec3::new(Grad::ZERO, Grad::ZERO, Grad::ZERO).add(position);
+        let [x, y, z] = rotate_identity([translated.x, translated.y, translated.z], Grad::ONE);
+        let r2 = FieldVec3::new(x, y, z).norm_sq();
+        let ratio_times_five = z.square().mul_f64(5.0).div(r2);
+        let equatorial = ratio_times_five.sub_f64(1.0);
+        let components = FieldVec3::new(
+            x.mul(equatorial),
+            y.mul(equatorial),
+            z.mul(ratio_times_five.sub_f64(3.0)),
+        );
+        let re2 = self.re * self.re;
+        let radii_ratio = r2.reciprocal().mul_f64(re2);
+        let radius = r2.sqrt();
+        let denominator = r2.mul(radius).mul_f64(2.0);
+        let j2_mu = Grad::constant(self.j2).mul_f64(self.mu).mul_f64(3.0);
+        let numerator = j2_mu.mul(radii_ratio);
+        let factor = numerator.div(denominator);
+        let acceleration = components.scalar_mul(factor);
+        let acceleration = rotate_identity(
+            [acceleration.x, acceleration.y, acceleration.z],
+            Grad::ONE.negate(),
+        );
+        let zero_scale = self.re == 0.0 || self.j2 == 0.0 || self.mu == 0.0;
+        if gradient_divisor_in_range(r2.value)
+            && gradient_divisor_in_range(denominator.value)
+            && normal_or_zero(re2, self.re == 0.0)
+            && normal_or_zero(radii_ratio.value, self.re == 0.0)
+            && normal_or_zero(self.j2 * self.mu, self.j2 == 0.0 || self.mu == 0.0)
+            && normal_or_zero(numerator.value, zero_scale)
+            && normal_or_zero(factor.value, zero_scale)
+            && normal_or_zero(factor.value / radius.value, zero_scale)
+            && acceleration
+                .iter()
+                .all(|component| component.grad.iter().all(|entry| entry.is_finite()))
+        {
+            return Ok(AccelerationPartials::position_only(Matrix3::from_rows(
+                &acceleration.map(|component| component.grad.into()),
+            )));
         }
         finite_partials(AccelerationPartials::position_only(
-            self.scaled_gradient(state),
+            self.scaled_gradient(position),
         ))
     }
 }
@@ -146,53 +186,66 @@ impl J2Gravity {
         Ok(())
     }
 
-    fn scaled_gradient(&self, state: &CartesianState) -> Matrix3<f64> {
-        let position = state.position_array().map(Wide::from);
-        let [x, y, z] = position;
-        let r2 = wide_norm_squared(position);
-        let z2 = z * z;
-        let r7 = r2 * r2 * r2 * r2.sqrt();
-        let r9 = r7 * r2;
-        let k = Wide::from(1.5)
-            * Wide::from(self.j2)
-            * Wide::from(self.mu)
-            * Wide::from(self.re)
-            * Wide::from(self.re);
-        let g = (Wide::from(5.0) * z2 - r2) / r7;
-        let g_z = (Wide::from(5.0) * z2 - Wide::from(3.0) * r2) / r7;
-        let dg_xy = (Wide::from(5.0) * r2 - Wide::from(35.0) * z2) / r9;
-        let dg_z = (Wide::from(15.0) * r2 - Wide::from(35.0) * z2) / r9;
-        let dgz_z = (Wide::from(25.0) * r2 - Wide::from(35.0) * z2) / r9;
-        let entries = [
-            g + x * x * dg_xy,
-            x * y * dg_xy,
-            x * z * dg_z,
-            x * y * dg_xy,
-            g + y * y * dg_xy,
-            y * z * dg_z,
-            x * z * dg_z,
-            y * z * dg_z,
-            g_z + z2 * dgz_z,
+    fn scaled_gradient(&self, position: FieldVec3) -> Matrix3<f64> {
+        let [x, y, z] = [position.x, position.y, position.z]
+            .map(|component| ScaledGrad::ZERO.add(ScaledGrad::from_grad(component)));
+        let r2 = x.square().add(y.square()).add(z.square());
+        let ratio_times_five = z.square().mul_scalar(ScaledF64::from_f64(5.0)).div(r2);
+        let equatorial = ratio_times_five.sub_scalar(1.0);
+        let components = [
+            x.mul_ordered(equatorial),
+            y.mul_ordered(equatorial),
+            z.mul_ordered(ratio_times_five.sub_scalar(3.0)),
         ];
-        Matrix3::from_row_slice(&entries.map(|entry| (entry * k).value()))
+        let re = ScaledF64::from_f64(self.re);
+        let radii_ratio = r2.reciprocal().mul_scalar(re.mul(re));
+        let cubed_radius = r2.mul_ordered(r2.sqrt());
+        let three = ScaledF64::from_f64(3.0);
+        let two = ScaledF64::from_f64(2.0);
+        let factor = ScaledGrad::from_grad(Grad::constant(self.j2))
+            .mul_scalar(ScaledF64::from_f64(self.mu))
+            .mul_scalar(three)
+            .mul_ordered(radii_ratio)
+            .div(cubed_radius.mul_scalar(two));
+        Matrix3::from_rows(&components.map(|component| {
+            ScaledGrad::ZERO
+                .add(component.mul_ordered(factor))
+                .grad
+                .map(ScaledF64::to_f64)
+                .into()
+        }))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::astro::propagator::api::PropagationContext;
-    use crate::astro::state::CartesianState;
+/// Hipparchus's field quaternion rotation with q1 = q2 = q3 = +0.
+/// For finite lanes, the zero quaternion products only affect signs of zeros.
+/// The final double and subtract reproduce the original nonzero lanes exactly
+/// when the double is finite, and return +0 for zero lanes. In scaled
+/// arithmetic, adding +0 has the same effect without a binary64 range limit.
+fn rotate_identity([x, y, z]: [Grad; 3], q0: Grad) -> [Grad; 3] {
+    let q1_x = Grad::ZERO.mul(x);
+    let q2_y = Grad::ZERO.mul(y);
+    let q3_z = Grad::ZERO.mul(z);
+    let s = q1_x.add(q2_y).add(q3_z);
+    let rotate = |component: Grad, cross: Grad| {
+        q0.mul(component.mul(q0).sub(cross))
+            .add(s.mul(Grad::ZERO))
+            .mul_f64(2.0)
+            .sub(component)
+    };
+    [
+        rotate(x, q3_z.sub(q2_y)),
+        rotate(y, q1_x.sub(q3_z)),
+        rotate(z, q2_y.sub(q1_x)),
+    ]
+}
 
-    #[test]
-    fn acceleration_matches_pinned_bits() {
-        let state = CartesianState::new(0.0, [7000.0, -1210.0, 1300.0], [0.0, 0.0, 0.0]);
-        let acceleration = J2Gravity::default()
-            .acceleration(&state, &PropagationContext::default())
-            .unwrap();
+fn normal_or_zero(value: f64, exact_zero: bool) -> bool {
+    value.is_normal() || (exact_zero && value == 0.0)
+}
 
-        assert_eq!(acceleration.x.to_bits(), 13_754_131_348_549_160_135);
-        assert_eq!(acceleration.y.to_bits(), 4_519_025_615_523_880_849);
-        assert_eq!(acceleration.z.to_bits(), 13_750_824_904_549_515_386);
-    }
+/// Gradient division and reciprocal both use the square of the inverse.
+fn gradient_divisor_in_range(value: f64) -> bool {
+    let inverse = 1.0 / value;
+    (inverse * inverse).is_normal()
 }

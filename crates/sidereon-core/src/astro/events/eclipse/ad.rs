@@ -1974,6 +1974,79 @@ impl<const N: usize> ScaledGrad<N> {
         }
     }
 
+    /// The ordered two products in Hipparchus `Gradient.multiply`.
+    #[inline]
+    pub(crate) fn mul_ordered(self, rhs: Self) -> Self {
+        Self {
+            val: self.val.mul(rhs.val),
+            grad: core::array::from_fn(|i| {
+                self.grad[i].mul(rhs.val).add(self.val.mul(rhs.grad[i]))
+            }),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn mul_scalar(self, scalar: ScaledF64) -> Self {
+        Self {
+            val: self.val.mul(scalar),
+            grad: self.grad.map(|entry| entry.mul(scalar)),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn sub_scalar(self, scalar: f64) -> Self {
+        Self {
+            val: self.val.sub(ScaledF64::from_f64(scalar)),
+            grad: self.grad,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn div(self, rhs: Self) -> Self {
+        let inverse = ScaledF64::from_f64(1.0).div(rhs.val);
+        let inverse_squared = inverse.mul(inverse);
+        Self {
+            val: self.val.mul(inverse),
+            grad: core::array::from_fn(|i| {
+                self.grad[i]
+                    .mul(rhs.val)
+                    .sub(self.val.mul(rhs.grad[i]))
+                    .mul(inverse_squared)
+            }),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn square(self) -> Self {
+        self.compose(
+            self.val.mul(self.val),
+            ScaledF64::from_f64(2.0).mul(self.val),
+        )
+    }
+
+    #[inline]
+    pub(crate) fn reciprocal(self) -> Self {
+        let inverse = ScaledF64::from_f64(1.0).div(self.val);
+        self.compose(inverse, inverse.negate().mul(inverse))
+    }
+
+    #[inline]
+    pub(crate) fn sqrt(self) -> Self {
+        let root = self.val.sqrt();
+        self.compose(
+            root,
+            ScaledF64::from_f64(1.0).div(ScaledF64::from_f64(2.0).mul(root)),
+        )
+    }
+
+    #[inline]
+    fn compose(self, val: ScaledF64, slope: ScaledF64) -> Self {
+        Self {
+            val,
+            grad: self.grad.map(|entry| slope.mul(entry)),
+        }
+    }
+
     #[inline]
     pub(crate) fn is_all_finite(self) -> bool {
         self.val.is_finite() && self.grad.iter().all(|g| g.is_finite())
