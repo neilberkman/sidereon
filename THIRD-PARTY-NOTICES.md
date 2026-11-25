@@ -7,27 +7,22 @@ attributions are reproduced below. No copyleft (GPL/LGPL/AGPL/MPL/EUPL/CDDL)
 code or dependencies are included.
 
 --------------------------------------------------------------------------------
-## Orekit (Apache License 2.0) — test data
+## Orekit (Apache License 2.0)
 
 Four CCSDS TDM KVN files under `crates/sidereon-core/tests/fixtures/tdm/`, named
 `orekit_*.kvn`, are copied byte for byte from Orekit's
-`src/test/resources/ccsds/tdm/kvn/`. No Orekit source code is used. Each file
+`src/test/resources/ccsds/tdm/kvn/`. Each file
 carries whitespace or a line length CCSDS 503.0-B-2 forbids, which is what the
 tests measure, so the bytes are kept as published rather than cleaned up.
 
-  OREKIT Copyright 2002-2026 CS GROUP
-
-  Licensed under the Apache License, Version 2.0 (the "License"); you may not
-  use these files except in compliance with the License. You may obtain a copy
-  of the License at
-
-      http://www.apache.org/licenses/LICENSE-2.0
-
-  Unless required by applicable law or agreed to in writing, software
-  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
-  License for the specific language governing permissions and limitations under
-  the License.
+The IERS 2010 Earth-orientation module includes Orekit 13.1.10's coefficient
+tables and fundamental nutation arguments. The module adapts Orekit's frame
+providers and Hipparchus 4.0.3's quaternion and interpolation arithmetic.
+The source copyright notices appear in the
+[crate's third-party notices](crates/sidereon-core/THIRD-PARTY-NOTICES.md#orekit-13110-and-hipparchus-403).
+The [Apache License, Version 2.0](crates/sidereon-core/APACHE-2.0.txt),
+[Orekit NOTICE](crates/sidereon-core/OREKIT-NOTICE.txt) and
+[Hipparchus NOTICE](crates/sidereon-core/HIPPARCHUS-NOTICE.txt) apply.
 
 --------------------------------------------------------------------------------
 ## RTKLIB (BSD 2-Clause)

@@ -20,3 +20,29 @@ public sources:
   license and derivation notice.
 
 No copyleft code is included.
+
+## Orekit 13.1.10 and Hipparchus 4.0.3
+
+The IERS 2010 Earth-orientation module includes Orekit's IERS coefficient
+tables and nutation arguments. Its date, rotation and interpolation code
+includes adaptations of the following Apache-2.0 sources.
+
+- `AbsoluteDate.java`, `DateComponents.java`, `TimeComponents.java`,
+  `UTCScale.java`, `UTCTAIOffset.java`, `UT1Scale.java`, `CIRFProvider.java`,
+  `TIRFProvider.java`, `ITRFProvider.java`, `Transform.java`,
+  `EOPHistory.java`, `IERSConventions.java`, `FundamentalNutationArguments.java`,
+  `NutationCodec.java`, `PoissonSeries.java`, `PoissonSeriesParser.java`,
+  `PolynomialParser.java`, `PolynomialNutation.java`, `SeriesTerm.java`,
+  `TideTerm.java`, `LuniSolarTerm.java`, `PlanetaryTerm.java`,
+  `GeneralTerm.java` and `NoFarPlanetsTerm.java`. Copyright 2002-2025 CS GROUP.
+- `TimeOffset.java`. Copyright 2022-2025 Luc Maisonobe.
+- `KinematicTransform.java`. Copyright 2022-2025 Romain Serra.
+- `Rotation.java`, `Vector3D.java`, `HermiteInterpolator.java`, `FastMath.java`
+  and `MathArrays.java`. Licensed to the Apache Software Foundation (ASF)
+  under one or more contributor license agreements. Their headers refer
+  to the Hipparchus NOTICE for copyright ownership and identify the
+  modifications by the Hipparchus project.
+
+See the [Apache License, Version 2.0](APACHE-2.0.txt), the
+[Orekit NOTICE](OREKIT-NOTICE.txt), and the
+[Hipparchus NOTICE](HIPPARCHUS-NOTICE.txt).

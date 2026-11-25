@@ -7,14 +7,11 @@
 //! segments. Each element contributes reflected shortwave radiation when sunlit
 //! plus emitted longwave radiation.
 //!
-//! Each surface element's geocentric latitude for the Knocke zonal albedo and
-//! emissivity model is measured from Earth's celestial intermediate pole
-//! expressed in GCRS (the third row of the GCRS-to-true-of-date rotation
-//! `N * P * B`, evaluated at the state epoch's TT and TDB), rather than the
-//! fixed GCRS z axis. Polar motion is outside this model's inputs, so the
-//! polar-motion offset between the celestial intermediate pole and the ITRS
-//! pole (below about 1e-5 rad of latitude) is omitted.
-//!
+//! The Knocke model measures surface latitude from the ITRF pole when the
+//! propagation context supplies an Earth-orientation provider. By default it
+//! uses the celestial intermediate pole, the third row of the
+//! GCRS-to-true-of-date rotation evaluated at the state's epoch.
+
 //! The Sun and Moon positions come from the crate's analytic series in GCRS
 //! ([`sun_moon_gcrs_at_tdb_seconds`](crate::astro::bodies::sun_moon::sun_moon_gcrs_at_tdb_seconds)),
 //! with the series evaluated at the TT of the state's TDB epoch and rotated
@@ -168,21 +165,31 @@ impl ForceModel for EarthRadiationPressure {
     fn acceleration(
         &self,
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        if !self.include_moon_eclipse {
-            let sun_pos_km = sun_position_km(state.epoch_tdb_seconds)?;
-            return earth_radiation_acceleration_with_sun(state, sun_pos_km, *self);
-        }
         let bodies = sun_moon_positions_km(state.epoch_tdb_seconds)?;
-        earth_radiation_acceleration_with_bodies(state, bodies.sun_km, Some(bodies.moon_km), *self)
+        let moon = self.include_moon_eclipse.then_some(bodies.moon_km);
+        if let Some(provider) = ctx.body_fixed_frame_provider() {
+            let orientation = provider
+                .orientation_at_tdb_seconds(state.epoch_tdb_seconds)
+                .map(|orientation| ctx.record_orientation(orientation))
+                .map_err(|error| {
+                    PropagationError::from_frame("albedo body-fixed frame evaluation failed", error)
+                })?;
+            let [x, y, z] = orientation.gcrf_to_itrf_matrix()[2];
+            return earth_radiation_acceleration_with_pole(
+                state,
+                bodies.sun_km,
+                moon,
+                Vector3::new(x, y, z),
+                *self,
+            );
+        }
+        earth_radiation_acceleration_with_bodies(state, bodies.sun_km, moon, *self)
     }
 }
 
-fn sun_position_km(epoch_tdb_seconds: f64) -> Result<Vector3<f64>, PropagationError> {
-    Ok(sun_moon_positions_km(epoch_tdb_seconds)?.sun_km)
-}
-
+#[cfg(test)]
 fn earth_radiation_acceleration_with_sun(
     state: &CartesianState,
     sun_pos_km: Vector3<f64>,
@@ -507,6 +514,55 @@ mod tests {
     fn dayside_leo_state() -> CartesianState {
         let r = WGS84_A_KM + 700.0;
         CartesianState::new(0.0, [r, 0.0, 0.0], [0.0, 7.5, 0.0])
+    }
+
+    #[test]
+    fn context_supplies_the_terrestrial_pole() {
+        use std::sync::Arc;
+
+        use crate::astro::frames::{
+            EarthOrientationProvider, Iers2010EarthOrientationProvider, Iers2010EopSample,
+        };
+
+        let sample = Iers2010EopSample {
+            mjd_utc: 59_024,
+            xp_arcsec: 0.18,
+            yp_arcsec: 0.43,
+            ut1_minus_utc_s: -0.23,
+            lod_s: -0.001,
+            dx_arcsec: 0.0002,
+            dy_arcsec: -0.0001,
+            pole_rates_rad_s: None,
+        };
+        let provider = Arc::new(
+            Iers2010EarthOrientationProvider::new(vec![
+                sample,
+                Iers2010EopSample {
+                    mjd_utc: 59_026,
+                    ..sample
+                },
+            ])
+            .unwrap(),
+        );
+        let state = CartesianState::new(646_315_251.184, [7000.0, 3000.0, 4000.0], [0.0; 3]);
+        let model = EarthRadiationPressure::new(1.2, 0.01).unwrap();
+        let context = PropagationContext::new().with_body_fixed_frame_provider(provider.clone());
+        let orientation = provider
+            .orientation_at_tdb_seconds(state.epoch_tdb_seconds)
+            .unwrap();
+        let pole = Vector3::from(orientation.gcrf_to_itrf_matrix()[2]);
+        let sun = sun_moon_positions_km(state.epoch_tdb_seconds)
+            .unwrap()
+            .sun_km;
+        let expected =
+            earth_radiation_acceleration_with_pole(&state, sun, None, pole, model).unwrap();
+        assert_eq!(model.acceleration(&state, &context).unwrap(), expected);
+        assert_ne!(
+            model
+                .acceleration(&state, &PropagationContext::new())
+                .unwrap(),
+            expected,
+        );
     }
 
     #[test]

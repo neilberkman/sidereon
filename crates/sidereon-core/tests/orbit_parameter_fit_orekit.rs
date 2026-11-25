@@ -27,8 +27,8 @@
 //! 3. the fit of the SP3 file itself through sidereon's own frame chain
 //!    ([`fit_sp3_ecef_orbit_parameters`]), whose observations differ from
 //!    Orekit's GCRF positions by the difference of the two frame chains
-//!    (up to 0.14 m here, see the test); the estimates must agree within the
-//!    first-order bound that difference allows.
+//!    owing chiefly to factory-frame interpolation. The estimates agree within
+//!    the first-order bound from the observation differences.
 //!
 //! The largest disagreements with Orekit on the same observations, in formal
 //! standard deviations for a 1 m a-priori sigma: 4.6e-6 (`vz_km_s`, state and
@@ -53,8 +53,8 @@ use sidereon_core::astro::forces::{
     EmpiricalRtnAcceleration, ForceModel, RtnAxis, SchwarzschildRelativity, SolarRadiationPressure,
     ThirdBodyBodies, ThirdBodyGravity, TwoBodyGravity,
 };
-use sidereon_core::astro::frames::orientation::{
-    EarthOrientationProvider, PolarMotionSample, PolarMotionSeriesEarthOrientationProvider,
+use sidereon_core::astro::frames::{
+    EarthOrientationProvider, Iers2010EarthOrientationProvider, Iers2010EopSample,
 };
 use sidereon_core::astro::propagator::{ForceModelKind, IntegratorOptions, PropagationContext};
 use sidereon_core::astro::state::CartesianState;
@@ -615,41 +615,34 @@ fn first_epoch_tdb() -> f64 {
     grid_epoch_tdb(0)
 }
 
-fn utc_tdb_seconds(utc: &str) -> f64 {
-    let date: Vec<i32> = utc[..10]
-        .split('-')
-        .map(|part| part.parse().expect("date"))
-        .collect();
-    let scales = TimeScales::from_utc(date[0], date[1], date[2], 0, 0, 0.0).expect("UTC");
-    j2000_seconds_from_split(scales.jd_whole, scales.tdb_fraction)
-}
-
 #[test]
 fn the_sp3_path_agrees_within_the_frame_difference() {
     let fixture = fixture();
     let samples = inertial_samples(&fixture);
-    // sidereon's frame chain with the pole coordinates Orekit read from the
-    // same orekit-data; UT1 comes from sidereon's own table.
-    let polar_motion = fixture["earth_orientation"]
+    let eop = fixture["earth_orientation"]
         .as_array()
         .expect("earth orientation")
         .iter()
-        .map(|entry| {
-            PolarMotionSample::from_arcseconds(
-                utc_tdb_seconds(entry["utc"].as_str().expect("utc")),
-                f(&entry["xp_arcsec"]),
-                f(&entry["yp_arcsec"]),
-            )
-            .expect("polar motion")
+        .map(|entry| Iers2010EopSample {
+            mjd_utc: i32::try_from(entry["mjd_utc"].as_i64().expect("MJD")).expect("valid MJD"),
+            xp_arcsec: f(&entry["xp_arcsec"]),
+            yp_arcsec: f(&entry["yp_arcsec"]),
+            ut1_minus_utc_s: f(&entry["ut1_minus_utc_s"]),
+            lod_s: f(&entry["lod_s"]),
+            dx_arcsec: f(&entry["dx_arcsec"]),
+            dy_arcsec: f(&entry["dy_arcsec"]),
+            pole_rates_rad_s: Some([f(&entry["x_rate_rad_s"]), f(&entry["y_rate_rad_s"])]),
         })
         .collect();
-    let provider = PolarMotionSeriesEarthOrientationProvider::new(polar_motion).expect("series");
+    let provider = Arc::new(Iers2010EarthOrientationProvider::new(eop).expect("series"));
 
     // The observations of the SP3 path differ from the fixture's by the
     // difference of the two frame chains.
     let observations = fixture["observations"].as_array().expect("observations");
     let mut sum_squares = 0.0;
     let mut largest: f64 = 0.0;
+    let mut exact_largest: f64 = 0.0;
+    let mut epoch_largest: f64 = 0.0;
     for (index, observation) in observations.iter().enumerate() {
         let orientation = provider
             .orientation_at_tdb_seconds(grid_epoch_tdb(index))
@@ -658,23 +651,45 @@ fn the_sp3_path_agrees_within_the_frame_difference() {
         let gcrf_km = orientation
             .itrf_to_gcrf_position_km([itrf[0] / 1.0e3, itrf[1] / 1.0e3, itrf[2] / 1.0e3])
             .expect("rotation");
+        let utc_seconds = 86382 + 300 * index as i32;
+        let exact = provider
+            .orientation_at_utc_mjd(59024 + utc_seconds / 86400, f64::from(utc_seconds % 86400))
+            .unwrap()
+            .itrf_to_gcrf_position_km(itrf.map(|v| v / 1.0e3))
+            .unwrap();
         let orekit = vector(&observation["gcrf_m"]);
         let difference = (0..3)
             .map(|k| (gcrf_km[k] * 1.0e3 - orekit[k]).powi(2))
             .sum::<f64>();
+        exact_largest = exact_largest.max(
+            (0..3)
+                .map(|k| (exact[k] * 1.0e3 - orekit[k]).powi(2))
+                .sum::<f64>()
+                .sqrt(),
+        );
+        epoch_largest = epoch_largest.max(
+            (0..3)
+                .map(|k| ((exact[k] - gcrf_km[k]) * 1.0e3).powi(2))
+                .sum::<f64>()
+                .sqrt(),
+        );
         sum_squares += difference;
         largest = largest.max(difference.sqrt());
     }
     let frame_norm = sum_squares.sqrt();
-    // Orekit's IERS 2010 ITRF adds the sub-daily ocean-tide and libration
-    // terms of the pole and UT1 and the celestial pole offsets dX, dY, which
-    // sidereon's chain does not apply: on this arc the two rotations of an SP3
-    // position differ by up to 0.14 m, up to 0.12 m of it the sub-daily terms;
-    // without them the chains agree within 6 cm. The bound below holds for
-    // whatever the difference is; these figures keep the test from passing
-    // with a frame chain gone wrong.
-    assert!(largest < 0.2, "frame difference {largest} m");
-    assert!(frame_norm < 2.0, "frame difference norm {frame_norm} m");
+    // Orekit's factory interpolation accounts for the 10.91 µm peak
+    // difference (25.84 µm over the arc). Exact UTC input gives the same
+    // peak, with the TDB epoch conversion contributing at most 32 nm.
+    assert!(largest < 1.2e-5, "frame difference {largest} m");
+    assert!(frame_norm < 3.0e-5, "frame difference norm {frame_norm} m");
+    assert!(
+        exact_largest < 1.2e-5,
+        "exact UTC frame difference {exact_largest} m"
+    );
+    assert!(
+        epoch_largest < 6.0e-8,
+        "TDB epoch contribution {epoch_largest} m"
+    );
 
     let product = product();
     for case in fixture["cases"].as_array().expect("cases") {
@@ -687,14 +702,13 @@ fn the_sp3_path_agrees_within_the_frame_difference() {
             km(vector(&guess["position_m"])),
             km(vector(&guess["velocity_m_s"])),
         );
-        let sp3 = fit_sp3_ecef_orbit_parameters(
-            &product,
-            g03(),
-            &provider,
-            Some(seed),
-            &options(&estimated),
-        )
-        .expect("SP3 fit");
+        let mut sp3_options = options(&estimated);
+        sp3_options.propagation_context = sp3_options
+            .propagation_context
+            .with_body_fixed_frame_provider(provider.clone());
+        let sp3 =
+            fit_sp3_ecef_orbit_parameters(&product, g03(), &*provider, Some(seed), &sp3_options)
+                .expect("SP3 fit");
         assert_eq!(sp3.parameter_names, inertial.parameter_names);
         let (covariance, variance_factor) = sidereon_covariance(&inertial);
         let sigmas = formal_sigmas(&covariance, variance_factor);

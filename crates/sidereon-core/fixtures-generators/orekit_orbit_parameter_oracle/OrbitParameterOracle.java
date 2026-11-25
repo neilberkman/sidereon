@@ -92,6 +92,7 @@ import org.orekit.forces.gravity.potential.TideSystem;
 import org.orekit.forces.radiation.ECOM2;
 import org.orekit.forces.radiation.IsotropicRadiationSingleCoefficient;
 import org.orekit.forces.radiation.SolarRadiationPressure;
+import org.orekit.frames.EOPEntry;
 import org.orekit.frames.EOPHistory;
 import org.orekit.frames.Frame;
 import org.orekit.frames.FramesFactory;
@@ -210,22 +211,25 @@ public final class OrbitParameterOracle {
             .append(", \"parameters_convergence_threshold\": ").append(num(CONVERGENCE_THRESHOLD))
             .append("},\n");
 
-        // Earth orientation the observations were rotated with, at 0h UTC of
-        // the days around the arc.
-        EOPHistory eop = FramesFactory.getEOPHistory(IERSConventions.IERS_2010, false);
+        EOPHistory eop = FramesFactory.getEOPHistory(IERSConventions.IERS_2010, true);
         TimeScale utc = TimeScalesFactory.getUTC();
+        int firstMjd = t0.getComponents(utc).getDate().getMJD() - 1;
         out.append("  \"earth_orientation\": [\n");
-        AbsoluteDate firstDay = new AbsoluteDate(t0.getComponents(utc).getDate(), utc).shiftedBy(-86400.0);
-        for (int day = 0; day < 4; day++) {
-            AbsoluteDate date = firstDay.shiftedBy(86400.0 * day);
-            double[] nro = eop.getNonRotatinOriginNutationCorrection(date);
-            out.append("    {\"utc\": ").append(quote(date.toString(utc)))
-                .append(", \"xp_arcsec\": ").append(num(eop.getPoleCorrection(date).getXp() / ARCSEC_TO_RAD))
-                .append(", \"yp_arcsec\": ").append(num(eop.getPoleCorrection(date).getYp() / ARCSEC_TO_RAD))
-                .append(", \"ut1_minus_utc_s\": ").append(num(eop.getUT1MinusUTC(date)))
-                .append(", \"dx_arcsec\": ").append(num(nro[0] / ARCSEC_TO_RAD))
-                .append(", \"dy_arcsec\": ").append(num(nro[1] / ARCSEC_TO_RAD))
-                .append("}").append(day < 3 ? ",\n" : "\n");
+        for (EOPEntry entry : eop.getEntries()) {
+            int mjd = entry.getMjd();
+            if (mjd < firstMjd || mjd > firstMjd + 4) {
+                continue;
+            }
+            out.append("    {\"mjd_utc\": ").append(mjd)
+                .append(", \"xp_arcsec\": ").append(num(entry.getX() / Constants.ARC_SECONDS_TO_RADIANS))
+                .append(", \"yp_arcsec\": ").append(num(entry.getY() / Constants.ARC_SECONDS_TO_RADIANS))
+                .append(", \"ut1_minus_utc_s\": ").append(num(entry.getUT1MinusUTC()))
+                .append(", \"lod_s\": ").append(num(entry.getLOD()))
+                .append(", \"dx_arcsec\": ").append(num(entry.getDx() / Constants.ARC_SECONDS_TO_RADIANS))
+                .append(", \"dy_arcsec\": ").append(num(entry.getDy() / Constants.ARC_SECONDS_TO_RADIANS))
+                .append(", \"x_rate_rad_s\": ").append(num(entry.getXRate()))
+                .append(", \"y_rate_rad_s\": ").append(num(entry.getYRate()))
+                .append("}").append(mjd < firstMjd + 4 ? ",\n" : "\n");
         }
         out.append("  ],\n");
 

@@ -5,10 +5,11 @@
   "force_model": {"gm_earth_m3_s2": 3.986004418E14, "re_earth_m": 6378137.0, "zonal_degrees": [2, 3, 4, 5, 6], "gm_sun_m3_s2": 1.3271244004193939E20, "gm_moon_m3_s2": 4.902800066E12, "srp_pressure_n_m2": 4.56E-6, "srp_reference_distance_m": 1.495978707E11, "area_to_mass_m2_kg": 0.02, "cr_start": 1.0, "relativity": true},
   "estimator": {"optimizer": "GaussNewtonOptimizer(QRDecomposer(1e-11), false)", "integrator": "DormandPrince853, position tolerance 1.0E-6 m", "sigma_m": 1.0, "parameters_convergence_threshold": 0.001},
   "earth_orientation": [
-    {"utc": "2020-06-23T00:00:00.000", "xp_arcsec": 0.15251125576902164, "yp_arcsec": 0.4362982653979661, "ut1_minus_utc_s": -0.24473022112477688, "dx_arcsec": 1.85E-4, "dy_arcsec": -1.1200000000000003E-4},
-    {"utc": "2020-06-24T00:00:00.000", "xp_arcsec": 0.154031383058768, "yp_arcsec": 0.4353412781929868, "ut1_minus_utc_s": -0.24358428824757036, "dx_arcsec": 2.04E-4, "dy_arcsec": -1.24E-4},
-    {"utc": "2020-06-25T00:00:00.000", "xp_arcsec": 0.15550820484713637, "yp_arcsec": 0.4346174900039357, "ut1_minus_utc_s": -0.24260090931109637, "dx_arcsec": 2.2400000000000005E-4, "dy_arcsec": -1.4000000000000001E-4},
-    {"utc": "2020-06-26T00:00:00.000", "xp_arcsec": 0.1570347709667867, "yp_arcsec": 0.4338740051856079, "ut1_minus_utc_s": -0.2418504597695398, "dx_arcsec": 2.4500000000000005E-4, "dy_arcsec": -1.5700000000000002E-4}
+    {"mjd_utc": 59023, "xp_arcsec": 0.152501, "yp_arcsec": 0.435847, "ut1_minus_utc_s": -0.2447075, "lod_s": -0.0011718, "dx_arcsec": 1.85E-4, "dy_arcsec": -1.1200000000000003E-4, "x_rate_rad_s": 7.955844878855765E-14, "y_rate_rad_s": -4.5881479929079885E-14},
+    {"mjd_utc": 59024, "xp_arcsec": 0.153959, "yp_arcsec": 0.4350319999999999, "ut1_minus_utc_s": -0.2435776, "lod_s": -0.0010683000000000001, "dx_arcsec": 2.04E-4, "dy_arcsec": -1.24E-4, "x_rate_rad_s": 8.03159701652918E-14, "y_rate_rad_s": -3.5977589336964334E-14},
+    {"mjd_utc": 59025, "xp_arcsec": 0.155398, "yp_arcsec": 0.43446900000000005, "ut1_minus_utc_s": -0.2426081, "lod_s": -8.6E-4, "dx_arcsec": 2.2400000000000005E-4, "dy_arcsec": -1.4000000000000001E-4, "x_rate_rad_s": 7.995123765056706E-14, "y_rate_rad_s": -3.3415109618138886E-14},
+    {"mjd_utc": 59026, "xp_arcsec": 0.156921, "yp_arcsec": 0.433871, "ut1_minus_utc_s": -0.2418658, "lod_s": -6.102999999999999E-4, "dx_arcsec": 2.4500000000000005E-4, "dy_arcsec": -1.5700000000000002E-4, "x_rate_rad_s": 1.0083451214743489E-13, "y_rate_rad_s": -3.148857377113773E-14},
+    {"mjd_utc": 59027, "xp_arcsec": 0.158865, "yp_arcsec": 0.43332800000000005, "ut1_minus_utc_s": -0.2413584, "lod_s": -4.1349999999999997E-4, "dx_arcsec": 2.31E-4, "dy_arcsec": -1.53E-4, "x_rate_rad_s": 1.1152398046356501E-13, "y_rate_rad_s": -3.049724950035245E-14}
   ],
   "observations": [
     {"gps": "2020-06-25T00:00:00.000", "tt_j2000_s": 6.46315251184E8, "itrf_m": [-1490224.158, 1.5550044531E7, -2.1555137316E7], "gcrf_m": [1.5397988300224528E7, 2371431.0103170313, -2.1585339212952882E7]},
