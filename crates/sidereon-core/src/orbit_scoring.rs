@@ -2080,18 +2080,7 @@ fn validate_options(options: &OrbitScoreOptions) -> Result<(), OrbitScoreError> 
             "not strictly increasing",
         ));
     }
-    if !(options.velocity_half_step_s.is_finite() && options.velocity_half_step_s > 0.0) {
-        return Err(invalid_input(
-            "velocity_half_step_s",
-            "not positive and finite",
-        ));
-    }
-    if options.velocity_half_step_s < MIN_VELOCITY_HALF_STEP_S {
-        return Err(invalid_input(
-            "velocity_half_step_s",
-            "below the 1e-8 s resolution of SP3 epochs",
-        ));
-    }
+    validate_velocity_half_step(options.velocity_half_step_s)?;
     for set in &options.frame_reconciliation.asserted_equivalent_label_sets {
         let mut labels = set.labels.iter().map(|label| label.trim());
         let blank = labels.clone().any(str::is_empty);
@@ -2106,10 +2095,30 @@ fn validate_options(options: &OrbitScoreOptions) -> Result<(), OrbitScoreError> 
     Ok(())
 }
 
+pub(crate) fn validate_velocity_half_step(half_step_s: f64) -> Result<(), OrbitScoreError> {
+    if !(half_step_s.is_finite() && half_step_s > 0.0) {
+        return Err(invalid_input(
+            "velocity_half_step_s",
+            "not positive and finite",
+        ));
+    }
+    if half_step_s < MIN_VELOCITY_HALF_STEP_S {
+        return Err(invalid_input(
+            "velocity_half_step_s",
+            "below the 1e-8 s resolution of SP3 epochs",
+        ));
+    }
+    Ok(())
+}
+
 /// The instants `(t - h, t + h)` of the reference velocity difference at `t`,
 /// as they round.
-fn velocity_instants(t_j2000_s: f64, half_step_s: f64) -> (f64, f64) {
+pub(crate) fn velocity_instants(t_j2000_s: f64, half_step_s: f64) -> (f64, f64) {
     (t_j2000_s - half_step_s, t_j2000_s + half_step_s)
+}
+
+pub(crate) fn velocity_instants_are_valid(t: f64, (minus, plus): (f64, f64)) -> bool {
+    minus.is_finite() && plus.is_finite() && minus < t && t < plus
 }
 
 /// Refuse a velocity half step that rounds away at an evaluation epoch: `t - h`
@@ -2119,7 +2128,7 @@ fn check_velocity_steps(epochs: &[EvalEpoch], half_step_s: f64) -> Result<(), Or
     for epoch in epochs {
         let t = epoch.t_j2000_s;
         let (minus, plus) = velocity_instants(t, half_step_s);
-        if !(minus.is_finite() && plus.is_finite() && minus < t && t < plus) {
+        if !velocity_instants_are_valid(t, (minus, plus)) {
             return Err(invalid_input(
                 "velocity_half_step_s",
                 "rounds away at an evaluation epoch",
@@ -2134,7 +2143,7 @@ fn check_velocity_steps(epochs: &[EvalEpoch], half_step_s: f64) -> Result<(), Or
 /// the epoch position `r0` where one does, each divided by the step between
 /// the instants as they round. That is `2h` and `h` exactly wherever `t +- h`
 /// are exact, as on any whole-second epoch with a binary-fraction half step.
-fn reference_velocity(
+pub(crate) fn reference_velocity(
     rp: Option<[f64; 3]>,
     rm: Option<[f64; 3]>,
     r0: [f64; 3],
