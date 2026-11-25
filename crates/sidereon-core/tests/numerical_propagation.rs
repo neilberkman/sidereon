@@ -28,9 +28,11 @@ use sidereon_core::astro::forces::TwoBodyGravity;
 use sidereon_core::astro::integrators::{DynamicsModel, Integrator, DP54};
 use sidereon_core::astro::propagator::api::{IntegratorOptions, PropagationContext};
 use sidereon_core::astro::propagator::{
-    ForceModelKind, IntegratorKind, OrbitalDynamics, StatePropagator,
+    propagate_variational, ForceModelKind, IntegratorKind, OrbitalDynamics, StatePropagator,
+    VariationalEpoch, VariationalEquations,
 };
 use sidereon_core::astro::state::{CartesianState, StateDerivative};
+use sidereon_core::astro::time::tt_from_tdb_j2000_seconds;
 use sidereon_core::constants::SECONDS_PER_HOUR;
 
 /// Stumpff functions c2(psi), c3(psi) for the universal-variable Kepler solve.
@@ -259,10 +261,12 @@ fn two_body_matches_analytic_kepler_to_tight_bound() {
     let sample_dts: Vec<f64> = (1..=8).map(|i| period * i as f64 / 8.0).collect();
     let states = propagator.ephemeris(&sample_dts).expect("ephemeris");
 
+    let tt0 = tt_from_tdb_j2000_seconds(0.0);
     let mut worst_pos = 0.0_f64;
     let mut worst_vel = 0.0_f64;
     for (state, &dt) in states.iter().zip(sample_dts.iter()) {
-        let (r_ref, v_ref) = kepler_universal(r0, v0, dt, MU_EARTH);
+        let dt_tt = tt_from_tdb_j2000_seconds(dt) - tt0;
+        let (r_ref, v_ref) = kepler_universal(r0, v0, dt_tt, MU_EARTH);
         let dpos = (state.position_km - r_ref).norm();
         let dvel = (state.velocity_km_s - v_ref).norm();
         worst_pos = worst_pos.max(dpos);
@@ -420,12 +424,12 @@ fn reference_arc_is_deterministic_and_frozen() {
     // Frozen-bits regression lock on the last sample (full arc cross-checked
     // Python-side against the dumped fixture).
     let last = states.last().unwrap();
-    assert_eq!(last.position_km.x.to_bits(), 0xc0c0_c53c_4169_9530);
-    assert_eq!(last.position_km.y.to_bits(), 0xc0b2_3e93_900c_70f8);
-    assert_eq!(last.position_km.z.to_bits(), 0xc083_abd6_a837_8930);
-    assert_eq!(last.velocity_km_s.x.to_bits(), 0x400e_7a9b_324f_c3b7);
-    assert_eq!(last.velocity_km_s.y.to_bits(), 0xc012_7346_7da9_155b);
-    assert_eq!(last.velocity_km_s.z.to_bits(), 0xbfe3_beff_5750_5a48);
+    assert_eq!(last.position_km.x.to_bits(), 0xc0c0_c53c_41a3_0dec);
+    assert_eq!(last.position_km.y.to_bits(), 0xc0b2_3e93_8f81_479c);
+    assert_eq!(last.position_km.z.to_bits(), 0xc083_abd6_a7a2_99c2);
+    assert_eq!(last.velocity_km_s.x.to_bits(), 0x400e_7a9b_316e_911e);
+    assert_eq!(last.velocity_km_s.y.to_bits(), 0xc012_7346_7de6_54ce);
+    assert_eq!(last.velocity_km_s.z.to_bits(), 0xbfe3_beff_5792_7b3d);
 
     if std::env::var("SIDEREON_DUMP_FIXTURES").is_ok() {
         dump_fixture(&times, &states);
@@ -481,15 +485,63 @@ fn dump_fixture(times: &[f64], states: &[CartesianState]) {
 }
 
 #[test]
-fn entry_point_is_bit_identical_to_direct_integration() {
+fn entry_point_matches_variational_propagator_bit_for_bit_on_tt_grid() {
     let (pos, vel) = elliptic_start();
-    let opts = || {
+    let initial = CartesianState::new(0.0, pos, vel);
+    let dp54_opts = {
         let mut options = IntegratorOptions::default();
         options.abs_tol = 1.0e-12;
         options.rel_tol = 1.0e-12;
         options
     };
+    let rk4_opts = {
+        let mut options = IntegratorOptions::default();
+        options.initial_step = 10.0;
+        options
+    };
+    let force = TwoBodyGravity::default();
+    let ctx = PropagationContext::default();
+    let equations = VariationalEquations {
+        force: &force,
+        parameters: &[],
+        sensitivity_parameters: &[],
+    };
+    let t_end = 4000.0;
+    let epochs = [VariationalEpoch::from_tdb_seconds(0.0, t_end)];
 
+    for (integrator, opts) in [
+        (IntegratorKind::Dp54, dp54_opts),
+        (IntegratorKind::Rk4, rk4_opts),
+    ] {
+        let via_entry = StatePropagator::new(0.0, pos, vel, ForceModelKind::two_body(), integrator)
+            .with_options(opts)
+            .propagate_to(t_end)
+            .expect("entry")
+            .final_state;
+
+        let via_variational =
+            propagate_variational(initial, &epochs, &equations, integrator, &opts, &ctx)
+                .expect("variational")[0]
+                .state;
+
+        assert_eq!(
+            via_entry.epoch_tdb_seconds.to_bits(),
+            via_variational.epoch_tdb_seconds.to_bits()
+        );
+        for axis in 0..3 {
+            assert_eq!(
+                via_entry.position_km[axis].to_bits(),
+                via_variational.position_km[axis].to_bits()
+            );
+            assert_eq!(
+                via_entry.velocity_km_s[axis].to_bits(),
+                via_variational.velocity_km_s[axis].to_bits()
+            );
+        }
+    }
+
+    // Against direct TDB-clock DP54 over the same nominal 4000 s interval,
+    // TT elapsed time differs by |d(TDB - TT)/dt| <= 3.4e-10 of the span.
     let via_entry = StatePropagator::new(
         0.0,
         pos,
@@ -497,35 +549,21 @@ fn entry_point_is_bit_identical_to_direct_integration() {
         ForceModelKind::two_body(),
         IntegratorKind::Dp54,
     )
-    .with_options(opts())
-    .propagate_to(4000.0)
+    .with_options(dp54_opts)
+    .propagate_to(t_end)
     .expect("entry")
     .final_state;
-
-    let force = TwoBodyGravity::default();
     let dynamics = OrbitalDynamics {
         force_model: &force,
     };
-    let ctx = PropagationContext::default();
-    let via_direct = DP54
-        .propagate(
-            CartesianState::new(0.0, pos, vel),
-            4000.0,
-            &dynamics,
-            &ctx,
-            &opts(),
-        )
+    let via_tdb_direct = DP54
+        .propagate(initial, t_end, &dynamics, &ctx, &dp54_opts)
         .expect("direct")
         .final_state;
-
-    for axis in 0..3 {
-        assert_eq!(
-            via_entry.position_km[axis].to_bits(),
-            via_direct.position_km[axis].to_bits()
-        );
-        assert_eq!(
-            via_entry.velocity_km_s[axis].to_bits(),
-            via_direct.velocity_km_s[axis].to_bits()
-        );
-    }
+    let pos_diff = (via_entry.position_km - via_tdb_direct.position_km).norm();
+    let expected_shift = (t_end - epochs[0].elapsed_tt_s).abs() * via_entry.velocity_km_s.norm();
+    assert!(
+        (pos_diff - expected_shift).abs() < 1.0e-8,
+        "pos_diff {pos_diff:e} vs expected_shift {expected_shift:e}"
+    );
 }

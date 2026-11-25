@@ -32,6 +32,7 @@ pub mod numerical;
 /// Defines [`PropagationResult`], discrete [`PropagationPoint`] trajectory
 /// samples at TDB epochs, and work counters in [`PropagationStats`].
 pub mod result;
+mod tt;
 pub mod variational;
 
 pub use crate::astro::forces::DragParameters;
@@ -42,7 +43,8 @@ pub use covariance::{
     CovariancePropagationOptions, CovarianceSegment, LabeledCovariance6, ProcessNoise,
 };
 pub use decay::{
-    estimate_decay, estimate_decay_with_source, DecayConfig, DecayError, DecayEstimate,
+    estimate_decay, estimate_decay_with_context, estimate_decay_with_source,
+    estimate_decay_with_source_and_context, DecayConfig, DecayError, DecayEstimate,
 };
 pub use driver::{
     propagate_states, propagate_states_with_context, PropagationConfig, PropagationForceModel,

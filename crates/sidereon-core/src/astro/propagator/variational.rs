@@ -45,14 +45,19 @@
 use crate::astro::error::PropagationError;
 use crate::astro::forces::ForceModel;
 use crate::astro::integrators::tableau::DP54Tableau;
+use crate::astro::integrators::with_ut1_departure_record;
 use crate::astro::propagator::api::{
     validate_adaptive_integrator_options, validate_integrator_epoch, validate_integrator_options,
     IntegratorOptions, PropagationContext,
 };
 use crate::astro::propagator::controller::PIController;
+use crate::astro::propagator::dense_output::{DenseOutput, DenseSegment};
 use crate::astro::propagator::numerical::IntegratorKind;
-use crate::astro::state::CartesianState;
-use crate::astro::time::scales::{tdb_minus_tt_seconds, tt_from_tdb_j2000_seconds};
+use crate::astro::propagator::result::{
+    validate_propagation_result, PropagationPoint, PropagationResult, PropagationStats,
+};
+use crate::astro::propagator::tt::{TtAnchor, TtEpochMap, TtSegment};
+use crate::astro::state::{CartesianState, StateDerivative};
 use nalgebra::{Matrix6, Matrix6xX, Vector3};
 
 /// Largest accepted difference, s, between a [`VariationalEpoch`]'s TDB
@@ -91,18 +96,15 @@ pub struct VariationalEpoch {
 
 impl VariationalEpoch {
     /// The TDB epoch `tdb_j2000_s` of a propagation from
-    /// `initial_tdb_j2000_s`, with the elapsed TT by
-    /// [`tt_from_tdb_j2000_seconds`].
-    ///
-    /// Each conversion rounds to the nearest `f64` of TT seconds past J2000,
-    /// about 0.1 microseconds in this century, so the elapsed TT carries up
-    /// to two such roundings; the difference of the two instants' own TT
-    /// seconds, where they are known, carries none on a regular grid.
+    /// `initial_tdb_j2000_s`, with the elapsed TT formed as
+    /// `(tdb_j2000_s - initial_tdb_j2000_s) - (tdb_minus_tt(tt_target) - tdb_minus_tt(tt_initial))`
+    /// so no rounded absolute TT values are subtracted.
     pub fn from_tdb_seconds(initial_tdb_j2000_s: f64, tdb_j2000_s: f64) -> Self {
+        let (epoch_map, _) = TtEpochMap::from_initial_tdb(initial_tdb_j2000_s);
+        let anchor = epoch_map.anchor_for_tdb(tdb_j2000_s);
         Self {
-            tdb_j2000_s,
-            elapsed_tt_s: tt_from_tdb_j2000_seconds(tdb_j2000_s)
-                - tt_from_tdb_j2000_seconds(initial_tdb_j2000_s),
+            tdb_j2000_s: anchor.tdb,
+            elapsed_tt_s: anchor.elapsed,
         }
     }
 }
@@ -249,24 +251,18 @@ fn propagate(
             "sensitivity parameter index {index} is outside the {parameter_count} parameters"
         )));
     }
-    // TT of the initial epoch, as the argument of TDB - TT only: an error of
-    // a few rounding units moves TDB - TT by less than 1e-16 s.
-    let tt_reference = tt_from_tdb_j2000_seconds(initial.epoch_tdb_seconds);
-    let start = Anchor {
-        tdb: initial.epoch_tdb_seconds,
-        elapsed: 0.0,
-    };
+    let (epoch_map, start) = TtEpochMap::from_initial_tdb(initial.epoch_tdb_seconds);
     for epoch in epochs {
         validate_integrator_epoch(epoch.tdb_j2000_s, "epochs.tdb_j2000_s")?;
         validate_integrator_epoch(epoch.elapsed_tt_s, "epochs.elapsed_tt_s")?;
-        let anchor = Anchor {
+        let anchor = TtAnchor {
             tdb: epoch.tdb_j2000_s,
             elapsed: epoch.elapsed_tt_s,
         };
         let advance = epoch.tdb_j2000_s - initial.epoch_tdb_seconds;
         let mismatch = advance
             - epoch.elapsed_tt_s
-            - tdb_minus_tt_change(tt_reference, start.elapsed, anchor.elapsed);
+            - epoch_map.tdb_minus_tt_change(start.elapsed, anchor.elapsed);
         let rounding =
             4.0 * f64::EPSILON * initial.epoch_tdb_seconds.abs().max(epoch.tdb_j2000_s.abs());
         if !mismatch.is_finite() || mismatch.abs() > EPOCH_CONSISTENCY_S + rounding {
@@ -278,22 +274,22 @@ fn propagate(
     }
 
     let system = System {
-        equations,
-        tt_reference,
+        force: ForceEval::Variational(equations),
+        epoch_map,
         ctx,
     };
     let mut current = Augmented::initial(&initial, columns);
     let mut from = start;
     for epoch in epochs {
-        let to = Anchor {
+        let to = TtAnchor {
             tdb: epoch.tdb_j2000_s,
             elapsed: epoch.elapsed_tt_s,
         };
         if to.elapsed != from.elapsed {
-            let segment = Segment { from, to };
+            let segment = TtSegment { from, to };
             current = match integrator {
-                IntegratorKind::Rk4 => system.rk4(current, &segment, options)?,
-                IntegratorKind::Dp54 => system.dp54(current, &segment, options)?,
+                IntegratorKind::Rk4 => system.rk4(current, &segment, options, None)?,
+                IntegratorKind::Dp54 => system.dp54(current, &segment, options, None)?,
             };
         }
         emit(&current, epoch.tdb_j2000_s)?;
@@ -302,33 +298,137 @@ fn propagate(
     Ok(())
 }
 
-/// An epoch on both scales: TDB seconds past J2000 and TT seconds elapsed.
+/// Integrate one TT-anchored segment for [`crate::astro::propagator::StatePropagator`],
+/// returning a full [`PropagationResult`] with UT1 departure tracking, step
+/// statistics, points, and optional DP54 dense output.
+///
+/// Shares the TT/TDB epoch mapping and the RK4/DP54 step equations with
+/// [`propagate_variational`], so trajectories propagated with the same forces,
+/// integrator, options, and TT grid are bit-for-bit identical.
+pub(crate) fn propagate_segment_result(
+    initial: CartesianState,
+    epoch_map: TtEpochMap,
+    segment: TtSegment,
+    force: &dyn ForceModel,
+    integrator: IntegratorKind,
+    options: &IntegratorOptions,
+    ctx: &PropagationContext,
+) -> Result<PropagationResult, PropagationError> {
+    with_ut1_departure_record(ctx, |run_ctx| {
+        match integrator {
+            IntegratorKind::Rk4 => validate_integrator_options(options)?,
+            IntegratorKind::Dp54 => validate_adaptive_integrator_options(options)?,
+        }
+        validate_integrator_epoch(segment.from.tdb, "initial.epoch_tdb_seconds")?;
+        validate_integrator_epoch(segment.to.tdb, "t_end_tdb_seconds")?;
+        validate_integrator_epoch(segment.from.elapsed, "segment.from.elapsed")?;
+        validate_integrator_epoch(segment.to.elapsed, "segment.to.elapsed")?;
+
+        let start_point = PropagationPoint {
+            epoch_tdb_seconds: segment.from.tdb,
+            position_km: initial.position_array(),
+            velocity_km_s: initial.velocity_array(),
+        };
+
+        if segment.from.elapsed == segment.to.elapsed {
+            let final_state = CartesianState {
+                epoch_tdb_seconds: segment.to.tdb,
+                position_km: initial.position_km,
+                velocity_km_s: initial.velocity_km_s,
+            };
+            let mut points = vec![start_point];
+            if !options.dense_output {
+                points.push(PropagationPoint {
+                    epoch_tdb_seconds: segment.to.tdb,
+                    position_km: final_state.position_array(),
+                    velocity_km_s: final_state.velocity_array(),
+                });
+            }
+            let dense = if options.dense_output && integrator == IntegratorKind::Dp54 {
+                Some(DenseOutput {
+                    segments: Vec::new(),
+                })
+            } else {
+                None
+            };
+            return validate_propagation_result(PropagationResult {
+                final_state,
+                points,
+                events: Vec::new(),
+                stats: PropagationStats::default(),
+                dense,
+                ut1_degraded: None,
+            });
+        }
+
+        let mut collector = ResultCollector {
+            dense_output: options.dense_output,
+            points: vec![start_point],
+            dense_segments: Vec::new(),
+            accepted_steps: 0,
+            rejected_steps: 0,
+            evaluations: 0,
+        };
+        let system = System {
+            force: ForceEval::Direct(force),
+            epoch_map,
+            ctx: run_ctx,
+        };
+        let y0 = Augmented::initial(&initial, 0);
+        let y_end = match integrator {
+            IntegratorKind::Rk4 => system.rk4(y0, &segment, options, Some(&mut collector))?,
+            IntegratorKind::Dp54 => system.dp54(y0, &segment, options, Some(&mut collector))?,
+        };
+        let final_state = CartesianState {
+            epoch_tdb_seconds: segment.to.tdb,
+            position_km: y_end.position,
+            velocity_km_s: y_end.velocity,
+        };
+        if !options.dense_output {
+            collector.points.push(PropagationPoint {
+                epoch_tdb_seconds: segment.to.tdb,
+                position_km: final_state.position_array(),
+                velocity_km_s: final_state.velocity_array(),
+            });
+        }
+        let dense = if options.dense_output && integrator == IntegratorKind::Dp54 {
+            Some(DenseOutput {
+                segments: collector.dense_segments,
+            })
+        } else {
+            None
+        };
+        validate_propagation_result(PropagationResult {
+            final_state,
+            points: collector.points,
+            events: Vec::new(),
+            stats: PropagationStats {
+                accepted_steps: collector.accepted_steps,
+                rejected_steps: collector.rejected_steps,
+                evaluations: collector.evaluations,
+            },
+            dense,
+            ut1_degraded: None,
+        })
+    })
+}
+
+/// Optional collector for [`PropagationResult`] outputs during TT integration.
+struct ResultCollector {
+    dense_output: bool,
+    points: Vec<PropagationPoint>,
+    dense_segments: Vec<DenseSegment>,
+    accepted_steps: u32,
+    rejected_steps: u32,
+    evaluations: u32,
+}
+
+/// Force evaluation mode: direct [`ForceModel::acceleration`] for trajectory
+/// propagation, or parameter-aware variational evaluation.
 #[derive(Clone, Copy)]
-struct Anchor {
-    tdb: f64,
-    elapsed: f64,
-}
-
-/// The change of TDB - TT from `from` to `to` TT seconds elapsed after the
-/// TT instant `tt_reference`.
-fn tdb_minus_tt_change(tt_reference: f64, from: f64, to: f64) -> f64 {
-    tdb_minus_tt_seconds(tt_reference + to) - tdb_minus_tt_seconds(tt_reference + from)
-}
-
-/// One integration from a requested epoch (or the initial one) to the next.
-struct Segment {
-    from: Anchor,
-    to: Anchor,
-}
-
-impl Segment {
-    fn start(&self) -> f64 {
-        self.from.elapsed
-    }
-
-    fn target(&self) -> f64 {
-        self.to.elapsed
-    }
+enum ForceEval<'a> {
+    Direct(&'a dyn ForceModel),
+    Variational(&'a VariationalEquations<'a>),
 }
 
 /// The trajectory with the columns of `[Phi | S]`.
@@ -432,32 +532,15 @@ impl Augmented {
 }
 
 struct System<'a> {
-    equations: &'a VariationalEquations<'a>,
-    /// TT of the initial epoch, the argument of TDB - TT.
-    tt_reference: f64,
+    force: ForceEval<'a>,
+    epoch_map: TtEpochMap,
     ctx: &'a PropagationContext,
 }
 
 impl System<'_> {
-    /// The TDB epoch the force models receive `elapsed` TT seconds into the
-    /// propagation, within `segment` (see the module documentation).
-    fn tdb_at(&self, segment: &Segment, elapsed: f64) -> f64 {
-        let Segment { from, to } = segment;
-        if elapsed == to.elapsed {
-            return to.tdb;
-        }
-        if elapsed == from.elapsed {
-            return from.tdb;
-        }
-        let tdb = from.tdb
-            + ((elapsed - from.elapsed)
-                + tdb_minus_tt_change(self.tt_reference, from.elapsed, elapsed));
-        tdb.max(from.tdb.min(to.tdb)).min(from.tdb.max(to.tdb))
-    }
-
     fn rate(
         &self,
-        segment: &Segment,
+        segment: &TtSegment,
         elapsed: f64,
         y: &Augmented,
     ) -> Result<Rate, PropagationError> {
@@ -467,15 +550,26 @@ impl System<'_> {
             ));
         }
         let state = CartesianState {
-            epoch_tdb_seconds: self.tdb_at(segment, elapsed),
+            epoch_tdb_seconds: self.epoch_map.tdb_at(segment, elapsed),
             position_km: y.position,
             velocity_km_s: y.velocity,
+        };
+        let equations = match self.force {
+            ForceEval::Direct(force) => {
+                let acceleration = force.acceleration(&state, self.ctx)?;
+                return Ok(Rate {
+                    position: y.velocity,
+                    velocity: acceleration,
+                    columns: Vec::new(),
+                });
+            }
+            ForceEval::Variational(equations) => equations,
         };
         let VariationalEquations {
             force,
             parameters,
             sensitivity_parameters,
-        } = *self.equations;
+        } = *equations;
         let acceleration = force.acceleration_with_parameters(parameters, &state, self.ctx)?;
         if y.columns.is_empty() {
             return Ok(Rate {
@@ -532,8 +626,9 @@ impl System<'_> {
     fn rk4(
         &self,
         mut y: Augmented,
-        segment: &Segment,
+        segment: &TtSegment,
         options: &IntegratorOptions,
+        mut collector: Option<&mut ResultCollector>,
     ) -> Result<Augmented, PropagationError> {
         let (start, target) = (segment.start(), segment.target());
         let span = target - start;
@@ -565,6 +660,17 @@ impl System<'_> {
             y = y.advanced(&[(&k1, 1.0), (&k2, 2.0), (&k3, 2.0), (&k4, 1.0)], h / 6.0);
             elapsed = next_elapsed;
             steps += 1;
+            if let Some(c) = collector.as_deref_mut() {
+                c.accepted_steps += 1;
+                c.evaluations += 4;
+                if c.dense_output {
+                    c.points.push(PropagationPoint {
+                        epoch_tdb_seconds: self.epoch_map.tdb_at(segment, elapsed),
+                        position_km: [y.position.x, y.position.y, y.position.z],
+                        velocity_km_s: [y.velocity.x, y.velocity.y, y.velocity.z],
+                    });
+                }
+            }
         }
         Ok(y)
     }
@@ -574,8 +680,9 @@ impl System<'_> {
     fn dp54(
         &self,
         mut y: Augmented,
-        segment: &Segment,
+        segment: &TtSegment,
         options: &IntegratorOptions,
+        mut collector: Option<&mut ResultCollector>,
     ) -> Result<Augmented, PropagationError> {
         let tableau = DP54Tableau::default();
         let controller = PIController {
@@ -591,9 +698,21 @@ impl System<'_> {
             options.max_step,
         );
         let mut steps = 0_u32;
+        let mut pending_dense_start = if collector.as_deref().is_some_and(|c| c.dense_output) {
+            Some(CartesianState {
+                epoch_tdb_seconds: segment.from.tdb,
+                position_km: y.position,
+                velocity_km_s: y.velocity,
+            })
+        } else {
+            None
+        };
         // First-same-as-last: the rate at the end of an accepted step opens
         // the next one.
         let mut k1 = self.rate(segment, elapsed, &y)?;
+        if let Some(c) = collector.as_deref_mut() {
+            c.evaluations += 1;
+        }
 
         while (elapsed - start).abs() < span_abs {
             if steps >= options.max_steps {
@@ -623,6 +742,9 @@ impl System<'_> {
             let next_elapsed = if last { target } else { elapsed + h_step };
             let k_next = self.rate(segment, next_elapsed, &next)?;
             stages.push(k_next);
+            if let Some(c) = collector.as_deref_mut() {
+                c.evaluations += 6;
+            }
 
             // Embedded fourth-order solution, for the position and velocity
             // error estimate only.
@@ -641,7 +763,7 @@ impl System<'_> {
                 .max((velocity_error * h_step).norm() / velocity_scale);
             if !error.is_finite() {
                 return Err(PropagationError::NumericalFailure(
-                    "variational step error not finite".to_string(),
+                    "integration step error not finite".to_string(),
                 ));
             }
 
@@ -650,18 +772,81 @@ impl System<'_> {
                 controller.next_step(h_step, error),
                 options.max_step,
             );
-            let mut stages = stages.into_iter();
             if error <= 1.0 {
+                if let Some(c) = collector.as_deref_mut() {
+                    c.accepted_steps += 1;
+                    if c.dense_output {
+                        let tdb_start = self.epoch_map.tdb_at(segment, elapsed);
+                        let tdb_end = self.epoch_map.tdb_at(segment, next_elapsed);
+                        let h_tdb = tdb_end - tdb_start;
+                        let y_end_state = CartesianState {
+                            epoch_tdb_seconds: tdb_end,
+                            position_km: next.position,
+                            velocity_km_s: next.velocity,
+                        };
+                        if h_tdb == 0.0 {
+                            // A step shorter than half a TDB ULP collapses to a
+                            // single representable TDB epoch: fold its post-step
+                            // state into the preceding segment so no zero-length
+                            // segment exists and the epoch holds the post-step
+                            // state.
+                            if let Some(last_seg) = c.dense_segments.last_mut() {
+                                last_seg.y_end = y_end_state;
+                                if let Some(last_point) = c.points.last_mut() {
+                                    last_point.epoch_tdb_seconds = tdb_end;
+                                    last_point.position_km = y_end_state.position_array();
+                                    last_point.velocity_km_s = y_end_state.velocity_array();
+                                }
+                            }
+                        } else {
+                            let scale = h_step / h_tdb;
+                            let ks_vec: Vec<StateDerivative> = stages
+                                .iter()
+                                .map(|stage| StateDerivative {
+                                    dpos_km_s: stage.position * scale,
+                                    dvel_km_s2: stage.velocity * scale,
+                                })
+                                .collect();
+                            let ks_array: [StateDerivative; 7] =
+                                ks_vec.try_into().map_err(|_| {
+                                    PropagationError::NumericalFailure(
+                                        "Failed to capture RK stages".to_string(),
+                                    )
+                                })?;
+                            let y_start_state =
+                                pending_dense_start.take().unwrap_or(CartesianState {
+                                    epoch_tdb_seconds: tdb_start,
+                                    position_km: y.position,
+                                    velocity_km_s: y.velocity,
+                                });
+                            c.dense_segments.push(DenseSegment::from_dp54_stages(
+                                tdb_start,
+                                h_tdb,
+                                y_start_state,
+                                y_end_state,
+                                &ks_array,
+                            ));
+                            c.points.push(PropagationPoint {
+                                epoch_tdb_seconds: tdb_end,
+                                position_km: y_end_state.position_array(),
+                                velocity_km_s: y_end_state.velocity_array(),
+                            });
+                        }
+                    }
+                }
                 y = next;
                 elapsed = next_elapsed;
-                k1 = stages.next_back().ok_or_else(missing_stage)?;
+                k1 = stages.into_iter().next_back().ok_or_else(missing_stage)?;
             } else {
+                if let Some(c) = collector.as_deref_mut() {
+                    c.rejected_steps += 1;
+                }
                 if h.abs() < options.min_step {
                     return Err(PropagationError::NumericalFailure(
                         "Step size too small".to_string(),
                     ));
                 }
-                k1 = stages.next().ok_or_else(missing_stage)?;
+                k1 = stages.into_iter().next().ok_or_else(missing_stage)?;
             }
         }
         Ok(y)
@@ -812,55 +997,60 @@ mod tests {
             .map(|step| EPOCH + 900.0 * f64::from(step))
             .collect();
         let epochs = from_epoch(&tdb);
-        // The plain propagator's time argument is TDB itself: it is asked for
-        // the epochs that span the same elapsed time. The force models then
-        // see epochs that differ by the change of TDB - TT, under 2
-        // microseconds over these two hours, which moves the Sun and Moon by
-        // centimetres.
-        let plain_epochs: Vec<f64> = epochs
-            .iter()
-            .map(|epoch| EPOCH + epoch.elapsed_tt_s)
-            .collect();
-        let plain = StatePropagator {
-            initial,
-            force_model: kind,
-            integrator: IntegratorKind::Dp54,
-            options: tight_options(),
-            drag: None,
-            space_weather: None,
+        let rk4_options = IntegratorOptions {
+            initial_step: 30.0,
+            ..IntegratorOptions::default()
         };
-        let expected = plain.ephemeris(&plain_epochs).expect("plain ephemeris");
-        let force = plain.build_force().expect("force");
-        let parameters: Vec<f64> = force.parameters().iter().map(|p| p.value).collect();
-        let equations = VariationalEquations {
-            force: force.as_ref(),
-            parameters: &parameters,
-            sensitivity_parameters: &[],
-        };
-        let states = propagate_variational(
-            initial,
-            &epochs,
-            &equations,
-            IntegratorKind::Dp54,
-            &tight_options(),
-            &PropagationContext::default(),
-        )
-        .expect("variational propagation");
-        assert_eq!(states[0].state, initial);
-        assert_eq!(states[0].state_transition, Matrix6::identity());
-        for ((state, expected), epoch) in states.iter().zip(&expected).zip(&tdb) {
-            assert_eq!(state.state.epoch_tdb_seconds, *epoch);
-            // Both integrate the same equations with the same tableau and
-            // tolerances. The plain propagator advances its epoch as a f64 of
-            // TDB seconds past J2000, which rounds each step's end to 2^-23 s
-            // at this epoch, while the variational run keeps elapsed seconds;
-            // 60 or so steps of at most 6e-8 s each at 3.9 km/s bound the
-            // difference by 1.4e-5 km.
-            assert!(
-                (state.state.position_km - expected.position_km).norm() <= 1.4e-5,
-                "position differs by {} km",
-                (state.state.position_km - expected.position_km).norm()
-            );
+        for (integrator, options) in [
+            (IntegratorKind::Dp54, tight_options()),
+            (IntegratorKind::Rk4, rk4_options),
+        ] {
+            let plain = StatePropagator {
+                initial,
+                force_model: kind,
+                integrator,
+                options,
+                drag: None,
+                space_weather: None,
+            };
+            let expected = plain.ephemeris(&tdb).expect("plain ephemeris");
+            let force = plain.build_force().expect("force");
+            let parameters: Vec<f64> = force.parameters().iter().map(|p| p.value).collect();
+            let equations = VariationalEquations {
+                force: force.as_ref(),
+                parameters: &parameters,
+                sensitivity_parameters: &[],
+            };
+            let states = propagate_variational(
+                initial,
+                &epochs,
+                &equations,
+                integrator,
+                &options,
+                &PropagationContext::default(),
+            )
+            .expect("variational propagation");
+            assert_eq!(states[0].state, initial);
+            assert_eq!(states[0].state_transition, Matrix6::identity());
+            for ((state, expected), epoch) in states.iter().zip(&expected).zip(&tdb) {
+                assert_eq!(state.state.epoch_tdb_seconds.to_bits(), epoch.to_bits());
+                assert_eq!(
+                    state.state.epoch_tdb_seconds.to_bits(),
+                    expected.epoch_tdb_seconds.to_bits()
+                );
+                for axis in 0..3 {
+                    assert_eq!(
+                        state.state.position_km[axis].to_bits(),
+                        expected.position_km[axis].to_bits(),
+                        "{integrator:?} position axis {axis} at {epoch}"
+                    );
+                    assert_eq!(
+                        state.state.velocity_km_s[axis].to_bits(),
+                        expected.velocity_km_s[axis].to_bits(),
+                        "{integrator:?} velocity axis {axis} at {epoch}"
+                    );
+                }
+            }
         }
     }
 

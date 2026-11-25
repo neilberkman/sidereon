@@ -1,34 +1,44 @@
 //! Atmospheric drag over NRLMSISE-00 density.
 //!
-//! `CartesianState::epoch_tdb_seconds` is interpreted here as continuous seconds
-//! past the J2000 epoch. The drag model treats those seconds directly as the UT
-//! epoch for NRLMSISE-00 calendar inputs and for the GMST-only ECI to ECEF
-//! rotation. For modern satellite drag, the neglected TDB-UT1 and UTC-UT1
-//! offsets are at most about 70 s: about 8e-4 day, 0.02 h of local-solar-time
-//! phase, 2e-6 year of seasonal phase, and 5.1e-3 rad or 0.29 deg of longitude.
-//! These are well below the empirical density uncertainty of NRLMSISE-00.
+//! `CartesianState::epoch_tdb_seconds` is absolute TDB seconds past J2000.
+//! Earth orientation is obtained on UT1 from the [`EarthOrientationProvider`]
+//! attached to [`PropagationContext`]. When the context supplies no provider,
+//! drag uses [`TdbEarthOrientationProvider::new`] in
+//! [`ValidityMode::Permissive`] so multi-year drag and decay evaluations past
+//! the embedded UT1 table use the long-term `Delta T` curve while recording
+//! the departure in [`PropagationContext`]; a caller-supplied provider keeps
+//! its own [`ValidityMode`]. The body-fixed position for geodetic coordinates
+//! and the Earth rotation vector `omega` come from that full IAU 2006/2000A
+//! precession-nutation, UT1 apparent sidereal rotation, and polar-motion
+//! orientation.
 //!
-//! Wind is neglected and the atmosphere is treated as co-rotating with Earth,
-//! following the standard Vallado rotating-atmosphere drag convention. Density
-//! caching is intentionally left for a future optimization so each RHS
-//! evaluation is reproducible from the instantaneous state.
+//! NRLMSISE-00 calendar inputs (year, day of year, seconds of day) and
+//! space-weather lookups are evaluated on UTC derived from the orientation's
+//! [`TimeScales`]. Wind is neglected and the atmosphere co-rotates with Earth,
+//! forming the GCRF atmosphere-relative velocity as `v - omega x r` with the
+//! orientation's Earth rotation vector rotated into GCRF. Density caching is
+//! intentionally left for a future optimization so each RHS evaluation is
+//! reproducible from the instantaneous state.
 
 use crate::astro::atmosphere::{self, NrlmsiseInput, MAX_ALTITUDE_KM};
 use crate::astro::constants::{
-    earth::OMEGA_E_DOT_RAD_S,
     time::{DAYS_PER_JULIAN_YEAR, SECONDS_PER_DAY},
     units::M_PER_KM,
 };
 use crate::astro::error::PropagationError;
 use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::frames::orientation::{
+    EarthOrientation, EarthOrientationProvider, TdbEarthOrientationProvider,
+};
 use crate::astro::frames::transforms::{
-    greenwich_mean_sidereal_time_radians_from_j2000_seconds, itrs_to_geodetic_compute,
-    FrameTransformError,
+    itrs_to_geodetic_compute, mat3_vec3_mul, FrameTransformError,
 };
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::space_weather::{SpaceWeatherError, SpaceWeatherPolicy, SpaceWeatherTable};
 use crate::astro::state::CartesianState;
-use crate::astro::time::civil::{civil_from_j2000_seconds, day_of_year_int, second_of_day};
+use crate::astro::time::civil::{day_of_year_int, j2000_seconds, second_of_day};
+use crate::astro::time::scales::TimeScales;
+use crate::astro::time::ValidityMode;
 use nalgebra::Vector3;
 use std::sync::Arc;
 
@@ -163,13 +173,18 @@ impl ForceModel for DragForce {
     fn acceleration(
         &self,
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
+        validate_drag_state(state)?;
+        let orientation = orientation_at_state(ctx, state.epoch_tdb_seconds)?;
+        let calendar = calendar_from_time_scales(&orientation.time_scales())?;
         drag_acceleration(
             self.space_weather,
             self.bc_factor_m2_kg,
             self.cutoff_altitude_km,
             state,
+            &orientation,
+            calendar,
         )
     }
 }
@@ -215,16 +230,24 @@ impl ForceModel for SourcedDragForce {
     fn acceleration(
         &self,
         state: &CartesianState,
-        _ctx: &PropagationContext,
+        ctx: &PropagationContext,
     ) -> Result<Vector3<f64>, PropagationError> {
-        let space_weather = self.source.at(state.epoch_tdb_seconds).map_err(|error| {
-            PropagationError::ForceModelFailure(format!("space weather: {error}"))
-        })?;
+        validate_drag_state(state)?;
+        let orientation = orientation_at_state(ctx, state.epoch_tdb_seconds)?;
+        let calendar = calendar_from_time_scales(&orientation.time_scales())?;
+        let space_weather =
+            self.source
+                .at(calendar.space_weather_utc_j2000_s)
+                .map_err(|error| {
+                    PropagationError::ForceModelFailure(format!("space weather: {error}"))
+                })?;
         drag_acceleration(
             space_weather,
             self.bc_factor_m2_kg,
             self.cutoff_altitude_km,
             state,
+            &orientation,
+            calendar,
         )
     }
 }
@@ -320,9 +343,13 @@ impl DragParameters {
     }
 }
 
-pub(crate) fn geodetic_altitude_km(state: &CartesianState) -> Result<f64, PropagationError> {
+pub(crate) fn geodetic_altitude_km(
+    state: &CartesianState,
+    ctx: &PropagationContext,
+) -> Result<f64, PropagationError> {
     validate_drag_state(state)?;
-    Ok(geodetic_from_validated_state(state)?.alt_km)
+    let orientation = orientation_at_state(ctx, state.epoch_tdb_seconds)?;
+    Ok(geodetic_from_orientation(state, &orientation)?.alt_km)
 }
 
 pub(crate) fn map_frame_error(
@@ -332,15 +359,31 @@ pub(crate) fn map_frame_error(
     PropagationError::NumericalFailure(format!("drag {context} failed: {error}"))
 }
 
+fn orientation_at_state(
+    ctx: &PropagationContext,
+    epoch_tdb_seconds: f64,
+) -> Result<EarthOrientation, PropagationError> {
+    let default_provider =
+        TdbEarthOrientationProvider::new().with_validity(ValidityMode::Permissive);
+    let provider: &dyn EarthOrientationProvider =
+        ctx.body_fixed_frame_provider().unwrap_or(&default_provider);
+    provider
+        .orientation_at_tdb_seconds(epoch_tdb_seconds)
+        .map(|orientation| ctx.record_orientation(orientation))
+        .map_err(|error| {
+            PropagationError::from_frame("drag body-fixed frame evaluation failed", error)
+        })
+}
+
 fn drag_acceleration(
     space_weather: SpaceWeather,
     bc_factor_m2_kg: f64,
     cutoff_altitude_km: f64,
     state: &CartesianState,
+    orientation: &EarthOrientation,
+    calendar: DragCalendar,
 ) -> Result<Vector3<f64>, PropagationError> {
-    validate_drag_state(state)?;
-    let calendar = calendar_from_epoch(state.epoch_tdb_seconds);
-    let geodetic = geodetic_from_validated_state(state)?;
+    let geodetic = geodetic_from_orientation(state, orientation)?;
 
     if geodetic.alt_km <= cutoff_altitude_km || geodetic.alt_km > MAX_ALTITUDE_KM {
         return Ok(Vector3::zeros());
@@ -370,7 +413,7 @@ fn drag_acceleration(
         ));
     }
 
-    let v_rel_km_s = relative_velocity_km_s(state);
+    let v_rel_km_s = relative_velocity_km_s(state, orientation)?;
     if !vector_is_finite(&v_rel_km_s) {
         return Err(PropagationError::NumericalFailure(
             "drag relative velocity not finite".to_string(),
@@ -478,18 +521,31 @@ struct DragCalendar {
     year: i32,
     doy: i32,
     sec_of_day: f64,
+    space_weather_utc_j2000_s: f64,
 }
 
-fn calendar_from_epoch(epoch_tdb_seconds: f64) -> DragCalendar {
-    let sec_i = epoch_tdb_seconds.floor() as i64;
-    let (year, month, day, hour, minute, second) = civil_from_j2000_seconds(sec_i);
-    let sec_of_day = second_of_day(hour as i32, minute as i32, second as f64)
-        + (epoch_tdb_seconds - sec_i as f64);
-    DragCalendar {
-        year: year as i32,
-        doy: day_of_year_int(year as i32, month as i32, day as i32) as i32,
-        sec_of_day,
+fn calendar_from_time_scales(ts: &TimeScales) -> Result<DragCalendar, PropagationError> {
+    let (year, month, day, hour, minute, second) = ts.utc_calendar_fields().ok_or_else(|| {
+        PropagationError::NumericalFailure("drag UTC calendar conversion failed".to_string())
+    })?;
+    let doy_i64 = day_of_year_int(year, month, day);
+    let doy = i32::try_from(doy_i64).map_err(|_| {
+        PropagationError::NumericalFailure("drag day of year out of i32 range".to_string())
+    })?;
+    let sec_of_day = second_of_day(hour, minute, second);
+    let sw_second = if second >= 60.0 { 59.0 } else { second };
+    let space_weather_utc_j2000_s = j2000_seconds(year, month, day, hour, minute, sw_second);
+    if !(sec_of_day.is_finite() && space_weather_utc_j2000_s.is_finite()) {
+        return Err(PropagationError::NumericalFailure(
+            "drag UTC calendar seconds not finite".to_string(),
+        ));
     }
+    Ok(DragCalendar {
+        year,
+        doy,
+        sec_of_day,
+        space_weather_utc_j2000_s,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -499,16 +555,14 @@ struct DragGeodetic {
     alt_km: f64,
 }
 
-fn geodetic_from_validated_state(state: &CartesianState) -> Result<DragGeodetic, PropagationError> {
-    let theta = greenwich_mean_sidereal_time_radians_from_j2000_seconds(state.epoch_tdb_seconds)
-        .map_err(|error| map_frame_error("gmst", error))?;
-    let r_ecef = eci_to_ecef_gmst(state.position_km, theta);
-    if !vector_is_finite(&r_ecef) {
-        return Err(PropagationError::NumericalFailure(
-            "drag ECEF position not finite".to_string(),
-        ));
-    }
-    let (lat_deg, lon_deg, alt_km) = itrs_to_geodetic_compute(r_ecef.x, r_ecef.y, r_ecef.z)
+fn geodetic_from_orientation(
+    state: &CartesianState,
+    orientation: &EarthOrientation,
+) -> Result<DragGeodetic, PropagationError> {
+    let r_itrf = orientation
+        .gcrf_to_itrf_position_km(state.position_array())
+        .map_err(|error| map_frame_error("gcrf_to_itrf", error))?;
+    let (lat_deg, lon_deg, alt_km) = itrs_to_geodetic_compute(r_itrf[0], r_itrf[1], r_itrf[2])
         .map_err(|error| map_frame_error("geodetic", error))?;
     if !(lat_deg.is_finite() && lon_deg.is_finite() && alt_km.is_finite()) {
         return Err(PropagationError::NumericalFailure(
@@ -522,23 +576,15 @@ fn geodetic_from_validated_state(state: &CartesianState) -> Result<DragGeodetic,
     })
 }
 
-fn eci_to_ecef_gmst(position_km: Vector3<f64>, theta: f64) -> Vector3<f64> {
-    let c = libm::cos(theta);
-    let s = libm::sin(theta);
-    Vector3::new(
-        c * position_km.x + s * position_km.y,
-        -s * position_km.x + c * position_km.y,
-        position_km.z,
-    )
-}
-
-fn relative_velocity_km_s(state: &CartesianState) -> Vector3<f64> {
-    let omega_cross_r = Vector3::new(
-        -OMEGA_E_DOT_RAD_S * state.position_km.y,
-        OMEGA_E_DOT_RAD_S * state.position_km.x,
-        0.0,
-    );
-    state.velocity_km_s - omega_cross_r
+fn relative_velocity_km_s(
+    state: &CartesianState,
+    orientation: &EarthOrientation,
+) -> Result<Vector3<f64>, PropagationError> {
+    let omega_itrf = orientation.earth_rotation_vector_itrf_rad_s();
+    let omega_gcrf_arr = mat3_vec3_mul(&orientation.itrf_to_gcrf_matrix(), &omega_itrf)
+        .map_err(|error| map_frame_error("earth_rotation_vector", error))?;
+    let omega_gcrf = Vector3::new(omega_gcrf_arr[0], omega_gcrf_arr[1], omega_gcrf_arr[2]);
+    Ok(state.velocity_km_s - omega_gcrf.cross(&state.position_km))
 }
 
 #[cfg(test)]
@@ -612,21 +658,25 @@ mod tests {
     fn state_from_geodetic_alt(epoch: f64, altitude_km: f64) -> CartesianState {
         let (x_ecef, y_ecef, z_ecef) =
             geodetic_to_itrs(0.0, 0.0, altitude_km).expect("valid geodetic");
-        let theta =
-            greenwich_mean_sidereal_time_radians_from_j2000_seconds(epoch).expect("valid gmst");
-        let c = libm::cos(theta);
-        let s = libm::sin(theta);
-        let x_eci = c * x_ecef - s * y_ecef;
-        let y_eci = s * x_ecef + c * y_ecef;
+        let orientation = TdbEarthOrientationProvider::new()
+            .orientation_at_tdb_seconds(epoch)
+            .expect("valid orientation");
+        let pos_eci = orientation
+            .itrf_to_gcrf_position_km([x_ecef, y_ecef, z_ecef])
+            .expect("valid ITRF to GCRF");
         let r = RE_EARTH + altitude_km;
         let v = (MU_EARTH / r).sqrt();
-        CartesianState::new(epoch, [x_eci, y_eci, z_ecef], [0.0, v, 0.0])
+        CartesianState::new(epoch, pos_eci, [0.0, v, 0.0])
     }
 
     fn density_for_state(state: &CartesianState, sw: SpaceWeather) -> f64 {
         validate_drag_state(state).expect("valid drag state");
-        let calendar = calendar_from_epoch(state.epoch_tdb_seconds);
-        let geodetic = geodetic_from_validated_state(state).expect("valid geodetic");
+        let orientation =
+            orientation_at_state(&PropagationContext::default(), state.epoch_tdb_seconds)
+                .expect("valid orientation");
+        let calendar =
+            calendar_from_time_scales(&orientation.time_scales()).expect("valid calendar");
+        let geodetic = geodetic_from_orientation(state, &orientation).expect("valid geodetic");
         let input = NrlmsiseInput {
             year: calendar.year,
             doy: calendar.doy,
@@ -646,8 +696,11 @@ mod tests {
     }
 
     fn hand_acceleration(state: &CartesianState, bc_factor_m2_kg: f64) -> Vector3<f64> {
+        let orientation =
+            orientation_at_state(&PropagationContext::default(), state.epoch_tdb_seconds)
+                .expect("valid orientation");
         let rho = density_for_state(state, quiet_sw());
-        let v_rel_m_s = relative_velocity_km_s(state) * M_PER_KM;
+        let v_rel_m_s = relative_velocity_km_s(state, &orientation).expect("v_rel") * M_PER_KM;
         v_rel_m_s * (-0.5 * rho * bc_factor_m2_kg * v_rel_m_s.norm()) / M_PER_KM
     }
 
@@ -705,10 +758,10 @@ mod tests {
         const DIRECTION_TOL: f64 = 1.0e-14;
         let state = circular_state(TEST_EPOCH_S, 380.0, 63.4_f64.to_radians());
         let drag = test_drag(BC_FACTOR);
-        let accel = drag
-            .acceleration(&state, &PropagationContext::default())
-            .expect("drag acceleration");
-        let v_rel = relative_velocity_km_s(&state);
+        let ctx = PropagationContext::default();
+        let accel = drag.acceleration(&state, &ctx).expect("drag acceleration");
+        let orientation = orientation_at_state(&ctx, state.epoch_tdb_seconds).expect("orientation");
+        let v_rel = relative_velocity_km_s(&state, &orientation).expect("v_rel");
 
         assert!(accel.dot(&v_rel) < 0.0);
         assert!(accel.cross(&v_rel).norm() <= accel.norm() * v_rel.norm() * DIRECTION_TOL);
@@ -811,8 +864,8 @@ mod tests {
         // King-Hele near-circular check, using B = 0.02 m^2/kg, altitude 360 km,
         // inclination 88 deg, quiet-Sun space weather, and a 24-sample
         // NRLMSISE-00 orbit-mean density. Observed SMA slope:
-        // -5.041449755563205e-3 m/s. Expected averaged rate:
-        // -5.013291857709087e-3 m/s. Relative difference: 5.62e-3.
+        // -5.039687362219701e-3 m/s. Expected averaged rate:
+        // -5.012722827628129e-3 m/s. Relative difference: 5.38e-3.
         const AGREEMENT_TOL: f64 = 0.15;
         let altitude_km = 360.0;
         let inclination_rad = 88.0_f64.to_radians();
@@ -882,7 +935,8 @@ mod tests {
         assert_eq!(accel_above, Vector3::zeros());
 
         let cutoff_state = state_from_geodetic_alt(TEST_EPOCH_S, 100.0);
-        let cutoff = geodetic_altitude_km(&cutoff_state).expect("cutoff altitude");
+        let cutoff = geodetic_altitude_km(&cutoff_state, &PropagationContext::default())
+            .expect("cutoff altitude");
         let drag =
             DragForce::from_bc_factor_m2_kg(BC_FACTOR, quiet_sw(), cutoff).expect("valid cutoff");
         let accel_cutoff = drag
@@ -942,27 +996,302 @@ mod tests {
     #[test]
     fn drag_rotation_sign_matches_known_longitude() {
         const LON_TOL_DEG: f64 = 1.0e-12;
-        let theta = greenwich_mean_sidereal_time_radians_from_j2000_seconds(TEST_EPOCH_S)
-            .expect("valid gmst");
         let state = CartesianState::new(TEST_EPOCH_S, [RE_EARTH + 400.0, 0.0, 0.0], [0.0; 3]);
-        let geodetic = geodetic_from_validated_state(&state).expect("valid geodetic");
-        let expected_lon = (-theta).to_degrees();
-        let expected_lon = ((expected_lon + 180.0).rem_euclid(360.0)) - 180.0;
+        let orientation =
+            orientation_at_state(&PropagationContext::default(), state.epoch_tdb_seconds)
+                .expect("valid orientation");
+        let geodetic = geodetic_from_orientation(&state, &orientation).expect("valid geodetic");
+        let r_itrf = crate::astro::frames::transforms::gcrs_to_itrs_compute(
+            state.position_km.x,
+            state.position_km.y,
+            state.position_km.z,
+            &orientation.time_scales(),
+            false,
+        )
+        .expect("independent GCRS to ITRS");
+        let (expected_lat, expected_lon, expected_alt) =
+            itrs_to_geodetic_compute(r_itrf.0, r_itrf.1, r_itrf.2).expect("independent geodetic");
 
+        assert!((geodetic.lat_deg - expected_lat).abs() <= LON_TOL_DEG);
         assert!((geodetic.lon_deg - expected_lon).abs() <= LON_TOL_DEG);
+        assert!((geodetic.alt_km - expected_alt).abs() <= 1.0e-12);
+    }
+
+    #[test]
+    fn drag_time_inputs_and_kinematics_match_independent_ut1_utc_and_gcrs_to_itrs() {
+        use crate::astro::frames::transforms::{gcrs_to_itrs_compute, PolarMotion};
+        use crate::astro::time::civil::j2000_seconds_from_split;
+        use crate::astro::time::DegradeReason;
+
+        // 2020-06-24 23:59:30.0 UTC lies ~69.184 s behind TDB, so its TDB date
+        // is already 2020-06-25 00:00:39.184..., while UTC is still 2020-06-24
+        // (day of year 176 in leap year 2020).
+        let ts = TimeScales::from_utc(2020, 6, 24, 23, 59, 30.0).expect("valid UTC");
+        let epoch_tdb_s = j2000_seconds_from_split(ts.jd_whole, ts.tdb_fraction);
+        let state = circular_state(epoch_tdb_s, 400.0, 51.6_f64.to_radians());
+
+        let ctx = PropagationContext::default();
+        let orientation = orientation_at_state(&ctx, epoch_tdb_s).expect("orientation");
+        let calendar = calendar_from_time_scales(&orientation.time_scales()).expect("calendar");
+        assert_eq!(calendar.year, 2020);
+        assert_eq!(calendar.doy, 176);
+        assert!(
+            (calendar.sec_of_day - (23.0 * 3600.0 + 59.0 * 60.0 + 30.0)).abs() < 1.0e-5,
+            "sec_of_day {}",
+            calendar.sec_of_day
+        );
+
+        // Independent GCRS -> ITRS evaluation directly from `TimeScales::from_utc`.
+        let (x_itrs, y_itrs, z_itrs) = gcrs_to_itrs_compute(
+            state.position_km.x,
+            state.position_km.y,
+            state.position_km.z,
+            &ts,
+            false,
+        )
+        .expect("independent GCRS->ITRS");
+        let (lat_deg, lon_deg, alt_km) =
+            itrs_to_geodetic_compute(x_itrs, y_itrs, z_itrs).expect("independent geodetic");
+        let geodetic = geodetic_from_orientation(&state, &orientation).expect("drag geodetic");
+        assert!((geodetic.lat_deg - lat_deg).abs() < 1.0e-10);
+        assert!((geodetic.lon_deg - lon_deg).abs() < 1.0e-10);
+        assert!((geodetic.alt_km - alt_km).abs() < 1.0e-10);
+
+        // Independent relative velocity via `EarthOrientation::gcrf_to_itrf_state_km`
+        // rotated back to GCRF: R^T (R v - omega_itrf x r_itrf) = v - omega_gcrf x r.
+        let indep_orientation = EarthOrientation::from_time_scales(&ts).expect("indep orientation");
+        let (_, v_itrf) = indep_orientation
+            .gcrf_to_itrf_state_km(state.position_array(), state.velocity_array())
+            .expect("GCRF->ITRF state");
+        let v_rel_indep = mat3_vec3_mul(&indep_orientation.itrf_to_gcrf_matrix(), &v_itrf)
+            .expect("ITRF->GCRF vel");
+        let v_rel_drag = relative_velocity_km_s(&state, &orientation).expect("drag v_rel");
+        let v_rel_diff = (v_rel_drag - Vector3::from(v_rel_indep)).norm();
+        assert!(
+            v_rel_diff < 1.0e-12,
+            "relative velocity diff {v_rel_diff:e} km/s"
+        );
+
+        // Independent NRLMSISE-00 + drag acceleration.
+        let sw = quiet_sw();
+        let indep_density = atmosphere::nrlmsise00_with_lst(
+            &NrlmsiseInput {
+                year: 2020,
+                doy: 176,
+                sec: 23.0 * 3600.0 + 59.0 * 60.0 + 30.0,
+                alt: alt_km,
+                g_lat: lat_deg,
+                g_long: lon_deg,
+                lst: 0.0,
+                f107a: sw.f107a,
+                f107: sw.f107,
+                ap: sw.ap,
+                ap_array: None,
+            },
+            None,
+        )
+        .expect("indep density")
+        .density();
+        let v_m_s = Vector3::from(v_rel_indep) * M_PER_KM;
+        let indep_accel = v_m_s * (-0.5 * indep_density * BC_FACTOR * v_m_s.norm()) / M_PER_KM;
+        let actual = test_drag(BC_FACTOR)
+            .acceleration(&state, &ctx)
+            .expect("drag accel");
+        let rel_diff = (actual - indep_accel).norm() / indep_accel.norm();
+        assert!(
+            rel_diff < 1.0e-9,
+            "acceleration rel diff {rel_diff:e} ({actual:?} vs {indep_accel:?})"
+        );
+
+        // Provider with nonzero polar motion attached to PropagationContext is used.
+        let pm = PolarMotion::from_arcseconds(0.35, 0.45).expect("polar motion");
+        let pm_ctx = PropagationContext::new().with_body_fixed_frame_provider(Arc::new(
+            TdbEarthOrientationProvider::with_polar_motion(pm),
+        ));
+        let pm_actual = test_drag(BC_FACTOR)
+            .acceleration(&state, &pm_ctx)
+            .expect("pm drag accel");
+        assert_ne!(pm_actual, actual);
+        let pm_indep =
+            EarthOrientation::from_time_scales_with_polar_motion(&ts, pm).expect("pm orientation");
+        let (pm_r_itrf, pm_v_itrf) = pm_indep
+            .gcrf_to_itrf_state_km(state.position_array(), state.velocity_array())
+            .expect("pm state");
+        let pm_v_rel = mat3_vec3_mul(&pm_indep.itrf_to_gcrf_matrix(), &pm_v_itrf).expect("v_rel");
+        let (pm_lat, pm_lon, pm_alt) =
+            itrs_to_geodetic_compute(pm_r_itrf[0], pm_r_itrf[1], pm_r_itrf[2]).expect("pm geo");
+        let pm_density = atmosphere::nrlmsise00_with_lst(
+            &NrlmsiseInput {
+                year: 2020,
+                doy: 176,
+                sec: 23.0 * 3600.0 + 59.0 * 60.0 + 30.0,
+                alt: pm_alt,
+                g_lat: pm_lat,
+                g_long: pm_lon,
+                lst: 0.0,
+                f107a: sw.f107a,
+                f107: sw.f107,
+                ap: sw.ap,
+                ap_array: None,
+            },
+            None,
+        )
+        .expect("pm density")
+        .density();
+        let pm_v_m_s = Vector3::from(pm_v_rel) * M_PER_KM;
+        let pm_indep_accel =
+            pm_v_m_s * (-0.5 * pm_density * BC_FACTOR * pm_v_m_s.norm()) / M_PER_KM;
+        assert!(
+            (pm_actual - pm_indep_accel).norm() / pm_indep_accel.norm() < 1.0e-9,
+            "polar-motion accel mismatch"
+        );
+
+        // Outside UT1 table: default context uses permissive long-term Delta T
+        // and records the departure; an explicit strict provider refuses.
+        let future_ts = TimeScales::from_utc(2100, 1, 1, 0, 0, 0.0).expect("future UTC");
+        let future_tdb = j2000_seconds_from_split(future_ts.jd_whole, future_ts.tdb_fraction);
+        let future_state = circular_state(future_tdb, 400.0, 51.6_f64.to_radians());
+        let default_ctx = PropagationContext::default();
+        let future_accel = test_drag(BC_FACTOR)
+            .acceleration(&future_state, &default_ctx)
+            .expect("default context drag outside UT1 table");
+        assert!(future_accel.norm() > 0.0);
+        assert_eq!(
+            default_ctx.ut1_departure(),
+            Some(DegradeReason::AfterCoverage)
+        );
+        let strict_ctx = PropagationContext::new()
+            .with_body_fixed_frame_provider(Arc::new(TdbEarthOrientationProvider::new()));
+        assert!(matches!(
+            test_drag(BC_FACTOR).acceleration(&future_state, &strict_ctx),
+            Err(PropagationError::Ut1OutsideCoverage(
+                DegradeReason::AfterCoverage
+            ))
+        ));
+    }
+
+    #[test]
+    fn drag_outside_embedded_ut1_table_uses_permissive_default_and_honors_strict_provider() {
+        use crate::astro::time::DegradeReason;
+
+        let drag = test_drag(BC_FACTOR);
+        let drag_params = test_drag_parameters(BC_FACTOR);
+        // 2028-01-01 00:00:00 TDB, 2027-07-04 00:00:00 TDB, 1973-01-01 00:00:00 TDB.
+        let cases = [
+            (883_569_600.0, DegradeReason::AfterCoverage),
+            (867_931_200.0, DegradeReason::AfterCoverage),
+            (-852_033_600.0, DegradeReason::BeforeCoverage),
+        ];
+
+        let strict_ctx = PropagationContext::new()
+            .with_body_fixed_frame_provider(Arc::new(TdbEarthOrientationProvider::new()));
+
+        for (epoch_tdb, expected_reason) in cases {
+            let state = circular_state(epoch_tdb, 400.0, 51.6_f64.to_radians());
+
+            let default_ctx = PropagationContext::default();
+            let accel = drag
+                .acceleration(&state, &default_ctx)
+                .expect("default context accepts out-of-table epoch");
+            assert!(accel.norm() > 0.0 && vector_is_finite(&accel));
+            assert_eq!(default_ctx.ut1_departure(), Some(expected_reason));
+
+            let prop_result = StatePropagator::new(
+                state.epoch_tdb_seconds,
+                state.position_array(),
+                state.velocity_array(),
+                ForceModelKind::two_body(),
+                IntegratorKind::Dp54,
+            )
+            .with_drag(drag_params)
+            .propagate_to(epoch_tdb + 60.0)
+            .expect("default drag propagation succeeds outside UT1 table");
+            assert_eq!(prop_result.ut1_degraded, Some(expected_reason));
+
+            let err = drag
+                .acceleration(&state, &strict_ctx)
+                .expect_err("strict caller provider must refuse out-of-table epoch");
+            assert!(
+                matches!(err, PropagationError::Ut1OutsideCoverage(reason) if reason == expected_reason),
+                "epoch {epoch_tdb}: expected {expected_reason:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sourced_drag_looks_up_space_weather_on_utc_across_midnight() {
+        use crate::astro::space_weather::parse_csv;
+        use crate::astro::time::civil::j2000_seconds_from_split;
+
+        const MINI_CSV: &str = "DATE,BSRN,ND,KP1,KP2,KP3,KP4,KP5,KP6,KP7,KP8,KP_SUM,AP1,AP2,AP3,AP4,AP5,AP6,AP7,AP8,AP_AVG,CP,C9,ISN,F10.7_OBS,F10.7_ADJ,F10.7_DATA_TYPE,F10.7_OBS_CENTER81,F10.7_OBS_LAST81,F10.7_ADJ_CENTER81,F10.7_ADJ_LAST81\n\
+2020-06-23,2549,1,10,10,10,10,10,10,10,10,80,4,4,4,4,4,4,4,4,4,0.1,0,0,70.0,70.0,OBS,70.0,70.0,70.0,70.0\n\
+2020-06-24,2549,2,10,10,10,10,10,10,10,10,80,4,4,4,4,4,4,4,4,4,0.1,0,0,220.0,220.0,OBS,80.0,80.0,80.0,80.0\n\
+2020-06-25,2549,3,60,60,60,60,60,60,60,60,480,80,80,80,80,80,80,80,80,80,1.8,7,150,240.0,240.0,OBS,200.0,200.0,200.0,200.0\n";
+
+        let table = Arc::new(parse_csv(MINI_CSV).expect("parse csv").value);
+        // 2020-06-24 23:59:30 UTC -> TDB is 2020-06-25 00:00:39.184... (next day!).
+        let ts = TimeScales::from_utc(2020, 6, 24, 23, 59, 30.0).expect("valid UTC");
+        let epoch_tdb_s = j2000_seconds_from_split(ts.jd_whole, ts.tdb_fraction);
+        let state = circular_state(epoch_tdb_s, 400.0, 51.6_f64.to_radians());
+
+        let sourced = SourcedDragForce::new(
+            test_drag_parameters(BC_FACTOR),
+            SpaceWeatherSource::Table(table),
+        );
+        let ctx = PropagationContext::default();
+        let actual = sourced.acceleration(&state, &ctx).expect("sourced drag");
+
+        // On UTC day 2020-06-24: F10.7 = previous day (2020-06-23) = 70.0,
+        // F10.7a = today (2020-06-24) = 80.0, Ap = today (2020-06-24) = 4.0.
+        let utc_day_sw = SpaceWeather {
+            f107: 70.0,
+            f107a: 80.0,
+            ap: 4.0,
+        };
+        let expected_utc = DragForce::from_bc_factor_m2_kg(
+            BC_FACTOR,
+            utc_day_sw,
+            DragForce::DEFAULT_REENTRY_ALTITUDE_KM,
+        )
+        .expect("utc drag")
+        .acceleration(&state, &ctx)
+        .expect("utc accel");
+        // On TDB day 2020-06-25 it would have been F10.7=220, F10.7a=200, Ap=80.
+        let tdb_day_sw = SpaceWeather {
+            f107: 220.0,
+            f107a: 200.0,
+            ap: 80.0,
+        };
+        let wrong_tdb = DragForce::from_bc_factor_m2_kg(
+            BC_FACTOR,
+            tdb_day_sw,
+            DragForce::DEFAULT_REENTRY_ALTITUDE_KM,
+        )
+        .expect("tdb drag")
+        .acceleration(&state, &ctx)
+        .expect("tdb accel");
+
+        assert_eq!(actual.x.to_bits(), expected_utc.x.to_bits());
+        assert_eq!(actual.y.to_bits(), expected_utc.y.to_bits());
+        assert_eq!(actual.z.to_bits(), expected_utc.z.to_bits());
+        assert!(
+            (actual - wrong_tdb).norm() > 0.5 * actual.norm(),
+            "TDB-day space weather should differ strongly from UTC-day"
+        );
     }
 
     #[test]
     fn drag_golden_case_bits() {
         // Golden case source: this module's drag path, using NRLMSISE-00 release
         // 20041227 density through atmosphere::nrlmsise00_with_lst. Inputs:
-        // epoch 646315200.25 s, position [6778.137, 0, 0] km, inclination
-        // 51.6 deg, B 0.02 m^2/kg, F10.7/F10.7a/Ap 150/150/4. Intermediates:
-        // year 2020, doy 177, sec 0.25, GMST 4.775165029523421 rad,
-        // geodetic lat 0 deg, lon 86.4031973298448 deg, alt 400 km,
-        // density 1.9576468755557382e-12 kg/m^3, v_rel [0,
-        // 4.269038333748105, 6.00979886918909] km/s, acceleration [-0,
-        // -6.160751630773568e-10, -8.672884919136098e-10] km/s^2.
+        // epoch 646315200.25 s TDB (2020-06-24 23:58:51.065721035 UTC), position
+        // [6778.137, 0, 0] km GCRF, inclination 51.6 deg, B 0.02 m^2/kg,
+        // F10.7/F10.7a/Ap 150/150/4. Intermediates: UTC year 2020, doy 176,
+        // sec 86331.065721035004, geodetic lat 0.11286438798161325 deg,
+        // lon 86.95568673113613 deg, alt 400.00008231857566 km,
+        // density 1.970490020559495e-12 kg/m^3, v_rel [0, 4.269039280677301,
+        // 6.009795934015082] km/s, acceleration [-0, -6.201169074140698e-10,
+        // -8.729776944567759e-10] km/s^2.
         let state = circular_state(TEST_EPOCH_S, 400.0, 51.6_f64.to_radians());
         let accel = test_drag(BC_FACTOR)
             .acceleration(&state, &PropagationContext::default())
@@ -972,8 +1301,8 @@ mod tests {
             [accel.x.to_bits(), accel.y.to_bits(), accel.z.to_bits()],
             [
                 9_223_372_036_854_775_808,
-                13_692_397_580_950_677_421,
-                13_694_827_167_186_369_312,
+                13_692_436_670_303_356_892,
+                13_694_882_189_777_148_921,
             ]
         );
     }

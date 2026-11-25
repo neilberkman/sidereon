@@ -1130,8 +1130,8 @@ fn propagating_the_estimate_reproduces_the_fitted_residuals() {
         let reported = [residual.radial_m, residual.along_m, residual.cross_m];
         assert_eq!(recomputed, reported, "at {}", residual.epoch_tdb_j2000_s);
     }
-    // Epochs formed from the TDB seconds alone carry two roundings of 1.2e-7 s
-    // in the elapsed TT at this epoch, 0.9 mm at 3.9 km/s.
+    // Epochs formed from TDB seconds alone still carry the TDB rounding of the
+    // input timestamps themselves, well below 1 mm at GNSS speed.
     let from_tdb: Vec<VariationalEpoch> = fit
         .residuals
         .iter()

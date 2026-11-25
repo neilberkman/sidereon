@@ -672,6 +672,36 @@ impl TimeScales {
     pub fn tcb_fraction(&self) -> f64 {
         tcb_fraction_from_tdb_split(self.jd_whole, self.tdb_fraction)
     }
+
+    /// UTC civil calendar fields `(year, month, day, hour, minute, second)`
+    /// resolved from this epoch's TT split Julian date through TAI and the
+    /// embedded leap-second table.
+    ///
+    /// Returns `None` if the TT split is not finite or lies outside the
+    /// calendar range of [`civil::civil_fields_from_j2000_seconds`].
+    pub(crate) fn utc_calendar_fields(&self) -> Option<(i32, i32, i32, i32, i32, f64)> {
+        if !(self.jd_whole.is_finite() && self.tt_fraction.is_finite()) {
+            return None;
+        }
+        let tai_j2000_s = (self.jd_whole - J2000_JD) * SECONDS_PER_DAY
+            + (self.tt_fraction * SECONDS_PER_DAY - TT_MINUS_TAI_S);
+        let (year, month, day, hour, minute, second) =
+            civil::civil_fields_from_j2000_seconds(tai_j2000_s)?;
+        let utc = tai_calendar_to_utc(
+            ScaleCal {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+            },
+            LEAP_SECONDS,
+        );
+        Some((
+            utc.year, utc.month, utc.day, utc.hour, utc.minute, utc.second,
+        ))
+    }
 }
 
 /// TAI - UTC, in seconds, that [`TimeScales::from_utc`] applies to a UTC
