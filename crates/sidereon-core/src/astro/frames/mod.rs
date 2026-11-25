@@ -23,11 +23,13 @@
 //! Only the pure float-producing compute functions live here; the language
 //! bindings add nothing but decode/encode shims around them.
 
+pub mod iers2010;
 pub mod nutation;
 pub mod orientation;
 pub mod precession;
 pub mod transforms;
 
+pub use iers2010::{Iers2010EarthOrientationProvider, Iers2010EopSample};
 pub use orientation::{
     EarthOrientation, EarthOrientationProvider, PolarMotionSample,
     PolarMotionSeriesEarthOrientationProvider, TdbEarthOrientationProvider,

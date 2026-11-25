@@ -6,6 +6,7 @@
 //! reimplement any series; it evaluates the established chain once per epoch and
 //! exposes reusable direction-cosine matrices and state transforms.
 
+use super::iers2010::rotation::Rotation;
 use crate::astro::constants::earth::OMEGA_E_DOT_RAD_S;
 use crate::astro::frames::transforms::{
     gcrs_to_itrs_matrix_with_polar_motion, mat3_vec3_mul, polar_motion_matrix, FrameTransformError,
@@ -19,21 +20,43 @@ use crate::astro::time::{DegradeReason, Validated, ValidityMode};
 
 /// A single evaluated Earth-orientation state for one epoch.
 ///
-/// The stored direction-cosine matrix maps GCRF/GCRS inertial coordinates to
-/// ITRF/ITRS Earth-fixed coordinates using the existing IAU 2006/2000A
-/// precession-nutation chain, apparent sidereal rotation, and optional polar
-/// motion. The inverse matrix is cached as the transpose so callers can evaluate
-/// the frame once and reuse it across many satellite states.
+/// The direction-cosine matrices map between GCRF/GCRS inertial coordinates
+/// and ITRF/ITRS Earth-fixed coordinates. An orientation can be evaluated
+/// once and reused across many satellite states.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EarthOrientation {
     time_scales: TimeScales,
     polar_motion: PolarMotion,
     gcrf_to_itrf: Mat3,
+    iers2010_rotation: Option<Rotation>,
     itrf_to_gcrf: Mat3,
     earth_rotation_vector_itrf_rad_s: [f64; 3],
 }
 
 impl EarthOrientation {
+    pub(super) fn from_iers2010(
+        time_scales: TimeScales,
+        polar_motion: PolarMotion,
+        rotation: Rotation,
+        matrix: Mat3,
+        rate: [f64; 3],
+    ) -> Self {
+        Self {
+            time_scales,
+            polar_motion,
+            gcrf_to_itrf: matrix,
+            itrf_to_gcrf: inline_tr(&matrix),
+            iers2010_rotation: Some(rotation),
+            earth_rotation_vector_itrf_rad_s: rate,
+        }
+    }
+
+    /// GCRF-to-ITRF quaternion in Hipparchus convention, scalar first,
+    /// when evaluated by the IERS 2010 provider.
+    pub fn iers2010_quaternion(&self) -> Option<[f64; 4]> {
+        self.iers2010_rotation.map(Rotation::components)
+    }
+
     /// Evaluate the full GCRF to ITRF rotation with zero polar motion.
     pub fn from_time_scales(ts: &TimeScales) -> Result<Self, FrameTransformError> {
         Self::from_time_scales_with_polar_motion(ts, PolarMotion::ZERO)
@@ -86,6 +109,7 @@ impl EarthOrientation {
             time_scales: stored,
             polar_motion,
             gcrf_to_itrf,
+            iers2010_rotation: None,
             itrf_to_gcrf,
             earth_rotation_vector_itrf_rad_s,
         })
@@ -177,7 +201,7 @@ impl EarthOrientation {
     /// Time scales used to evaluate this orientation.
     ///
     /// They keep their [`TimeScales::ut1_degraded`] flag. For an orientation
-    /// accepted outside the UT1 table under [`ValidityMode::Permissive`] the
+    /// accepted outside its coverage under [`ValidityMode::Permissive`] the
     /// transforms that read UT1 refuse them as they stand; a consumer that has
     /// accepted the orientation runs them under
     /// [`crate::astro::frames::transforms::with_ut1_validity`] with
@@ -186,8 +210,8 @@ impl EarthOrientation {
         self.time_scales
     }
 
-    /// `Some` when this orientation was accepted outside the UT1 table under
-    /// [`ValidityMode::Permissive`], with the side of the table it lies on.
+    /// `Some` when this orientation was accepted outside UT1 coverage under
+    /// [`ValidityMode::Permissive`], indicating which boundary it crossed.
     pub fn ut1_degraded(&self) -> Option<DegradeReason> {
         self.time_scales.ut1_degraded
     }
@@ -232,6 +256,9 @@ impl EarthOrientation {
         position_gcrf_km: [f64; 3],
     ) -> Result<[f64; 3], FrameTransformError> {
         validate_vec3("position_gcrf_km", &position_gcrf_km)?;
+        if let Some(rotation) = self.iers2010_rotation {
+            return rotation.position(position_gcrf_km);
+        }
         mat3_vec3_mul(&self.gcrf_to_itrf, &position_gcrf_km)
     }
 
@@ -241,6 +268,9 @@ impl EarthOrientation {
         position_itrf_km: [f64; 3],
     ) -> Result<[f64; 3], FrameTransformError> {
         validate_vec3("position_itrf_km", &position_itrf_km)?;
+        if let Some(rotation) = self.iers2010_rotation {
+            return rotation.inverse().position(position_itrf_km);
+        }
         mat3_vec3_mul(&self.itrf_to_gcrf, &position_itrf_km)
     }
 
@@ -255,6 +285,14 @@ impl EarthOrientation {
     ) -> Result<([f64; 3], [f64; 3]), FrameTransformError> {
         validate_vec3("position_gcrf_km", &position_gcrf_km)?;
         validate_vec3("velocity_gcrf_km_s", &velocity_gcrf_km_s)?;
+        if let Some(rotation) = self.iers2010_rotation {
+            return rotation.state(
+                position_gcrf_km,
+                velocity_gcrf_km_s,
+                self.earth_rotation_vector_itrf_rad_s,
+                false,
+            );
+        }
         let position_itrf_km = mat3_vec3_mul(&self.gcrf_to_itrf, &position_gcrf_km)?;
         let rotated_velocity = mat3_vec3_mul(&self.gcrf_to_itrf, &velocity_gcrf_km_s)?;
         let transport = cross(self.earth_rotation_vector_itrf_rad_s, position_itrf_km);
@@ -272,6 +310,14 @@ impl EarthOrientation {
     ) -> Result<([f64; 3], [f64; 3]), FrameTransformError> {
         validate_vec3("position_itrf_km", &position_itrf_km)?;
         validate_vec3("velocity_itrf_km_s", &velocity_itrf_km_s)?;
+        if let Some(rotation) = self.iers2010_rotation {
+            return rotation.state(
+                position_itrf_km,
+                velocity_itrf_km_s,
+                self.earth_rotation_vector_itrf_rad_s,
+                true,
+            );
+        }
         let position_gcrf_km = mat3_vec3_mul(&self.itrf_to_gcrf, &position_itrf_km)?;
         let transport = cross(self.earth_rotation_vector_itrf_rad_s, position_itrf_km);
         let velocity_rotating = add(velocity_itrf_km_s, transport);
@@ -292,7 +338,7 @@ pub trait EarthOrientationProvider: Send + Sync {
         epoch_tdb_seconds: f64,
     ) -> Result<EarthOrientation, FrameTransformError>;
 
-    /// The UT1 policy this provider applies to an epoch outside the UT1 table.
+    /// The UT1 policy this provider applies to an epoch outside its coverage.
     ///
     /// The default is [`ValidityMode::Strict`]; a provider that can accept
     /// such an epoch reports [`ValidityMode::Permissive`] when configured to,
@@ -530,7 +576,7 @@ fn time_scales_from_scale_j2000_seconds(
         .map_err(|_| invalid_input("epoch_j2000_s", "time-scale conversion failed"))
 }
 
-fn invalid_input(field: &'static str, reason: &'static str) -> FrameTransformError {
+pub(super) fn invalid_input(field: &'static str, reason: &'static str) -> FrameTransformError {
     FrameTransformError::InvalidInput { field, reason }
 }
 
