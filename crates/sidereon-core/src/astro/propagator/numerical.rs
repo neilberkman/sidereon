@@ -15,6 +15,8 @@
 //! point, so they reflect the selected force model and integrator without
 //! duplicating dynamics.
 
+use std::sync::Arc;
+
 use crate::astro::constants::{J2_EARTH, MU_EARTH, RE_EARTH};
 use crate::astro::covariance::{Covariance6, Covariance6Error};
 use crate::astro::error::PropagationError;
@@ -278,9 +280,11 @@ impl ForceModelKind {
         })
     }
 
-    /// Build the boxed [`ForceModel`] this variant describes. Reuses the force
-    /// model implementations; no acceleration math is duplicated here.
-    fn build(self) -> Result<Box<dyn ForceModel>, PropagationError> {
+    /// Build the boxed [`ForceModel`] this variant describes.
+    ///
+    /// Returns an error for incompatible gravity or tide components or when
+    /// the configured spherical-harmonic model cannot be built.
+    pub fn build(self) -> Result<Box<dyn ForceModel>, PropagationError> {
         match self {
             ForceModelKind::TwoBody { mu_km3_s2 } => Ok(Box::new(TwoBodyGravity { mu: mu_km3_s2 })),
             ForceModelKind::TwoBodyJ2 {
@@ -445,7 +449,23 @@ impl StatePropagator {
         t_end_tdb_seconds: f64,
         ctx: &PropagationContext,
     ) -> Result<PropagationResult, PropagationError> {
-        let force = self.build_force()?;
+        self.propagate_to_with_additional_forces(t_end_tdb_seconds, &[], ctx)
+    }
+
+    /// Propagate to an absolute TDB epoch with an explicit context, integrating
+    /// over elapsed TT. Additional forces are summed in slice order after the
+    /// configured force model and drag.
+    ///
+    /// An empty slice is equivalent to [`Self::propagate_to_with_context`].
+    /// DP54 includes a continuous interpolant when
+    /// [`IntegratorOptions::dense_output`] is set.
+    pub fn propagate_to_with_additional_forces(
+        &self,
+        t_end_tdb_seconds: f64,
+        additional_forces: &[Arc<dyn ForceModel>],
+        ctx: &PropagationContext,
+    ) -> Result<PropagationResult, PropagationError> {
+        let force = self.build_force_with_additional_forces(additional_forces)?;
         let dynamics = OrbitalDynamics {
             force_model: force.as_ref(),
         };
@@ -538,7 +558,7 @@ impl StatePropagator {
         ctx: &PropagationContext,
     ) -> Result<StateTransitionMatrix, PropagationError> {
         crate::validate::finite(t_end_tdb_seconds, "t_end_tdb_seconds").map_err(map_field_error)?;
-        let force = self.build_force()?;
+        let force = self.force_model_with_drag()?;
         let dynamics = OrbitalDynamics {
             force_model: force.as_ref(),
         };
@@ -623,11 +643,26 @@ impl StatePropagator {
         epochs_tdb_seconds: &[f64],
         ctx: &PropagationContext,
     ) -> Result<Vec<CartesianState>, PropagationError> {
+        self.ephemeris_with_additional_forces(epochs_tdb_seconds, &[], ctx)
+    }
+
+    /// Sample the trajectory at absolute TDB epochs with an explicit context,
+    /// integrating over elapsed TT. Additional forces are summed in slice order
+    /// after the configured force model and drag.
+    ///
+    /// Uses the epoch ordering and sampling rules of [`Self::ephemeris`].
+    /// An empty slice is equivalent to [`Self::ephemeris_with_context`].
+    pub fn ephemeris_with_additional_forces(
+        &self,
+        epochs_tdb_seconds: &[f64],
+        additional_forces: &[Arc<dyn ForceModel>],
+        ctx: &PropagationContext,
+    ) -> Result<Vec<CartesianState>, PropagationError> {
         validate_initial_state(self.initial)?;
         validate_epoch_finite(self.initial.epoch_tdb_seconds, "initial.epoch_tdb_seconds")?;
         validate_ephemeris_epochs(epochs_tdb_seconds)?;
 
-        let force = self.build_force()?;
+        let force = self.build_force_with_additional_forces(additional_forces)?;
         let dynamics = OrbitalDynamics {
             force_model: force.as_ref(),
         };
@@ -650,8 +685,7 @@ impl StatePropagator {
         Ok(states)
     }
 
-    /// Dispatch to the selected TT integrator. Kept private so the public
-    /// surface stays `propagate_to` / `ephemeris`.
+    /// Dispatch to the selected TT integrator.
     pub(super) fn run(
         &self,
         initial: CartesianState,
@@ -687,7 +721,12 @@ impl StatePropagator {
         )
     }
 
-    pub(crate) fn build_force(&self) -> Result<Box<dyn ForceModel>, PropagationError> {
+    /// Build the configured force model with atmospheric drag, if enabled.
+    ///
+    /// Drag uses the configured space-weather source when present and the fixed
+    /// space weather in [`DragParameters`] otherwise. A source without drag
+    /// returns [`PropagationError::InvalidInput`].
+    pub fn force_model_with_drag(&self) -> Result<Box<dyn ForceModel>, PropagationError> {
         let gravity = self.force_model.build()?;
         match (self.drag, self.space_weather.clone()) {
             (Some(drag), Some(source)) => {
@@ -707,6 +746,22 @@ impl StatePropagator {
             )),
             (None, None) => Ok(gravity),
         }
+    }
+
+    pub(crate) fn build_force_with_additional_forces(
+        &self,
+        additional_forces: &[Arc<dyn ForceModel>],
+    ) -> Result<Box<dyn ForceModel>, PropagationError> {
+        let base = self.force_model_with_drag()?;
+        if additional_forces.is_empty() {
+            return Ok(base);
+        }
+        let mut composite = CompositeForceModel::new();
+        composite.add(base);
+        for model in additional_forces {
+            composite.add(Box::new(Arc::clone(model)));
+        }
+        Ok(Box::new(composite))
     }
 }
 
@@ -800,10 +855,13 @@ fn validate_epoch_finite(value: f64, field: &'static str) -> Result<(), Propagat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::astro::forces::{DragParameters, SpaceWeather, SpaceWeatherSource};
+    use crate::astro::forces::{
+        DragParameters, Ecom2SolarRadiationPressure, EmpiricalHarmonic, EmpiricalRtnAcceleration,
+        RtnAxis, SpaceWeather, SpaceWeatherSource,
+    };
     use crate::astro::integrators::{Integrator, DP54, RK4};
     use crate::astro::propagator::variational::{
-        propagate_variational, VariationalEpoch, VariationalEquations,
+        propagate_trajectory, propagate_variational, VariationalEpoch, VariationalEquations,
     };
     use nalgebra::Vector3;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1177,24 +1235,246 @@ mod tests {
     }
 
     #[test]
+    fn empty_additional_forces_preserve_state_and_dense_output() {
+        let propagator = StatePropagator::new(
+            646_315_200.0,
+            [6900.0, 720.0, 0.0],
+            [-0.6, 7.4, 0.0],
+            ForceModelKind::two_body(),
+            IntegratorKind::Dp54,
+        )
+        .with_options(IntegratorOptions {
+            dense_output: true,
+            ..IntegratorOptions::default()
+        });
+        let ctx = PropagationContext::default();
+        let start = propagator.initial.epoch_tdb_seconds;
+        let end = start + 640.0;
+        let epochs = [start, start + 250.0, start + 250.0, end];
+        let plain = propagator
+            .propagate_to_with_context(end, &ctx)
+            .expect("state propagation");
+        let extra = propagator
+            .propagate_to_with_additional_forces(end, &[], &ctx)
+            .expect("state propagation with empty slice");
+        assert_states_bit_for_bit(&[plain.final_state], &[extra.final_state]);
+        assert_eq!(plain.stats.accepted_steps, extra.stats.accepted_steps);
+        assert_eq!(plain.stats.rejected_steps, extra.stats.rejected_steps);
+        assert_eq!(plain.stats.evaluations, extra.stats.evaluations);
+        assert_eq!(plain.ut1_degraded, extra.ut1_degraded);
+        assert!(plain.events.is_empty() && extra.events.is_empty());
+        let point_bits = |result: &PropagationResult| {
+            result
+                .points
+                .iter()
+                .map(|p| {
+                    (
+                        p.epoch_tdb_seconds.to_bits(),
+                        p.position_km.map(f64::to_bits),
+                        p.velocity_km_s.map(f64::to_bits),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(point_bits(&plain), point_bits(&extra));
+
+        let plain_dense = plain.dense.expect("dense output");
+        let extra_dense = extra.dense.expect("dense output with empty slice");
+        assert_eq!(
+            plain_dense.segments[0].ks[0].dvel_km_s2.z.to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(plain_dense.segments.len(), extra_dense.segments.len());
+        for (left, right) in plain_dense.segments.iter().zip(&extra_dense.segments) {
+            assert_eq!(left.t_start.to_bits(), right.t_start.to_bits());
+            assert_eq!(left.h.to_bits(), right.h.to_bits());
+            assert_states_bit_for_bit(&[left.y_start, left.y_end], &[right.y_start, right.y_end]);
+            for (left_stage, right_stage) in left.ks.iter().zip(&right.ks) {
+                for axis in 0..3 {
+                    assert_eq!(
+                        left_stage.dpos_km_s[axis].to_bits(),
+                        right_stage.dpos_km_s[axis].to_bits()
+                    );
+                    assert_eq!(
+                        left_stage.dvel_km_s2[axis].to_bits(),
+                        right_stage.dvel_km_s2[axis].to_bits()
+                    );
+                }
+            }
+        }
+
+        let plain_states = propagator
+            .ephemeris_with_context(&epochs, &ctx)
+            .expect("ephemeris");
+        let extra_states = propagator
+            .ephemeris_with_additional_forces(&epochs, &[], &ctx)
+            .expect("ephemeris with empty slice");
+        assert_states_bit_for_bit(&plain_states, &extra_states);
+    }
+
+    #[test]
+    fn additional_forces_match_parameter_fit_trajectory() {
+        let initial = CartesianState::new(646_315_200.0, [6890.0, 720.0, 130.0], [-0.6, 7.4, 1.2]);
+        let drag = test_drag_parameters(0.15);
+        let source = SpaceWeatherSource::Fixed(SpaceWeather {
+            f107: 175.0,
+            ..SpaceWeather::default()
+        });
+        let empirical = Arc::new(
+            EmpiricalRtnAcceleration::new()
+                .with_term(RtnAxis::AlongTrack, EmpiricalHarmonic::Constant, 1e-6)
+                .expect("empirical acceleration"),
+        );
+        let ecom2 = Arc::new(
+            Ecom2SolarRadiationPressure::new(0, 0, vec![1e-7, -2e-7, 3e-7]).expect("ECOM2"),
+        );
+        let kind = ForceModelKind::two_body_j2();
+        let additional: [Arc<dyn ForceModel>; 2] = [empirical.clone(), ecom2.clone()];
+        let mut base = CompositeForceModel::new();
+        base.add(kind.build().expect("gravity"));
+        base.add(Box::new(SourcedDragForce::new(drag, source.clone())));
+        let mut equivalent = CompositeForceModel::new();
+        equivalent.add(Box::new(base));
+        equivalent.add(Box::new(empirical));
+        equivalent.add(Box::new(ecom2));
+        let parameters: Vec<_> = equivalent.parameters().iter().map(|p| p.value).collect();
+        let equations = VariationalEquations {
+            force: &equivalent,
+            parameters: &parameters,
+            sensitivity_parameters: &[],
+        };
+        let ctx = PropagationContext::default();
+        let start = initial.epoch_tdb_seconds;
+        let end = start + 640.0;
+        let epochs = [start, start + 250.0, end];
+        let fit_epochs = epochs.map(|epoch| VariationalEpoch::from_tdb_seconds(start, epoch));
+        for integrator in [IntegratorKind::Rk4, IntegratorKind::Dp54] {
+            let options = IntegratorOptions {
+                dense_output: true,
+                ..IntegratorOptions::default()
+            };
+            let propagator = StatePropagator {
+                initial,
+                force_model: kind,
+                integrator,
+                options,
+                drag: Some(drag),
+                space_weather: Some(source.clone()),
+            };
+            let expected =
+                propagate_trajectory(initial, &fit_epochs, &equations, integrator, &options, &ctx)
+                    .expect("fit trajectory");
+            let states = propagator
+                .ephemeris_with_additional_forces(&epochs, &additional, &ctx)
+                .expect("ephemeris with additional forces");
+            assert_states_bit_for_bit(&states, &expected);
+
+            let result = propagator
+                .propagate_to_with_additional_forces(end, &additional, &ctx)
+                .expect("propagation with additional forces");
+            let single = propagate_trajectory(
+                initial,
+                &fit_epochs[2..],
+                &equations,
+                integrator,
+                &options,
+                &ctx,
+            )
+            .expect("single-segment fit trajectory");
+            assert_states_bit_for_bit(&[result.final_state], &single);
+            if integrator == IntegratorKind::Dp54 {
+                let dense = result.dense.expect("dense output with additional forces");
+                assert_states_bit_for_bit(&[dense.eval(end).expect("dense endpoint")], &single);
+            }
+        }
+    }
+
+    #[test]
+    fn force_model_kind_build_matches_propagator_composite() {
+        let kind = ForceModelKind::two_body_j2();
+        let prop = StatePropagator::new(
+            0.0,
+            [6900.0, 720.0, 130.0],
+            [-0.6, 7.4, 1.2],
+            kind,
+            IntegratorKind::Rk4,
+        );
+        let mut expected = CompositeForceModel::new();
+        expected.add(Box::new(TwoBodyGravity { mu: MU_EARTH }));
+        expected.add(Box::new(J2Gravity {
+            mu: MU_EARTH,
+            re: RE_EARTH,
+            j2: J2_EARTH,
+        }));
+        let ctx = PropagationContext::default();
+        let expected_accel = expected.acceleration(&prop.initial, &ctx).expect("gravity");
+        for force in [
+            kind.build().expect("built force"),
+            prop.force_model_with_drag().expect("propagator force"),
+        ] {
+            let accel = force.acceleration(&prop.initial, &ctx).expect("gravity");
+            assert_eq!(
+                <[f64; 3]>::from(accel).map(f64::to_bits),
+                <[f64; 3]>::from(expected_accel).map(f64::to_bits)
+            );
+        }
+    }
+
+    #[test]
     fn space_weather_source_without_drag_is_invalid_input() {
         let initial = leo_state(250.0);
-        let err = StatePropagator::new(
+        let prop = StatePropagator::new(
             initial.epoch_tdb_seconds,
             initial.position_array(),
             initial.velocity_array(),
             ForceModelKind::two_body(),
             IntegratorKind::Rk4,
         )
-        .with_space_weather(SpaceWeatherSource::Fixed(SpaceWeather::default()))
-        .propagate_to(initial.epoch_tdb_seconds + 60.0)
-        .expect_err("source without drag fails");
-        match err {
-            PropagationError::InvalidInput(message) => {
-                assert!(message.contains("space weather source without drag"));
-            }
-            other => panic!("expected invalid input, got {other:?}"),
+        .with_space_weather(SpaceWeatherSource::Fixed(SpaceWeather::default()));
+        let end = initial.epoch_tdb_seconds + 60.0;
+        let ctx = PropagationContext::default();
+        let additional: [Arc<dyn ForceModel>; 1] = [Arc::new(TwoBodyGravity::default())];
+        let Err(build_error) = prop.force_model_with_drag() else {
+            panic!("expected force construction error");
+        };
+        for err in [
+            build_error,
+            prop.propagate_to(end).expect_err("state propagation error"),
+            prop.propagate_to_with_additional_forces(end, &additional, &ctx)
+                .expect_err("state propagation error with additional forces"),
+            prop.ephemeris_with_additional_forces(&[end], &additional, &ctx)
+                .expect_err("ephemeris error with additional forces"),
+        ] {
+            assert!(matches!(err, PropagationError::InvalidInput(message)
+                if message == "space weather source without drag"));
         }
+    }
+
+    #[test]
+    fn invalid_sourced_drag_weather_is_refused() {
+        let initial = leo_state(250.0);
+        let prop = StatePropagator {
+            initial,
+            force_model: ForceModelKind::two_body(),
+            integrator: IntegratorKind::Rk4,
+            options: IntegratorOptions::default(),
+            drag: Some(test_drag_parameters(0.15)),
+            space_weather: Some(SpaceWeatherSource::Fixed(SpaceWeather {
+                ap: -1.0,
+                ..SpaceWeather::default()
+            })),
+        };
+        let ctx = PropagationContext::default();
+        let force = prop.force_model_with_drag().expect("sourced drag model");
+        assert!(matches!(
+            force.acceleration(&initial, &ctx),
+            Err(PropagationError::InvalidInput(message)) if message.contains("ap")
+        ));
+        let additional: [Arc<dyn ForceModel>; 1] = [Arc::new(TwoBodyGravity::default())];
+        assert!(matches!(
+            prop.propagate_to_with_additional_forces(60.0, &additional, &ctx),
+            Err(PropagationError::InvalidInput(message)) if message.contains("ap")
+        ));
     }
 
     #[test]

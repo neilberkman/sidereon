@@ -1807,7 +1807,7 @@ fn propagate_states(
 ) -> Result<Vec<CartesianState>, OrbitFitError> {
     let propagation = |source| OrbitFitError::Propagation { satellite, source };
     let force = build_propagator(initial, options)
-        .build_force()
+        .force_model_with_drag()
         .map_err(propagation)?;
     let parameters: Vec<f64> = force.parameters().iter().map(|p| p.value).collect();
     propagate_trajectory(

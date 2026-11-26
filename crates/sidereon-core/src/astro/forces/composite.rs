@@ -13,7 +13,7 @@ use nalgebra::{Matrix3, Vector3};
 /// component [`ForceModel`] implementations.
 ///
 /// `ForceModelKind::build` uses it for two-body-plus-J2 and configured composite
-/// propagation, while `StatePropagator::build_force` uses it to layer drag over
+/// propagation, while `StatePropagator::force_model_with_drag` uses it to layer drag over
 /// gravity. The summed vector is consumed by
 /// [`crate::astro::propagator::dynamics::OrbitalDynamics`] as the km/s²
 /// velocity derivative.

@@ -935,7 +935,7 @@ mod tests {
             drag: None,
             space_weather: None,
         }
-        .build_force()
+        .force_model_with_drag()
         .expect("force");
         let mut composite = CompositeForceModel::new();
         composite.add(base);
@@ -1014,7 +1014,7 @@ mod tests {
                 space_weather: None,
             };
             let expected = plain.ephemeris(&tdb).expect("plain ephemeris");
-            let force = plain.build_force().expect("force");
+            let force = plain.force_model_with_drag().expect("force");
             let parameters: Vec<f64> = force.parameters().iter().map(|p| p.value).collect();
             let equations = VariationalEquations {
                 force: force.as_ref(),
