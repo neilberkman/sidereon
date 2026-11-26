@@ -4,6 +4,8 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-11-26
+
 ### Added
 
 - `DenseOutput::coverage_tdb_seconds` returns the chronological bounds of dense propagation output in TDB seconds past J2000, or `None` when there are no segments.
