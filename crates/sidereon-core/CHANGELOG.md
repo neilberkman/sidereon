@@ -6,6 +6,7 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Added
 
+- `DenseOutput::coverage_tdb_seconds` returns the chronological bounds of dense propagation output in TDB seconds past J2000, or `None` when there are no segments.
 - `ForceModelKind::build` returns the configured force model, and `StatePropagator::force_model_with_drag` includes its fixed or sourced atmospheric drag when enabled.
 - `StatePropagator::propagate_to_with_additional_forces` and `StatePropagator::ephemeris_with_additional_forces` add caller-supplied force models after the configured force model and drag, in the same order as an orbit parameter fit. Single-epoch DP54 propagation supports dense output.
 

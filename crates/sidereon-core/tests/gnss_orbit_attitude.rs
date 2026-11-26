@@ -14,10 +14,11 @@ use sidereon_core::astro::propagator::analytic::{
     BrouwerLyddanePropagator, CircularElements, EcksteinHechlerPropagator, KeplerianElements,
     ZonalHarmonics,
 };
+use sidereon_core::astro::propagator::dense_output::{DenseOutput, DenseSegment};
 use sidereon_core::astro::propagator::{
     ForceModelKind, IntegratorKind, IntegratorOptions, StatePropagator,
 };
-use sidereon_core::astro::state::CartesianState;
+use sidereon_core::astro::state::{CartesianState, StateDerivative};
 use sidereon_core::astro::time::{
     j2000_seconds, j2000_seconds_from_split, tdb_from_tt_j2000_seconds, tt_from_tdb_j2000_seconds,
     Instant, TimeScale, TimeScales,
@@ -137,6 +138,40 @@ fn numerical_samples_use_the_continuous_propagation_arc() {
         }
         assert!(trajectory.sample(start.min(end).next_down()).is_none());
         assert!(trajectory.sample(start.max(end).next_up()).is_none());
+    }
+}
+
+#[test]
+fn numerical_samples_use_the_recorded_final_epoch_for_coverage() {
+    let start = 3.0;
+    let y_start = CartesianState::new(start, [26_560.0, 0.0, 0.0], [0.0, 2.5, 2.9]);
+    let stages = [StateDerivative {
+        dpos_km_s: nalgebra::Vector3::zeros(),
+        dvel_km_s2: nalgebra::Vector3::zeros(),
+    }; 7];
+
+    for (end, computed_end, accepts_computed_end) in [
+        (1.0_f64.next_down(), 1.0, true),
+        (0.75_f64.next_up(), 0.75, false),
+    ] {
+        let y_end = CartesianState::new(end, [26_560.0, -5.0, -5.8], [0.0, 2.5, 2.9]);
+        let dense = DenseOutput {
+            segments: vec![DenseSegment::from_dp54_stages(
+                start,
+                end - start,
+                y_start,
+                y_end,
+                &stages,
+            )],
+        };
+        let trajectory = OrbitAttitudeTrajectory::from_dense_output(&dense);
+        assert_eq!(dense.coverage_tdb_seconds(), Some((computed_end, start)));
+        assert_eq!(dense.eval(computed_end), Ok(y_end));
+        assert_sample_bits(trajectory.sample(end).unwrap(), inertial_sample(y_end, end));
+        assert_eq!(
+            trajectory.sample(computed_end).is_some(),
+            accepts_computed_end
+        );
     }
 }
 

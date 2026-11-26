@@ -252,30 +252,49 @@ pub struct DenseOutput {
 }
 
 impl DenseOutput {
-    /// Evaluate the interpolated state at any time t within the covered range.
-    pub fn eval(&self, t: f64) -> Result<CartesianState, DenseOutputError> {
-        if self.segments.is_empty() {
-            return Err(DenseOutputError::Empty);
-        }
-
-        let first = &self.segments[0];
-        let last = &self.segments[self.segments.len() - 1];
-
-        let t_start = first.t_start;
-        let t_end = last.t_end();
-
-        let (t_min, t_max) = if t_start <= t_end {
+    /// Returns the ordered bounds `(t_min, t_max)` in TDB seconds past J2000,
+    /// or `None` if there are no segments.
+    ///
+    /// The bounds are the first segment's start and the last segment's
+    /// computed endpoint, in chronological order for either propagation direction.
+    /// These are the bounds reported by [`DenseOutputError::OutputOutOfRange`].
+    /// [`Self::eval`] applies a collection-level tolerance of `1e-7` seconds
+    /// and checks the selected segment's interpolation range separately.
+    #[must_use]
+    pub fn coverage_tdb_seconds(&self) -> Option<(f64, f64)> {
+        let t_start = self.segments.first()?.t_start;
+        let t_end = self.segments.last()?.t_end();
+        Some(if t_start <= t_end {
             (t_start, t_end)
         } else {
             (t_end, t_start)
-        };
+        })
+    }
+
+    /// Returns the ordered bounds using the recorded final state's epoch,
+    /// which may differ from the computed endpoint due to rounding.
+    pub(crate) fn state_coverage_tdb_seconds(&self) -> Option<(f64, f64)> {
+        let (t_min, t_max) = self.coverage_tdb_seconds()?;
+        let last = self.segments.last()?;
+        let end = last.y_end.epoch_tdb_seconds;
+        if end == last.t_end() && !t_min.is_nan() && !t_max.is_nan() {
+            Some((t_min, t_max))
+        } else {
+            let start = self.segments.first()?.t_start;
+            Some((start.min(end), start.max(end)))
+        }
+    }
+
+    /// Evaluate the interpolated state at any time t within the covered range.
+    pub fn eval(&self, t: f64) -> Result<CartesianState, DenseOutputError> {
+        let (t_min, t_max) = self.coverage_tdb_seconds().ok_or(DenseOutputError::Empty)?;
 
         if t < t_min - 1e-7 || t > t_max + 1e-7 {
             return Err(DenseOutputError::OutputOutOfRange { t, t_min, t_max });
         }
 
         // Binary search for the correct segment
-        let forward = t_start <= t_end;
+        let forward = self.segments[0].t_start == t_min;
         let idx = if forward {
             self.segments
                 .partition_point(|s| s.t_start <= t)
