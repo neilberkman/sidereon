@@ -1,6 +1,6 @@
 [package]
 name = "sidereon-core"
-version = "4.1.0"
+version = "4.2.0"
 authors = []
 edition = "2021"
 rust-version = "1.89"
