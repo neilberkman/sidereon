@@ -7,8 +7,8 @@ use super::*;
 use crate::astro::constants::MU_EARTH;
 use crate::astro::error::PropagationError;
 use crate::astro::forces::{
-    AccelerationPartials, EmpiricalHarmonic, EmpiricalRtnAcceleration, RtnAxis,
-    SolarRadiationPressure,
+    AccelerationPartials, CompositeForceModel, EmpiricalHarmonic, EmpiricalRtnAcceleration,
+    RtnAxis, SolarRadiationPressure,
 };
 use crate::astro::propagator::ForceModelComponents;
 use crate::astro::time::model::TimeScale;
@@ -100,7 +100,7 @@ fn synthetic_samples(cr: f64, empirical: EmpiricalRtnAcceleration) -> Vec<Inerti
             drag: None,
             space_weather: None,
         }
-        .build_force()
+        .force_model_with_drag()
         .expect("force"),
     );
     composite.add(Box::new(empirical));
@@ -980,7 +980,7 @@ fn propagated_samples(
         drag: None,
         space_weather: None,
     }
-    .build_force()
+    .force_model_with_drag()
     .expect("force");
     let values: Vec<f64> = force.parameters().iter().map(|p| p.value).collect();
     let epochs = propagation_epochs(instants);

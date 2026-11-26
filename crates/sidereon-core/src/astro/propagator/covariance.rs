@@ -224,7 +224,7 @@ impl StatePropagator {
         validate_epochs_monotonic(self.initial.epoch_tdb_seconds, epochs_tdb_seconds)?;
         validate_process_noise(options.process_noise)?;
 
-        let force = self.build_force()?;
+        let force = self.force_model_with_drag()?;
         let dynamics = OrbitalDynamics {
             force_model: force.as_ref(),
         };
@@ -1341,7 +1341,7 @@ mod tests {
 
         // Verify segment dt comes from the single initial-anchored TtEpochMap
         // and matches manual transport_covariance bit for bit.
-        let force = propagator.build_force().expect("force");
+        let force = propagator.force_model_with_drag().expect("force");
         let dynamics = OrbitalDynamics {
             force_model: force.as_ref(),
         };

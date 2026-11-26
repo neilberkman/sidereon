@@ -13,9 +13,7 @@ use super::{
     MIN_SEED_SAMPLES,
 };
 use crate::astro::covariance::rtn_to_eci_rotation;
-use crate::astro::forces::{
-    CompositeForceModel, DragParameters, ForceModel, ForceParameter, SpaceWeatherSource,
-};
+use crate::astro::forces::{DragParameters, ForceModel, ForceParameter, SpaceWeatherSource};
 use crate::astro::frames::orientation::EarthOrientationProvider;
 use crate::astro::frames::transforms::Ut1Gate;
 use crate::astro::iod;
@@ -1262,7 +1260,7 @@ fn residual_statistics(
 fn build_force(
     options: &OrbitParameterFitOptions,
 ) -> Result<Box<dyn ForceModel>, crate::astro::error::PropagationError> {
-    let base = StatePropagator {
+    StatePropagator {
         initial: CartesianState::new(0.0, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
         force_model: options.force_model,
         integrator: options.integrator,
@@ -1270,16 +1268,7 @@ fn build_force(
         drag: options.drag,
         space_weather: options.space_weather.clone(),
     }
-    .build_force()?;
-    if options.additional_forces.is_empty() {
-        return Ok(base);
-    }
-    let mut composite = CompositeForceModel::new();
-    composite.add(base);
-    for model in &options.additional_forces {
-        composite.add(Box::new(Arc::clone(model)));
-    }
-    Ok(Box::new(composite))
+    .build_force_with_additional_forces(&options.additional_forces)
 }
 
 /// Indices of the requested parameters in the force model's listing.
