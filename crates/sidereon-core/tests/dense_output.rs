@@ -1,6 +1,7 @@
 use nalgebra::Vector3;
 use sidereon_core::astro::forces::TwoBodyGravity;
 use sidereon_core::astro::integrators::{Integrator, DP54};
+use sidereon_core::astro::propagator::dense_output::{DenseOutput, DenseOutputError};
 use sidereon_core::astro::propagator::{
     api::IntegratorOptions, OrbitalDynamics, PropagationContext,
 };
@@ -73,7 +74,7 @@ fn test_dense_output_endpoint_exactness() {
 }
 
 #[test]
-fn test_dense_output_circular_orbit_parity() {
+fn test_dense_output_matches_analytic_circular_orbit() {
     let mu: f64 = 398600.4418;
     let r_mag: f64 = 7000.0;
     let v_mag: f64 = (mu / r_mag).sqrt();
@@ -238,13 +239,7 @@ fn test_dense_output_monotonic_continuity() {
 }
 
 #[test]
-fn test_dense_output_range_rejection() {
-    let initial_state = CartesianState {
-        epoch_tdb_seconds: 100.0,
-        position_km: Vector3::new(7000.0, 0.0, 0.0),
-        velocity_km_s: Vector3::new(0.0, 7.5, 0.0),
-    };
-
+fn dense_output_coverage_and_range_errors_in_both_directions() {
     let force = TwoBodyGravity::default();
     let dynamics = OrbitalDynamics {
         force_model: &force,
@@ -254,14 +249,41 @@ fn test_dense_output_range_rejection() {
     let mut opts = IntegratorOptions::default();
     opts.dense_output = true;
 
-    let result = integrator
-        .propagate(initial_state, 200.0, &dynamics, &ctx, &opts)
-        .expect("Propagation failed");
-    let dense = result.dense.expect("Dense output missing");
+    for (start, end) in [(100.0, 200.0), (200.0, 100.0)] {
+        let initial_state = CartesianState::new(start, [7000.0, 0.0, 0.0], [0.0, 7.5, 0.0]);
+        let result = integrator
+            .propagate(initial_state, end, &dynamics, &ctx, &opts)
+            .expect("Propagation failed");
+        let dense = result.dense.expect("Dense output missing");
 
-    assert!(dense.eval(99.0).is_err(), "Should reject time before start");
-    assert!(dense.eval(201.0).is_err(), "Should reject time after end");
-    assert!(dense.eval(150.0).is_ok(), "Should accept time in range");
+        assert_eq!(dense.coverage_tdb_seconds(), Some((100.0, 200.0)));
+        let (t_min, t_max) = dense.coverage_tdb_seconds().unwrap();
+        assert_eq!(dense.eval(start), Ok(initial_state));
+        assert_eq!(dense.eval(end), Ok(result.final_state));
+        assert!(dense.eval(150.0).is_ok());
+
+        let lower_limit = t_min - 1e-7;
+        let upper_limit = t_max + 1e-7;
+        for t in [lower_limit, upper_limit] {
+            assert!(matches!(
+                dense.eval(t),
+                Err(DenseOutputError::SegmentOutOfRange { .. })
+            ));
+        }
+        for t in [lower_limit.next_down(), upper_limit.next_up()] {
+            assert_eq!(
+                dense.eval(t),
+                Err(DenseOutputError::OutputOutOfRange { t, t_min, t_max })
+            );
+        }
+    }
+}
+
+#[test]
+fn empty_dense_output_has_no_coverage() {
+    let dense = DenseOutput::default();
+    assert_eq!(dense.coverage_tdb_seconds(), None);
+    assert_eq!(dense.eval(0.0), Err(DenseOutputError::Empty));
 }
 
 const MU_EARTH_DEFAULT: f64 = 398600.4418;

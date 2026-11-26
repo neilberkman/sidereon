@@ -223,9 +223,8 @@ impl<'a> OrbitAttitudeTrajectory<'a> {
             Source::EcksteinHechler(propagator) => propagator.propagate(tdb).ok()?,
             Source::BrouwerLyddane(propagator) => propagator.propagate(tdb).ok()?,
             Source::DenseOutput(output) => {
-                let start = output.segments.first()?.t_start;
-                let end = output.segments.last()?.y_end.epoch_tdb_seconds;
-                if !(start.min(end)..=start.max(end)).contains(&tdb) {
+                let (t_min, t_max) = output.state_coverage_tdb_seconds()?;
+                if !(t_min..=t_max).contains(&tdb) {
                     return None;
                 }
                 output.eval(tdb).ok()?
