@@ -1503,13 +1503,23 @@ fn overflowing_norm_vectors_normalize_accurately_across_ecom_paths() {
         .acceleration_partials_with_sun(r_conical, v_conical, s_conical)
         .expect("conical ECOM2 state partials");
 
-    // True frame: e_D = (0, 1, 0), e_Y = (0, 0, -1), e_B = (-1, 0, 0), delta_u = 0.
+    // e_D = (0, 1, 0), e_Y = (0, 0, -1), e_B = (-1, 0, 0), delta_u = 0.
     let inv_km = 1.0 / M_PER_KM;
-    assert_eq!(p2_c[0], Vector3::new(-inv_km, 0.0, 0.0)); // B0 -> e_B
-    assert_eq!(p2_c[1], Vector3::new(-inv_km, 0.0, 0.0)); // B1c * cos(0)
-    assert_eq!(p2_c[2], Vector3::zeros()); // B1s * sin(0)
-    assert_eq!(p2_c[3], Vector3::new(0.0, inv_km, 0.0)); // D0 -> e_D
-    assert_eq!(p2_c[8], Vector3::new(0.0, 0.0, -inv_km)); // Y0 -> e_Y
+    let b = Vector3::new(-inv_km, 0.0, 0.0);
+    let d = Vector3::new(0.0, inv_km, 0.0);
+    let y = Vector3::new(0.0, 0.0, -inv_km);
+    let zero = Vector3::zeros();
+    assert_eq!(
+        p2_c.iter().map(|p| p.map(f64::to_bits)).collect::<Vec<_>>(),
+        [b, b, zero, d, d, d, zero, zero, y].map(|p| p.map(f64::to_bits))
+    );
+    let coeffs = mixed_d4b1();
+    let expected = Vector3::new(
+        -(coeffs.b0 + coeffs.b1c),
+        (coeffs.d0 + coeffs.d2c) + coeffs.d4c,
+        -coeffs.y0,
+    ) / M_PER_KM;
+    assert_eq!(a2_c.map(f64::to_bits), expected.map(f64::to_bits));
     let recon2: Vector3<f64> = ecom2_conical
         .coefficients()
         .iter()
@@ -1629,11 +1639,7 @@ fn overflowing_norm_vectors_normalize_accurately_across_ecom_paths() {
     let m_disc = Vector3::new(0.0, 0.0, 384_400.0);
 
     let geom = ecom_geometry(r_disc, v_disc, s_disc).expect("ApparentDisc geometry");
-    assert!(
-        (geom.delta_u_rad.expect("delta_u") - FRAC_PI_4).abs() <= 1.0e-14,
-        "expected delta_u = pi/4, got {:?}",
-        geom.delta_u_rad
-    );
+    assert_eq!(geom.delta_u_rad.unwrap().to_bits(), FRAC_PI_4.to_bits());
     assert!(
         (geom.argument_of_latitude_rad.expect("u") - FRAC_PI_4).abs() <= 1.0e-14,
         "expected u = pi/4, got {:?}",
@@ -1650,6 +1656,24 @@ fn overflowing_norm_vectors_normalize_accurately_across_ecom_paths() {
     let pp2_d = ecom2_def
         .parameter_partials_with_sun_moon(r_disc, v_disc, s_disc, m_disc)
         .expect("default ECOM2 param partials");
+
+    assert_eq!(
+        a2_d.map(f64::to_bits),
+        Vector3::new(
+            0x3d73_da68_0e4e_fad8,
+            0xbddb_a713_9709_350f,
+            0x3d5d_a785_c469_aad7,
+        )
+    );
+    // D4c uses cos(4 delta_u), which is -1 for this orbit.
+    assert_eq!(
+        pp2_d[5].map(f64::to_bits),
+        Vector3::new(
+            0x3e87_d451_797c_b462,
+            0xbf50_624d_ca47_8b30,
+            0x3e87_d451_797c_b55e,
+        )
+    );
 
     // Reference evaluated with nominal velocity magnitude along the exact same direction
     // (delta_u depends only on the direction of v).
@@ -2240,15 +2264,9 @@ fn atan2_and_delta_u_handle_overflowing_intermediates_and_multiscale_vectors() {
         g_atan2.value.to_bits(),
         fast_math::atan2(1.0e200, 1.0e200).to_bits()
     );
-    assert!(
-        (g_atan2.grad[0] - 5.0e-201).abs() <= 4.0 * f64::EPSILON * 5.0e-201,
-        "expected 5.0e-201, got {:e}",
-        g_atan2.grad[0]
-    );
-    assert!(
-        (g_atan2.grad[1] + 5.0e-201).abs() <= 4.0 * f64::EPSILON * 5.0e-201,
-        "expected -5.0e-201, got {:e}",
-        g_atan2.grad[1]
+    assert_eq!(
+        g_atan2.grad.map(f64::to_bits),
+        [5.0e-201_f64.to_bits(), (-5.0e-201_f64).to_bits()]
     );
 
     let d2c_conical = Ecom2SolarRadiationPressure::d4b1(Ecom2D4b1Coefficients {
@@ -6121,12 +6139,8 @@ fn spherical_penumbra_plane_section_nonfinite_tan_theta_fallback_ecom_partials()
 }
 
 #[test]
-fn atan2_overflowing_denom_keeps_exact_hipparchus_bits_for_ecom2_parameter_partials() {
-    // Conical + spherical Earth input where every DYB/frame norm_sq is finite
-    // and nonzero, while px^2 + py^2 overflows to +Inf in Gradient.atan2.
-    // For parameter partials py.grad == px.grad == 0, so Hipparchus's inv = 0
-    // yields exact delta_u.grad = 0; ECOM2 must keep Hipparchus's exact bits
-    // without escalating to ScaledFieldVec3.
+fn ecom2_recovers_parameter_partials_when_the_atan2_denominator_overflows() {
+    // The double angle is finite. Gradient.atan2 also squares both projections.
     let model = Ecom2SolarRadiationPressure::d2b1(Ecom2D2b1Coefficients {
         d0: 1.0e-7,
         d2c: 1.0e-9,
@@ -6177,82 +6191,18 @@ fn atan2_overflowing_denom_keeps_exact_hipparchus_bits_for_ecom2_parameter_parti
         );
     }
 
-    let ratio_f = lighting_ratio_field(
-        r,
-        s,
-        None,
-        ShadowFunction::Conical,
-        EarthShadowModel::Spherical,
-        false,
-    )
-    .unwrap();
-    let params_g: Vec<Grad<7>> = model
-        .coefficients()
-        .iter()
-        .enumerate()
-        .map(|(k, &c)| Grad::variable(k, c))
-        .collect();
-    let raw_pp_f = raw_orekit_ecom2_field(
-        FieldVec3::<7>::constant(r_m),
-        v,
-        false,
-        FieldVec3::<7>::constant(s_m),
-        Grad::<7>::constant(ratio_f.value),
-        is_sunlit_field(ratio_f),
-        1,
-        1,
-        &params_g,
-    )
-    .expect("raw Orekit field parameter partials");
+    // The Sun direction is (7, 24, 0)/25 and the orbit angle is zero.
     let pp = model
         .parameter_partials_with_sun(r, v, s)
         .expect("ECOM2 parameter partials on atan2 denom overflow");
-    for k in 0..7 {
-        assert_eq!(
-            pp[k].x.to_bits(),
-            (raw_pp_f.x.grad[k] / M_PER_KM).to_bits(),
-            "ECOM2 pp[{k}].x bit mismatch"
-        );
-        assert_eq!(
-            pp[k].y.to_bits(),
-            (raw_pp_f.y.grad[k] / M_PER_KM).to_bits(),
-            "ECOM2 pp[{k}].y bit mismatch"
-        );
-        assert_eq!(
-            pp[k].z.to_bits(),
-            (raw_pp_f.z.grad[k] / M_PER_KM).to_bits(),
-            "ECOM2 pp[{k}].z bit mismatch"
-        );
-    }
-
-    // Direct checks on Grad::atan2_unscaled_with_fn when y^2 + x^2 == +Inf:
-    // 1. Zero gradients -> exact Hipparchus result kept.
-    let y0 = Grad::<2>::constant(1.0e200);
-    let x0 = Grad::<2>::constant(1.0e200);
-    let g0 = y0
-        .atan2_unscaled_with_fn(x0, fast_math::atan2)
-        .expect("zero-grad atan2 denom overflow kept");
+    let d = Vector3::new(7.0 / 25.0, 24.0 / 25.0, 0.0) / M_PER_KM;
+    let y = Vector3::new(0.0, 0.0, -1.0) / M_PER_KM;
+    let b = Vector3::new(-24.0 / 25.0, 7.0 / 25.0, 0.0) / M_PER_KM;
+    let zero = Vector3::zeros();
     assert_eq!(
-        g0.value.to_bits(),
-        fast_math::atan2(1.0e200, 1.0e200).to_bits()
+        pp.iter().map(|p| p.map(f64::to_bits)).collect::<Vec<_>>(),
+        [b, b, zero, d, d, zero, y].map(|p| p.map(f64::to_bits))
     );
-    assert_eq!(g0.grad, [0.0, 0.0]);
-    // 2. Nonzero gradient whose true derivative N / (y^2 + x^2) <= 2^-1075 rounds to 0 -> kept.
-    let y_tiny = Grad::<1> {
-        value: 1.0e200,
-        grad: [1.0e-125],
-    };
-    let x_tiny = Grad::<1>::constant(1.0e200);
-    let g_tiny = y_tiny
-        .atan2_unscaled_with_fn(x_tiny, fast_math::atan2)
-        .expect("underflowing-to-zero true derivative kept");
-    assert_eq!(g_tiny.grad, [0.0]);
-    // 3. Nonzero gradient whose true derivative is nonzero in binary64 -> rejected (fallback).
-    let y_nz = Grad::<1>::variable(0, 1.0e200);
-    let x_nz = Grad::<1>::constant(1.0e200);
-    assert!(y_nz
-        .atan2_unscaled_with_fn(x_nz, fast_math::atan2)
-        .is_none());
 }
 
 #[test]

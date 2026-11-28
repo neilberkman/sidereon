@@ -399,6 +399,16 @@ mod tests {
     }
 
     #[test]
+    fn third_body_recovers_overflowing_cubed_distances() {
+        let radius = libm::ldexp(1.0, 360);
+        let satellite = Vector3::new(radius, 0.0, 0.0);
+        let body = Vector3::new(2.0 * radius, 0.0, 0.0);
+        let acceleration = third_body_acceleration(satellite, body, libm::ldexp(1.0, 700)).unwrap();
+        let expected = Vector3::new(libm::ldexp(0.75, -20), 0.0, 0.0);
+        assert_eq!(acceleration.map(f64::to_bits), expected.map(f64::to_bits));
+    }
+
+    #[test]
     fn leo_magnitudes_match_textbook_order() {
         let state = CartesianState::new(0.0, [7000.0, 0.0, 0.0], [0.0, 7.5, 0.0]);
         let sun = ThirdBodyGravity::sun()

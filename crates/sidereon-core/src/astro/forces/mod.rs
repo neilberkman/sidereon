@@ -1,3 +1,14 @@
+//! Acceleration models and their derivatives for numerical propagation.
+//!
+//! For a binary64 reference evaluation, the models preserve its bits when
+//! every intermediate and the requested result are finite, including
+//! subnormals and signed zeros. If an intermediate or result is infinite or
+//! NaN, the models with extended-exponent arithmetic evaluate the expression
+//! with that arithmetic and round to binary64 at the output. This also
+//! covers overflow hidden by a later operation, such as division by an
+//! infinite cubed radius. An undefined or non-finite requested result after
+//! recovery returns [`crate::astro::error::PropagationError::NumericalFailure`].
+
 pub mod albedo;
 /// Combines the accelerations returned by multiple [`ForceModel`]
 /// components in insertion order and returns the first component error.

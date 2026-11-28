@@ -56,18 +56,11 @@
 //! from `acceleration_partials`, where only the lighting gradient is
 //! undefined).
 //!
-//! On the Orekit-order path ([`ShadowFunction::ApparentDisc`] everywhere, and
-//! [`ShadowFunction::Conical`] in full sunlight), wherever Orekit's evaluation
-//! is finite (including subnormal intermediates and underflow to zero),
-//! Orekit's exact bits are preserved. Where any intermediate or output of
-//! Orekit's evaluation is non-finite on finite inputs (`d_ref`, `k_ref`,
-//! `factor`, `r2`, `raw_p`, `flux`, the m/s^2 value, the km/s^2 conversion, or
-//! any field gradient entry) or `r2 == 0` on distinct positions, evaluation
-//! falls back to exponent-separated arithmetic directly from the km inputs
-//! (using the ported apparent-disc lighting ratio value and `1/m` gradient
-//! scaled to `1/km` in `ScaledF64`, with umbra—zero lighting ratio and zero
-//! gradient—returning exact zero; the same fallback applies to the `C_R`
-//! partial's field evaluation and its exact-axis annular double-ratio path).
+//! The extended-exponent SRP evaluation uses the original km inputs and
+//! lighting gradients in `1/km`. It also handles a squared distance that
+//! rounds to zero for distinct positions. Umbra with a zero lighting
+//! gradient returns exact zero.
+//!
 //! Under both shadow functions, `acceleration` returns
 //! [`PropagationError::NumericalFailure`] when its own km/s^2 output overflows
 //! (or when the satellite coincides with the Sun or the Sun position is zero),

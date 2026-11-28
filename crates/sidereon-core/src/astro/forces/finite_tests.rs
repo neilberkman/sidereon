@@ -416,14 +416,61 @@ fn high_degree_and_relativistic_recovery_preserve_homogeneity() {
             libm::ldexp(base_gradient, -(acceleration_degree + 1) * exponent).to_bits()
         );
     }
+}
+
+#[test]
+fn zonal_and_relativistic_gravity_recover_overflowing_radius_powers() {
+    let zonal = ZonalGravity::new(
+        pow2(500),
+        pow2(100),
+        ZonalDegrees::through(2).unwrap(),
+        ZonalCoefficients {
+            j2: 1.0,
+            ..ZonalCoefficients::default()
+        },
+    );
+    let relativity = SchwarzschildRelativity::new(pow2(225), pow2(260));
+    let ctx = PropagationContext::default();
+    for (model, radius_exponent, acceleration, gradient) in [
+        (
+            &zonal as &dyn ForceModel,
+            210,
+            -1.5 * pow2(-140),
+            6.0 * pow2(-350),
+        ),
+        (&relativity, 180, pow2(-608), -3.0 * pow2(-788)),
+    ] {
+        let state = axial(radius_exponent);
+        assert_eq!(
+            model.acceleration(&state, &ctx).unwrap().x.to_bits(),
+            acceleration.to_bits()
+        );
+        assert_eq!(
+            model
+                .acceleration_partials(&[], &state, &ctx)
+                .unwrap()
+                .wrt_position[(0, 0)]
+                .to_bits(),
+            gradient.to_bits()
+        );
+    }
+}
+
+#[test]
+fn j2_keeps_signed_zeros_when_the_numerator_underflows() {
+    let ctx = PropagationContext::default();
     let j2 = J2Gravity {
         mu: pow2(-950),
         re: pow2(-150),
         j2: 1.0,
     };
-    let base = j2.acceleration(&axial(-60), &ctx).unwrap().x;
+    let acceleration = j2.acceleration(&axial(-60), &ctx).unwrap();
+    assert_eq!(
+        acceleration.map(f64::to_bits),
+        Vector3::repeat((-0.0_f64).to_bits())
+    );
     let fallback = j2.acceleration(&axial(-545), &ctx).unwrap().x;
-    assert_eq!(fallback.to_bits(), libm::ldexp(base, 4 * 485).to_bits());
+    assert_eq!(fallback.to_bits(), (-1.5 * pow2(930)).to_bits());
 }
 
 #[test]
@@ -438,14 +485,15 @@ fn j2_recovers_when_the_cubed_radius_overflows() {
     // On the x axis, a_x = -(3/2) J2 mu Re² / x⁴ and da_x/dx = -4 a_x / x.
     let acceleration = model.acceleration(&state, &ctx).unwrap();
     let partials = model.acceleration_partials(&[], &state, &ctx).unwrap();
-    assert_eq!(acceleration.x, -0.1875 * pow2(-400));
-    assert_eq!(partials.wrt_position[(0, 0)], 0.75 * pow2(-750));
-    for (row, col) in [(0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1)] {
-        assert_eq!(
-            partials.wrt_position[(row, col)].to_bits(),
-            0.0_f64.to_bits()
-        );
-    }
+    assert_eq!(
+        acceleration.map(f64::to_bits),
+        Vector3::new(-0.1875 * pow2(-400), -0.0, -0.0).map(f64::to_bits)
+    );
+    let diagonal = Vector3::new(0.75, -0.1875, -0.5625) * pow2(-750);
+    assert_eq!(
+        partials.wrt_position.map(f64::to_bits),
+        Matrix3::from_diagonal(&diagonal).map(f64::to_bits)
+    );
 }
 
 #[test]

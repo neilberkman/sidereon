@@ -291,16 +291,7 @@ impl<const N: usize> Grad<N> {
         self.atan2_with_fn(x, fast_math::atan2)
     }
 
-    /// Raw Hipparchus `Gradient.atan2` without scaled fallback.
-    ///
-    /// Keeps Hipparchus's exact result (value and gradient) whenever every
-    /// output entry is finite and matches the unscaled formula without error:
-    /// either `self^2 + x^2` is finite and nonzero, or `self^2 + x^2` overflows
-    /// to `+Inf` (making `inv = 0` and `grad[i] = N_i * 0`) and every entry
-    /// equals the correctly rounded true derivative `N_i / (y^2 + x^2)` (which
-    /// always holds when every `N_i = x * dy_i - dx_i * y` is zero, as in
-    /// parameter partials). Returns `None` only where an output entry is
-    /// non-finite or wrong because of overflow/underflow.
+    /// Hipparchus `Gradient.atan2`, returning `None` for a non-finite evaluation.
     #[inline]
     pub(crate) fn atan2_unscaled_with_fn(
         self,
@@ -308,6 +299,9 @@ impl<const N: usize> Grad<N> {
         atan2_fn: fn(f64, f64) -> f64,
     ) -> Option<Self> {
         let denom = self.value * self.value + x.value * x.value;
+        if !denom.is_finite() || denom == 0.0 {
+            return None;
+        }
         let inv = 1.0 / denom;
         let mut grad = [0.0; N];
         for i in 0..N {
@@ -317,43 +311,7 @@ impl<const N: usize> Grad<N> {
             value: atan2_fn(self.value, x.value),
             grad,
         };
-        if !out.is_all_finite() {
-            return None;
-        }
-        if denom.is_finite() && denom != 0.0 {
-            return Some(out);
-        }
-        if denom == 0.0 || !(self.is_all_finite() && x.is_all_finite()) {
-            return None;
-        }
-        // `denom == +Inf` on finite inputs: Hipparchus computed `inv = 0.0` and
-        // `grad[i] = N_i * 0.0 = +/-0.0`. Keep it iff every true derivative
-        // `N_i / (y^2 + x^2)` rounds to `0.0` in binary64.
-        let mut all_zero_grad = true;
-        for i in 0..N {
-            if self.grad[i] != 0.0 || x.grad[i] != 0.0 {
-                all_zero_grad = false;
-                break;
-            }
-        }
-        if all_zero_grad {
-            return Some(out);
-        }
-        let y_s = ScaledF64::from_f64(self.value);
-        let x_s = ScaledF64::from_f64(x.value);
-        let denom_s = ScaledF64::lincomb2(y_s, y_s, x_s, x_s);
-        for i in 0..N {
-            let num_s = ScaledF64::lincomb2(
-                x_s,
-                ScaledF64::from_f64(self.grad[i]),
-                y_s.negate(),
-                ScaledF64::from_f64(x.grad[i]),
-            );
-            if num_s.div(denom_s).to_f64() != 0.0 {
-                return None;
-            }
-        }
-        Some(out)
+        out.is_all_finite().then_some(out)
     }
 
     #[inline]
