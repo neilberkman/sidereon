@@ -7,6 +7,7 @@ use sidereon_core::constants::F_L1_HZ;
 use sidereon_core::ephemeris::Sp3;
 use sidereon_core::observables::{
     j2000_seconds_from_split, predict, rounded_microsecond_replay, PredictOptions,
+    TransmitTimeOptions,
 };
 use sidereon_core::quality::{
     chi2_inv, pseudorange_variance, sigmas, weight_vector, PseudorangeVarianceModel,
@@ -396,10 +397,20 @@ fn observable_formula_cases_match_golden_bits() {
             1.0e-6,
             &format!("observable case {index} transmit_time"),
         );
-        assert_in_delta(
-            t_rx_j2000_s - predicted.transmit_time_j2000_s,
+        let mut transmit_options = TransmitTimeOptions::default();
+        transmit_options.light_time = options.light_time;
+        transmit_options.sagnac = options.sagnac;
+        let transmit = rounded_microsecond_replay::transmit_time_satellite_state(
+            &sp3,
+            sat,
+            receiver_ecef_m,
+            t_rx_j2000_s,
+            transmit_options,
+        )
+        .unwrap_or_else(|err| panic!("observable case {index} {sat}: {err}"));
+        assert_bits(
+            transmit.signal_flight_time_s,
             hexf(&case["tau_s"]),
-            1.0e-6,
             &format!("observable case {index} tau_s"),
         );
     }

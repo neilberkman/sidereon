@@ -1,0 +1,18 @@
+[package]
+name = "sgp4-cpp-oracle"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+license = "MIT"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+libm = "=0.2.16"
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sidereon-core = { path = "../sidereon-core" }

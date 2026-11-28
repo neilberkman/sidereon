@@ -49,10 +49,8 @@ fn main() {
         .flag_if_supported("-w")
         // CRITICAL: clang ≥14 enables FP contraction (a*b+c → fma) by default
         // on macOS aarch64. Rust never auto-contracts. The Vallado port was
-        // written assuming non-FMA arithmetic. The Python sgp4 PyPI wheel
-        // (which generated the JSON fixture) is gcc-built and also non-FMA.
-        // Disable FP contraction here so this oracle matches the JSON fixture
-        // AND the pure-Rust port bit-for-bit.
+        // written assuming separate multiplication and addition.
+        // Disable FP contraction to preserve that arithmetic order.
         .flag_if_supported("-ffp-contract=off");
 
     // macOS: BSD `ar` doesn't accept the `-D` flag that newer cc-rs passes

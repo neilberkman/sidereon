@@ -1121,6 +1121,9 @@ fn regen_trace_level(level: &str) {
             hexbits((x[3] - b_truth).abs()).into();
     }
 
+    let (selection, geo) = dop_geometry_at_reference_solution(&doc["fixture"], &reference, &inputs);
+    doc["fixture"]["dop_geometry"] = dop_geometry_bits(&selection, geo);
+
     // Record the position-leg reference change in the fixture provenance.
     doc["env_ref"]["sp3_interp_reference"] = serde_json::json!(
         "position: RTKLIB preceph.c interppol/pephpos (sliding-window degree-10 \
@@ -1371,14 +1374,34 @@ fn independent_solve_l3_agreement() {
     independent_solve_level("L3_relativistic");
 }
 
-// ---------------------------------------------------------------------------
-// DOP from the converged geometry agrees with the recipe's recorded DOP.
-// (BLAS-agreement track: the DOP recipe is 0-ULP at a fixed geometry, but here
-// it is recomputed at the independently-converged position, so it is a
-// sub-micron-geometry agreement, not a 0-ULP claim.)
-// ---------------------------------------------------------------------------
+fn dop_geometry_at_reference_solution(
+    fixture: &Value,
+    eph: &dyn super::EphemerisSource,
+    inputs: &Inputs,
+) -> (super::Selection, crate::frame::Wgs84Geodetic) {
+    let x = fixture["final_solution"]["x"].as_array().unwrap();
+    let [rx, ry, rz, clock]: [f64; 4] = std::array::from_fn(|axis| bits(x[axis].as_str().unwrap()));
+    let position = [rx, ry, rz];
+    let model = SppModelRecipe::geometric_light_time_replay();
+    let selection = super::select_at(eph, &solve_inputs(inputs), model, None, position, &|_| {
+        clock
+    });
+    let geo = super::geodetic_from_ecef(model.frame, position);
+    (selection, geo)
+}
+
+fn dop_geometry_bits(selection: &super::Selection, geo: crate::frame::Wgs84Geodetic) -> Value {
+    serde_json::json!({
+        "los_ecef": selection.lines_of_sight.iter()
+            .map(|los| [los.e_x, los.e_y, los.e_z].map(hexbits))
+            .collect::<Vec<_>>(),
+        "latitude_rad": hexbits(geo.lat_rad),
+        "longitude_rad": hexbits(geo.lon_rad),
+    })
+}
+
 #[test]
-fn dop_from_converged_geometry_agrees() {
+fn dop_at_reference_solution_matches_bits() {
     for &level in LEVELS {
         let doc = read_fixture(&fixture_name(level));
         let inputs = load_inputs(&doc, level);
@@ -1426,10 +1449,8 @@ fn dop_from_converged_geometry_agrees() {
                 &format!("{level}.dop.{}", observation.satellite_id),
             );
         }
-        // The recipe weighted every satellite by `sin^2(el)` at the initial guess for the
-        // whole solve. The DOP arithmetic at the converged geometry reproduces the
-        // recipe's with the recipe's weights, and the solution reports the geometry's
-        // own DOP, every line of sight at unit weight, as RTKLIB `dops` forms it.
+        // The DOP reference uses the solve's frozen sin²(elevation) weights.
+        // The reported DOP uses unit weights at the solver's converged position.
         let at_solution = test_support::selection_at_solution_for_test(
             &NoRelativityTerm(&sp3),
             &solve_inputs(&inputs),
@@ -1444,14 +1465,29 @@ fn dop_from_converged_geometry_agrees() {
             SppModelRecipe::geometric_light_time_replay().frame,
             sol.position.as_array(),
         );
-        let geometry = &doc["fixture"]["used_sat_geometry"];
-        let recipe_weights: Vec<f64> = sol
-            .used_sats
+        let fixture = &doc["fixture"];
+        let (reference_selection, reference_geo) =
+            dop_geometry_at_reference_solution(fixture, &NoRelativityTerm(&sp3), &inputs);
+        assert_eq!(reference_selection.used, used_sats(&doc));
+        assert_eq!(
+            dop_geometry_bits(&reference_selection, reference_geo),
+            fixture["dop_geometry"],
+            "{level}: DOP geometry"
+        );
+        let weights: Vec<f64> = reference_selection
+            .used
             .iter()
-            .map(|id| bits(geometry[id.to_string()]["weight"].as_str().unwrap()))
+            .map(|id| {
+                bits(
+                    fixture["used_sat_geometry"][id.to_string()]["weight"]
+                        .as_str()
+                        .unwrap(),
+                )
+            })
             .collect();
-        let recipe_dop = crate::dop::dop(&at_solution.lines_of_sight, &recipe_weights, geo)
-            .expect("DOP with the recipe weights");
+        let recipe_dop =
+            crate::dop::dop(&reference_selection.lines_of_sight, &weights, reference_geo)
+                .expect("DOP with the recipe weights");
         let unit_weights = vec![1.0; at_solution.lines_of_sight.len()];
         let own_dop = crate::dop::dop(&at_solution.lines_of_sight, &unit_weights, geo)
             .expect("DOP at unit weight");
@@ -1464,11 +1500,7 @@ fn dop_from_converged_geometry_agrees() {
             ("tdop", recipe_dop.tdop, own_dop.tdop, dop.tdop),
         ] {
             let w = bits(want[label].as_str().unwrap());
-            let rel = (recipe - w).abs() / w.max(1.0);
-            assert!(
-                rel <= 1e-9,
-                "{level}: {label} with the recipe weights: rust={recipe} ref={w} (rel {rel})"
-            );
+            assert_eq!(recipe.to_bits(), w.to_bits(), "{level}: {label}");
             let rel = (got - own).abs() / own.max(1.0);
             assert!(
                 rel <= 1e-9,

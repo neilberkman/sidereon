@@ -1,18 +1,7 @@
 #!/usr/bin/env bash
-# Regenerate tests/fixtures/tides/dehanttideinel_oracle.json: the station
-# displacement of the IERS Conventions (2010) Chapter 7 routine DEHANTTIDEINEL,
-# built from the IERS source, for the four test cases of its header and a grid
-# of stations and UTC dates (see dehant_oracle.f90).
-#
-# usage: ./generate.sh
-#
-# The IERS files are downloaded from the IERS Conventions Centre and checked
-# against the SHA-256 digests below before they are compiled. They are compiled
-# with gfortran at -O0 with floating-point contraction off, so every operation
-# is a separately rounded binary64 operation as in the Rust translation. The
-# fixture is read by the Rust test
-# `solid_earth_tide_matches_dehanttideinel_built_from_source`.
 set -euo pipefail
+
+command -v gfortran >/dev/null || { printf '%s\n' 'gfortran is required' >&2; exit 127; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$HERE/../../tests/fixtures/tides/dehanttideinel_oracle.json"
@@ -44,20 +33,24 @@ for src in "$BUILD"/*.F; do
     gfortran $FFLAGS -c "$src" -o "${src%.F}.o"
 done
 gfortran -O0 -ffp-contract=off -c "$HERE/dehant_oracle.f90" -o "$BUILD/dehant_oracle.o"
-gfortran -o "$BUILD/dehant_oracle" "$BUILD"/*.o
+cargo build --locked --release --manifest-path "$HERE/../portable-math/Cargo.toml" \
+    --target-dir "$BUILD/math"
+cc -c "$HERE/portable_math.c" -o "$BUILD/portable_math.o"
+gfortran -o "$BUILD/dehant_oracle" "$BUILD"/*.o \
+    "$BUILD/math/release/libgeometry_oracle_math.a" -Wl,--wrap=sin,--wrap=cos,--wrap=atan2 \
+    -lm -ldl -lpthread
 
 {
     printf '{\n'
     printf '  "_source": {\n'
-    printf '    "generator": "fixtures-generators/dehanttideinel_oracle/generate.sh",\n'
-    printf '    "routine": "IERS Conventions (2010) Chapter 7 DEHANTTIDEINEL.F with CAL2JD.F, DAT.F, NORM8.F, SPROD.F, ST1IDIU.F, ST1ISEM.F, ST1L1.F, STEP2DIU.F, STEP2LON.F, ZERO_VEC8.F",\n'
+    printf '    "routine": "IERS Conventions (2010) Chapter 7 DEHANTTIDEINEL",\n'
     printf '    "source_url": "%s/",\n' "$BASE"
-    printf '    "compiler": "%s",\n' "$(gfortran --version | head -1)"
+    printf '    "transcendentals": "libm 0.2.16",\n'
     printf '    "units": "metres for positions and displacement, hours for fhr_hours; dates are UTC"\n'
     printf '  },\n'
     printf '  "cases": [\n'
     "$BUILD/dehant_oracle"
     printf '  ]\n'
     printf '}\n'
-} > "$OUT"
-echo "wrote $OUT"
+} > "$BUILD/fixture.json"
+mv "$BUILD/fixture.json" "$OUT"

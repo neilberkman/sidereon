@@ -896,12 +896,12 @@ fn solid_earth_tide_unchecked(
 
     // Latitude-corrected H2 and L2.
     let cosphi = (xsta[0] * xsta[0] + xsta[1] * xsta[1]).sqrt() / rsta;
-    let h2 = H20 - 0.0006 * (1.0 - 3.0 / 2.0 * cosphi * cosphi);
-    let l2 = L20 + 0.0002 * (1.0 - 3.0 / 2.0 * cosphi * cosphi);
+    let h2 = H20 - 0.0006 * (1.0 - 3.0 / 2.0 * (cosphi * cosphi));
+    let l2 = L20 + 0.0002 * (1.0 - 3.0 / 2.0 * (cosphi * cosphi));
 
     // P2 term.
-    let p2sun = 3.0 * (h2 / 2.0 - l2) * scsun * scsun - h2 / 2.0;
-    let p2mon = 3.0 * (h2 / 2.0 - l2) * scmon * scmon - h2 / 2.0;
+    let p2sun = 3.0 * (h2 / 2.0 - l2) * (scsun * scsun) - h2 / 2.0;
+    let p2mon = 3.0 * (h2 / 2.0 - l2) * (scmon * scmon) - h2 / 2.0;
 
     // P3 term.
     let scsun3 = scsun * scsun * scsun;
@@ -912,8 +912,8 @@ fn solid_earth_tide_unchecked(
     // Term in direction of Sun/Moon vector.
     let x2sun = 3.0 * l2 * scsun;
     let x2mon = 3.0 * l2 * scmon;
-    let x3sun = 3.0 * L3 / 2.0 * (5.0 * scsun * scsun - 1.0);
-    let x3mon = 3.0 * L3 / 2.0 * (5.0 * scmon * scmon - 1.0);
+    let x3sun = 3.0 * L3 / 2.0 * (5.0 * (scsun * scsun) - 1.0);
+    let x3mon = 3.0 * L3 / 2.0 * (5.0 * (scmon * scmon) - 1.0);
 
     // Factors for Sun/Moon (IAU current best estimates).
     const MASS_RATIO_SUN: f64 = 332946.0482;
@@ -921,8 +921,8 @@ fn solid_earth_tide_unchecked(
     const RE: f64 = SOLID_TIDE_EARTH_RADIUS_M;
     let re_over_rsun = RE / rsun;
     let re_over_rmon = RE / rmon;
-    let fac2sun = MASS_RATIO_SUN * RE * re_over_rsun * re_over_rsun * re_over_rsun;
-    let fac2mon = MASS_RATIO_MOON * RE * re_over_rmon * re_over_rmon * re_over_rmon;
+    let fac2sun = MASS_RATIO_SUN * RE * (re_over_rsun * re_over_rsun * re_over_rsun);
+    let fac2mon = MASS_RATIO_MOON * RE * (re_over_rmon * re_over_rmon * re_over_rmon);
     let fac3sun = fac2sun * (RE / rsun);
     let fac3mon = fac2mon * (RE / rmon);
 
@@ -1038,15 +1038,13 @@ fn out_of_phase_semidiurnal_correction(
 
     let drsun = -3.0 / 4.0
         * DHI
-        * cosphi
-        * cosphi
+        * (cosphi * cosphi)
         * fac2sun
         * ((xsun[0] * xsun[0] - xsun[1] * xsun[1]) * sintwola - 2.0 * xsun[0] * xsun[1] * costwola)
         / (rsun * rsun);
     let drmon = -3.0 / 4.0
         * DHI
-        * cosphi
-        * cosphi
+        * (cosphi * cosphi)
         * fac2mon
         * ((xmon[0] * xmon[0] - xmon[1] * xmon[1]) * sintwola - 2.0 * xmon[0] * xmon[1] * costwola)
         / (rmon * rmon);
@@ -1108,9 +1106,9 @@ fn latitude_dependence_correction(
 
     // Diurnal band.
     let mut l1 = L1D;
-    let dnsun = -l1 * sinphi * sinphi * fac2sun * xsun[2] * (xsun[0] * cosla + xsun[1] * sinla)
+    let dnsun = -l1 * (sinphi * sinphi) * fac2sun * xsun[2] * (xsun[0] * cosla + xsun[1] * sinla)
         / (rsun * rsun);
-    let dnmon = -l1 * sinphi * sinphi * fac2mon * xmon[2] * (xmon[0] * cosla + xmon[1] * sinla)
+    let dnmon = -l1 * (sinphi * sinphi) * fac2mon * xmon[2] * (xmon[0] * cosla + xmon[1] * sinla)
         / (rmon * rmon);
     let desun = l1
         * sinphi
@@ -1154,15 +1152,13 @@ fn latitude_dependence_correction(
         * ((xmon[0] * xmon[0] - xmon[1] * xmon[1]) * costwola + 2.0 * xmon[0] * xmon[1] * sintwola)
         / (rmon * rmon);
     let desun = -l1 / 2.0
-        * sinphi
-        * sinphi
+        * (sinphi * sinphi)
         * cosphi
         * fac2sun
         * ((xsun[0] * xsun[0] - xsun[1] * xsun[1]) * sintwola - 2.0 * xsun[0] * xsun[1] * costwola)
         / (rsun * rsun);
     let demon = -l1 / 2.0
-        * sinphi
-        * sinphi
+        * (sinphi * sinphi)
         * cosphi
         * fac2mon
         * ((xmon[0] * xmon[0] - xmon[1] * xmon[1]) * sintwola - 2.0 * xmon[0] * xmon[1] * costwola)
@@ -1171,8 +1167,8 @@ fn latitude_dependence_correction(
     let de = 3.0 * (desun + demon);
     let dn = 3.0 * (dnsun + dnmon);
 
-    xcorsta[0] += -de * sinla - dn * sinphi * cosla;
-    xcorsta[1] += de * cosla - dn * sinphi * sinla;
+    xcorsta[0] = xcorsta[0] - de * sinla - dn * sinphi * cosla;
+    xcorsta[1] = xcorsta[1] + de * cosla - dn * sinphi * sinla;
     xcorsta[2] += dn * cosphi;
     xcorsta
 }
@@ -1330,9 +1326,9 @@ fn frequency_dependent_diurnal_correction(
             + w[8] * (cosphi * cosphi - sinphi * sinphi) * cos_angle;
         let de = w[7] * sinphi * cos_angle - w[8] * sinphi * sin_angle;
 
-        xcorsta[0] += dr * cosla * cosphi - de * sinla - dn * sinphi * cosla;
-        xcorsta[1] += dr * sinla * cosphi + de * cosla - dn * sinphi * sinla;
-        xcorsta[2] += dr * sinphi + dn * cosphi;
+        xcorsta[0] = xcorsta[0] + dr * cosla * cosphi - de * sinla - dn * sinphi * cosla;
+        xcorsta[1] = xcorsta[1] + dr * sinla * cosphi + de * cosla - dn * sinphi * sinla;
+        xcorsta[2] = xcorsta[2] + dr * sinphi + dn * cosphi;
     }
     for v in &mut xcorsta {
         *v /= KM_TO_M;
@@ -1385,15 +1381,15 @@ fn frequency_dependent_long_period_correction(xsta: &[f64; 3], t: f64) -> [f64; 
         let thetaf = (w[0] * s + w[1] * h + w[2] * p + w[3] * zns + w[4] * ps) * DEG_TO_RAD;
         let sin_theta = libm::sin(thetaf);
         let cos_theta = libm::cos(thetaf);
-        let dr = w[5] * (3.0 * sinphi * sinphi - 1.0) / 2.0 * cos_theta
-            + w[7] * (3.0 * sinphi * sinphi - 1.0) / 2.0 * sin_theta;
+        let dr = w[5] * (3.0 * (sinphi * sinphi) - 1.0) / 2.0 * cos_theta
+            + w[7] * (3.0 * (sinphi * sinphi) - 1.0) / 2.0 * sin_theta;
         let dn =
             w[6] * (cosphi * sinphi * 2.0) * cos_theta + w[8] * (cosphi * sinphi * 2.0) * sin_theta;
         let de = 0.0;
 
-        xcorsta[0] += dr * cosla * cosphi - de * sinla - dn * sinphi * cosla;
-        xcorsta[1] += dr * sinla * cosphi + de * cosla - dn * sinphi * sinla;
-        xcorsta[2] += dr * sinphi + dn * cosphi;
+        xcorsta[0] = xcorsta[0] + dr * cosla * cosphi - de * sinla - dn * sinphi * cosla;
+        xcorsta[1] = xcorsta[1] + dr * sinla * cosphi + de * cosla - dn * sinphi * sinla;
+        xcorsta[2] = xcorsta[2] + dr * sinphi + dn * cosphi;
     }
     for v in &mut xcorsta {
         *v /= KM_TO_M;

@@ -8,6 +8,10 @@ All notable changes to `sidereon-core` are documented here.
 
 - `J2Gravity` and the J2 term of `TwoBodyJ2` preserve Orekit 13.1.10's acceleration and position partials bit for bit when every binary64 intermediate is finite, including subnormals and signed zeros. The force models use extended exponents and round at the output when an intermediate or result is non-finite, including overflow hidden by a later division or normalization. Solid Earth tides retain the rounded subnormal radius power in the degree-3 coefficient calculation.
 
+- Site-wise `MappingModel::Vmf1` follows TU Wien's zenith-distance complement, seasonal phase constant, and binary32 mapping coefficients promoted to binary64. The ZIM2 hydrostatic and wet mapping factors match TU Wien at 0 ULP.
+
+- Solid Earth station tides preserve DEHANTTIDEINEL’s arithmetic order for powers and correction sums. The IERS routine constants match the reference at 0 ULP with portable transcendental functions.
+
 ## [4.2.0] - 2026-11-26
 
 ### Added

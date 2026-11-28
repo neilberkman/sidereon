@@ -280,7 +280,8 @@ pub(crate) fn tropo_mapping_unchecked(
         }
         MappingModel::Vmf1 { ah, aw } => {
             let mjd = modified_julian_date(epoch);
-            let m = vmf::vmf1_mapping(elevation_rad, receiver.lat_rad, mjd, ah, aw);
+            let zenith_distance_rad = core::f64::consts::FRAC_PI_2 - elevation_rad;
+            let m = vmf::vmf1_mapping(zenith_distance_rad, receiver.lat_rad, mjd, ah, aw);
             MappingFactors {
                 dry: m.mh,
                 wet: m.mw,

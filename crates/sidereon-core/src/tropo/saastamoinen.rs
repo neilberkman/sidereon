@@ -200,7 +200,10 @@ fn interpc(coef: &[f64; 5], lat_deg: f64) -> f64 {
 /// Vienna (VMF) mapping functions: the families differ only in where `a, b, c`
 /// come from, not in this evaluation, so the VMF module reuses it verbatim.
 pub(crate) fn mapf(el_rad: f64, a: f64, b: f64, c: f64) -> f64 {
-    let sinel = libm::sin(el_rad);
+    mapf_from_sine(libm::sin(el_rad), a, b, c)
+}
+
+pub(crate) fn mapf_from_sine(sinel: f64, a: f64, b: f64, c: f64) -> f64 {
     (1.0 + a / (1.0 + b / (1.0 + c))) / (sinel + (a / (sinel + b / (sinel + c))))
 }
 

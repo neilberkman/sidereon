@@ -33,18 +33,15 @@
 //! `doy = mjd - 44239 + 1 - 28` exactly as in `vmf1.f` (where MJD 44239 is
 //! 1980-01-01); `mjd` is the modified Julian date of the epoch.
 //!
-//! Determinism: the only transcendentals are `cos` and `sin`, no fused
-//! multiply-add, and the operation grouping matches the Fortran reference. This
-//! module uses `std::f64::consts::PI` (the correctly rounded π) rather than the
-//! reference's truncated `3.14159265359`; the difference is far below the last
-//! significant bit of the mapping factor (well under a micrometre of slant
-//! delay), and the reference-parity test reports the achieved agreement.
-
-use core::f64::consts::PI;
+//! The seasonal phase and the zenith-distance complement use the TU Wien
+//! constant `3.14159265359`.
 
 use crate::astro::constants::time::DAYS_PER_JULIAN_YEAR;
 
-use super::saastamoinen::mapf;
+use super::saastamoinen::mapf_from_sine;
+
+#[allow(clippy::approx_constant)]
+pub(super) const VMF1_PI: f64 = 3.14159265359;
 
 /// VMF1 mapping factors at one elevation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,12 +56,12 @@ pub(crate) struct Vmf1Components {
 
 /// VMF1 hydrostatic and wet mapping factors for site-wise `a` coefficients.
 ///
-/// `el_rad` is the elevation angle in radians, `lat_rad` the ellipsoidal
+/// `zenith_distance_rad` is the zenith distance in radians, `lat_rad` the ellipsoidal
 /// latitude in radians, `mjd` the modified Julian date of the epoch, and
 /// `ah`/`aw` the hydrostatic/wet `a` coefficients from the VMF1 site-wise data
 /// product at that station and epoch. Mirrors the TU Wien `vmf1.f` term order.
 pub(crate) fn vmf1_mapping(
-    el_rad: f64,
+    zenith_distance_rad: f64,
     lat_rad: f64,
     mjd: f64,
     ah: f64,
@@ -73,23 +70,25 @@ pub(crate) fn vmf1_mapping(
     // Reference day 28 January (Niell 1996), via vmf1.f's MJD expression.
     let doy = mjd - 44239.0 + 1.0 - 28.0;
 
-    let bh = 0.0029;
-    let c0h = 0.062;
+    // The reference coefficients are binary32 values promoted to binary64.
+    let bh = 0.0029_f32 as f64;
+    let c0h = 0.062_f32 as f64;
     let (phh, c11h, c10h) = if lat_rad < 0.0 {
         // Southern hemisphere.
-        (PI, 0.007, 0.002)
+        (VMF1_PI, 0.007_f32 as f64, 0.002_f32 as f64)
     } else {
         // Northern hemisphere.
-        (0.0, 0.005, 0.001)
+        (0.0, 0.005_f32 as f64, 0.001_f32 as f64)
     };
     let ch = c0h
-        + ((libm::cos(doy / DAYS_PER_JULIAN_YEAR * 2.0 * PI + phh) + 1.0) * c11h / 2.0 + c10h)
+        + ((libm::cos(doy / DAYS_PER_JULIAN_YEAR * 2.0 * VMF1_PI + phh) + 1.0) * c11h / 2.0 + c10h)
             * (1.0 - libm::cos(lat_rad));
-    let mh = mapf(el_rad, ah, bh, ch);
+    let sine = libm::sin(VMF1_PI / 2.0 - zenith_distance_rad);
+    let mh = mapf_from_sine(sine, ah, bh, ch);
 
-    let bw = 0.00146;
-    let cw = 0.04391;
-    let mw = mapf(el_rad, aw, bw, cw);
+    let bw = 0.00146_f32 as f64;
+    let cw = 0.04391_f32 as f64;
+    let mw = mapf_from_sine(sine, aw, bw, cw);
 
     Vmf1Components { mh, mw, ch }
 }

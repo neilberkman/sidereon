@@ -174,9 +174,9 @@ const GSDC_ORACLES: &[GsdcArc] = &[
         first_time: "2021-08-04T20:40:43.449",
         first_truth_time_utc: "2021-08-04T20:40:25.449",
         last_time: "2021-08-04T21:06:36.450",
-        fixed_3d_median: 5.044745,
+        fixed_3d_median: 5.044_745_499_999_999,
         fixed_3d_p95: 7.332008,
-        float_3d_median: 4.516922,
+        float_3d_median: 4.516_921_500_000_000_5,
         float_3d_p95: 12.296687,
         fixed_beats_float: false,
     },
@@ -202,7 +202,7 @@ const GSDC_ORACLES: &[GsdcArc] = &[
         first_time: "2021-08-24T20:33:00.437",
         first_truth_time_utc: "2021-08-24T20:32:42.437",
         last_time: "2021-08-24T21:25:16.437",
-        fixed_3d_median: 3.476352,
+        fixed_3d_median: 3.476_352_000_000_000_3,
         fixed_3d_p95: 4.562249,
         float_3d_median: 3.964981,
         float_3d_p95: 8.579962,
@@ -232,7 +232,7 @@ const GSDC_ORACLES: &[GsdcArc] = &[
         last_time: "2021-12-15T19:13:37.438",
         fixed_3d_median: 3.022934,
         fixed_3d_p95: 3.022934,
-        float_3d_median: 3.633223,
+        float_3d_median: 3.633_222_5,
         float_3d_p95: 7.466983,
         fixed_beats_float: true,
     },
@@ -354,10 +354,11 @@ fn as_f64(value: &Value, label: &str) -> f64 {
         .unwrap_or_else(|| panic!("{label} is not a float"))
 }
 
-fn assert_close(actual: f64, expected: f64, tolerance: f64, label: &str) {
-    assert!(
-        (actual - expected).abs() <= tolerance,
-        "{label}: actual={actual:?} expected={expected:?} tolerance={tolerance:?}"
+fn assert_bits(actual: f64, expected: f64, label: &str) {
+    assert_eq!(
+        actual.to_bits(),
+        expected.to_bits(),
+        "{label}: actual={actual:?} expected={expected:?}"
     );
 }
 
@@ -651,13 +652,12 @@ fn gsdc_demo5_oracles_pin_moving_rover_references() {
             ),
             18
         );
-        assert_close(
+        assert_bits(
             as_f64(
                 &oracle["truth"]["base_station"]["distance_from_drive_start_km"],
                 "truth.base_station.distance_from_drive_start_km",
             ),
             arc.base_distance_km,
-            0.0,
             arc.fixture,
         );
 
@@ -722,34 +722,30 @@ fn gsdc_demo5_oracles_pin_moving_rover_references() {
             arc.final_status
         );
 
-        assert_close(
+        assert_bits(
             as_f64(&reference["fix_rate"], "reference.fix_rate"),
             arc.fix_rate,
-            1.0e-12,
             "fix_rate",
         );
-        assert_close(
+        assert_bits(
             as_f64(
                 &reference["error_3d"]["median_m"],
                 "reference.error_3d.median_m",
             ),
             arc.error_3d_median,
-            1.0e-6,
             "error_3d median",
         );
-        assert_close(
+        assert_bits(
             as_f64(&reference["error_3d"]["p95_m"], "reference.error_3d.p95_m"),
             arc.error_3d_p95,
-            1.0e-6,
             "error_3d p95",
         );
-        assert_close(
+        assert_bits(
             as_f64(
                 &reference["horizontal_error"]["p95_m"],
                 "reference.horizontal_error.p95_m",
             ),
             arc.horizontal_p95,
-            1.0e-6,
             "horizontal p95",
         );
 
@@ -773,30 +769,10 @@ fn gsdc_demo5_oracles_pin_moving_rover_references() {
         let fixed_3d = status_error_values(epochs, 1, "error_3d_m");
         let float_3d = status_error_values(epochs, 2, "error_3d_m");
 
-        assert_close(
-            median(&fixed_3d),
-            arc.fixed_3d_median,
-            1.0e-6,
-            "fixed median",
-        );
-        assert_close(
-            percentile(&fixed_3d, 0.95),
-            arc.fixed_3d_p95,
-            1.0e-6,
-            "fixed p95",
-        );
-        assert_close(
-            median(&float_3d),
-            arc.float_3d_median,
-            1.0e-6,
-            "float median",
-        );
-        assert_close(
-            percentile(&float_3d, 0.95),
-            arc.float_3d_p95,
-            1.0e-6,
-            "float p95",
-        );
+        assert_bits(median(&fixed_3d), arc.fixed_3d_median, "fixed median");
+        assert_bits(percentile(&fixed_3d, 0.95), arc.fixed_3d_p95, "fixed p95");
+        assert_bits(median(&float_3d), arc.float_3d_median, "float median");
+        assert_bits(percentile(&float_3d, 0.95), arc.float_3d_p95, "float p95");
         assert_eq!(
             fixed_split_beats_float(&fixed_3d, &float_3d),
             arc.fixed_beats_float,
@@ -847,33 +823,29 @@ fn pasa_scoa_cd_oracles_pin_epn_references() {
             ),
             "PASA00ESP"
         );
-        assert_close(
+        assert_bits(
             as_f64(
                 &oracle["truth"]["baseline_length_km"],
                 "truth.baseline_length_km",
             ),
             21.836327792,
-            0.0,
             "baseline length",
         );
 
         let truth = &oracle["truth"]["antenna_baseline_enu_m"];
-        assert_close(
+        assert_bits(
             as_f64(&truth["east"], "truth.antenna_baseline_enu_m.east"),
             -20_265.520_602_760_01,
-            1.0e-12,
             "truth east",
         );
-        assert_close(
+        assert_bits(
             as_f64(&truth["north"], "truth.antenna_baseline_enu_m.north"),
             -8_132.221_127_240_546,
-            1.0e-12,
             "truth north",
         );
-        assert_close(
+        assert_bits(
             as_f64(&truth["up"], "truth.antenna_baseline_enu_m.up"),
             -29.422_321_279_917,
-            1.0e-12,
             "truth up",
         );
 
@@ -933,43 +905,38 @@ fn pasa_scoa_cd_oracles_pin_epn_references() {
             arc.satellites_max
         );
 
-        assert_close(
+        assert_bits(
             as_f64(&reference["fix_rate"], "reference.fix_rate"),
             arc.fix_rate,
-            1.0e-12,
             "fix rate",
         );
-        assert_close(
+        assert_bits(
             as_f64(&reference["final_ratio"], "reference.final_ratio"),
             arc.final_ratio,
-            1.0e-12,
             "final ratio",
         );
-        assert_close(
+        assert_bits(
             as_f64(
                 &reference["final_truth_error_m"],
                 "reference.final_truth_error_m",
             ),
             arc.final_truth_error_m,
-            1.0e-12,
             "final truth error",
         );
-        assert_close(
+        assert_bits(
             as_f64(
                 &reference["mean_truth_error_m"],
                 "reference.mean_truth_error_m",
             ),
             arc.mean_truth_error_m,
-            1.0e-12,
             "mean truth error",
         );
-        assert_close(
+        assert_bits(
             as_f64(
                 &reference["max_truth_error_m"],
                 "reference.max_truth_error_m",
             ),
             arc.max_truth_error_m,
-            1.0e-12,
             "max truth error",
         );
 

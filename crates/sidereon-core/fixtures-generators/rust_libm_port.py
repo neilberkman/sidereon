@@ -1,8 +1,8 @@
-"""Binary64 port of the Rust `libm` crate 0.2.16 `sin`, `cos`, `atan2` and `pow`.
+"""Binary64 port of the Rust `libm` crate 0.2.16 `sin`, `cos`, `atan2`, `pow` and `log`.
 
 The `libm` crate ports musl, which ports FreeBSD msun; the functions below follow
 its kernels (`k_sin`, `k_cos`, `rem_pio2` and `rem_pio2_large`, `atan`, `atan2`,
-`pow`) statement for statement, special cases (NaN, infinities, zeros) included,
+`pow`, `log`) statement for statement, special cases (NaN, infinities, zeros) included,
 with every operation rounded to binary64 as Python floats round. Square roots use
 `math.sqrt` and `scalbn` uses `math.ldexp`, which are correctly rounded as the
 crate's are. The broadcast goldens built with this port are checked at 0 ULP
@@ -671,3 +671,44 @@ def pow(x, y):
     else:
         z = _set_high(z, j)
     return s * z
+
+# Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+#
+# Developed at SunSoft, a Sun Microsystems, Inc. business.
+# Permission to use, copy, modify, and distribute this
+# software is freely granted, provided that this notice
+# is preserved.
+def log(x):
+    """Natural logarithm with fdlibm argument reduction and polynomial order."""
+    if x == 0.0:
+        return -math.inf
+    if x < 0.0:
+        return math.nan
+    if not math.isfinite(x):
+        return x
+
+    u = bits(x)
+    high = u >> 32
+    exponent = 0
+    if high < 0x00100000:
+        exponent -= 54
+        u = bits(x * float(1 << 54))
+        high = u >> 32
+
+    # Reduce x to the interval around one and keep both parts of log(2).
+    high += 0x3FF00000 - 0x3FE6A09E
+    exponent += (high >> 20) - 0x3FF
+    high = (high & 0x000FFFFF) + 0x3FE6A09E
+    reduced = fb((high << 32) | (u & 0xFFFFFFFF))
+    f = reduced - 1.0
+    half_square = 0.5 * f * f
+    s = f / (2.0 + f)
+    z = s * s
+    w = z * z
+    t1 = w * (3.999999999940941908e-01
+              + w * (2.222219843214978396e-01 + w * 1.531383769920937332e-01))
+    t2 = z * (6.666666666666735130e-01
+              + w * (2.857142874366239149e-01
+                     + w * (1.818357216161805012e-01 + w * 1.479819860511658591e-01)))
+    return (s * (half_square + (t2 + t1)) + float(exponent) * 1.90821492927058770002e-10
+            - half_square + f + float(exponent) * 6.93147180369123816490e-01)

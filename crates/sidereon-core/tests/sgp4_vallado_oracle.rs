@@ -200,6 +200,8 @@ impl Agreement {
         for (a, b) in actual.iter().zip(&expected) {
             self.max_ulp = self.max_ulp.max(ulp_distance(*a, *b));
         }
+        // diff_sgp4_step_at_nonzero_tsince pins Vallado propagation with
+        // portable transcendental functions. These bounds cover platform libm.
         let Some(bounds) = row["bound"].as_array() else {
             return;
         };
