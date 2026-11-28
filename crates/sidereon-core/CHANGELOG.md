@@ -4,6 +4,10 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- `J2Gravity` and the J2 term of `TwoBodyJ2` preserve Orekit 13.1.10's acceleration and position partials bit for bit when every binary64 intermediate is finite, including subnormals and signed zeros. The force models use extended exponents and round at the output when an intermediate or result is non-finite, including overflow hidden by a later division or normalization. Solid Earth tides retain the rounded subnormal radius power in the degree-3 coefficient calculation.
+
 ## [4.2.0] - 2026-11-26
 
 ### Added

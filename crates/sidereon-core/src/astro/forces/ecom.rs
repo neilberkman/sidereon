@@ -133,30 +133,10 @@
 //!   terms for ECOM2). Where a nonzero coefficient or a requested parameter
 //!   partial needs the undefined vector, a typed
 //!   [`PropagationError::NumericalFailure`] is returned.
-//! - **Overflowing vector normalization and scaled fallback:** Hipparchus
-//!   4.0.3's `Vector3D.normalize` and `FieldVector3D.normalize` return a zero
-//!   vector when a finite vector's squared norm overflows to `+Inf`
-//!   (`1 / +Inf = 0`). Where a vector's norm value is finite and nonzero,
-//!   `normalize` returns Hipparchus's exact result (including non-finite
-//!   gradient entries). Where the norm value is not finite while every
-//!   component value is finite, it prescales by an exact power of two. In
-//!   addition, where unscaled intermediate ECOM2 frame cross products,
-//!   normalizations, `atan2` derivatives, Fourier sums, linear combinations,
-//!   lighting scaling, or unit conversions produce a non-finite value or
-//!   derivative, or a zero norm or denominator, on finite inputs while the
-//!   mathematical result is finite and defined, ECOM2 falls back to
-//!   exponent-separated arithmetic evaluated directly from the km inputs (with
-//!   no km-to-m input rounding, converting only the outputs, forming
-//!   `e_Y = normalize(sunPos x satPos)` via the compensated scaled cross
-//!   product so exact collinearity always gives zero rather than `e_D` rounding
-//!   noise, recomputing flushed frame vectors from the unflushed scaled inputs,
-//!   taking conical lighting gradients directly in `1/km`, and scaling
-//!   apparent-disc `1/m` gradients by `1000` in `ScaledF64`), leaving every
-//!   input whose unscaled Orekit evaluation is finite (and nonzero where a
-//!   direction is formed, and not caught by the exact collinearity/orthogonality
-//!   predicates) bit-identical to Orekit. ECOM1 is evaluated in
-//!   exponent-separated arithmetic throughout on every input and rounded to
-//!   binary64 once at the output.
+//! - **Extended exponents:** ECOM2's recovery uses the original km inputs,
+//!   a compensated `sunPos x satPos` for `e_Y`, and lighting gradients in
+//!   `1/km`. A rounded zero norm also requires recovery when the direction
+//!   is defined. ECOM1 uses extended exponents throughout.
 //! - **Exact-axis annular parameter partials:** Where field lighting evaluation
 //!   fails on an exact-axis annular eclipse while the double lighting ratio is
 //!   defined, parameter partials use the double lighting ratio value.

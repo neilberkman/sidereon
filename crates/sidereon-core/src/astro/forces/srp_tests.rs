@@ -3107,15 +3107,9 @@ fn orekit_path_nonfinite_intermediates_fall_back_to_independent_reference() {
             .expect("sunlit conical cr_p with r2 overflow");
         let jp = srp_position_partials_with_bodies(sat_r2, sun_r2, None, model)
             .expect("sunlit conical jp with r2 overflow");
-        let rel_a = scaled_rel_err_vec3(acc, acc_r2);
-        let rel_c = scaled_rel_err_vec3(cr_p, cr_r2);
-        let rel_j = scaled_rel_err_mat3(jp, jp_r2);
-        assert!(
-            rel_a <= 8.0 * f64::EPSILON
-                && rel_c <= 8.0 * f64::EPSILON
-                && rel_j <= 8.0 * f64::EPSILON,
-            "r2 overflow {earth_model:?}: rel_a={rel_a:e}, rel_c={rel_c:e}, rel_j={rel_j:e}"
-        );
+        assert_eq!(acc.map(f64::to_bits), acc_r2.map(f64::to_bits));
+        assert_eq!(cr_p.map(f64::to_bits), cr_r2.map(f64::to_bits));
+        assert_eq!(jp.map(f64::to_bits), jp_r2.map(f64::to_bits));
     }
     // Under ApparentDisc, sun = [3e151, 0, 0] km overflows sun_m.norm() inside the ported
     // shadow function, so all three entry points consistently refuse it.

@@ -20,7 +20,11 @@ import org.orekit.utils.FieldAbsolutePVCoordinates;
 public final class J2Oracle {
     private static final int VARIABLES = 3;
 
-    private record Sample(String name, double x, double y, double z) {}
+    private record Sample(String name, double x, double y, double z, double mu, double re, double j2) {
+        Sample(String name, double x, double y, double z) {
+            this(name, x, y, z, 398600.4418, 6378.137, 1.08262668e-3);
+        }
+    }
 
     private static void append(StringBuilder out, double value) {
         if (!Double.isFinite(value)) {
@@ -32,7 +36,6 @@ public final class J2Oracle {
     public static void main(String[] args) throws IOException {
         // Use km and seconds consistently for both position and gravity constants.
         final Frame gcrf = FramesFactory.getGCRF();
-        final J2OnlyPerturbation j2 = new J2OnlyPerturbation(398600.4418, 6378.137, 1.08262668e-3, gcrf);
         final AbsoluteDate date = AbsoluteDate.J2000_EPOCH;
         final GradientField field = GradientField.getField(VARIABLES);
         final FieldAbsoluteDate<Gradient> fieldDate = new FieldAbsoluteDate<>(field, date);
@@ -47,13 +50,23 @@ public final class J2Oracle {
             new Sample("low_radius", -1.125, 0.625, 0.25),
             new Sample("large_exponent", 0x1.2p169, -0x1.4p167, 0x1.3p168),
             new Sample("small_exponent", 0x1.2p-163, -0x1.4p-165, 0x1.3p-164),
+            new Sample("subnormal_component", 0x1.0p-164, -Double.MIN_VALUE, 0x1.0p-166),
+            new Sample("subnormal_gradient_divisor", 0x1.1p175, -0x1.7p173, 0x1.3p174),
+            new Sample("subnormal_j2_mu", 0x1.2p-20, -0x1.4p-22, 0x1.3p-21, 0x1.6bp-1054, 1, 0.1),
+            new Sample("subnormal_numerator", 0x1.2p-7, -0x1.4p-9, 0x1.3p-8, 0x1.6bp-1054, 1, 0.1),
+            new Sample("subnormal_reference_radius_squared", 0x1.1p-148, -0x1.2p-150, 0x1.3p-149,
+                       0x1.6p390, 0x1.04p-525, 0x1.3p-12),
+            new Sample("zero_reference_radius_squared", 0x1.1p-148, -0x1.2p-150, 0x1.3p-149,
+                       0x1.6p390, 0x1.02p-539, 0x1.3p-12),
         };
 
         final StringBuilder out = new StringBuilder(
             "# Orekit 13.1.10 / Hipparchus 4.0.3, GCRF\n" +
-            "# Case, position (km), acceleration (km/s^2), position partials (1/s^2, row-major)\n"
+            "# Case, position (km), mu (km^3/s^2), reference radius (km), J2, " +
+            "acceleration (km/s^2), position partials (1/s^2, row-major)\n"
         );
         for (Sample sample : samples) {
+            final J2OnlyPerturbation j2 = new J2OnlyPerturbation(sample.mu(), sample.re(), sample.j2(), gcrf);
             final Vector3D position = new Vector3D(sample.x(), sample.y(), sample.z());
             final SpacecraftState state = new SpacecraftState(
                 new AbsolutePVCoordinates(gcrf, date, position, Vector3D.ZERO)
@@ -70,6 +83,9 @@ public final class J2Oracle {
             for (double coordinate : position.toArray()) {
                 append(out, coordinate);
             }
+            append(out, j2.getMu());
+            append(out, j2.getrEq());
+            append(out, j2.getJ2(date));
             for (double component : j2.acceleration(state, new double[0]).toArray()) {
                 append(out, component);
             }

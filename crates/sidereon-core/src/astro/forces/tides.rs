@@ -968,67 +968,37 @@ fn add_body_tide_coefficients(
         let radius_power = geometry.radius_ratio.powi(3);
         let gm_power = gm_ratio * radius_power;
         let base = gm_power * geometry.p2[order as usize] / 5.0;
-        let ordinary_range = gm_ratio.is_normal()
-            && geometry.radius_ratio.is_normal()
-            && radius_power.is_normal()
-            && gm_power.is_normal()
-            && base.is_normal();
         let cosine = geometry.cos_m[order as usize];
         let sine = geometry.sin_m[order as usize];
-        let (dc, ds) = if ordinary_range {
-            coefficient_delta(base, love.primary, cosine, sine)
+        let (dc, ds) = coefficient_delta(base, love.primary, cosine, sine);
+        let dc4 = base * love.plus * cosine;
+        let ds4 = base * love.plus * sine;
+        let (dc, ds, dc4, ds4) = if [dc, ds, dc4, ds4].into_iter().all(f64::is_finite) {
+            (dc, ds, dc4, ds4)
         } else {
+            let p = geometry.p2[order as usize];
+            let scaled = |factors: &[f64]| {
+                scaled_body_product(gm_body_km3_s2, model.mu_earth_km3_s2, &geometry, 3, factors)
+            };
             (
-                scaled_body_product(
-                    gm_body_km3_s2,
-                    model.mu_earth_km3_s2,
-                    &geometry,
-                    3,
-                    &[
-                        geometry.p2[order as usize],
-                        1.0 / 5.0,
-                        love.primary.real * cosine + love.primary.imag * sine,
-                    ],
-                ),
-                scaled_body_product(
-                    gm_body_km3_s2,
-                    model.mu_earth_km3_s2,
-                    &geometry,
-                    3,
-                    &[
-                        geometry.p2[order as usize],
-                        1.0 / 5.0,
-                        love.primary.real * sine - love.primary.imag * cosine,
-                    ],
-                ),
+                scaled(&[
+                    p,
+                    1.0 / 5.0,
+                    love.primary.real * cosine + love.primary.imag * sine,
+                ]),
+                scaled(&[
+                    p,
+                    1.0 / 5.0,
+                    love.primary.real * sine - love.primary.imag * cosine,
+                ]),
+                scaled(&[p, 1.0 / 5.0, love.plus, cosine]),
+                scaled(&[p, 1.0 / 5.0, love.plus, sine]),
             )
         };
         let idx = order as usize;
         corrections[idx].c += dc;
         corrections[idx].s += ds;
 
-        let dc4 = if ordinary_range {
-            base * love.plus * cosine
-        } else {
-            scaled_body_product(
-                gm_body_km3_s2,
-                model.mu_earth_km3_s2,
-                &geometry,
-                3,
-                &[geometry.p2[order as usize], 1.0 / 5.0, love.plus, cosine],
-            )
-        };
-        let ds4 = if ordinary_range {
-            base * love.plus * sine
-        } else {
-            scaled_body_product(
-                gm_body_km3_s2,
-                model.mu_earth_km3_s2,
-                &geometry,
-                3,
-                &[geometry.p2[order as usize], 1.0 / 5.0, love.plus, sine],
-            )
-        };
         let idx4 = 7 + order as usize;
         corrections[idx4].c += dc4;
         corrections[idx4].s += ds4;
@@ -1039,39 +1009,19 @@ fn add_body_tide_coefficients(
         let radius_power = geometry.radius_ratio.powi(4);
         let gm_power = gm_ratio * radius_power;
         let base = gm_power * geometry.p3[order as usize] / 7.0;
-        let ordinary_range = gm_ratio.is_normal()
-            && geometry.radius_ratio.is_normal()
-            && radius_power.is_normal()
-            && gm_power.is_normal()
-            && base.is_normal();
         let cosine = geometry.cos_m[order as usize];
         let sine = geometry.sin_m[order as usize];
-        let (dc, ds) = if ordinary_range {
-            coefficient_delta(base, love, cosine, sine)
+        let (dc, ds) = coefficient_delta(base, love, cosine, sine);
+        let (dc, ds) = if dc.is_finite() && ds.is_finite() {
+            (dc, ds)
         } else {
+            let p = geometry.p3[order as usize];
+            let scaled = |factors: &[f64]| {
+                scaled_body_product(gm_body_km3_s2, model.mu_earth_km3_s2, &geometry, 4, factors)
+            };
             (
-                scaled_body_product(
-                    gm_body_km3_s2,
-                    model.mu_earth_km3_s2,
-                    &geometry,
-                    4,
-                    &[
-                        geometry.p3[order as usize],
-                        1.0 / 7.0,
-                        love.real * cosine + love.imag * sine,
-                    ],
-                ),
-                scaled_body_product(
-                    gm_body_km3_s2,
-                    model.mu_earth_km3_s2,
-                    &geometry,
-                    4,
-                    &[
-                        geometry.p3[order as usize],
-                        1.0 / 7.0,
-                        love.real * sine - love.imag * cosine,
-                    ],
-                ),
+                scaled(&[p, 1.0 / 7.0, love.real * cosine + love.imag * sine]),
+                scaled(&[p, 1.0 / 7.0, love.real * sine - love.imag * cosine]),
             )
         };
         let idx = 3 + order as usize;
@@ -1468,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn subnormal_radius_power_is_combined_with_large_gm_before_rounding() {
+    fn degree_three_tides_keep_a_subnormal_radius_power() {
         let model = SolidEarthTideGravity::new(1.0, 1.0, 1.0e300, 1.0e300);
         let geometry = body_geometry([0.0, 0.0, 1.0e80], model.reference_radius_km)
             .expect("finite extreme body geometry");
@@ -1486,17 +1436,13 @@ mod tests {
             .expect("finite degree-two and degree-three corrections");
 
         let expected_c20 = 2.0e60 * 5.0_f64.sqrt() / 5.0 * SOLID_EARTH_TIDE_K20_REAL;
-        let expected_c30 = 2.0e-20 * 7.0_f64.sqrt() / 7.0 * SOLID_EARTH_TIDE_K30_REAL;
+        let expected_c30 = 2.0 * (base * SOLID_EARTH_TIDE_K30_REAL);
         assert_close(
             corrections[0].c,
             expected_c20,
             roundoff_gamma(32) * expected_c20.abs(),
         );
-        assert_close(
-            corrections[3].c,
-            expected_c30,
-            roundoff_gamma(32) * expected_c30.abs(),
-        );
+        assert_eq!(corrections[3].c.to_bits(), expected_c30.to_bits());
     }
 
     #[test]

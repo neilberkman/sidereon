@@ -23,8 +23,6 @@ use nalgebra::{Matrix3, Vector3};
 /// The J2 axis is the z axis of the propagation frame. For
 /// [`crate::astro::propagator::ForceModelKind::TwoBodyJ2`], the equivalent
 /// Orekit configuration uses GCRF for both the propagation and J2 frames.
-/// Arithmetic with extended exponents recovers results when intermediate
-/// scales exceed the binary64 exponent range.
 /// A zero position returns [`PropagationError::NumericalFailure`].
 pub struct J2Gravity {
     /// Gravitational parameter in km³/s². `Default::default` sets this to
@@ -76,21 +74,10 @@ impl ForceModel for J2Gravity {
         let numerator = j2_mu * radii_ratio;
         let factor = numerator / denominator;
         let acceleration = components.scalar_mul(factor);
-        let zero_scale = self.re == 0.0 || self.j2 == 0.0 || self.mu == 0.0;
-        if r2.is_normal()
-            && denominator.is_normal()
-            && normal_or_zero(re2, self.re == 0.0)
-            && normal_or_zero(radii_ratio, self.re == 0.0)
-            && normal_or_zero(j2_mu, self.j2 == 0.0 || self.mu == 0.0)
-            && normal_or_zero(numerator, zero_scale)
-            && normal_or_zero(factor, zero_scale)
-            && (factor.abs() <= 1.0
-                || (normal_or_zero(components.x, x == 0.0 || equatorial == 0.0)
-                    && normal_or_zero(components.y, y == 0.0 || equatorial == 0.0)
-                    && normal_or_zero(components.z, z == 0.0 || axial == 0.0)))
+        if denominator.is_finite()
             && [acceleration.x, acceleration.y, acceleration.z]
-                .iter()
-                .all(|value| value.is_finite())
+                .into_iter()
+                .all(f64::is_finite)
         {
             return Ok(Vector3::new(acceleration.x, acceleration.y, acceleration.z));
         }
@@ -151,18 +138,9 @@ impl ForceModel for J2Gravity {
             [acceleration.x, acceleration.y, acceleration.z],
             Grad::ONE.negate(),
         );
-        let zero_scale = self.re == 0.0 || self.j2 == 0.0 || self.mu == 0.0;
-        if gradient_divisor_in_range(r2.value)
-            && gradient_divisor_in_range(denominator.value)
-            && normal_or_zero(re2, self.re == 0.0)
-            && normal_or_zero(radii_ratio.value, self.re == 0.0)
-            && normal_or_zero(self.j2 * self.mu, self.j2 == 0.0 || self.mu == 0.0)
-            && normal_or_zero(numerator.value, zero_scale)
-            && normal_or_zero(factor.value, zero_scale)
-            && normal_or_zero(factor.value / radius.value, zero_scale)
-            && acceleration
-                .iter()
-                .all(|component| component.grad.iter().all(|entry| entry.is_finite()))
+        if gradient_divisor_is_finite(r2)
+            && gradient_divisor_is_finite(denominator)
+            && acceleration.into_iter().all(Grad::is_all_finite)
         {
             return Ok(AccelerationPartials::position_only(Matrix3::from_rows(
                 &acceleration.map(|component| component.grad.into()),
@@ -217,6 +195,12 @@ impl J2Gravity {
     }
 }
 
+/// Gradient division and reciprocal both square the inverse.
+fn gradient_divisor_is_finite(divisor: Grad) -> bool {
+    let inverse = 1.0 / divisor.value;
+    divisor.is_all_finite() && (inverse * inverse).is_finite()
+}
+
 /// Hipparchus's field quaternion rotation with q1 = q2 = q3 = +0.
 /// For finite lanes, the zero quaternion products only affect signs of zeros.
 /// The final double and subtract reproduce the original nonzero lanes exactly
@@ -238,14 +222,4 @@ fn rotate_identity([x, y, z]: [Grad; 3], q0: Grad) -> [Grad; 3] {
         rotate(y, q1_x.sub(q3_z)),
         rotate(z, q2_y.sub(q1_x)),
     ]
-}
-
-fn normal_or_zero(value: f64, exact_zero: bool) -> bool {
-    value.is_normal() || (exact_zero && value == 0.0)
-}
-
-/// Gradient division and reciprocal both use the square of the inverse.
-fn gradient_divisor_in_range(value: f64) -> bool {
-    let inverse = 1.0 / value;
-    (inverse * inverse).is_normal()
 }
