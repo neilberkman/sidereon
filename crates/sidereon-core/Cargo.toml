@@ -24,7 +24,6 @@ exclude = [
     "benches/hotpath.rs",
     "tests/cpp/**",
     "tests/sgp4_diagnostic.rs",
-    "tests/sgp4_oracle_diff.rs",
     # Fixture generators and the RTKLIB oracle harness rebuild committed goldens.
     "fixtures-generators/**",
 ]

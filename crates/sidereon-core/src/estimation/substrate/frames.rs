@@ -396,6 +396,24 @@ mod tests {
         assert_eq!(satazel([0.0; 3], [2.0e7, 1.0e7, -5.0e6]), (0.0, FRAC_PI_2));
     }
 
+    #[cfg(sidereon_repo_tests)]
+    #[test]
+    fn satazel_elevation_matches_rtklib_bits() {
+        let doc: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/rtklib_integrity_geometry.json"
+        )))
+        .unwrap();
+        let cases = doc["elevation_mask_cases"].as_array().unwrap();
+        for (index, case) in cases.iter().enumerate() {
+            let vector =
+                |field: &str| std::array::from_fn(|axis| case[field][axis].as_f64().unwrap());
+            let (_, actual) = satazel(vector("receiver_ecef_m"), vector("satellite_ecef_m"));
+            let expected = case["portable_ecef_elevation_rad"].as_f64().unwrap();
+            assert_eq!(actual.to_bits(), expected.to_bits(), "case {index}");
+        }
+    }
+
     #[test]
     fn satazel_matches_rtklib_local_angles_and_degenerate_azimuth() {
         let (azimuth, elevation) = satazel([10.0, 0.0, 0.0], [10.0, 10.0, 0.0]);

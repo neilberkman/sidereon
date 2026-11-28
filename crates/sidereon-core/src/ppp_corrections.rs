@@ -1502,15 +1502,13 @@ mod tests {
         }
     }
 
-    /// The reference fixture was computed with the transmission epoch rounded to whole
-    /// microseconds and the receiver dipole in the geocentric frame. Replayed through
-    /// both it agrees to the bit. With the live transmission epoch, which keeps every bit
-    /// of the flight time, it differs only through that epoch: the station tide not at
-    /// all, and the wind-up and satellite antenna terms by at most what the satellite's
-    /// turn over that epoch difference moves them. The live build then differs from that
-    /// in the wind-up alone, through the receiver dipole's geodetic frame.
+    /// The observation corrections use a whole-microsecond transmit epoch and
+    /// geocentric receiver dipole. DEHANTTIDEINEL supplies the station tide at
+    /// the PPP receive epoch. Transmit-time rounding affects the wind-up and
+    /// satellite antenna terms through satellite motion. The geodetic receiver
+    /// dipole affects wind-up alone.
     #[test]
-    fn ppp_corrections_match_elixir_reference_fixture() {
+    fn ppp_corrections_match_reference_bits() {
         let sp3 = sp3_fixture();
         let sat = GnssSatelliteId::new(GnssSystem::Gps, 21).expect("valid satellite id");
         let epoch = civil(2020, 6, 24, 12, 0, 0.0);
@@ -1545,11 +1543,22 @@ mod tests {
         )
         .expect("valid PPP corrections");
 
+        let tides: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/tides/dehanttideinel_oracle.json"
+        ))
+        .expect("DEHANTTIDEINEL fixture");
+        let tide = tides["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["id"] == "ppp_2020_06_24")
+            .expect("PPP receive epoch");
+        let tide_bits = std::array::from_fn(|axis| {
+            let hex = tide["dxtide_m"][axis].as_str().unwrap();
+            u64::from_str_radix(hex.strip_prefix("0x").unwrap(), 16).unwrap()
+        });
         assert_eq!(got.tide.len(), 1);
-        assert_eq!(
-            got.tide[0].vector_m.map(f64::to_bits),
-            [0x3FB8BC98E788ED00, 0x3FAA54D8C1097507, 0x3FB03498C46B3B4F]
-        );
+        assert_eq!(got.tide[0].vector_m.map(f64::to_bits), tide_bits);
         assert_eq!(got.windup_m.len(), 1);
         assert_eq!(got.windup_m[0].value_m.to_bits(), 0xBF808DE79DBD2C16);
         assert_eq!(got.sat_pco_ecef.len(), 1);

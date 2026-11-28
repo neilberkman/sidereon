@@ -1376,6 +1376,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sgp4-cpp-oracle"
+version = "0.0.0"
+dependencies = [
+ "cc",
+ "libm",
+ "serde_json",
+ "sidereon-core",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

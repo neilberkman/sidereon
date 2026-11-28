@@ -12,10 +12,9 @@
 //! grants free use including commercial use and distribution of derived work
 //! with attribution to the IERS origin.
 //!
-//! `tests/fixtures/tides/dehanttideinel_oracle.json` holds the output of
-//! `DEHANTTIDEINEL` itself, compiled from the IERS source by
-//! `fixtures-generators/dehanttideinel_oracle/generate.sh`, for the four header
-//! cases and a grid of eight stations over thirteen UTC dates from 1958 to 2040.
+//! The DEHANTTIDEINEL output covers the four header cases, a PPP receive epoch
+//! and a grid of eight stations over thirteen UTC dates from 1958 to 2040. Its inputs
+//! and displacements are stored as binary64 bit patterns.
 
 use std::path::PathBuf;
 
@@ -73,7 +72,7 @@ fn solid_earth_tide_matches_iers_dehant_golden() {
         // The DEHANTTIDEINEL.F header prints case 3's output again under case
         // 4, whose `xsun` input (~0.06 AU) is not a physical Sun distance. The
         // routine built from source returns a different displacement for those
-        // inputs; `solid_earth_tide_matches_dehanttideinel_built_from_source`
+        // inputs; `solid_earth_tide_matches_dehanttideinel`
         // checks case 4 against that output instead.
         if id == "case_4_2017_01_15" {
             continue;
@@ -122,40 +121,45 @@ fn solid_earth_tide_matches_iers_dehant_golden() {
     );
 }
 
-#[test]
-fn solid_earth_tide_matches_dehanttideinel_built_from_source() {
+fn dehant_fixture() -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/tides/dehanttideinel_oracle.json");
-    let raw = std::fs::read_to_string(&path).expect("read dehanttideinel_oracle.json");
-    let doc: Value = serde_json::from_str(&raw).expect("parse dehanttideinel_oracle.json");
+    let raw = std::fs::read_to_string(path).expect("read DEHANTTIDEINEL fixture");
+    serde_json::from_str(&raw).expect("parse DEHANTTIDEINEL fixture")
+}
+
+fn dehant_number(value: &Value) -> f64 {
+    let hex = value.as_str().unwrap().strip_prefix("0x").unwrap();
+    f64::from_bits(u64::from_str_radix(hex, 16).unwrap())
+}
+
+fn dehant_vec3(value: &Value) -> [f64; 3] {
+    let values = value.as_array().expect("3-vector");
+    assert_eq!(values.len(), 3);
+    std::array::from_fn(|axis| dehant_number(&values[axis]))
+}
+
+#[test]
+fn solid_earth_tide_matches_dehanttideinel() {
+    let doc = dehant_fixture();
     let cases = doc["cases"].as_array().expect("cases array");
-    assert_eq!(cases.len(), 108, "4 header cases and 8 stations x 13 dates");
+    assert_eq!(
+        cases.len(),
+        109,
+        "4 header cases, 1 PPP epoch and 8 stations x 13 dates"
+    );
 
-    let array3 = |v: &Value| -> [f64; 3] {
-        let a = v.as_array().expect("3-vector");
-        assert_eq!(a.len(), 3);
-        [
-            a[0].as_f64().unwrap(),
-            a[1].as_f64().unwrap(),
-            a[2].as_f64().unwrap(),
-        ]
-    };
-
-    let mut failures = Vec::new();
-    let mut max_dev = 0.0_f64;
-    let mut max_bound = 0.0_f64;
-    let mut max_bound_fraction = 0.0_f64;
-    let mut exact = 0_usize;
+    assert_eq!(doc["_source"]["transcendentals"], "libm 0.2.16");
     for case in cases {
         let id = case["id"].as_str().expect("case id");
-        let xsta = array3(&case["xsta_m"]);
-        let xsun = array3(&case["xsun_m"]);
-        let xmon = array3(&case["xmon_m"]);
+        let xsta = dehant_vec3(&case["xsta_m"]);
+        let xsun = dehant_vec3(&case["xsun_m"]);
+        let xmon = dehant_vec3(&case["xmon_m"]);
         let year = case["year"].as_i64().unwrap() as i32;
         let month = case["month"].as_i64().unwrap() as i32;
         let day = case["day"].as_i64().unwrap() as i32;
-        let fhr = case["fhr_hours"].as_f64().unwrap();
-        let expected = array3(&case["dxtide_m"]);
+        let fhr = dehant_number(&case["fhr_hours"]);
+        let expected = dehant_vec3(&case["dxtide_m"]);
         assert!((1958..=2040).contains(&year));
 
         let got = solid_earth_tide_with_constants(
@@ -169,58 +173,11 @@ fn solid_earth_tide_matches_dehanttideinel_built_from_source() {
             StationTideConstants::IersRoutine,
         )
         .expect("valid tide input");
-        let tolerance = dehant_oracle_roundoff_bound(&xsun, &xmon);
-        max_bound = max_bound.max(tolerance);
-        for k in 0..3 {
-            let dev = (got[k] - expected[k]).abs();
-            if got[k] == expected[k] {
-                exact += 1;
-            }
-            max_dev = max_dev.max(dev);
-            max_bound_fraction = max_bound_fraction.max(dev / tolerance);
-            if !dev.is_finite() || dev > tolerance {
-                failures.push(format!(
-                    "{id} component {k}: got {:.17e}, DEHANTTIDEINEL {:.17e}, dev {dev:.3e} m exceeds derived bound {tolerance:.3e} m",
-                    got[k], expected[k],
-                ));
-            }
+        for (axis, (actual, reference)) in got.into_iter().zip(expected).enumerate() {
+            assert!(reference.is_finite(), "{id} axis {axis}");
+            assert_eq!(actual.to_bits(), reference.to_bits(), "{id} axis {axis}");
         }
     }
-    println!(
-        "DEHANTTIDEINEL: {exact} of {} components bit-identical, max dev {max_dev:.3e} m, \
-         max derived bound {max_bound:.3e} m, max bound fraction {max_bound_fraction:.3e}",
-        3 * cases.len()
-    );
-    assert!(
-        failures.is_empty(),
-        "DEHANTTIDEINEL mismatch (max dev {max_dev:.3e} m):\n{}",
-        failures.join("\n")
-    );
-}
-
-fn dehant_oracle_roundoff_bound(xsun: &[f64; 3], xmon: &[f64; 3]) -> f64 {
-    const EARTH_RADIUS_M: f64 = 6_378_136.6;
-    const MASS_RATIO_SUN: f64 = 332_946.048_2;
-    const MASS_RATIO_MOON: f64 = 0.0123000371;
-    let distance = |vector: &[f64; 3]| {
-        (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt()
-    };
-    let scale = |mass_ratio: f64, radius: f64| {
-        let earth_to_body = EARTH_RADIUS_M / radius;
-        mass_ratio * EARTH_RADIUS_M * earth_to_body * earth_to_body * earth_to_body
-    };
-    let sun_degree_two = scale(MASS_RATIO_SUN, distance(xsun));
-    let moon_degree_two = scale(MASS_RATIO_MOON, distance(xmon));
-    let magnitude_m = 8.0
-        * (sun_degree_two
-            + moon_degree_two
-            + sun_degree_two * EARTH_RADIUS_M / distance(xsun)
-            + moon_degree_two * EARTH_RADIUS_M / distance(xmon))
-        + 0.1;
-    let unit_roundoff = f64::EPSILON / 2.0;
-    let gamma = |operations: f64| operations * unit_roundoff / (1.0 - operations * unit_roundoff);
-    let phase_error = 2.0 * gamma(64.0) * (2.0e6_f64.to_radians()) + 8.0 * unit_roundoff;
-    2.0 * gamma(512.0) * magnitude_m + 0.1 * phase_error
 }
 
 #[test]
@@ -315,30 +272,17 @@ fn conventions_and_routine_constants_differ_by_under_the_changed_amplitudes() {
     // 0.01 mm moved to another frequency (row 25, up to 0.02 mm), so the two
     // variants can differ by at most 0.18 mm in any component.
     const BOUND_M: f64 = 0.18e-3;
-    let raw = std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/tides/dehanttideinel_oracle.json"),
-    )
-    .expect("read dehanttideinel_oracle.json");
-    let doc: Value = serde_json::from_str(&raw).expect("parse dehanttideinel_oracle.json");
+    let doc = dehant_fixture();
     let mut max_diff = 0.0_f64;
     for case in doc["cases"].as_array().expect("cases array") {
         if case["id"] == "header_case_4" {
             continue;
         }
-        let v = |key: &str| -> [f64; 3] {
-            let a = case[key].as_array().expect("3-vector");
-            [
-                a[0].as_f64().unwrap(),
-                a[1].as_f64().unwrap(),
-                a[2].as_f64().unwrap(),
-            ]
-        };
-        let (xsta, xsun, xmon) = (v("xsta_m"), v("xsun_m"), v("xmon_m"));
+        let [xsta, xsun, xmon] = ["xsta_m", "xsun_m", "xmon_m"].map(|key| dehant_vec3(&case[key]));
         let year = case["year"].as_i64().unwrap() as i32;
         let month = case["month"].as_i64().unwrap() as i32;
         let day = case["day"].as_i64().unwrap() as i32;
-        let fhr = case["fhr_hours"].as_f64().unwrap();
+        let fhr = dehant_number(&case["fhr_hours"]);
         let [a, b] = [
             StationTideConstants::Conventions,
             StationTideConstants::IersRoutine,

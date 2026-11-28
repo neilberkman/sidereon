@@ -644,36 +644,6 @@ fn elevation_boundaries_and_rtk_mask_match_rtklib_satazel() {
 }
 
 #[test]
-fn shared_ecef_elevation_matches_rtklib_satazel_within_16_ulp() {
-    let doc: Value = serde_json::from_str(RTKLIB).unwrap();
-    for case in doc["elevation_mask_cases"].as_array().unwrap() {
-        let sat = case["satellite_ecef_m"].as_array().unwrap();
-        let satellite = [number(&sat[0]), number(&sat[1]), number(&sat[2])];
-        let station = GeodeticStationKm {
-            latitude_deg: 0.7f64.to_degrees(),
-            longitude_deg: (-1.2f64).to_degrees(),
-            altitude_km: 0.05,
-        };
-        let (_, sidereon_el_deg, _) = itrs_to_topocentric(
-            [
-                satellite[0] / 1000.0,
-                satellite[1] / 1000.0,
-                satellite[2] / 1000.0,
-            ],
-            &station,
-        )
-        .unwrap();
-        let rtklib_el_rad = number(&case["rtklib_el_rad"]);
-        close(
-            sidereon_el_deg.to_radians(),
-            rtklib_el_rad,
-            16.0 * f64::EPSILON,
-            "shared-ECEF elevation radians",
-        );
-    }
-}
-
-#[test]
 fn exact_mask_boundary_documents_platform_libm_rounding() {
     let doc: Value = serde_json::from_str(RTKLIB).unwrap();
     let mut seen = [false; 2];

@@ -1,48 +1,14 @@
-//! Field-level diff between our pure-Rust `vallado::sgp4init` output and the
-//! Vallado C++ reference. Gated behind the `sgp4-debug-oracle` feature so the
-//! C++ build never runs in normal `cargo test`.
-//!
-//! Run with:
-//!
-//!   cargo test --features sgp4-debug-oracle --test sgp4_oracle_diff -- --nocapture
-//!
-//! The first satellite checked is NORAD 04632 (the worst Stage-B offender).
-//! When a divergence is found, every subsequent field that differs is also
-//! reported so we can see whether the bug is localized to one variable or
-//! cascades from a single root.
+//! Vallado SGP4 initialization and propagation oracle.
 
-#![cfg(feature = "sgp4-debug-oracle")]
-
-#[path = "../src/astro/sgp4/vallado.rs"]
-#[allow(
-    dead_code,
-    unused_variables,
-    unused_assignments,
-    unused_mut,
-    non_snake_case,
-    non_camel_case_types,
-    clippy::approx_constant,
-    clippy::excessive_precision,
-    clippy::too_many_arguments,
-    clippy::needless_return,
-    clippy::assign_op_pattern,
-    clippy::manual_range_contains,
-    clippy::collapsible_if,
-    clippy::collapsible_else_if,
-    clippy::float_cmp,
-    clippy::needless_late_init,
-    clippy::field_reassign_with_default
-)]
-mod vallado;
-
-use serde_json::Value;
-use sidereon_core::astro::sgp4_cpp_oracle::{
-    cpp_sgp4_step, cpp_sgp4init_dump, force_link_oracle, CPP_DUMP_DOUBLE_COUNT, CPP_DUMP_INT_COUNT,
+use super::cpp_oracle::{
+    cpp_sgp4_step, cpp_sgp4init_dump, CPP_DUMP_DOUBLE_COUNT, CPP_DUMP_INT_COUNT,
 };
+use super::vallado;
+use serde_json::Value;
 use std::os::raw::{c_char, c_int};
 
 /// Field-name list. MUST match the order of stores in `cpp_sgp4init_dump`
-/// inside `tests/cpp/sgp4_dump_wrapper.cpp`.
+/// in the Vallado field dump.
 const FIELDS_F64: &[&str] = &[
     // Near-Earth (25)
     "aycof",
@@ -298,9 +264,7 @@ fn dump_rust(
 }
 
 fn ulp(a: f64, b: f64) -> u64 {
-    let ia = a.to_bits() as i64;
-    let ib = b.to_bits() as i64;
-    (ia - ib).unsigned_abs()
+    a.to_bits().abs_diff(b.to_bits())
 }
 
 fn hex_to_f64(s: &str) -> f64 {
@@ -326,12 +290,13 @@ fn hex_to_f64(s: &str) -> f64 {
 }
 
 fn run_satellite(norad_target: &str, opsmode: char) -> usize {
-    // Touch the oracle symbols so the linker keeps the C++ static lib.
-    let _keep = force_link_oracle();
     assert_eq!(FIELDS_F64.len(), CPP_DUMP_DOUBLE_COUNT);
     assert_eq!(FIELDS_I32.len(), CPP_DUMP_INT_COUNT);
 
-    let data: Value = serde_json::from_str(include_str!("sgp4_verification.json")).unwrap();
+    let data: Value = serde_json::from_str(include_str!(
+        "../../sidereon-core/tests/sgp4_verification.json"
+    ))
+    .unwrap();
     let sat = data["satellites"]
         .as_array()
         .unwrap()
@@ -438,8 +403,8 @@ fn run_satellite(norad_target: &str, opsmode: char) -> usize {
     for (i, name) in FIELDS_F64.iter().enumerate() {
         let r = rust_doubles[i];
         let c = cpp_doubles[i];
-        let d = ulp(r, c);
-        if d != 0 {
+        if c.is_finite() && r.to_bits() != c.to_bits() {
+            let d = ulp(r, c);
             if first_div.is_none() {
                 first_div = Some(i);
                 let lo = i.saturating_sub(5);
@@ -485,18 +450,18 @@ fn run_satellite(norad_target: &str, opsmode: char) -> usize {
 }
 
 #[test]
-fn diff_norad_04632_worst_offender() {
-    run_satellite("04632", 'i');
+fn diff_norad_04632() {
+    assert_eq!(run_satellite("04632", 'i'), 0);
 }
 
 #[test]
 fn diff_norad_28129() {
-    run_satellite("28129", 'i');
+    assert_eq!(run_satellite("28129", 'i'), 0);
 }
 
 #[test]
 fn diff_norad_88888_analyst() {
-    run_satellite("88888", 'i');
+    assert_eq!(run_satellite("88888", 'i'), 0);
 }
 
 /// Run the full sgp4init+sgp4 r/v step diff (Rust vs C++ reference) over every
@@ -505,8 +470,10 @@ fn diff_norad_88888_analyst() {
 /// the Rust port and the C++ reference, so a 0-ULP result proves the Rust port
 /// is bit-exact to the reference *for that mode*.
 fn step_diff_for_opsmode(opsmode: char) -> (usize, usize) {
-    let _keep = force_link_oracle();
-    let data: Value = serde_json::from_str(include_str!("sgp4_verification.json")).unwrap();
+    let data: Value = serde_json::from_str(include_str!(
+        "../../sidereon-core/tests/sgp4_verification.json"
+    ))
+    .unwrap();
 
     let mut total_checks = 0usize;
     let mut total_failures = 0usize;
@@ -575,10 +542,6 @@ fn step_diff_for_opsmode(opsmode: char) -> (usize, usize) {
             let mut rr = [0.0_f64; 3];
             let mut rv = [0.0_f64; 3];
             vallado::sgp4(&mut rust_satrec, tsince, &mut rr, &mut rv);
-            if rust_satrec.error != 0 {
-                continue;
-            }
-
             // C++ step (independent init+step)
             let mut cr = [0.0_f64; 3];
             let mut cv = [0.0_f64; 3];
@@ -609,14 +572,18 @@ fn step_diff_for_opsmode(opsmode: char) -> (usize, usize) {
                 continue;
             }
 
+            assert_eq!(rust_satrec.error, 0, "{norad} at {tsince} minutes");
             let labels = ["px", "py", "pz", "vx", "vy", "vz"];
             let actual = [rr[0], rr[1], rr[2], rv[0], rv[1], rv[2]];
             let expected = [cr[0], cr[1], cr[2], cv[0], cv[1], cv[2]];
 
             for (i, label) in labels.iter().enumerate() {
+                if !expected[i].is_finite() {
+                    continue;
+                }
                 total_checks += 1;
-                let d = ulp(actual[i], expected[i]);
-                if d > 0 {
+                if actual[i].to_bits() != expected[i].to_bits() {
+                    let d = ulp(actual[i], expected[i]);
                     total_failures += 1;
                     if worst.len() < 15 || d > worst.last().unwrap().3 {
                         worst.push((norad.clone(), tsince, *label, d));
@@ -677,11 +644,11 @@ fn diff_sgp4_step_at_nonzero_tsince_afspc() {
 }
 
 #[test]
-fn diff_norad_25544_iss_clean_baseline() {
+fn diff_norad_00005() {
     // ISS-class LEO. Should be clean since near-Earth sats had few failures.
     // If it's also clean field-by-field, that confirms the bug is in
     // deep-space init, not initl.
-    run_satellite("00005", 'i');
+    assert_eq!(run_satellite("00005", 'i'), 0);
 }
 
 /// AFSPC opsmode 'a' sgp4init field-level oracle diff. For the deep-space,

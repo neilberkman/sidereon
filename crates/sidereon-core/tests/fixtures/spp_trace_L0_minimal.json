@@ -2280,11 +2280,11 @@
       "message": "`xtol` termination condition is satisfied."
     },
     "dop": {
-      "gdop": "0x40121a7d97dcbbc7",
-      "pdop": "0x400d386422890c5e",
-      "hdop": "0x3ffd0cf06c21d520",
-      "vdop": "0x40095ab42c2bda8a",
-      "tdop": "0x4005615e497b9321"
+      "gdop": "0x40121a7d97dbd88c",
+      "pdop": "0x400d386422880e25",
+      "hdop": "0x3ffd0cf06c24daa6",
+      "vdop": "0x40095ab42c29d7fb",
+      "tdop": "0x4005615e4979ecf5"
     },
     "final_solution": {
       "note": "trf SVD step is BLAS-bound (Apple Accelerate); the converged x is an independent-solve AGREEMENT target (sub-micron / ~1e-12), never 0 ULP.",
@@ -2324,6 +2324,52 @@
         "0x0000000000000000"
       ],
       "abs_err_clock_m": "0x3e0ee00000000000"
+    },
+    "dop_geometry": {
+      "los_ecef": [
+        [
+          "0x3fbfcb01ad402b3e",
+          "0xbfecad16c61f4691",
+          "0x3fdb449bbe5d2f0a"
+        ],
+        [
+          "0x3feb8d2f6d66c032",
+          "0x3fdfa8a8365efcbb",
+          "0xbfbe4c98ef19e6c5"
+        ],
+        [
+          "0x3fe66f5fbd9ef92a",
+          "0xbfcb6c6bc480cad4",
+          "0x3fe5c38bc6adfbae"
+        ],
+        [
+          "0x3fb9aa819493a3fe",
+          "0x3fe356e67de9b50f",
+          "0x3fe94aca03c313d7"
+        ],
+        [
+          "0x3fe421e15a5072a6",
+          "0x3fe5866fc639d33c",
+          "0x3fd8edaee9bda753"
+        ],
+        [
+          "0x3fe3454be6182d6e",
+          "0x3fc99b56bfca5b53",
+          "0x3fe8bb5316043d32"
+        ],
+        [
+          "0x3fef29a5d866c0a4",
+          "0x3fc1aed57686cc8b",
+          "0x3fc719042357a1e6"
+        ],
+        [
+          "0x3fd8d57869ec2790",
+          "0xbfe0d90e56fbdd4d",
+          "0x3fe834f06a20551d"
+        ]
+      ],
+      "latitude_rad": "0x3fe921fb5432aa62",
+      "longitude_rad": "0x3fbf46bb9c109320"
     }
   }
 }

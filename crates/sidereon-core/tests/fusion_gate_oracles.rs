@@ -45,12 +45,23 @@ fn state(p0: f64, p1: f64) -> InsFilterState {
     d[1] = p1;
     InsFilterState::from_diagonal(n, ErrorStateLayout::Fifteen, &d).unwrap()
 }
-fn assert_close(a: f64, b: f64, t: f64) {
-    assert!(
-        (a - b).abs() <= t,
-        "actual={a:.17e} expected={b:.17e} tol={t:.1e}"
-    );
+fn fixture_bits(value: &Value) -> u64 {
+    u64::from_str_radix(value.as_str().unwrap().strip_prefix("0x").unwrap(), 16).unwrap()
 }
+
+fn fixture_number(value: &Value) -> f64 {
+    f64::from_bits(fixture_bits(value))
+}
+
+fn fixture_vector(value: &Value) -> Vec<f64> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(fixture_number)
+        .collect()
+}
+
 fn gated(threshold_sigma: f64, min_rows: usize) -> EkfUpdateOptions {
     let mut options = EkfUpdateOptions::default();
     options.innovation_gate = Some(InnovationGate {
@@ -61,7 +72,7 @@ fn gated(threshold_sigma: f64, min_rows: usize) -> EkfUpdateOptions {
 }
 
 #[test]
-fn gated_update_matches_numpy_joseph_reference() {
+fn gated_update_matches_joseph_reference_bits() {
     let f = fixture();
     let u = &f["update"];
     let mut st = state(2., 3.);
@@ -72,22 +83,20 @@ fn gated_update_matches_numpy_joseph_reference() {
     let corr = EkfCorrection::new(vec![1.25, -4.], h, vec![vec![1., 0.2], vec![0.2, 2.]]).unwrap();
     let report = ekf_correct_closed_loop(&mut st, &corr, gated(1.5, 1)).unwrap();
     assert_eq!((report.accepted_rows, report.rejected_rows), (1, 1));
-    // The indirect-state convention subtracts the Kalman error from nominal position.
-    assert_close(
-        WGS84_A_M - st.nominal.position_ecef_m[0],
-        u["state_delta"][0].as_f64().unwrap(),
-        5.0e-10, // Subtracting the correction from a 6.4e6 m nominal loses at most one binary64 ulp (9.4e-10 m).
-    );
-    assert_close(
-        st.covariance[0][0],
-        u["covariance"][0][0].as_f64().unwrap(),
-        4.0e-15,
-    );
-    assert_close(
-        st.covariance[1][1],
-        u["covariance"][1][1].as_f64().unwrap(),
-        4.0e-15,
-    );
+    for row in 0..2 {
+        assert_eq!(
+            st.nominal.position_ecef_m[row].to_bits(),
+            fixture_bits(&u["nominal_position_ecef_m_bits"][row]),
+            "position axis {row}"
+        );
+        for column in 0..2 {
+            assert_eq!(
+                st.covariance[row][column].to_bits(),
+                fixture_bits(&u["covariance_bits"][row][column]),
+                "covariance ({row}, {column})"
+            );
+        }
+    }
 }
 
 #[test]
@@ -112,66 +121,52 @@ fn joint_nis_gate_rejects_correlated_rows_for_ekf_and_ukf() {
     let mut h = vec![vec![0.; ERROR_STATE_DIMENSION_15]; 2];
     h[0][0] = 1.;
     h[1][1] = 1.;
-    let correction =
-        EkfCorrection::new(vec![2.5, 2.5], h, vec![vec![0.5, -0.45], vec![-0.45, 0.5]]).unwrap();
+    let innovation = fixture_vector(&oracle["innovation_bits"]);
+    let measurement_covariance = oracle["r_bits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(fixture_vector)
+        .collect();
+    let correction = EkfCorrection::new(innovation, h, measurement_covariance).unwrap();
+    let probability = fixture_number(&oracle["joint_false_alarm_probability_bits"]);
+    let p = &oracle["p_block_bits"];
+    let mut filter_state = state(fixture_number(&p[0][0]), fixture_number(&p[1][1]));
+    filter_state.covariance[0][1] = fixture_number(&p[0][1]);
+    filter_state.covariance[1][0] = fixture_number(&p[1][0]);
+
     let mut ekf_options = EkfUpdateOptions::default();
-    ekf_options.joint_innovation_gate_probability = Some(0.01);
-    let mut ekf_state = state(0.5, 0.5);
-    ekf_state.covariance[0][1] = -0.45;
-    ekf_state.covariance[1][0] = -0.45;
-    let ekf = ekf_correct_closed_loop(&mut ekf_state, &correction, ekf_options).unwrap();
-    assert_close(
-        ekf.normalized_innovation_squared,
-        oracle["joint_d2"].as_f64().unwrap(),
-        2.0e-13,
-    );
-    assert!(!ekf.applied);
-    assert!(ekf.innovation_gate.is_none());
-    let ekf_gate = ekf.joint_innovation_gate.expect("joint EKF report");
-    assert_close(
-        ekf_gate.statistic,
-        oracle["joint_d2"].as_f64().unwrap(),
-        2.0e-13,
-    );
-    assert_eq!(ekf_gate.degrees_of_freedom, 2);
-    let joint_threshold = oracle["joint_threshold"].as_f64().unwrap();
-    assert_close(
-        ekf_gate.threshold,
-        joint_threshold,
-        2.0 * f64::EPSILON * joint_threshold,
-    );
-    assert_eq!(ekf_gate.false_alarm_probability, 0.01);
-    assert!(!ekf_gate.accepted);
+    ekf_options.joint_innovation_gate_probability = Some(probability);
+    let ekf = ekf_correct_closed_loop(&mut filter_state.clone(), &correction, ekf_options).unwrap();
 
     let mut ukf_options = UkfUpdateOptions::default();
-    ukf_options.joint_innovation_gate_probability = Some(0.01);
-    let mut ukf_state = state(0.5, 0.5);
-    ukf_state.covariance[0][1] = -0.45;
-    ukf_state.covariance[1][0] = -0.45;
+    ukf_options.joint_innovation_gate_probability = Some(probability);
     let ukf =
-        sidereon_core::fusion::ukf_correct_closed_loop(&mut ukf_state, &correction, ukf_options)
+        sidereon_core::fusion::ukf_correct_closed_loop(&mut filter_state, &correction, ukf_options)
             .unwrap();
-    assert_close(
-        ukf.normalized_innovation_squared,
-        oracle["joint_d2"].as_f64().unwrap(),
-        2.0e-13,
-    );
-    assert!(!ukf.applied);
-    assert!(ukf.innovation_gate.is_none());
-    let ukf_gate = ukf.joint_innovation_gate.expect("joint UKF report");
-    assert_close(
-        ukf_gate.statistic,
-        oracle["joint_d2"].as_f64().unwrap(),
-        2.0e-13,
-    );
-    assert_eq!(ukf_gate.degrees_of_freedom, 2);
-    assert_close(
-        ukf_gate.threshold,
-        joint_threshold,
-        2.0 * f64::EPSILON * joint_threshold,
-    );
-    assert_eq!(ukf_gate.false_alarm_probability, 0.01);
-    assert!(!ukf_gate.accepted);
+
+    for (report, expected) in [(ekf, "joint_ekf_nis_bits"), (ukf, "joint_ukf_nis_bits")] {
+        let nis = fixture_bits(&oracle[expected]);
+        assert_eq!(
+            report.normalized_innovation_squared.to_bits(),
+            nis,
+            "{expected}"
+        );
+        assert!(!report.applied);
+        assert!(report.innovation_gate.is_none());
+        let gate = report.joint_innovation_gate.expect("joint gate report");
+        assert_eq!(gate.statistic.to_bits(), nis, "{expected}");
+        assert_eq!(gate.degrees_of_freedom, 2);
+        assert_eq!(
+            gate.threshold.to_bits(),
+            fixture_bits(&oracle["joint_threshold_bits"])
+        );
+        assert_eq!(
+            gate.false_alarm_probability.to_bits(),
+            probability.to_bits()
+        );
+        assert!(!gate.accepted);
+    }
 }
 
 #[test]
@@ -255,12 +250,7 @@ fn gate_precedes_igg_reweighting() {
 #[test]
 fn gate_uses_raw_covariance_after_igg_removes_rows() {
     let oracle = &fixture()["raw_gate_after_igg_removal"];
-    let innovation = oracle["innovation"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_f64().unwrap())
-        .collect::<Vec<_>>();
+    let innovation = fixture_vector(&oracle["innovation_bits"]);
     let nominal = NavState::new(0., [WGS84_A_M, 0., 0.], [0.; 3], identity3()).unwrap();
     let measurement = measurement_with_covariance(
         [WGS84_A_M + innovation[0], innovation[1], innovation[2]],
@@ -297,12 +287,9 @@ fn gate_uses_raw_covariance_after_igg_removes_rows() {
 
 #[test]
 fn joint_gate_reports_raw_nis_after_igg_removes_rows() {
-    let values = fixture()["raw_gate_after_igg_removal"]["innovation"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_f64().unwrap())
-        .collect::<Vec<_>>();
+    let oracle = &fixture()["raw_gate_after_igg_removal"];
+    let values = fixture_vector(&oracle["innovation_bits"]);
+    let expected = fixture_bits(&oracle["retained_nis_bits"]);
     let measurement = measurement_with_covariance(
         [WGS84_A_M + values[0], values[1], values[2]],
         [values[3], values[4], values[5]],
@@ -334,9 +321,9 @@ fn joint_gate_reports_raw_nis_after_igg_removes_rows() {
         let report = filter.update_loose(&measurement).unwrap();
         assert!(!report.applied);
         assert_eq!((report.accepted_rows, report.rejected_rows), (0, 6));
-        assert_close(report.nis, 16.0, 32.0 * f64::EPSILON);
+        assert_eq!(report.nis.to_bits(), expected, "{filter_kind:?}");
         let gate = report.ekf.joint_innovation_gate.expect("joint gate report");
-        assert_close(gate.statistic, 16.0, 32.0 * f64::EPSILON);
+        assert_eq!(gate.statistic.to_bits(), expected, "{filter_kind:?}");
         assert_eq!(gate.degrees_of_freedom, 1);
         assert!(!gate.accepted);
     }
@@ -346,7 +333,10 @@ fn joint_gate_reports_raw_nis_after_igg_removes_rows() {
 fn igg_zero_weight_region_has_no_state_effect() {
     let mut f = loose_filter(true, false);
     f.update_loose(&measurement(50.)).unwrap();
-    assert_close(f.state().nominal.position_ecef_m[0], WGS84_A_M, 0.0);
+    assert_eq!(
+        f.state().nominal.position_ecef_m[0].to_bits(),
+        WGS84_A_M.to_bits()
+    );
 }
 
 #[test]
@@ -411,38 +401,47 @@ fn applied_igg_weight_is_non_increasing_across_rejection_boundary() {
 #[test]
 fn yang_mixed_position_velocity_statistic_is_unit_consistent() {
     let oracle = &fixture()["yang_mixed_units"];
-    assert_close(
-        oracle["module_trace_statistic"].as_f64().unwrap(),
-        0.12 / 300.03,
-        1.0e-18,
+    let innovation = fixture_vector(&oracle["innovation_bits"]);
+    let predicted_variances: [f64; 6] = fixture_vector(&oracle["predicted_variance_bits"])
+        .try_into()
+        .unwrap();
+    let measurement_variances: [f64; 6] = fixture_vector(&oracle["measurement_variance_bits"])
+        .try_into()
+        .unwrap();
+    let trace_statistic = |rows: std::ops::Range<usize>| {
+        let squared_norm = rows
+            .clone()
+            .map(|i| innovation[i] * innovation[i])
+            .sum::<f64>();
+        let trace = rows
+            .map(|i| predicted_variances[i] + measurement_variances[i])
+            .sum::<f64>();
+        squared_norm / trace
+    };
+    assert_eq!(
+        trace_statistic(0..6).to_bits(),
+        fixture_bits(&oracle["full_trace_statistic_bits"])
     );
-    assert_close(
-        oracle["velocity_block_statistic"].as_f64().unwrap(),
-        4.0,
-        1.0e-15,
+    assert_eq!(
+        trace_statistic(3..6).to_bits(),
+        fixture_bits(&oracle["velocity_block_statistic_bits"])
     );
+
     let adaptation = YangPredictionAdaptiveFactor {
         threshold: 1.0,
         outlier_gate_probability: 0.99,
     };
-    let mut filter = loose_filter_with_diagonal(
-        false,
-        false,
-        [1., 1., 1., 0.001, 0.001, 0.001],
-        Some(adaptation),
-    );
+    let mut filter =
+        loose_filter_with_diagonal(false, false, predicted_variances, Some(adaptation));
     let measurement = measurement_with_covariance(
-        [WGS84_A_M, 0., 0.],
-        [0.2, 0.2, 0.2],
-        [99., 99., 99., 0.009, 0.009, 0.009],
+        [WGS84_A_M + innovation[0], innovation[1], innovation[2]],
+        [innovation[3], innovation[4], innovation[5]],
+        measurement_variances,
     );
     filter.update_loose(&measurement).unwrap();
-    let oracle_scale = 4.0;
-    let expected_velocity_variance = oracle_scale * 0.001 * 0.009 / (oracle_scale * 0.001 + 0.009);
-    assert_close(
-        filter.state().covariance[3][3],
-        expected_velocity_variance,
-        2.0e-15,
+    assert_eq!(
+        filter.state().covariance[3][3].to_bits(),
+        fixture_bits(&oracle["posterior_velocity_variance_bits"])
     );
 }
 

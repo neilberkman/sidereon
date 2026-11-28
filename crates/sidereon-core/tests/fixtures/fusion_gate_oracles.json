@@ -1,14 +1,13 @@
 {
   "provenance": {
-    "tool": "NumPy/SciPy",
-    "numpy": "2.5.4",
+    "numpy": "2.5.5",
     "scipy": "1.18.1",
-    "generator": "crates/sidereon-core/fixtures-generators/generate_fusion_gate_oracles.py",
-    "generator_sha256": "7b8e3d5d91365c584ac25ff994cbae54aaea8d9c51b0eda21f19cab4c23cfc1c",
+    "generator_sha256": "8af4ca40fed21fd17bdc655ae95261cd15cfc56ef9f5591e11b4326c57b1a9b4",
     "references": [
       "FilterPy KalmanFilter.update and mahalanobis equations",
       "Yang, Song, Xu IGG III weight function",
-      "SciPy scipy.stats.chi2.ppf"
+      "Exponential survival function for chi-square with two degrees of freedom",
+      "SciPy chi-square quantiles"
     ]
   },
   "inputs": {
@@ -756,13 +755,13 @@
     ]
   },
   "raw_gate_after_igg_removal": {
-    "innovation": [
-      8.485281374238571,
-      5.656854249492381,
-      8.485281374238571,
-      8.485281374238571,
-      8.485281374238571,
-      8.485281374238571
+    "innovation_bits": [
+      "0x4020f876ccdf6cda",
+      "0x4016a09e667f3bcd",
+      "0x4020f876ccdf6cda",
+      "0x4020f876ccdf6cda",
+      "0x4020f876ccdf6cda",
+      "0x4020f876ccdf6cda"
     ],
     "S": [
       [
@@ -822,71 +821,41 @@
       6.0,
       6.0
     ],
-    "retained_rows": [],
+    "igg_retained_rows": [
+      1
+    ],
+    "retained_nis_bits": "0x4030000000000000",
     "gate_threshold_sigma": 3.0
   },
   "yang_mixed_units": {
-    "innovation": [
-      0.0,
-      0.0,
-      0.0,
-      0.2,
-      0.2,
-      0.2
+    "innovation_bits": [
+      "0x0000000000000000",
+      "0x0000000000000000",
+      "0x0000000000000000",
+      "0x3fc999999999999a",
+      "0x3fc999999999999a",
+      "0x3fc999999999999a"
     ],
-    "S": [
-      [
-        100.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0
-      ],
-      [
-        0.0,
-        100.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0
-      ],
-      [
-        0.0,
-        0.0,
-        100.0,
-        0.0,
-        0.0,
-        0.0
-      ],
-      [
-        0.0,
-        0.0,
-        0.0,
-        0.01,
-        0.0,
-        0.0
-      ],
-      [
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.01,
-        0.0
-      ],
-      [
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.01
-      ]
+    "predicted_variance_bits": [
+      "0x3ff0000000000000",
+      "0x3ff0000000000000",
+      "0x3ff0000000000000",
+      "0x3f50624dd2f1a9fc",
+      "0x3f50624dd2f1a9fc",
+      "0x3f50624dd2f1a9fc"
     ],
-    "module_trace_statistic": 0.00039996000399960017,
-    "unit_consistent_mean_squared_standardized": 2.0000000000000004,
-    "velocity_block_statistic": 4.000000000000001
+    "measurement_variance_bits": [
+      "0x4058c00000000000",
+      "0x4058c00000000000",
+      "0x4058c00000000000",
+      "0x3f826e978d4fdf3b",
+      "0x3f826e978d4fdf3b",
+      "0x3f826e978d4fdf3b"
+    ],
+    "full_trace_statistic_bits": "0x3f3a3637230afb39",
+    "unit_consistent_mean_squared_standardized": 2.000000000000001,
+    "velocity_block_statistic_bits": "0x4010000000000002",
+    "posterior_velocity_variance_bits": "0x3f66af7f72d87538"
   },
   "yang_chi2_0p99": [
     6.634896601021215,
@@ -903,24 +872,35 @@
     26.21696730553585
   ],
   "correlated_verdict": {
-    "innovation": [
-      2.5,
-      2.5
+    "innovation_bits": [
+      "0x4004000000000000",
+      "0x4004000000000000"
     ],
-    "S": [
+    "p_block_bits": [
       [
-        1.0,
-        -0.9
+        "0x3fe0000000000000",
+        "0xbfdccccccccccccd"
       ],
       [
-        -0.9,
-        1.0
+        "0xbfdccccccccccccd",
+        "0x3fe0000000000000"
       ]
     ],
-    "row_gate_threshold": 3.0,
+    "r_bits": [
+      [
+        "0x3fe0000000000000",
+        "0xbfdccccccccccccd"
+      ],
+      [
+        "0xbfdccccccccccccd",
+        "0x3fe0000000000000"
+      ]
+    ],
     "row_gate_pass": true,
-    "joint_d2": 125.00000000000003,
-    "joint_threshold": 9.21034037197618,
+    "joint_ekf_nis_bits": "0x405f400000000004",
+    "joint_ukf_nis_bits": "0x405f40000000000c",
+    "joint_false_alarm_probability_bits": "0x3f847ae147ae147b",
+    "joint_threshold_bits": "0x40226bb1bbb55516",
     "joint_pass": false
   },
   "update": {
@@ -966,18 +946,18 @@
     "accepted": [
       0
     ],
-    "state_delta": [
-      0.8333333333333333,
-      0.0
+    "nominal_position_ecef_m_bits": [
+      "0x415854a60aaaaaab",
+      "0x0000000000000000"
     ],
-    "covariance": [
+    "covariance_bits": [
       [
-        0.6666666666666667,
-        0.0
+        "0x3fe5555555555555",
+        "0x0000000000000000"
       ],
       [
-        0.0,
-        3.0
+        "0x0000000000000000",
+        "0x4008000000000000"
       ]
     ],
     "S": [
@@ -987,7 +967,7 @@
     ],
     "K": [
       [
-        0.6666666666666666
+        0.6666666666666667
       ],
       [
         0.0

@@ -823,20 +823,8 @@ fn zwd_public_helpers_reject_invalid_inputs() {
     }));
 }
 
-/// VMF1 (Vienna Mapping Function 1) site-wise mapping factors match the TU Wien
-/// reference implementation `vmf1.f`.
-///
-/// Oracle: `https://vmf.geo.tuwien.ac.at/codes/vmf1.f` (Böhm 2006, site-wise, no
-/// height correction), compiled with gfortran and evaluated at the ZIM2
-/// site-wise `a` coefficients for 2026-05-13 00 UT (MJD 61173.00,
-/// ah = 0.00121738, aw = 0.00058796; VMF1_OP GNSS daily product) and ZIM2's
-/// ellipsoidal latitude 46.8771 deg, over elevations 5..90 deg. The reference
-/// values below are that program's output. The only difference between the port
-/// and the reference is the value of pi: the reference uses the truncated
-/// constant 3.14159265359 while the port uses the correctly rounded
-/// `std::f64::consts::PI`; the resulting agreement is reported by the assert and
-/// is ~3e-9 in the mapping factor at 5 deg (under a nanometre of slant delay),
-/// shrinking to exactly zero at the zenith.
+/// TU Wien VMF1 site-wise mapping factors at ZIM2 on MJD 61173.00,
+/// with VMF1_OP coefficients and ellipsoidal latitude 46.8771 degrees.
 #[test]
 fn vmf1_site_wise_matches_tuwien_reference() {
     // (elevation_deg, reference mfh, reference mfw) from vmf1.f.
@@ -874,26 +862,14 @@ fn vmf1_site_wise_matches_tuwien_reference() {
         aw: 0.00058796,
     };
 
-    let mut max_dry = 0.0_f64;
-    let mut max_wet = 0.0_f64;
     for (el_deg, ref_mfh, ref_mfw) in REF {
-        let m = super::tropo_mapping(model, el_deg.to_radians(), receiver, epoch)
-            .expect("VMF1 mapping resolves");
-        max_dry = max_dry.max((m.dry - ref_mfh).abs());
-        max_wet = max_wet.max((m.wet - ref_mfw).abs());
+        let zd = (90.0 - el_deg) * super::vmf::VMF1_PI / 180.0;
+        let elevation = core::f64::consts::FRAC_PI_2 - zd;
+        let m =
+            super::tropo_mapping(model, elevation, receiver, epoch).expect("VMF1 mapping resolves");
+        assert_eq!(m.dry.to_bits(), ref_mfh.to_bits(), "{el_deg}° hydrostatic");
+        assert_eq!(m.wet.to_bits(), ref_mfw.to_bits(), "{el_deg}° wet");
     }
-
-    eprintln!("VMF1 vs vmf1.f: max |dry| = {max_dry:e}, max |wet| = {max_wet:e}");
-    // Agreement bound: the residual is the reference's pi truncation only
-    // (achieved ~1.3e-9 hydrostatic, ~2.8e-9 wet at 5 deg).
-    assert!(
-        max_dry < 5.0e-9,
-        "VMF1 hydrostatic mapping vs vmf1.f off by {max_dry:e}"
-    );
-    assert!(
-        max_wet < 5.0e-9,
-        "VMF1 wet mapping vs vmf1.f off by {max_wet:e}"
-    );
 }
 
 /// The VMF1 continued fraction is exactly 1 at the zenith and decreases

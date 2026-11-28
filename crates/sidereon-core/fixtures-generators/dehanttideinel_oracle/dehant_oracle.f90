@@ -1,21 +1,6 @@
-! Oracle driver for the IERS Conventions (2010) Chapter 7 routine
-! DEHANTTIDEINEL. It calls the unmodified IERS source for every case and writes
-! the inputs and the displacement it returns as the elements of a JSON array on
-! standard output; generate.sh wraps them into the fixture.
-!
-! Every real number is written with 17 significant digits, so a correctly
-! rounded reader recovers the exact binary64 value the routine saw.
-!
-! The cases are the four test cases printed in the DEHANTTIDEINEL.F header,
-! followed by a grid of stations and UTC dates. The grid spans the pre-UTC
-! years (before 1960, where the SOFA DAT routine returns 0 s), the 1960-1971
-! drift era, the leap-second era, and dates after the last table entry. The
-! grid's Sun and Moon positions come from the low-precision formulas of the
-! Astronomical Almanac and are rotated to Earth-fixed axes by the mean sidereal
-! angle; they only have to be realistic, because the test passes the same
-! numbers to both implementations.
-
+! IERS DEHANTTIDEINEL displacement at four header cases, a PPP epoch and a station grid.
 program dehant_oracle
+  use iso_fortran_env, only: int64
   implicit none
   double precision, parameter :: d2r = 3.14159265358979323846d0 / 180d0
   double precision, parameter :: au_m = 1.495978707d11
@@ -77,6 +62,13 @@ program dehant_oracle
     [380934092.93550891d0, 2871428.1904491195d0, 79015680.553570181d0], &
     2017, 1, 15, 0.00d0)
 
+  ! Earth-fixed Sun and Moon positions at the PPP receive epoch.
+  xsun = transfer([int(z'42403F010E16C75A', int64), int(z'41D7393179CA928A', int64), &
+    int(z'422C1CC1A399DE0A', int64)], xsun)
+  xmon = transfer([int(z'41AE6C1946CC349C', int64), int(z'41AD3E32DDEEBE75', int64), &
+    int(z'419F38A22360D35E', int64)], xmon)
+  call emit('ppp_2020_06_24', [3512900d0, 780500d0, 5248700d0], xsun, xmon, 2020, 6, 24, 12d0)
+
   do j = 1, ndate
     call sun_moon(dates(1, j), dates(2, j), dates(3, j), hours(j), xsun, xmon)
     do i = 1, nsta
@@ -115,9 +107,9 @@ contains
   function num(x) result(text)
     double precision, intent(in) :: x
     character(len=:), allocatable :: text
-    character(len=32) :: buf
-    write (buf, '(es24.16e3)') x
-    text = trim(adjustl(buf))
+    character(len=16) :: buf
+    write (buf, '(z16.16)') transfer(x, 0_int64)
+    text = '"0x' // buf // '"'
   end function num
 
   function vec(v) result(text)
